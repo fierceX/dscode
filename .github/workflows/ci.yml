@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  rustagent:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            suffix: linux-amd64
+            ext: ""
+          - runner: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            suffix: linux-arm64
+            ext: ""
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            suffix: darwin-arm64
+            ext: ""
+          - runner: macos-14
+            target: x86_64-apple-darwin
+            suffix: darwin-amd64
+            ext: ""
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Check Rust code (linux only)
+        if: matrix.runner == 'ubuntu-latest' && matrix.target == 'x86_64-unknown-linux-gnu'
+        run: make check
+
+      - name: Install cross linker (linux arm64 target)
+        if: matrix.runner == 'ubuntu-latest' && matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build rustagent
+        run: |
+          mkdir -p dist
+          if [ "${{ matrix.runner }}" = "ubuntu-latest" ] && [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+          fi
+          cargo build --release --target ${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/rustagent dist/rustagent-${{ matrix.suffix }}${{ matrix.ext }}
+
+      - name: Upload rustagent
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustagent-${{ matrix.suffix }}
+          path: dist/rustagent-${{ matrix.suffix }}${{ matrix.ext }}
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [rustagent]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Show artifacts
+        run: ls -lh dist
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/rustagent-linux-amd64
+            dist/rustagent-linux-arm64
+            dist/rustagent-darwin-amd64
+            dist/rustagent-darwin-arm64
