@@ -304,33 +304,38 @@ dscode -m deepseek-v4-flash --max-context 1M -i          # 1M 上下文窗口
 dscode -m deepseek-v4-flash --skill debugging
 
 # 加载多个
-dscode -m deepseek-v4-flash --skill debugging --skill python
+dscode -m deepseek-v4-flash --skill debugging --skill tdd
 
-# 交互式加载（由 LLM 的 Skill 工具触发）
-# LLM 从 skill-index 中选择 → Skill(name) → 加载 SKILL.md
+# 按需加载（由 LLM 的 Skill 工具触发）
+# LLM 从 system prompt 的 skill-index 段中选择 → Skill(name) → 加载 SKILL.md
 ```
 
-### 搜索路径（按优先级）
+### 内置技能（编译时嵌入）
 
-1. `<cwd>/.claude/skills/<name>/SKILL.md`
-2. `<cwd>/skills/<name>/SKILL.md`
-3. `~/.claude/skills/<name>/SKILL.md`
+所有 `skills/<name>/SKILL.md` 文件在编译时自动嵌入到二进制中。
+添加新技能只需创建文件，不需要修改 Rust 代码。
+
+| 技能名 | 描述 | 适用场景 |
+|--------|------|---------|
+| `debugging` | 四阶段系统调试：根因调查 → 模式分析 → 假设验证 → 修复实现 | 遇到 bug、测试失败、非预期行为时 |
+| `verification` | 验证门控：禁止在未运行验证的情况下声称任务完成 | 完成任务、声称修复成功、commit 前 |
+| `tdd` | 测试驱动开发：红绿重构循环 | 实现新功能或修 bug 前 |
+| `pre-code-check` | 编码前置检查：先搜索调用点、读上下文、验证假设 | 编辑文件前 |
+
+### 搜索路径（优先级）
+
+1. **内置（编译时嵌入）** — 直接读取内存，零文件 I/O
+2. `<project>/.claude/skills/<name>/SKILL.md` — 项目级覆盖
+3. `<project>/skills/<name>/SKILL.md` — 项目开发目录
+4. `~/.claude/skills/<name>/SKILL.md` — 用户全局
+
+同名 skill 会被覆盖（优先级高的替代内置的）。
 
 ### 加载机制
 
-1. `--skill NAME` 在 prompt 的 `<selected-skills>` 段嵌入 SKILL.md 全文
-2. Skill 工具在运行时按需加载，不修改后续轮次的 system prompt
-3. 同名 skill 去重（路径优先级高的覆盖）
-
-### 内置技能
-
-当前项目包含以下 skill：
-
-| 技能名 | 路径 | 用途 |
-|--------|------|------|
-| `test-skill-repo` | `skills/test-skill-repo/SKILL.md` | 测试用 skill，验证加载路径和变量替换 |
-| `skill-creator` | `DeepSeek-TUI/...` | 外部项目 skill，与本项目无关 |
-| `v4-best-practices` | `DeepSeek-TUI/...` | 外部项目 skill，与本项目无关 |
+- `--skill NAME` 在 system prompt 的 `<selected-skills>` 段嵌入 SKILL.md 全文
+- `Skill` 工具在运行时按需加载，不修改后续轮次的 system prompt
+- 内置技能即使在离线环境也可用（编译时已嵌入）
 
 ---
 

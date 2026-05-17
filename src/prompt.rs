@@ -44,6 +44,46 @@ impl Builder {
         sections.push(wrap_section("environment", &environment, None));
         let rules_str = "- Be concise and concrete. No pleasantries, no explanations unless asked. Raw results only.\n- Prefer safe, exact edits.\n- Report failures clearly.";
         sections.push(wrap_section("rules", &rules_str, None));
+
+        // Verification gate — iron law before completion claims
+        sections.push(wrap_section(
+            "verification-gate",
+            "BEFORE claiming any work is complete, fixed, or passing:\n\
+             1. IDENTIFY the verification command (test suite, build, lint, etc.)\n\
+             2. RUN it fresh and capture the FULL output\n\
+             3. READ the output — check exit code, count failures, read error lines\n\
+             4. STATE the result WITH evidence: pass/fail, how many tests, exit code\n\
+             If you skip any of these steps, you are NOT verifying — you are guessing.\n\
+             Guessing is lying.",
+            None,
+        ));
+
+        // Stop triggers — red-flag patterns that force a pause
+        sections.push(wrap_section(
+            "stop-triggers",
+            "Stop and re-analyze when:\n\
+             - 3 consecutive tool calls returned Error:\n\
+             - You're about to make multiple changes before testing\n\
+             - A build or test failed but you skipped reading full output\n\
+             - You're thinking \"should work now\" without fresh verification\n\
+             - You skipped TodoWrite because \"the task is simple\"\n\
+             Any of these means: STOP. Analyze root cause before acting.",
+            None,
+        ));
+
+        // Rationalization table — common excuses vs reality
+        sections.push(wrap_section(
+            "rationalization-table",
+            "| Rationalization | Reality |\n\
+             |--------|---------|\n\
+             | \"One-file change, don't need Grep\" | Without searching you WILL miss call sites. Use Grep. |\n\
+             | \"Just two lines, skip the tests\" | Two lines can break the build chain. Run the tests. |\n\
+             | \"Non-zero exit but it's just a warning\" | Non-zero IS failure. Read the full output. |\n\
+             | \"I'll change 3 files at once, compile together\" | You can't isolate what broke it. One change, verify, next. |\n\
+             | \"Task is simple, skip TodoWrite\" | Simple tasks have order too. Write the checklist. |\n",
+            None,
+        ));
+
         sections.push(wrap_section(
             "using-your-tools",
             "- Use Read for a single file. If you need multiple files, call Read multiple times.\n- Read supports optional offset and limit parameters to read specific line ranges (saves tokens for large files). Output includes line numbers.\n- Use Glob and Grep for one pattern at a time.\n- Grep supports a context parameter to show surrounding lines — use it to get enough text for Edit directly from Grep output, avoiding a separate Read.\n- Use multiple tool calls in one response when they are independent.\n- Prefer dedicated tools over Bash when a dedicated tool fits the task.\n- For Edit: copy old_string exactly (including whitespace/indent/newlines). If you already know the location from prior context, use Read with offset/limit. If you need to locate the text first, use Grep with context — its output is often sufficient for Edit without an extra Read.\n- For skills, first check the skill-index section, then use Skill(name) for the matching skill.",
@@ -153,12 +193,19 @@ impl Builder {
     }
 
     fn build_skill_index_section(&self) -> Result<Option<String>> {
-        let bases = find_skill_base_dirs(&self.cwd, &self.home);
-        if bases.is_empty() {
-            return Ok(None);
-        }
-        let mut seen = HashSet::new();
         let mut lines = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        // List embedded (built-in) skills
+        for skill in crate::assets::embedded_skills::all() {
+            let added = seen.insert(skill.name.to_string());
+            if added {
+                lines.push(format!("- {}: {}", skill.name, skill.description));
+            }
+        }
+
+        // List file-system skills (user/project overrides)
+        let bases = find_skill_base_dirs(&self.cwd, &self.home);
         for base in bases {
             for entry in fs::read_dir(base)? {
                 let entry = entry?;
@@ -194,11 +241,18 @@ impl Builder {
             return Ok(None);
         }
         let bases = find_skill_base_dirs(&self.cwd, &self.home);
-        if bases.is_empty() {
-            return Ok(None);
-        }
         let mut sections = Vec::new();
         for skill in &self.skills {
+            // Check embedded skills first
+            if let Some(embedded) = crate::assets::embedded_skills::find(skill) {
+                let full = format!(
+                    "Base directory: <built-in>\n\n{}",
+                    embedded.content.replace("${DSCODE_SKILL_DIR}", "<built-in>")
+                );
+                sections.push(wrap_section("skill", &full, Some(&embedded.name)));
+                continue;
+            }
+            // Fallback to file system
             let Some(skill_file) = find_skill_file(&bases, skill) else {
                 return Err(anyhow::anyhow!(
                     "skill not found: {skill} (expected .claude/skills/{skill}/SKILL.md or ~/.claude/skills/{skill}/SKILL.md)"

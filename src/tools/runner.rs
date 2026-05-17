@@ -248,6 +248,13 @@ fn skill_tool(ctx: &AgentSharedContext, name: &str) -> Result<String> {
     let name = name.trim();
     if name.is_empty() { bail!("Error: no skill name provided"); }
 
+    // Check embedded skills first (built into binary)
+    if let Some(skill) = crate::assets::embedded_skills::find(name) {
+        let expanded = skill.content.replace("${DSCODE_SKILL_DIR}", "<built-in>");
+        return Ok(format!("Skill: {}\nBase directory: <built-in>\n\n{}", skill.name, expanded));
+    }
+
+    // Fallback to file system
     let Some(skill_file) = crate::prompt::resolve_skill_file(&ctx.cwd, &ctx.home, name) else {
         bail!("Error: skill not found: {name}");
     };
