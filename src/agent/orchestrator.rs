@@ -148,6 +148,17 @@ impl OrchActor {
         }
 
         let (model, api_url) = self.resolve_active();
+
+        // [LOG] Turn start: model selection + system state
+        self.ctx.log_event(serde_json::json!({
+            "type": "turn_start",
+            "model": &model,
+            "auto_model_enabled": self.auto_model_enabled,
+            "controller": self.controller.snapshot(),
+            "model_selector": self.model_selector.snapshot_beliefs(),
+            "forced_model": self.forced_model.map(|t| t.label()),
+        }));
+
         let llm: Arc<dyn LlmClient> = match AsyncLlClient::new(
             &model, self.ctx.api_key(), &api_url,
         ) {
@@ -216,9 +227,13 @@ impl OrchActor {
                     let signals = executor.accumulated_signals();
                     if signals.iter().any(|s| s.kind == "tool_error") {
                         self.controller.note_error(false);
+                        let signal_kinds: Vec<&str> = signals.iter().map(|s| s.kind.as_str()).collect();
+                        let signal_details: Vec<&str> = signals.iter().map(|s| s.detail.as_str()).collect();
                         self.ctx.log_event(serde_json::json!({
                             "type": "sensor_signal_aggregated",
                             "signal_count": signals.len(),
+                            "signal_kinds": signal_kinds,
+                            "signal_details": signal_details,
                             "controller_k": self.controller.no_progress_count(),
                             "controller_p": self.controller.stall_probability(),
                         }));
@@ -240,6 +255,30 @@ impl OrchActor {
                     }));
                 }
 
+                // [LOG] Turn end: comprehensive tracking snapshot
+                {
+                    let signals = executor.accumulated_signals();
+                    let decision_str = match &decision {
+                        TurnDecision::Stop => "Stop",
+                        TurnDecision::Continue => "Continue",
+                        TurnDecision::Interrupted => "Interrupted",
+                        TurnDecision::Failed(_) => "Failed",
+                    };
+                    let signal_kinds: Vec<&str> = signals.iter().map(|s| s.kind.as_str()).collect();
+                    let signal_details: Vec<&str> = signals.iter().map(|s| s.detail.as_str()).collect();
+                    self.ctx.log_event(serde_json::json!({
+                        "type": "turn_tracking",
+                        "decision": decision_str,
+                        "tool_call_count": executor.tool_call_count(),
+                        "signal_count": signals.len(),
+                        "signal_kinds": signal_kinds,
+                        "signal_details": signal_details,
+                        "controller": self.controller.snapshot(),
+                        "model_selector": self.model_selector.snapshot_beliefs(),
+                        "model": &model,
+                    }));
+                }
+
                 if let TurnDecision::Failed(ref msg) = decision
                     && msg != "interrupted" {
                         self.ctx.display.render_error(msg);
@@ -248,6 +287,16 @@ impl OrchActor {
             Err(e) => {
                 let info = errors::classify_anyhow(&e);
                 self.controller.note_error(false);
+                // [LOG] Turn error with full context
+                self.ctx.log_event(serde_json::json!({
+                    "type": "turn_error",
+                    "error": format!("{e}"),
+                    "category": format!("{:?}", info.category),
+                    "severity": format!("{:?}", info.severity),
+                    "controller": self.controller.snapshot(),
+                    "model_selector": self.model_selector.snapshot_beliefs(),
+                    "model": &model,
+                }));
                 if info.severity == errors::ErrorSeverity::Fatal {
                     self.ctx.display.render_error(&format!("Fatal error: {e}"));
                 } else {
@@ -382,13 +431,28 @@ impl OrchActor {
             return;
         };
 
+        let action_str = match action {
+            ControlAction::InjectReflectionHint => "InjectReflectionHint",
+            ControlAction::UpgradeModel => "UpgradeModel",
+            ControlAction::Abort => "Abort",
+        };
+
+        // [LOG] Control action taken with full context
+        self.ctx.log_event(serde_json::json!({
+            "type": "control_action",
+            "action": action_str,
+            "P_stall": self.controller.stall_probability(),
+            "k": self.controller.no_progress_count(),
+            "fix_loop": self.controller.has_fix_loop(),
+            "controller_snapshot": self.controller.snapshot(),
+        }));
+
         match action {
             ControlAction::InjectReflectionHint => {
                 self.ctx.display.render_info(&format!(
                     "Controller: P(stall)={:.3} — injecting reflection hint.",
                     self.controller.stall_probability()
                 ));
-                // Future: inject a reflection prompt into the conversation
             }
             ControlAction::UpgradeModel => {
                 self.ctx.display.render_info(&format!(

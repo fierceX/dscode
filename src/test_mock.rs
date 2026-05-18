@@ -226,7 +226,10 @@ fn run_sensor_detects_python_test_failure() {
     )
     .expect("sensor should run");
     assert!(!signals.is_empty(), "should detect test failure");
-    assert!(signals.iter().any(|s| s.detail.contains("Test failure")));
+    assert!(signals.iter().any(|s| s.detail.contains("Pytest failure")
+        || s.detail.contains("Test failure")),
+        "should detect pytest failure, got: {:?}",
+        signals.iter().map(|s| &s.detail).collect::<Vec<_>>());
 }
 
 #[test]

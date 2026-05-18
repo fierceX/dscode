@@ -154,6 +154,25 @@ impl Controller {
             self.is_locked(),
         )
     }
+
+    /// Return a structured JSON snapshot of the controller's current state.
+    /// Used for logging at every turn boundary.
+    pub fn snapshot(&self) -> serde_json::Value {
+        serde_json::json!({
+            "k": self.no_progress_count,
+            "P_stall": self.stall_probability,
+            "locked": self.is_locked(),
+            "fix_loop": self.has_fix_loop(),
+            "tool_call_count": self.tool_call_count,
+            "had_end_turn": self.had_end_turn,
+            "control_action": match self.get_control_action() {
+                Some(ControlAction::InjectReflectionHint) => "InjectReflectionHint",
+                Some(ControlAction::UpgradeModel) => "UpgradeModel",
+                Some(ControlAction::Abort) => "Abort",
+                None => "None",
+            },
+        })
+    }
 }
 
 #[cfg(test)]

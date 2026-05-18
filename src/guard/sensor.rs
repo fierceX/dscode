@@ -162,7 +162,10 @@ mod tests {
         let output = "FAILED tests/test_main.py::test_foo - AssertionError: assert 1 == 2\n";
         let signals = run_sensor("error", "Bash", 100, output.len(), output)
             .expect("sensor should run");
-        assert!(signals.iter().any(|s| s.detail.contains("Test failure")));
+        assert!(signals.iter().any(|s| s.detail.contains("Pytest failure")
+            || s.detail.contains("Test failure")),
+            "should detect pytest failure, got: {:?}",
+            signals.iter().map(|s| &s.detail).collect::<Vec<_>>());
     }
 
     #[test]

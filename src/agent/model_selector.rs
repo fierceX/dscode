@@ -105,6 +105,22 @@ impl ModelSelector {
             .collect();
         parts.join(", ")
     }
+
+    /// Return structured JSON snapshot of model beliefs for logging.
+    pub fn snapshot_beliefs(&self) -> serde_json::Value {
+        let beliefs: Vec<serde_json::Value> = self.beliefs.iter().map(|b| {
+            serde_json::json!({
+                "model": b.name,
+                "alpha": b.alpha,
+                "beta": b.beta,
+                "mean": b.mean(),
+            })
+        }).collect();
+        serde_json::json!({
+            "models": beliefs,
+            "greedy_choice": self.select_greedy(),
+        })
+    }
 }
 
 impl Default for ModelSelector {
