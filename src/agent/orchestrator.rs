@@ -73,7 +73,7 @@ impl OrchActor {
 
                         match &result {
                             Ok((true, _reason)) => {
-                                *self.ctx.immutable_prefix.lock().unwrap() = None;
+                                *self.ctx.immutable_prefix.lock().unwrap_or_else(|e| e.into_inner()) = None;
 
                                 // Show the compacted summary once, as normal content (no prefix, no gray)
                                 if let Some(summary) = self.ctx.compaction.read_summary().await {

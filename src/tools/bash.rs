@@ -11,7 +11,7 @@ static ADAPTIVE_HISTORY: LazyLock<Mutex<VecDeque<Duration>>> = LazyLock::new(|| 
 
 /// Compute adaptive timeout: median of last 10 executions × 3, min 5s, max 600s.
 pub fn adaptive_timeout(default_timeout: Duration) -> Duration {
-    let history = ADAPTIVE_HISTORY.lock().unwrap();
+    let history = ADAPTIVE_HISTORY.lock().unwrap_or_else(|e| e.into_inner());
     if history.len() < 5 {
         return default_timeout.min(Duration::from_secs(600));
     }
@@ -23,7 +23,7 @@ pub fn adaptive_timeout(default_timeout: Duration) -> Duration {
 }
 
 fn record_execution_time(elapsed: Duration) {
-    let mut history = ADAPTIVE_HISTORY.lock().unwrap();
+    let mut history = ADAPTIVE_HISTORY.lock().unwrap_or_else(|e| e.into_inner());
     history.push_front(elapsed);
     history.truncate(10);
 }

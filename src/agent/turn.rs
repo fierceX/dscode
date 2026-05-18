@@ -62,7 +62,7 @@ impl TurnExecutor {
     /// The prefix is invalidated after plan/summary changes (PlanClear, PlanConfirm, compaction)
     /// and rebuilt on the next call to this method.
     fn ensure_prefix(&self) -> Result<(String, Vec<serde_json::Value>)> {
-        let mut guard = self.ctx.immutable_prefix.lock().unwrap();
+        let mut guard = self.ctx.immutable_prefix.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(ref prefix) = *guard {
             // Verify fingerprint; on mismatch force-rebuild instead of crashing.
             if !prefix.verify_fingerprint() {
@@ -90,7 +90,7 @@ impl TurnExecutor {
 
     /// Mark the prefix as stale so it is rebuilt on the next ensure_prefix() call.
     fn invalidate_prefix(&self) {
-        *self.ctx.immutable_prefix.lock().unwrap() = None;
+        *self.ctx.immutable_prefix.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     /// Execute a full turn: send user input, stream response, execute tools, decide next.

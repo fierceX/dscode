@@ -1,6 +1,7 @@
 use anyhow::{Result, bail};
 use std::path::{Path, PathBuf};
 
+/// Resolved file-system paths for a session directory.
 #[derive(Debug, Clone)]
 pub struct Paths {
     pub base_dir: PathBuf,
@@ -13,6 +14,7 @@ pub struct Paths {
     pub stats: PathBuf,
 }
 
+/// Derive a filesystem-safe project key from the working directory path.
 pub fn project_key(cwd: &Path) -> String {
     let s = cwd.to_string_lossy();
     let stripped = s.strip_prefix(std::path::MAIN_SEPARATOR).unwrap_or(&s);
@@ -31,6 +33,7 @@ pub fn project_key(cwd: &Path) -> String {
     out.trim_end_matches('-').to_string()
 }
 
+/// Build all session paths for a given home directory, working directory, and session ID.
 pub fn paths_for(home: &Path, cwd: &Path, session_id: &str) -> Paths {
     let project_dir = home.join(".dscode/projects").join(project_key(cwd));
     let session_dir = project_dir.join(session_id);
@@ -84,6 +87,7 @@ async fn session_activity_mod_time(session_dir: &Path) -> Result<std::time::Syst
     Ok(tokio::fs::metadata(session_dir).await?.modified()?)
 }
 
+/// Generate a unique session ID: YYYYMMDD-HHmmss-XXXX.
 pub fn chrono_session_id() -> String {
     use time::format_description::FormatItem;
     use time::macros::format_description;

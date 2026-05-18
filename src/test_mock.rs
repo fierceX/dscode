@@ -862,3 +862,99 @@ fn auto_disabled_unknown_model_falls_back_to_flash() {
     let tier = ModelTier::parse("gpt-4").unwrap_or(ModelTier::Flash);
     assert_eq!(tier, ModelTier::Flash);
 }
+
+// ========================================================================
+// 11. 端到端信号链路仿真
+// ========================================================================
+
+/// 全链路仿真：传感器信号 → Controller → ModelSelector → 模型切换
+/// 模拟 5 轮失败的完整生命周期。
+#[test]
+fn end_to_end_signal_chain_five_failed_turns() {
+    let mut c = Controller::new();
+    let mut ms = ModelSelector::new();
+    ms.ensure("flash");
+    ms.ensure("pro");
+
+    // --- 轮次 1：Failed + 有传感器信号 ---
+    c.note_tool_call();
+    c.note_tool_call();
+    c.note_tool_call(); // 3 tool calls
+    c.note_error(false); // update_after_turn (Failed)
+    // 传感器聚合信号
+    let signals_round1 = vec![
+        crate::guard::sensor::SensorSignal {
+            kind: "tool_error".into(), weight: 1.0, detail: "Rust compilation error".into(),
+        },
+    ];
+    if signals_round1.iter().any(|s| s.kind == "tool_error") {
+        c.note_error(false); // +1 aggregated
+    }
+    ms.update("flash", false); // flash failed
+    // 第 1 轮后：k=2, P=0.75, flash α=1, β=2
+    assert_eq!(c.no_progress_count(), 2);
+    assert!((c.stall_probability() - 0.75).abs() < 1e-10);
+
+    // --- 轮次 2：Failed + 有信号 ---
+    c.note_tool_call(); c.note_tool_call();
+    c.note_error(false);
+    let signals_round2 = vec![
+        crate::guard::sensor::SensorSignal {
+            kind: "tool_error".into(), weight: 1.0, detail: "Rust compilation error".into(),
+        },
+    ];
+    if signals_round2.iter().any(|s| s.kind == "tool_error") {
+        c.note_error(false);
+    }
+    ms.update("flash", false);
+    // 第 2 轮后：k=4, P=0.9375
+    assert_eq!(c.no_progress_count(), 4);
+    assert!(c.is_locked()); // P > 0.80
+
+    // --- 轮次 3：Failed + 有信号 → 触发 UpgradeModel ---
+    c.note_tool_call();
+    c.note_error(false);
+    if true { c.note_error(false); } // 聚合
+    ms.update("flash", false);
+    // 第 3 轮后：k=6, P≈0.984 > 0.95 → UpgradeModel
+    assert_eq!(c.get_control_action(), Some(ControlAction::UpgradeModel));
+
+    // --- 轮次 4：切换到 pro，成功 ---
+    c.note_end_turn();
+    c.note_progress(true);
+    c.reset_stall();
+    ms.update("pro", true);
+    // Stop 后：k=0, P=0
+    assert_eq!(c.stall_probability(), 0.0);
+    assert!(!c.is_locked());
+    // pro 的 mean 应高于 flash
+    assert!(ms.mean("pro") > ms.mean("flash"));
+
+    // --- 轮次 5：继续用 pro，成功 ---
+    ms.update("pro", true);
+    ms.update("pro", true);
+    // selector 应坚定选择 pro
+    assert_eq!(ms.select_greedy(), "pro");
+}
+
+/// 验证控制动作优先级链：Abort > UpgradeModel > InjectReflectionHint
+#[test]
+fn control_action_priority_chain() {
+    let mut c = Controller::new();
+
+    // k=1 → P=0.5 → None
+    c.note_error(false);
+    assert_eq!(c.get_control_action(), None);
+
+    // k=3 → P=0.875 → InjectReflectionHint
+    c.note_error(false); c.note_error(false);
+    assert_eq!(c.get_control_action(), Some(ControlAction::InjectReflectionHint));
+
+    // k=5 → P=0.969 → UpgradeModel (覆盖 InjectReflectionHint)
+    c.note_error(false); c.note_error(false);
+    assert_eq!(c.get_control_action(), Some(ControlAction::UpgradeModel));
+
+    // k=10 → P=0.999 → Abort (覆盖 UpgradeModel)
+    for _ in 0..5 { c.note_error(false); }
+    assert_eq!(c.get_control_action(), Some(ControlAction::Abort));
+}

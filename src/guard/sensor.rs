@@ -36,7 +36,7 @@ static SENSOR_INIT: Mutex<Option<PathBuf>> = Mutex::new(None);
 /// Ensure sensor scripts are extracted to a temp directory.
 /// Returns the directory path.
 fn ensure_sensor_dir() -> std::io::Result<PathBuf> {
-    let mut guard = SENSOR_INIT.lock().unwrap();
+    let mut guard = SENSOR_INIT.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref dir) = *guard {
         return Ok(dir.clone());
     }

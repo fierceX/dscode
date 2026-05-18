@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
 
+/// Result of executing a single tool call, persisted in the conversation store.
 #[derive(Debug, Clone)]
 pub struct ToolResult {
     pub tool_use_id: String,

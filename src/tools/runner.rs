@@ -85,7 +85,7 @@ impl ToolRunner {
 
     /// Reset storm breaker window — call at the start of each user turn.
     pub fn reset_storm(&self) {
-        self.storm.lock().unwrap().reset();
+        self.storm.lock().unwrap_or_else(|e| e.into_inner()).reset();
     }
 
     pub async fn execute_all(
@@ -98,7 +98,7 @@ impl ToolRunner {
             if !is_storm_exempt(&call.name) && self.find_tool(&call.name).is_some() {
                 let args_json = serde_json::to_string(&call.input_json).unwrap_or_default();
                 let decision = {
-                    let mut storm = self.storm.lock().unwrap();
+                    let mut storm = self.storm.lock().unwrap_or_else(|e| e.into_inner());
                     storm.check(&call.name, &args_json, is_tool_mutating(&call.name))
                 };
                 if let StormDecision::Suppress(reason) = decision {
