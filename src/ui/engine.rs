@@ -187,34 +187,20 @@ fn normalize_display_text(s: &str, interactive: bool) -> String {
     if interactive { normalized.replace('\n', "\r\n") } else { normalized }
 }
 
-/// Format a token count with K suffix for title bar display.
+/// Format a token count for title bar display.
 /// Raw stats remain unchanged — this is purely a display transformation.
-/// Examples: 1234 → "1.2K", 1000000 → "1,000K", 0 → "0"
+/// Examples: 0 → "0", 500 → "500", 1234 → "1.2K", 1234567 → "1.23M"
 fn fmt_k(n: u64) -> String {
     if n < 1000 {
         return n.to_string();
     }
-    let k = n / 1000;
-    let rem = n % 1000;
-    if k < 10 && rem >= 100 {
-        // 1.1K .. 9.9K
-        format!("{}.{}K", k, rem / 100)
-    } else if k < 10 {
-        // 1.0K .. 9.0K
-        format!("{}.{}K", k, rem / 100)
+    if n >= 1_000_000 {
+        let m = n / 1_000_000;
+        let rest = n % 1_000_000;
+        format!("{}.{:02}M", m, rest / 10_000)
     } else {
-        // 10K+: comma-separated K
-        let s = k.to_string();
-        let buf = &mut String::with_capacity(s.len() + 3);
-        let bytes = s.as_bytes();
-        let off = bytes.len() % 3;
-        let first = if off == 0 { 3 } else { off };
-        buf.push_str(&s[..first]);
-        for chunk in bytes[first..].chunks(3) {
-            buf.push(',');
-            buf.push_str(std::str::from_utf8(chunk).unwrap_or("???"));
-        }
-        buf.push('K');
-        buf.to_string()
+        let k = n / 1000;
+        let rem = n % 1000;
+        format!("{}.{}K", k, rem / 100)
     }
 }

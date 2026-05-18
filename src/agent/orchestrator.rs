@@ -96,23 +96,7 @@ impl OrchActor {
 
                                 self.ctx.log_event(serde_json::json!({"type":"compact","trigger":"manual","result":_reason}));
                                 // Refresh title bar
-                                let new_stats = self.ctx.stats.snapshot().await;
-                                let snapshot = crate::ui::StatsSnapshot {
-                                    current_turn_count: new_stats.current_turn_count,
-                                    agent_request_count: new_stats.agent_request_count,
-                                    total_input_tokens: new_stats.total_input_tokens,
-                                    total_output_tokens: new_stats.total_output_tokens,
-                                    current_context_tokens: new_stats.current_context_tokens,
-                                    max_context_tokens: self.ctx.config.max_context_tokens as u64,
-                                    total_cache_read_tokens: new_stats.total_cache_read_tokens,
-                                    total_cache_creation_tokens: new_stats.total_cache_creation_tokens,
-                                    flash_cost_micros: new_stats.flash_cost_micros,
-                                    pro_cost_micros: new_stats.pro_cost_micros,
-                                    flash_quality: self.model_selector.mean("flash"),
-                                    flash_observations: self.model_selector.observations("flash"),
-                                };
-                                let model_label = crate::config::resolve_model_label(&self.ctx.config.model);
-                                self.ctx.display.render_title_update(model_label, &snapshot);
+                                self.refresh_title().await;
                             }
                             Ok((false, reason)) => {
                                 self.ctx.display.render_info(&format!("Compact skipped: {reason}"));
@@ -320,6 +304,30 @@ impl OrchActor {
                 }
             }
         }
+
+        // Refresh title bar with current flash quality info
+        self.refresh_title().await;
+    }
+
+    /// Update the terminal title bar with current stats and flash quality.
+    async fn refresh_title(&self) {
+        let new_stats = self.ctx.stats.snapshot().await;
+        let snapshot = crate::ui::StatsSnapshot {
+            current_turn_count: new_stats.current_turn_count,
+            agent_request_count: new_stats.agent_request_count,
+            total_input_tokens: new_stats.total_input_tokens,
+            total_output_tokens: new_stats.total_output_tokens,
+            current_context_tokens: new_stats.current_context_tokens,
+            max_context_tokens: self.ctx.config.max_context_tokens as u64,
+            total_cache_read_tokens: new_stats.total_cache_read_tokens,
+            total_cache_creation_tokens: new_stats.total_cache_creation_tokens,
+            flash_cost_micros: new_stats.flash_cost_micros,
+            pro_cost_micros: new_stats.pro_cost_micros,
+            flash_quality: self.model_selector.mean("flash"),
+            flash_observations: self.model_selector.observations("flash"),
+        };
+        let model_label = crate::config::resolve_model_label(&self.ctx.config.model);
+        self.ctx.display.render_title_update(model_label, &snapshot);
     }
 
     async fn handle_sub_agent_result(&mut self, report: SubAgentReport) {
