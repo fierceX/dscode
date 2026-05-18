@@ -7,6 +7,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 #[derive(Default)]
 pub struct Stats {
     pub current_turn_count: u64,
@@ -204,6 +205,45 @@ mod tests {
         t.flush_if_dirty().await.unwrap();
         let mtime2 = tokio::fs::metadata(&path).await.unwrap().modified().unwrap();
         assert!(mtime2 > mtime1);
+    }
+
+    /// Verifies that old-format stats.json (without flash_cost_micros/pro_cost_micros)
+    /// deserializes correctly and preserves existing accumulated fields.
+    #[test]
+    fn old_format_json_preserves_existing_fields() {
+        let old_json = serde_json::json!({
+            "current_turn_count": 5,
+            "agent_request_count": 12,
+            "compact_request_count": 2,
+            "sub_agent_request_count": 1,
+            "total_input_tokens": 50000,
+            "total_output_tokens": 8000,
+            "total_cache_read_tokens": 30000,
+            "total_cache_creation_tokens": 5000,
+            "current_context_tokens": 6000,
+            "last_updated": "2025-06-01T00:00:00Z"
+            // flash_cost_micros and pro_cost_micros missing — old format
+        });
+        let stats: Stats = serde_json::from_value(old_json)
+            .expect("old format should deserialize without error");
+        assert_eq!(stats.current_turn_count, 5);
+        assert_eq!(stats.agent_request_count, 12);
+        assert_eq!(stats.total_input_tokens, 50000);
+        assert_eq!(stats.total_output_tokens, 8000);
+        // Missing fields default to 0
+        assert_eq!(stats.flash_cost_micros, 0);
+        assert_eq!(stats.pro_cost_micros, 0);
+    }
+
+    /// Verifies that completely empty JSON object deserializes to all-defaults.
+    #[test]
+    fn empty_json_deserializes_to_defaults() {
+        let stats: Stats = serde_json::from_str("{}")
+            .expect("empty JSON should deserialize");
+        assert_eq!(stats.current_turn_count, 0);
+        assert_eq!(stats.total_input_tokens, 0);
+        assert_eq!(stats.flash_cost_micros, 0);
+        assert_eq!(stats.pro_cost_micros, 0);
     }
 }
 
