@@ -93,6 +93,30 @@ impl ModelSelector {
             .unwrap_or(0.5)
     }
 
+    /// Total observations for a model (α + β - 2, excluding the prior).
+    pub fn observations(&self, model: &str) -> u64 {
+        self.beliefs
+            .iter()
+            .find(|b| b.name == model)
+            .map(|b| (b.alpha + b.beta - 2.0) as u64)
+            .unwrap_or(0)
+    }
+
+    /// Reset a model's beliefs to a specific Beta(α, β) prior.
+    /// Creates the model if it doesn't exist.
+    pub fn reset_belief(&mut self, model: &str, alpha: f64, beta: f64) {
+        if let Some(b) = self.beliefs.iter_mut().find(|b| b.name == model) {
+            b.alpha = alpha;
+            b.beta = beta;
+        } else {
+            self.beliefs.push(ModelBelief {
+                name: model.to_string(),
+                alpha,
+                beta,
+            });
+        }
+    }
+
     /// Get the number of registered models.
     pub fn len(&self) -> usize {
         self.beliefs.len()

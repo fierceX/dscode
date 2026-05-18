@@ -379,10 +379,14 @@ impl OrchActor {
                 let label = t.label();
                 if t == crate::config::ModelTier::Flash {
                     self.forced_model = None;
+                    // Reset flash beliefs to gentle prior: Beta(3,3)
+                    // → mean=0.50, giving flash a fair chance to prove itself
+                    self.model_selector.reset_belief("flash", 3.0, 3.0);
+                    self.controller.reset_stall();
+                    self.ctx.display.render_info("切回 flash，重置观察记录 (Beta(3,3))。");
                 } else {
                     self.forced_model = Some(t);
                 }
-                self.controller.reset_stall();
                 self.ctx.display.render_info(&format!("Switched to {label} model."));
             }
             Err(_) => {
@@ -396,14 +400,25 @@ impl OrchActor {
             forced
         } else if !self.auto_model_enabled {
             crate::config::ModelTier::parse(&self.ctx.config.model).unwrap_or(crate::config::ModelTier::Flash)
-        } else if self.controller.is_locked() || matches!(self.controller.get_control_action(), Some(ControlAction::UpgradeModel) | Some(ControlAction::Abort)) {
+        } else if self.controller.is_locked()
+            || matches!(self.controller.get_control_action(), Some(ControlAction::UpgradeModel) | Some(ControlAction::Abort))
+            || self.flash_quality_triggers_upgrade()
+        {
             crate::config::ModelTier::Pro
         } else {
-            // Use Thompson Sampling / Greedy selector for normal model choice
-            let selected = self.model_selector.select_greedy();
-            crate::config::ModelTier::parse(selected).unwrap_or(crate::config::ModelTier::Flash)
+            // Default: flash is presumed good until proven otherwise.
+            // Controller tracks short-term stall; ModelSelector tracks long-term quality.
+            crate::config::ModelTier::Flash
         };
         (tier.model_name().to_string(), self.ctx.api_url.clone())
+    }
+
+    /// Upgrade to pro if flash has accumulated enough failure evidence.
+    /// Q(flash) = α/(α+β) < 0.50  and  ≥8 observations.
+    fn flash_quality_triggers_upgrade(&self) -> bool {
+        let q = self.model_selector.mean("flash");
+        let n = self.model_selector.observations("flash");
+        q < 0.50 && n >= 8
     }
 
     fn update_after_turn(&mut self, decision: &TurnDecision) {

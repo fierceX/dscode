@@ -32,16 +32,18 @@ fn simulate_resolve_active(
             controller.get_control_action(),
             Some(ControlAction::UpgradeModel) | Some(ControlAction::Abort)
         )
+        || flash_quality_triggers(selector)
     {
         return "pro";
     }
-    let selected = selector.select_greedy();
-    ModelTier::parse(selected)
-        .map(|t| match t {
-            ModelTier::Pro => "pro",
-            ModelTier::Flash => "flash",
-        })
-        .unwrap_or("flash")
+    // Default: flash — presumed good until proven otherwise
+    "flash"
+}
+
+fn flash_quality_triggers(selector: &ModelSelector) -> bool {
+    let q = selector.mean("flash");
+    let n = selector.observations("flash");
+    q < 0.50 && n >= 8
 }
 
 #[test]
@@ -96,30 +98,59 @@ fn resolve_active_controller_abort_forces_pro() {
 }
 
 #[test]
-fn resolve_active_selector_picks_best_model_when_no_stall() {
+fn resolve_active_defaults_to_flash_when_no_stall() {
     let c = Controller::new(); // P=0, no lock
     let mut ms = ModelSelector::new();
     ms.ensure("flash");
     ms.ensure("pro");
-    // Make pro look much better
-    for _ in 0..20 {
-        ms.update("pro", true);
-    }
+    // No evidence against flash → default is flash
+    assert_eq!(simulate_resolve_active(&c, &ms, true), "flash");
+}
+
+/// flash 累积 ≥8 次观测且 Q < 0.50 → 证明 flash 不够好 → 升级 pro
+#[test]
+fn flash_quality_triggers_upgrade_after_enough_failures() {
+    let c = Controller::new();
+    let mut ms = ModelSelector::new();
+    ms.ensure("flash");
+    // 7 次观测: 2 成功, 5 失败 → Q=3/(3+6)=0.33 < 0.50, 但 n=7 < 8
+    for _ in 0..2 { ms.update("flash", true); }
+    for _ in 0..5 { ms.update("flash", false); }
+    assert_eq!(ms.observations("flash"), 7);
+    assert!(ms.mean("flash") < 0.50);
+    assert!(!flash_quality_triggers(&ms), "n=7 < 8, should not trigger");
+
+    // 第 8 次观测（失败）→ n=8, Q<0.50 → 触发
+    ms.update("flash", false);
+    assert_eq!(ms.observations("flash"), 8);
+    assert!(flash_quality_triggers(&ms));
     assert_eq!(simulate_resolve_active(&c, &ms, true), "pro");
 }
 
+/// flash 成功率够好（≥0.50）→ 即使很多观测也不升级
 #[test]
-fn resolve_active_selector_picks_flash_when_better() {
+fn flash_quality_above_threshold_no_upgrade() {
+    let c = Controller::new();
+    let mut ms = ModelSelector::new();
+    ms.ensure("flash");
+    // 20 次观测: 14 成功, 6 失败 → Q=15/(15+7)=0.68 > 0.50
+    for _ in 0..14 { ms.update("flash", true); }
+    for _ in 0..6 { ms.update("flash", false); }
+    assert!(ms.observations("flash") >= 8);
+    assert!(ms.mean("flash") > 0.50);
+    assert!(!flash_quality_triggers(&ms));
+    assert_eq!(simulate_resolve_active(&c, &ms, true), "flash");
+}
+
+#[test]
+fn resolve_active_flash_is_default_regardless_of_pro_data() {
     let c = Controller::new(); // P=0, no lock
     let mut ms = ModelSelector::new();
     ms.ensure("flash");
     ms.ensure("pro");
-    // Make flash look better than pro
+    // Even if pro has great data, flash is the default
     for _ in 0..10 {
-        ms.update("flash", true);
-    }
-    for _ in 0..3 {
-        ms.update("pro", false);
+        ms.update("pro", true);
     }
     assert_eq!(simulate_resolve_active(&c, &ms, true), "flash");
 }
@@ -428,36 +459,36 @@ fn selector_format_beliefs_shows_all_models() {
 // 6. 跨组件集成场景
 // ========================================================================
 
-/// 模拟一个完整的"失败 → 学习 → 恢复"场景。
+/// 模拟一个完整的"失败 → 证明不够好 → 升级 → 手动复位"场景。
 #[test]
-fn full_cycle_fail_learn_recover() {
+fn full_cycle_flash_fails_then_upgrades() {
     let mut c = Controller::new();
     let mut ms = ModelSelector::new();
     ms.ensure("flash");
-    ms.ensure("pro");
 
-    // --- Phase 1: 使用 flash, 连续失败 ---
-    for i in 0..4 {
-        c.note_error(false);                // controller sees stall
-        ms.update("flash", false);           // flash failure
-
-        // After 3 failures, controller locks
-        if i >= 2 {
-            assert!(c.is_locked(), "should lock at k=3");
-            // resolve_active would return "pro" when locked
-        }
+    // --- Phase 1: flash 积累失败证据 ---
+    for i in 0..7 {
+        c.note_error(false); // controller sees stall
+        ms.update("flash", false);
     }
 
-    // --- Phase 2: 切换到 pro, 成功后恢复 ---
-    ms.update("pro", true);  // pro success
-    c.note_progress(true);   // progress made
-    c.reset_stall();          // reset stall
+    // 7 次失败 + 初始 Beta(1,1) → Q = 1/(1+8) = 0.11 < 0.50
+    // 但观测数只有 7 < 8 → 还不触发
+    assert!(!flash_quality_triggers(&ms));
 
-    assert!(!c.is_locked(), "after reset, should not be locked");
-    assert!(ms.mean("pro") > ms.mean("flash"), "pro should be preferred after learning");
-
-    // resolve_active would now pick pro (since selector prefers it)
+    // --- Phase 2: 再失败 1 次 → 观测=8, Q<0.50 → 升级 ---
+    c.note_error(false);
+    ms.update("flash", false);
+    assert_eq!(ms.observations("flash"), 8);
+    assert!(flash_quality_triggers(&ms));
     assert_eq!(simulate_resolve_active(&c, &ms, true), "pro");
+
+    // --- Phase 3: 用户 /flash 复位 ---
+    ms.reset_belief("flash", 3.0, 3.0);
+    c.reset_stall();
+    assert!(!c.is_locked(), "after reset");
+    assert!((ms.mean("flash") - 0.5).abs() < 1e-10, "reset to Beta(3,3)");
+    assert_eq!(simulate_resolve_active(&c, &ms, true), "flash");
 }
 
 /// 验证 Controller 和 ModelSelector 在 auto_model_enabled=false 时都不影响决策。
