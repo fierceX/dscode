@@ -43,7 +43,7 @@ fn simulate_resolve_active(
 fn flash_quality_triggers(selector: &ModelSelector) -> bool {
     let q = selector.mean("flash");
     let n = selector.observations("flash");
-    q < 0.50 && n >= 8
+    q < 0.50 && n >= 16
 }
 
 #[test]
@@ -107,22 +107,22 @@ fn resolve_active_defaults_to_flash_when_no_stall() {
     assert_eq!(simulate_resolve_active(&c, &ms, true), "flash");
 }
 
-/// flash 累积 ≥8 次观测且 Q < 0.50 → 证明 flash 不够好 → 升级 pro
+/// flash 累积 ≥16 次观测且 Q < 0.50 → 证明 flash 不够好 → 升级 pro
 #[test]
 fn flash_quality_triggers_upgrade_after_enough_failures() {
     let c = Controller::new();
     let mut ms = ModelSelector::new();
     ms.ensure("flash");
-    // 7 次观测: 2 成功, 5 失败 → Q=3/(3+6)=0.33 < 0.50, 但 n=7 < 8
-    for _ in 0..2 { ms.update("flash", true); }
-    for _ in 0..5 { ms.update("flash", false); }
-    assert_eq!(ms.observations("flash"), 7);
+    // 15 次观测: 3 成功, 12 失败 → Q=4/(4+13)=0.235 < 0.50, 但 n=15 < 16
+    for _ in 0..3 { ms.update("flash", true); }
+    for _ in 0..12 { ms.update("flash", false); }
+    assert_eq!(ms.observations("flash"), 15);
     assert!(ms.mean("flash") < 0.50);
-    assert!(!flash_quality_triggers(&ms), "n=7 < 8, should not trigger");
+    assert!(!flash_quality_triggers(&ms), "n=15 < 16, should not trigger");
 
-    // 第 8 次观测（失败）→ n=8, Q<0.50 → 触发
+    // 第 16 次观测（失败）→ n=16, Q<0.50 → 触发
     ms.update("flash", false);
-    assert_eq!(ms.observations("flash"), 8);
+    assert_eq!(ms.observations("flash"), 16);
     assert!(flash_quality_triggers(&ms));
     assert_eq!(simulate_resolve_active(&c, &ms, true), "pro");
 }
@@ -136,7 +136,7 @@ fn flash_quality_above_threshold_no_upgrade() {
     // 20 次观测: 14 成功, 6 失败 → Q=15/(15+7)=0.68 > 0.50
     for _ in 0..14 { ms.update("flash", true); }
     for _ in 0..6 { ms.update("flash", false); }
-    assert!(ms.observations("flash") >= 8);
+    assert!(ms.observations("flash") >= 16);
     assert!(ms.mean("flash") > 0.50);
     assert!(!flash_quality_triggers(&ms));
     assert_eq!(simulate_resolve_active(&c, &ms, true), "flash");
@@ -467,19 +467,19 @@ fn full_cycle_flash_fails_then_upgrades() {
     ms.ensure("flash");
 
     // --- Phase 1: flash 积累失败证据 ---
-    for i in 0..7 {
-        c.note_error(false); // controller sees stall
+    for _ in 0..15 {
+        c.note_error(false);
         ms.update("flash", false);
     }
 
-    // 7 次失败 + 初始 Beta(1,1) → Q = 1/(1+8) = 0.11 < 0.50
-    // 但观测数只有 7 < 8 → 还不触发
+    // 15 次失败 + 初始 Beta(1,1) → Q = 1/(1+16) = 0.059 < 0.50
+    // 但观测数只有 15 < 16 → 还不触发
     assert!(!flash_quality_triggers(&ms));
 
-    // --- Phase 2: 再失败 1 次 → 观测=8, Q<0.50 → 升级 ---
+    // --- Phase 2: 再失败 1 次 → 观测=16, Q<0.50 → 升级 ---
     c.note_error(false);
     ms.update("flash", false);
-    assert_eq!(ms.observations("flash"), 8);
+    assert_eq!(ms.observations("flash"), 16);
     assert!(flash_quality_triggers(&ms));
     assert_eq!(simulate_resolve_active(&c, &ms, true), "pro");
 

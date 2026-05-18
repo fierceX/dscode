@@ -51,7 +51,7 @@ resolve_active():
   ① forced_model  → 手动指定（/flash, /pro）
   ② !auto_model   → 配置文件中的模型
   ③ is_locked()   → Pro（短期停滞，P(stall) > 0.80）
-  ④ flash Q < 0.50 && N ≥ 8 → Pro（长期质量低于阈值）
+  ④ flash Q < 0.50 && N ≥ 16 → Pro（长期质量低于阈值，工具级观测）
   ⑤ 默认 → Flash
 ```
 

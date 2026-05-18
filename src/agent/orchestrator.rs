@@ -445,11 +445,11 @@ impl OrchActor {
     }
 
     /// Upgrade to pro if flash has accumulated enough failure evidence.
-    /// Q(flash) = α/(α+β) < 0.50  and  ≥8 observations.
+    /// Q(flash) = α/(α+β) < 0.50  and  ≥16 observations (tool-level).
     fn flash_quality_triggers_upgrade(&self) -> bool {
         let q = self.model_selector.mean("flash");
         let n = self.model_selector.observations("flash");
-        q < 0.50 && n >= 8
+        q < 0.50 && n >= 16
     }
 
     fn update_after_turn(&mut self, decision: &TurnDecision) {
