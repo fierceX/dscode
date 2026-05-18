@@ -108,6 +108,8 @@ impl OrchActor {
                                     total_cache_creation_tokens: new_stats.total_cache_creation_tokens,
                                     flash_cost_micros: new_stats.flash_cost_micros,
                                     pro_cost_micros: new_stats.pro_cost_micros,
+                                    flash_quality: self.model_selector.mean("flash"),
+                                    flash_observations: self.model_selector.observations("flash"),
                                 };
                                 let model_label = crate::config::resolve_model_label(&self.ctx.config.model);
                                 self.ctx.display.render_title_update(model_label, &snapshot);

@@ -377,6 +377,8 @@ impl TurnExecutor {
                 total_cache_creation_tokens: stats.total_cache_creation_tokens,
                 flash_cost_micros: stats.flash_cost_micros,
                 pro_cost_micros: stats.pro_cost_micros,
+                flash_quality: 0.0,
+                flash_observations: 0,
             });
             if needs_pro {
                 effects.push(TurnEffect::NeedsPro);

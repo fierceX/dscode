@@ -142,8 +142,13 @@ impl Display for TerminalDisplay {
 
     fn render_title_update(&self, model: &str, stats: &StatsSnapshot) {
         let total_in = stats.total_input_tokens + stats.total_cache_read_tokens;
+        let quality = if stats.flash_quality > 0.0 && stats.flash_observations > 0 {
+            format!(" Q:{:.2}/{}", stats.flash_quality, stats.flash_observations)
+        } else {
+            String::new()
+        };
         let msg = format!(
-            "\x1b]0;{} T:{} R:{} I:{}({}) O:{} C:{}({}) ${}\x07",
+            "\x1b]0;{}{quality} T:{} R:{} I:{}({}) O:{} C:{}({}) ${}\x07",
             model,
             StatsSnapshot::fmt_num(stats.current_turn_count),
             StatsSnapshot::fmt_num(stats.agent_request_count),
