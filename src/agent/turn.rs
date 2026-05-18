@@ -18,6 +18,7 @@ pub struct TurnExecutor {
     compacted_this_turn: bool,
     tool_call_count: u32,
     accumulated_signals: Vec<crate::guard::sensor::SensorSignal>,
+    tool_error_count: u32,
     flash_quality: f64,
     flash_observations: u64,
 }
@@ -47,7 +48,7 @@ pub enum TurnDecision {
 impl TurnExecutor {
     pub fn new(ctx: Arc<AgentSharedContext>, llm: Arc<dyn LlmClient>) -> Self {
         let tools = Arc::new(ToolRunner::new(ctx.clone()));
-        Self { ctx, llm, tools, compacted_this_turn: false, tool_call_count: 0, accumulated_signals: Vec::new(), flash_quality: 0.0, flash_observations: 0 }
+        Self { ctx, llm, tools, compacted_this_turn: false, tool_call_count: 0, accumulated_signals: Vec::new(), tool_error_count: 0, flash_quality: 0.0, flash_observations: 0 }
     }
 
     /// Return the total number of tool calls made during this turn.
@@ -58,6 +59,11 @@ impl TurnExecutor {
     /// Return accumulated sensor signals from all tool calls in this turn.
     pub fn accumulated_signals(&self) -> &[crate::guard::sensor::SensorSignal] {
         &self.accumulated_signals
+    }
+
+    /// Number of tool calls that produced at least one tool_error signal.
+    pub fn tool_error_count(&self) -> u32 {
+        self.tool_error_count
     }
 
     /// Set flash quality values so title bar updates show real Q during execution.
@@ -108,6 +114,7 @@ impl TurnExecutor {
         self.compacted_this_turn = false;
         self.tool_call_count = 0;
         self.accumulated_signals.clear();
+        self.tool_error_count = 0;
 
         self.ctx.store.add_user(user_input).await?;
         self.ctx.stats.record_turn().await;
@@ -294,6 +301,9 @@ impl TurnExecutor {
                     // Accumulate sensor signals
                     if !result.sensor_signals.is_empty() {
                         self.accumulated_signals.extend(result.sensor_signals.clone());
+                        if result.sensor_signals.iter().any(|s| s.kind == "tool_error") {
+                            self.tool_error_count += 1;
+                        }
                     }
                     if result.tool_name == "PlanClear" {
                         let _ = self.ctx.compaction.evaluate_and_compact(

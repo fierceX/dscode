@@ -249,13 +249,29 @@ impl OrchActor {
                     let tier_label = crate::config::ModelTier::parse(&model)
                         .map(|t| t.label().to_string())
                         .unwrap_or_else(|_| model.clone());
-                    self.model_selector.update(&tier_label, success);
+
+                    // 工具级更新: error.sh 检测结果反映 flash 真实出错率
+                    let total = executor.tool_call_count();
+                    let errors = executor.tool_error_count();
+                    let clean = total.saturating_sub(errors);
+                    // 只有 1 个工具调用且无错误时保留 task-level update
+                    // 否则使用更精确的工具级更新
+                    if total > 1 || errors > 0 {
+                        for _ in 0..clean { self.model_selector.update(&tier_label, true); }
+                        for _ in 0..errors { self.model_selector.update(&tier_label, false); }
+                    } else {
+                        let success = matches!(decision, TurnDecision::Stop);
+                        self.model_selector.update(&tier_label, success);
+                    }
                     // Persist beliefs to disk for session resume
                     let _ = self.model_selector.save_to_path(&self.model_beliefs_path);
+                    let update_type = if total > 1 || errors > 0 { "tool" } else { "task" };
                     self.ctx.log_event(serde_json::json!({
                         "type": "model_selector_update",
                         "model": &tier_label,
-                        "success": success,
+                        "update_type": update_type,
+                        "tool_total": total,
+                        "tool_errors": errors,
                         "beliefs": self.model_selector.format_beliefs(),
                     }));
                 }
