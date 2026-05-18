@@ -125,13 +125,13 @@ fn resolve_active_selector_picks_flash_when_better() {
 }
 
 #[test]
-fn resolve_active_selector_uses_last_equal_when_means_equal() {
+fn resolve_active_selector_prefers_flash_when_means_equal() {
     let c = Controller::new();
     let mut ms = ModelSelector::new();
     ms.ensure("flash");
     ms.ensure("pro");
-    // Both have mean=0.5 → max_by returns the last element when equal ("pro")
-    assert_eq!(simulate_resolve_active(&c, &ms, true), "pro");
+    // Both have mean=0.5 → flash preferred (cheaper default)
+    assert_eq!(simulate_resolve_active(&c, &ms, true), "flash");
 }
 
 #[test]

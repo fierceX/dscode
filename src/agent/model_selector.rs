@@ -49,11 +49,21 @@ impl ModelSelector {
 
     /// Greedy selection: pick the model with the highest mean success rate.
     ///
-    /// Returns the model name. If no models are registered, returns "flash".
+    /// When means are equal, prefers "flash" (the cheaper model) as default.
+    /// If no models are registered, returns "flash".
     pub fn select_greedy(&self) -> &str {
         self.beliefs
             .iter()
-            .max_by(|a, b| a.mean().partial_cmp(&b.mean()).unwrap_or(std::cmp::Ordering::Equal))
+            .max_by(|a, b| {
+                a.mean().partial_cmp(&b.mean())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    // Equal means → prefer "flash" (cheaper default)
+                    .then_with(|| {
+                        if a.name == "flash" { std::cmp::Ordering::Greater }
+                        else if b.name == "flash" { std::cmp::Ordering::Less }
+                        else { std::cmp::Ordering::Equal }
+                    })
+            })
             .map(|b| b.name.as_str())
             .unwrap_or("flash")
     }
