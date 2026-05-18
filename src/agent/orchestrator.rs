@@ -164,6 +164,11 @@ impl OrchActor {
         };
 
         let mut executor = TurnExecutor::new(self.ctx.clone(), llm);
+        // Pass current flash quality so title shows Q during execution
+        executor.set_flash_quality(
+            self.model_selector.mean("flash"),
+            self.model_selector.observations("flash"),
+        );
 
         match executor.execute(&input).await {
             Ok((decision, effects)) => {

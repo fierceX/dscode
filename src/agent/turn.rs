@@ -18,6 +18,8 @@ pub struct TurnExecutor {
     compacted_this_turn: bool,
     tool_call_count: u32,
     accumulated_signals: Vec<crate::guard::sensor::SensorSignal>,
+    flash_quality: f64,
+    flash_observations: u64,
 }
 
 /// Represents the outcome of a turn that needs to be actioned.
@@ -45,7 +47,7 @@ pub enum TurnDecision {
 impl TurnExecutor {
     pub fn new(ctx: Arc<AgentSharedContext>, llm: Arc<dyn LlmClient>) -> Self {
         let tools = Arc::new(ToolRunner::new(ctx.clone()));
-        Self { ctx, llm, tools, compacted_this_turn: false, tool_call_count: 0, accumulated_signals: Vec::new() }
+        Self { ctx, llm, tools, compacted_this_turn: false, tool_call_count: 0, accumulated_signals: Vec::new(), flash_quality: 0.0, flash_observations: 0 }
     }
 
     /// Return the total number of tool calls made during this turn.
@@ -56,6 +58,12 @@ impl TurnExecutor {
     /// Return accumulated sensor signals from all tool calls in this turn.
     pub fn accumulated_signals(&self) -> &[crate::guard::sensor::SensorSignal] {
         &self.accumulated_signals
+    }
+
+    /// Set flash quality values so title bar updates show real Q during execution.
+    pub fn set_flash_quality(&mut self, q: f64, n: u64) {
+        self.flash_quality = q;
+        self.flash_observations = n;
     }
 
     /// Build or reuse the ImmutablePrefix. Returns the current system_prompt and tools_json.
@@ -377,8 +385,8 @@ impl TurnExecutor {
                 total_cache_creation_tokens: stats.total_cache_creation_tokens,
                 flash_cost_micros: stats.flash_cost_micros,
                 pro_cost_micros: stats.pro_cost_micros,
-                flash_quality: 0.0,
-                flash_observations: 0,
+                flash_quality: self.flash_quality,
+                flash_observations: self.flash_observations,
             });
             if needs_pro {
                 effects.push(TurnEffect::NeedsPro);
