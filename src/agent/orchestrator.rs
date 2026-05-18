@@ -219,24 +219,22 @@ impl OrchActor {
 
                 self.update_after_turn(&decision);
 
-                // 将传感器信号（聚合后）喂入 Controller
-                // 一轮中无论多少个错误信号，只计 1 次 note_error(false)
-                // 仅在轮次失败时补充，成功轮次（Stop）已由 update_after_turn 重置
-                if matches!(decision, TurnDecision::Failed{..}) {
+                // 将传感器信号（聚合后）喂入 Controller —·—不受 Stop/Failed 限制
+                // 一轮中无论多少个工具错误，只计 1 次 note_error(false)
+                // 执行顺序在 update_after_turn 之后，不会被 note_progress(true) 擦除
+                if executor.tool_error_count() > 0 {
+                    self.controller.note_error(false);
                     let signals = executor.accumulated_signals();
-                    if signals.iter().any(|s| s.kind == "tool_error") {
-                        self.controller.note_error(false);
-                        let signal_kinds: Vec<&str> = signals.iter().map(|s| s.kind.as_str()).collect();
-                        let signal_details: Vec<&str> = signals.iter().map(|s| s.detail.as_str()).collect();
-                        self.ctx.log_event(serde_json::json!({
-                            "type": "sensor_signal_aggregated",
-                            "signal_count": signals.len(),
-                            "signal_kinds": signal_kinds,
-                            "signal_details": signal_details,
-                            "controller_k": self.controller.no_progress_count(),
-                            "controller_p": self.controller.stall_probability(),
-                        }));
-                    }
+                    let signal_kinds: Vec<&str> = signals.iter().map(|s| s.kind.as_str()).collect();
+                    let signal_details: Vec<&str> = signals.iter().map(|s| s.detail.as_str()).collect();
+                    self.ctx.log_event(serde_json::json!({
+                        "type": "sensor_signal_aggregated",
+                        "signal_count": signals.len(),
+                        "signal_kinds": signal_kinds,
+                        "signal_details": signal_details,
+                        "controller_k": self.controller.no_progress_count(),
+                        "controller_p": self.controller.stall_probability(),
+                    }));
                 }
 
                 // Check control actions after each turn
