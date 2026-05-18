@@ -68,7 +68,7 @@ pub fn replay_last_turns(events_path: &Path) {
             }
             "text" => {
                 if prev_was_thinking && last_char != '\n' {
-                    let _ = write!(stdout, "\n");
+                    let _ = writeln!(stdout);
                     last_char = '\n';
                 }
                 let content = evt.get("content").and_then(Value::as_str).unwrap_or("");
@@ -136,7 +136,7 @@ pub fn replay_last_turns(events_path: &Path) {
 
 fn flush_newline(stdout: &mut std::io::Stdout, last_char: &mut char, prev_was_thinking: bool) {
     if prev_was_thinking && *last_char != '\n' {
-        let _ = write!(stdout, "\n");
+        let _ = writeln!(stdout);
         *last_char = '\n';
     }
 }

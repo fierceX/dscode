@@ -149,20 +149,17 @@ pub fn build_tool_call_summary(
             }
         }
         "TodoWrite" => {
-            if let Some(summary) = fields.get("summary").cloned() {
-                if !summary.is_empty() { label = summary; }
-            }
-            if label.is_empty() {
-                if let Some(todos) = fields.get("todos") {
-                    if let Ok(arr) = serde_json::from_str::<Vec<Value>>(todos) {
+            if let Some(summary) = fields.get("summary").cloned()
+                && !summary.is_empty() { label = summary; }
+            if label.is_empty()
+                && let Some(todos) = fields.get("todos")
+                    && let Ok(arr) = serde_json::from_str::<Vec<Value>>(todos) {
                         let total = arr.len();
                         let completed = arr.iter().filter(|item| {
                             item.get("status").and_then(Value::as_str) == Some("completed")
                         }).count();
                         label = format!("{completed}/{total}");
                     }
-                }
-            }
         }
         "Skill" => label = fields.get("name").cloned().unwrap_or_default(),
         "SubAgent" => label = fields.get("description").cloned().unwrap_or_default(),

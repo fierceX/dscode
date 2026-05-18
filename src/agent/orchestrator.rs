@@ -152,11 +152,10 @@ impl OrchActor {
 
                 self.update_after_turn(&decision);
 
-                if let TurnDecision::Failed(ref msg) = decision {
-                    if msg != "interrupted" {
+                if let TurnDecision::Failed(ref msg) = decision
+                    && msg != "interrupted" {
                         self.ctx.display.render_error(msg);
                     }
-                }
             }
             Err(e) => {
                 let info = errors::classify_anyhow(&e);

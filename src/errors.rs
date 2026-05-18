@@ -84,7 +84,7 @@ pub fn classify_anyhow(err: &anyhow::Error) -> ErrorInfo {
     if let Some(source_err) = err.root_cause().downcast_ref::<reqwest::Error>() {
         if let Some(status) = source_err.status() {
             return match status.as_u16() {
-                400..=402 | 403 => ErrorInfo::new(ErrorCategory::Auth, ErrorSeverity::Error, false),
+                400..=403 => ErrorInfo::new(ErrorCategory::Auth, ErrorSeverity::Error, false),
                 404 | 422 => ErrorInfo::new(ErrorCategory::Parse, ErrorSeverity::Error, false),
                 429 => ErrorInfo::new(ErrorCategory::RateLimit, ErrorSeverity::Warning, true),
                 500..=599 => ErrorInfo::new(ErrorCategory::Network, ErrorSeverity::Warning, true),

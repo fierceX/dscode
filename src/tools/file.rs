@@ -218,7 +218,7 @@ pub struct EditTool;
 
 impl super::runner::ToolExec for ReadTool {
     fn name(&self) -> &'static str { "Read" }
-    fn execute(&self, input: &serde_json::Value, ctx: &crate::context::AgentSharedContext) -> anyhow::Result<(String, bool, String)> {
+    fn execute(&self, input: &serde_json::Value, _ctx: &crate::context::AgentSharedContext) -> anyhow::Result<(String, bool, String)> {
         #[derive(serde::Deserialize)]
         struct Args { path: String, #[serde(default)] offset: Option<usize>, #[serde(default)] limit: Option<usize> }
         let args: Args = serde_json::from_value(input.clone())?;

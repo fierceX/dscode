@@ -127,11 +127,10 @@ impl ToolRunner {
             {
                 let args_str = serde_json::to_string(&call.input_json).unwrap_or_default();
                 let result = crate::repair::repair_truncated_json(&args_str);
-                if result.changed && !result.fallback {
-                    if let Ok(repaired_val) = serde_json::from_str::<serde_json::Value>(&result.repaired) {
+                if result.changed && !result.fallback
+                    && let Ok(repaired_val) = serde_json::from_str::<serde_json::Value>(&result.repaired) {
                         call.input_json = repaired_val;
                     }
-                }
             }
             // Pass tool name for lookup inside spawn_blocking
             let tool_name = call.name.clone();

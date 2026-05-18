@@ -7,6 +7,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct Stats {
     pub current_turn_count: u64,
     pub agent_request_count: u64,
@@ -20,22 +21,6 @@ pub struct Stats {
     pub last_updated: String,
 }
 
-impl Default for Stats {
-    fn default() -> Self {
-        Self {
-            current_turn_count: 0,
-            agent_request_count: 0,
-            compact_request_count: 0,
-            sub_agent_request_count: 0,
-            total_input_tokens: 0,
-            total_output_tokens: 0,
-            total_cache_read_tokens: 0,
-            total_cache_creation_tokens: 0,
-            current_context_tokens: 0,
-            last_updated: String::new(),
-        }
-    }
-}
 
 /// StatsTracker provides thread-safe, batched stats persistence.
 /// Read operations use RwLock (read); writes mark dirty and flush occurs once per turn.

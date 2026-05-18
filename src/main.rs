@@ -1,4 +1,4 @@
-use dscode::config::{api_url, apply_provider_defaults, parse_args};
+use dscode::config::{api_url, apply_provider_defaults, apply_config_file, parse_args};
 use dscode::session::paths;
 use dscode::session::stats::StatsTracker;
 use dscode::session::compaction::CompactionEngine;
@@ -55,6 +55,7 @@ async fn run(args: Vec<String>) -> Result<()> {
         return Ok(());
     }
 
+    apply_config_file(&mut cfg);
     apply_provider_defaults(&mut cfg)?;
 
     let mut sid = cfg.session_id.clone();
@@ -436,11 +437,11 @@ fn print_usage() {
     println!();
     println!("Options:");
     println!("  -m, --model MODEL       Model name (default: deepseek-v4-flash)");
-    println!("  --max-tokens N          Max output tokens (default: 4096)");
+    println!("  --max-tokens N          Max output tokens (default: 81920)");
     println!("  --tool-timeout N        Tool execution timeout in seconds (default: 600)");
     println!("  --skill NAME            Load skill from .claude/skills/NAME/SKILL.md");
     println!("  --max-turns N           Max agent turns (default: 40)");
-    println!("  --max-context N         Max stored context tokens (default: 200000)");
+    println!("  --max-context N         Max stored context tokens (default: 1M)");
     println!("  --api-key KEY           API key (default from env)");
     println!("  --base-url URL          Override API base URL (default: api.deepseek.com)");
     println!("  --output-format FMT     Output format: human | stream-json");

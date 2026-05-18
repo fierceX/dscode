@@ -17,6 +17,7 @@ pub struct SubAgentResult {
 
 /// SubAgentExecutor runs a child agent in an isolated context.
 pub struct SubAgentExecutor {
+    #[allow(dead_code)]
     session_id: String,
     child_store: Arc<ConversationStore>,
     child_ctx: Arc<AgentSharedContext>,
@@ -140,18 +141,16 @@ impl SubAgentExecutor {
                             for b in content {
                                 match b.get("type").and_then(|t| t.as_str()).unwrap_or("") {
                                     "thinking" => {
-                                        if result_thinking.is_empty() {
-                                            if let Some(t) = b.get("thinking").and_then(|v| v.as_str()) {
+                                        if result_thinking.is_empty()
+                                            && let Some(t) = b.get("thinking").and_then(|v| v.as_str()) {
                                                 result_thinking = t.to_string();
                                             }
-                                        }
                                     }
                                     "text" => {
-                                        if result_text.is_empty() {
-                                            if let Some(t) = b.get("text").and_then(|v| v.as_str()) {
+                                        if result_text.is_empty()
+                                            && let Some(t) = b.get("text").and_then(|v| v.as_str()) {
                                                 result_text = t.to_string();
                                             }
-                                        }
                                     }
                                     _ => {}
                                 }

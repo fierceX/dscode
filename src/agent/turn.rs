@@ -109,14 +109,13 @@ impl TurnExecutor {
                     "auto",
                     stats.current_context_tokens as usize,
                 ).await;
-                if let Ok((did_compact, _)) = compacted {
-                    if did_compact {
+                if let Ok((did_compact, _)) = compacted
+                    && did_compact {
                         self.compacted_this_turn = true;
                         self.invalidate_prefix();
                         messages = self.ctx.store.lines().await?;
                         (system_prompt, tools_json) = self.ensure_prefix()?;
                     }
-                }
             }
 
             // Preflight: estimate tokens and emergency compact if >95% context
@@ -131,12 +130,11 @@ impl TurnExecutor {
                         "preflight",
                         stats.current_context_tokens as usize,
                     ).await;
-                    if let Ok((did_compact, _)) = compacted {
-                        if did_compact {
+                    if let Ok((did_compact, _)) = compacted
+                        && did_compact {
                             self.compacted_this_turn = true;
                             self.invalidate_prefix();
                         }
-                    }
                     messages = self.ctx.store.lines().await?;
                     (system_prompt, tools_json) = self.ensure_prefix()?;
                 }
@@ -297,8 +295,8 @@ impl TurnExecutor {
                         self.invalidate_prefix();
                     }
 
-                    if result.spawns_sub_agent {
-                        if let Some(prompt) = result.sub_agent_prompt.take() {
+                    if result.spawns_sub_agent
+                        && let Some(prompt) = result.sub_agent_prompt.take() {
                             let session_id = format!("sub_{}", crate::session::paths::chrono_session_id());
                             effects.push(TurnEffect::SubAgentLaunched {
                                 session_id: session_id.clone(),
@@ -308,7 +306,6 @@ impl TurnExecutor {
                             });
                             result.content = format!("Sub-agent started: session_id={}", session_id);
                         }
-                    }
 
                     processed_results.push(result);
                 }

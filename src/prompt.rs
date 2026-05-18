@@ -1,5 +1,4 @@
 use anyhow::Result;
-use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -28,7 +27,7 @@ impl Builder {
         let identity = if locale.starts_with("zh") {
             "你是 dscode，一个在终端中运行的轻量级编码智能体。".to_string()
         } else {
-            format!("You are dscode, a lightweight coding agent that works in a terminal.")
+            "You are dscode, a lightweight coding agent that works in a terminal.".to_string()
         };
         sections.push(wrap_section("agent-identity", &identity, None));
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "unknown".to_string());
@@ -43,7 +42,7 @@ impl Builder {
         );
         sections.push(wrap_section("environment", &environment, None));
         let rules_str = "- Be concise and concrete. No pleasantries, no explanations unless asked. Raw results only.\n- Prefer safe, exact edits.\n- Report failures clearly.";
-        sections.push(wrap_section("rules", &rules_str, None));
+        sections.push(wrap_section("rules", rules_str, None));
 
         // Verification gate — iron law before completion claims
         sections.push(wrap_section(
@@ -249,7 +248,7 @@ impl Builder {
                     "Base directory: <built-in>\n\n{}",
                     embedded.content.replace("${DSCODE_SKILL_DIR}", "<built-in>")
                 );
-                sections.push(wrap_section("skill", &full, Some(&embedded.name)));
+                sections.push(wrap_section("skill", &full, Some(embedded.name)));
                 continue;
             }
             // Fallback to file system
@@ -420,4 +419,142 @@ pub fn append_feedforward_hints(system_prompt: &mut String, user_input: &str) {
 
 fn has_any(input: &str, keywords: &[&str]) -> bool {
     keywords.iter().any(|k| input.contains(k))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn test_builder() -> Builder {
+        Builder {
+            cwd: PathBuf::from("/tmp"),
+            home: PathBuf::from("/home/user"),
+            skills: vec![],
+            summary_file: PathBuf::from("/tmp/summary.txt"),
+            plan_file: PathBuf::from("/tmp/plan.md"),
+            plan_draft_file: PathBuf::from("/tmp/plan.draft"),
+        }
+    }
+
+    #[test]
+    fn build_system_prompt_contains_agent_identity() {
+        let prompt = test_builder().build_system_prompt().unwrap();
+        assert!(prompt.contains("dscode"), "should contain project name");
+        assert!(prompt.contains("<agent-identity>"), "should have identity section");
+    }
+
+    #[test]
+    fn build_system_prompt_contains_environment() {
+        let prompt = test_builder().build_system_prompt().unwrap();
+        assert!(prompt.contains("<environment>"), "should have environment section");
+        assert!(prompt.contains("/tmp"), "should contain cwd");
+    }
+
+    #[test]
+    fn build_system_prompt_has_all_sections() {
+        let prompt = test_builder().build_system_prompt().unwrap();
+        let sections = vec![
+            "<agent-identity>",
+            "<environment>",
+            "<rules>",
+            "<verification-gate>",
+            "<stop-triggers>",
+            "<rationalization-table>",
+            "<using-your-tools>",
+            "<sub-agent-guidance>",
+            "<todo-guidance>",
+            "<plan-lifecycle-guidance>",
+            "<output-language>",
+        ];
+        for section in &sections {
+            assert!(prompt.contains(section), "missing section: {}", section);
+        }
+    }
+
+    #[test]
+    fn build_system_prompt_includes_verification_gate() {
+        let prompt = test_builder().build_system_prompt().unwrap();
+        assert!(prompt.contains("verification-gate"));
+        assert!(prompt.contains("IDENTIFY"));
+        assert!(prompt.contains("Guessing is lying"));
+    }
+
+    #[test]
+    fn build_system_prompt_includes_stop_triggers() {
+        let prompt = test_builder().build_system_prompt().unwrap();
+        assert!(prompt.contains("stop-triggers"));
+        assert!(prompt.contains("3 consecutive tool calls"));
+    }
+
+    #[test]
+    fn build_system_prompt_includes_rationalization_table() {
+        let prompt = test_builder().build_system_prompt().unwrap();
+        assert!(prompt.contains("rationalization-table"));
+        assert!(prompt.contains("Without searching you WILL miss"));
+    }
+
+    #[test]
+    fn build_system_prompt_includes_plan_lifecycle() {
+        let prompt = test_builder().build_system_prompt().unwrap();
+        assert!(prompt.contains("PLANNING WORKFLOW"));
+        assert!(prompt.contains("PlanConfirm"));
+        assert!(prompt.contains("PlanClear"));
+    }
+
+    #[test]
+    fn build_system_prompt_includes_todo_guidance() {
+        let prompt = test_builder().build_system_prompt().unwrap();
+        assert!(prompt.contains("TodoWrite"));
+    }
+
+    #[test]
+    fn extract_skill_summary_from_frontmatter() {
+        let content = "---\nname: test-skill\ndescription: \"Test skill description\"\n---\n\nSkill content";
+        let summary = extract_skill_summary(content);
+        assert_eq!(summary, "Test skill description");
+    }
+
+    #[test]
+    fn extract_skill_summary_without_frontmatter_returns_fallback() {
+        let content = "No frontmatter here.\n\nSome content";
+        let summary = extract_skill_summary(content);
+        assert!(!summary.is_empty());
+        assert!(summary.contains("No frontmatter here."));
+    }
+
+    #[test]
+    fn extract_skill_summary_falls_back_to_first_non_empty_line() {
+        let content = "\n\n---\nname: test\n---\n\nActual content";
+        let summary = extract_skill_summary(content);
+        assert!(!summary.is_empty());
+    }
+
+    #[test]
+    fn wrap_section_with_name() {
+        let result = wrap_section("test", "content", Some("section-name"));
+        assert!(result.contains("<test name="));
+        assert!(result.contains("content"));
+        assert!(result.contains("</test>"));
+    }
+
+    #[test]
+    fn wrap_section_without_name() {
+        let result = wrap_section("test", "content", None);
+        assert!(result.contains("<test>"));
+        assert!(result.contains("content"));
+        assert!(result.contains("</test>"));
+    }
+
+    #[test]
+    fn wrap_section_empty_content_returns_empty() {
+        let result = wrap_section("test", "", None);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn read_optional_file_nonexistent_returns_none() {
+        let result = read_optional_file(Path::new("/nonexistent/path")).unwrap();
+        assert!(result.is_none());
+    }
 }

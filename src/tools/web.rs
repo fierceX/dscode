@@ -9,9 +9,8 @@ pub fn web_search(query: &str) -> Result<String> {
         .get("https://s.jina.ai/")
         .query(&[("q", query)])
         .header("X-Respond-With", "no-content");
-    if let Ok(key) = std::env::var("JINA_API_KEY") {
-        if !key.is_empty() { req = req.header("Authorization", format!("Bearer {key}")); }
-    }
+    if let Ok(key) = std::env::var("JINA_API_KEY")
+        && !key.is_empty() { req = req.header("Authorization", format!("Bearer {key}")); }
     let handle = tokio::runtime::Handle::try_current()
         .map_err(|_| anyhow::anyhow!("no tokio runtime"))?;
     Ok(std::thread::spawn(move || handle.block_on(async { req.send().await?.text().await }))
@@ -27,9 +26,8 @@ pub fn web_fetch(url: &str) -> Result<String> {
     let mut req = client
         .get("https://r.jina.ai/")
         .query(&[("url", url)]);
-    if let Ok(key) = std::env::var("JINA_API_KEY") {
-        if !key.is_empty() { req = req.header("Authorization", format!("Bearer {key}")); }
-    }
+    if let Ok(key) = std::env::var("JINA_API_KEY")
+        && !key.is_empty() { req = req.header("Authorization", format!("Bearer {key}")); }
     let handle = tokio::runtime::Handle::try_current()
         .map_err(|_| anyhow::anyhow!("no tokio runtime"))?;
     Ok(std::thread::spawn(move || handle.block_on(async { req.send().await?.text().await }))

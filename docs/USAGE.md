@@ -21,19 +21,47 @@ echo "list the files" | ./target/release/dscode -m deepseek-v4-flash
 # 继续上次会话
 ./target/release/dscode -m deepseek-v4-flash --continue -i
 ```
+## 配置文件
+
+`~/.dscoderc`（用户级）和 `<project>/.dscoderc`（项目级）可选配置。
+优先级：CLI 参数 > 项目配置 > 用户配置 > 环境变量 > 默认值。
+
+```toml
+# ~/.dscoderc 示例
+api_key = "sk-xxx"                    # API 密钥
+base_url = "https://api.deepseek.com/v1"  # API 端点
+model = "deepseek-v4-flash"            # 默认模型
+max_tokens = 81920                     # 最大输出 token
+max_turns = 40                         # 最大轮次
+max_context = "1M"                     # 最大上下文（支持 K/M 后缀）
+tool_timeout = 600                     # 工具超时（秒）
+auto_model = false                     # 自动升级
+secondary_model = "deepseek-v4-pro"    # 升级目标模型
+auto_upgrade_threshold = 4             # 升级阈值
+auto_self_report = false               # 自报告升级
+context_compact_pct = 85               # 压缩触发百分比
+log_events = true                      # 事件日志
+```
+
+项目级 `.dscoderc` 覆盖用户级，CLI 参数覆盖所有文件设置。
+所有字段可选，未设置的字段使用默认值或环境变量。
+
+完整示例见 `.dscoderc.example`。
 
 ---
+
+
 
 ## CLI 参数
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `-m` / `--model` | `deepseek-v4-flash` | 模型名 |
-| `--max-tokens` | `4096` | 最大输出 token 数 |
+| `--max-tokens` | `81920` | 最大输出 token 数 |
 | `--tool-timeout` | `600` | 工具执行超时（秒） |
 | `--skill NAME` | — | 加载 skill（可重复） |
-| `--max-turns` | `40` | 最大 agent 轮次。每轮含 LLM 调用 + 工具执行 |
-| `--max-context` | `200000` | 上下文 token 上限。支持 `k`/`m` 后缀，如 `500K` / `1M` |
+| `--max-turns` | `40` | 最大 agent 轮次 |
+| `--max-context` | `1000000` | 上下文 token 上限。支持 `k`/`m` 后缀 |
 | `--api-key KEY` | env | 覆盖 API Key |
 | `--base-url URL` | `https://api.deepseek.com/v1` | 覆盖 API 端点 |
 | `--output-format FMT` | `human` | 输出格式：`human` / `stream-json` |

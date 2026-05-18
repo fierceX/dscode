@@ -6,6 +6,24 @@ pub enum OutputFormat {
     StreamJson,
 }
 
+/// TOML config file structure (optional, loaded from ~/.dscoderc or <project>/.dscoderc).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct DscodeConfigFile {
+    pub api_key: Option<String>,
+    pub base_url: Option<String>,
+    pub model: Option<String>,
+    pub max_tokens: Option<i32>,
+    pub max_turns: Option<i32>,
+    pub max_context: Option<String>,   // supports K/M suffix
+    pub tool_timeout: Option<i32>,
+    pub auto_model: Option<bool>,
+    pub secondary_model: Option<String>,
+    pub auto_upgrade_threshold: Option<u32>,
+    pub auto_self_report: Option<bool>,
+    pub context_compact_pct: Option<u8>,
+    pub log_events: Option<bool>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub model: String,
@@ -33,7 +51,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             model: String::new(),
-            max_tokens: 4096,
+            max_tokens: 81920,
             tool_timeout_secs: 600,
             tool_result_max_bytes: 100_000,
             file_write_max_bytes: 1_048_576,
@@ -43,7 +61,7 @@ impl Default for Config {
             base_url: String::new(),
             prompt: String::new(),
             max_turns: 40,
-            max_context_tokens: 200_000,
+            max_context_tokens: 1_000_000,
             skills: Vec::new(),
             interactive: false,
             session_id: String::new(),
@@ -160,18 +178,79 @@ fn require_value(args: &[String], i: usize) -> Result<String> {
     Ok(args[i + 1].clone())
 }
 
+pub fn apply_config_file(cfg: &mut Config) {
+    // Priority: project .dscoderc > user ~/.dscoderc
+    // Each field only fills if cfg equivalent is empty/still default
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let home = std::path::PathBuf::from(
+        std::env::var("DSCODE_HOME")
+            .or_else(|_| std::env::var("HOME"))
+            .unwrap_or_else(|_| String::from(".")),
+    );
+
+    let paths = [
+        home.join(".dscoderc"),             // user-level
+        cwd.join(".dscoderc"),              // project-level
+    ];
+
+    for path in &paths {
+        let Ok(data) = std::fs::read_to_string(path) else { continue };
+        let Ok(toml_cfg): Result<DscodeConfigFile, _> = toml::from_str(&data) else { continue };
+        // Apply only if cfg field is still at default/empty
+        if cfg.model.is_empty() && toml_cfg.model.is_some() {
+            cfg.model = toml_cfg.model.unwrap();
+        }
+        if cfg.api_key.is_empty() && toml_cfg.api_key.is_some() {
+            cfg.api_key = toml_cfg.api_key.unwrap();
+        }
+        if cfg.base_url.is_empty() && toml_cfg.base_url.is_some() {
+            cfg.base_url = toml_cfg.base_url.unwrap();
+        }
+        if cfg.max_tokens == 81920 && toml_cfg.max_tokens.is_some() {
+            cfg.max_tokens = toml_cfg.max_tokens.unwrap();
+        }
+        if cfg.max_turns == 40 && toml_cfg.max_turns.is_some() {
+            cfg.max_turns = toml_cfg.max_turns.unwrap();
+        }
+        if cfg.max_context_tokens == 1_000_000 && toml_cfg.max_context.is_some() {
+            if let Ok(v) = parse_size_bytes(&toml_cfg.max_context.unwrap()) {
+                cfg.max_context_tokens = v;
+            }
+        }
+        if cfg.tool_timeout_secs == 600 && toml_cfg.tool_timeout.is_some() {
+            cfg.tool_timeout_secs = toml_cfg.tool_timeout.unwrap();
+        }
+        if toml_cfg.auto_model.is_some() {
+            unsafe { std::env::set_var("AUTO_MODEL", if toml_cfg.auto_model.unwrap() { "true" } else { "false" }); }
+        }
+        if toml_cfg.secondary_model.is_some() {
+            unsafe { std::env::set_var("SECONDARY_MODEL", &toml_cfg.secondary_model.unwrap()); }
+        }
+        if toml_cfg.auto_upgrade_threshold.is_some() {
+            unsafe { std::env::set_var("AUTO_UPGRADE_THRESHOLD", &toml_cfg.auto_upgrade_threshold.unwrap().to_string()); }
+        }
+        if toml_cfg.auto_self_report.is_some() {
+            unsafe { std::env::set_var("AUTO_SELF_REPORT", if toml_cfg.auto_self_report.unwrap() { "true" } else { "false" }); }
+        }
+        if toml_cfg.context_compact_pct.is_some() {
+            unsafe { std::env::set_var("CONTEXT_COMPACT_PCT", &toml_cfg.context_compact_pct.unwrap().to_string()); }
+        }
+        if toml_cfg.log_events.is_some() {
+            cfg.log_events = toml_cfg.log_events.unwrap();
+        }
+    }
+}
+
     pub fn apply_provider_defaults(cfg: &mut Config) -> Result<()> {
     // Env var overrides for size limits
-    if let Ok(v) = std::env::var("TOOL_RESULT_MAX_BYTES") {
-        if let Ok(n) = v.parse::<usize>() {
+    if let Ok(v) = std::env::var("TOOL_RESULT_MAX_BYTES")
+        && let Ok(n) = v.parse::<usize>() {
             cfg.tool_result_max_bytes = n;
         }
-    }
-    if let Ok(v) = std::env::var("FILE_WRITE_MAX_BYTES") {
-        if let Ok(n) = v.parse::<usize>() {
+    if let Ok(v) = std::env::var("FILE_WRITE_MAX_BYTES")
+        && let Ok(n) = v.parse::<usize>() {
             cfg.file_write_max_bytes = n;
         }
-    }
     if let Ok(v) = std::env::var("LOG_EVENTS") {
         cfg.log_events = v != "0" && v != "false" && v != "no";
     }
@@ -281,3 +360,45 @@ mod tests {
         assert!(parse_args(vec!["--unknown".into()]).is_err());
     }
 }
+
+
+    #[test]
+    fn parse_config_file_overrides_model() {
+        let toml_str = r#"
+model = "deepseek-v4-pro"
+max_tokens = 163840
+max_context = "500K"
+tool_timeout = 120
+"#;
+        let parsed: DscodeConfigFile = toml::from_str(toml_str).unwrap();
+        assert_eq!(parsed.model.unwrap(), "deepseek-v4-pro");
+        assert_eq!(parsed.max_tokens.unwrap(), 163840);
+        assert_eq!(parsed.max_context.unwrap(), "500K");
+        assert_eq!(parsed.tool_timeout.unwrap(), 120);
+    }
+
+    #[test]
+    fn parse_config_file_auto_model_fields() {
+        let toml_str = r#"
+auto_model = true
+secondary_model = "deepseek-v4-pro"
+auto_upgrade_threshold = 3
+context_compact_pct = 70
+"#;
+        let parsed: DscodeConfigFile = toml::from_str(toml_str).unwrap();
+        assert!(parsed.auto_model.unwrap());
+        assert_eq!(parsed.secondary_model.unwrap(), "deepseek-v4-pro");
+        assert_eq!(parsed.auto_upgrade_threshold.unwrap(), 3);
+        assert_eq!(parsed.context_compact_pct.unwrap(), 70);
+    }
+
+    #[test]
+    fn parse_config_file_partial_fields() {
+        // Only setting one field should not require others
+        let toml_str = r#"log_events = false"#;
+        let parsed: DscodeConfigFile = toml::from_str(toml_str).unwrap();
+        assert!(!parsed.log_events.unwrap());
+        assert!(parsed.model.is_none());
+        assert!(parsed.api_key.is_none());
+    }
+

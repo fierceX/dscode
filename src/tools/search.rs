@@ -18,7 +18,7 @@ pub fn grep(pattern: &str, path: &str, file_glob: &str, context: Option<usize>) 
         .map_err(|_| anyhow!("Error: rg is required for grep"))?;
     let mut cmd = Command::new("rg");
     cmd.args(["-n", "--color", "never", "--heading"]);
-    if let Some(c) = context { if c > 0 { cmd.args(["-C", &c.to_string()]); } }
+    if let Some(c) = context && c > 0 { cmd.args(["-C", &c.to_string()]); }
     if !file_glob.is_empty() { cmd.args(["--glob", file_glob]); }
     if pattern.starts_with('-') { cmd.args(["-e", pattern]); } else { cmd.args(["--", pattern]); }
     cmd.arg(path);

@@ -84,7 +84,7 @@ impl CompactionEngine {
 
         // Emergency: keep minimal context
         let k = if tier == CompactionTier::Emergency {
-            keep_lines.max(1).min(5)
+            keep_lines.clamp(1, 5)
         } else {
             keep_lines
         };
@@ -205,4 +205,98 @@ impl CompactionEngine {
 
 fn is_plan_trigger(trigger: &str) -> bool {
     trigger == "plan_clear" || trigger == "plan_confirm"
+}
+
+#[cfg(test)]
+mod tests {
+    // Test should_compact logic inline (CompactionEngine requires async construction)
+
+    #[test]
+    fn compact_triggers_at_threshold() {
+        let pct = 85u8;
+        let max_ctx = 200_000usize;
+        let test = |ctx: usize| -> bool {
+            if max_ctx == 0 { return false; }
+            (ctx * 100) / max_ctx >= pct as usize
+        };
+        assert!(!test(100_000));
+        assert!(!test(169_999));
+        assert!(test(170_000));
+        assert!(test(200_000));
+    }
+
+    #[test]
+    fn compact_triggers_for_plan_operations() {
+        let pct = 85u8;
+        let max_ctx = 200_000usize;
+        let should_compact = |trigger: &str, ctx: usize| -> bool {
+            if trigger == "plan_clear" || trigger == "plan_confirm" { return true; }
+            if max_ctx == 0 { return false; }
+            (ctx * 100) / max_ctx >= pct as usize
+        };
+        assert!(should_compact("plan_clear", 0));
+        assert!(should_compact("plan_confirm", 0));
+        assert!(!should_compact("auto", 100_000));
+        assert!(should_compact("auto", 200_000));
+    }
+
+    #[test]
+    fn compact_skips_when_max_context_is_zero() {
+        let pct = 85u8;
+        let max_ctx = 0usize;
+        let should_compact = |trigger: &str, ctx: usize| -> bool {
+            if trigger == "plan_clear" || trigger == "plan_confirm" { return true; }
+            if max_ctx == 0 { return false; }
+            (ctx * 100) / max_ctx >= pct as usize
+        };
+        assert!(!should_compact("auto", 100));
+    }
+
+    #[test]
+    fn compact_pct_configurable() {
+        let test_pct = |pct: u8, ctx: usize, max_ctx: usize| -> bool {
+            if max_ctx == 0 { return false; }
+            (ctx * 100) / max_ctx >= pct as usize
+        };
+        assert!(test_pct(50, 100, 200));
+        assert!(!test_pct(50, 99, 200));
+        assert!(test_pct(70, 140, 200));
+        assert!(!test_pct(70, 139, 200));
+        assert!(test_pct(90, 180, 200));
+        assert!(!test_pct(90, 179, 200));
+    }
+
+    #[test]
+    fn compact_tier_from_ratio_emergency() {
+        use crate::compact_dp::CompactionTier;
+        assert_eq!(CompactionTier::from_ratio(95, 100), CompactionTier::Emergency);
+        assert_eq!(CompactionTier::from_ratio(100, 100), CompactionTier::Emergency);
+    }
+
+    #[test]
+    fn compact_tier_from_ratio_force_summary() {
+        use crate::compact_dp::CompactionTier;
+        assert_eq!(CompactionTier::from_ratio(80, 100), CompactionTier::ForceSummary);
+        assert_eq!(CompactionTier::from_ratio(94, 100), CompactionTier::ForceSummary);
+    }
+
+    #[test]
+    fn compact_tier_from_ratio_aggressive() {
+        use crate::compact_dp::CompactionTier;
+        assert_eq!(CompactionTier::from_ratio(70, 100), CompactionTier::Aggressive);
+        assert_eq!(CompactionTier::from_ratio(79, 100), CompactionTier::Aggressive);
+    }
+
+    #[test]
+    fn compact_tier_from_ratio_conservative() {
+        use crate::compact_dp::CompactionTier;
+        assert_eq!(CompactionTier::from_ratio(0, 100), CompactionTier::Conservative);
+        assert_eq!(CompactionTier::from_ratio(69, 100), CompactionTier::Conservative);
+    }
+
+    #[test]
+    fn compact_tier_zero_max_returns_conservative() {
+        use crate::compact_dp::CompactionTier;
+        assert_eq!(CompactionTier::from_ratio(100, 0), CompactionTier::Conservative);
+    }
 }

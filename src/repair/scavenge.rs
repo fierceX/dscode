@@ -67,11 +67,10 @@ pub fn scavenge_tool_calls(text: &str) -> Option<Vec<Value>> {
         let caps: Vec<_> = re.captures_iter(text).collect();
         if !caps.is_empty() {
             for cap in &caps {
-                if let Some(m) = cap.get(1) {
-                    if let Ok(v) = serde_json::from_str::<Value>(m.as_str()) {
+                if let Some(m) = cap.get(1)
+                    && let Ok(v) = serde_json::from_str::<Value>(m.as_str()) {
                         results.push(v);
                     }
-                }
             }
             if !results.is_empty() {
                 return Some(results);
@@ -128,7 +127,6 @@ pub fn scavenge_combined(
 /// Format: <|DSML|invoke name="TOOL_NAME">
 ///           <|DSML|parameter name="KEY" string="true">VALUE<|DSML|parameter>
 ///         <|DSML|invoke>
-
 fn scavenge_dsml(text: &str) -> Option<Vec<(String, serde_json::Map<String, Value>)>> {
     let mut results = Vec::new();
     let mut pos = 0;
@@ -218,33 +216,28 @@ fn scavenge_bare_json(text: &str) -> Option<Value> {
 /// Try multiple JSON shapes for tool call representation.
 fn coerce_to_tool_call(v: &Value) -> Option<Value> {
     // Shape 1: { "name": "...", "arguments": {...} }
-    if let Some(name) = v.get("name").and_then(Value::as_str) {
-        if !name.is_empty() {
+    if let Some(name) = v.get("name").and_then(Value::as_str)
+        && !name.is_empty() {
             let args = v.get("arguments").cloned().unwrap_or(Value::Object(Default::default()));
             return Some(serde_json::json!({"name": name, "arguments": args}));
         }
-    }
 
     // Shape 2: OpenAI-style { "type": "function", "function": { "name": "...", "arguments": "..." } }
-    if v.get("type").and_then(Value::as_str) == Some("function") {
-        if let Some(func) = v.get("function") {
-            if let Some(name) = func.get("name").and_then(Value::as_str) {
-                if !name.is_empty() {
+    if v.get("type").and_then(Value::as_str) == Some("function")
+        && let Some(func) = v.get("function")
+            && let Some(name) = func.get("name").and_then(Value::as_str)
+                && !name.is_empty() {
                     let args_raw = func.get("arguments").and_then(Value::as_str).unwrap_or("{}");
                     let args: Value = serde_json::from_str(args_raw).unwrap_or(Value::Object(Default::default()));
                     return Some(serde_json::json!({"name": name, "arguments": args}));
                 }
-            }
-        }
-    }
 
     // Shape 3: { "tool_name": "...", "tool_args": {...} } (R1 free-form variant)
-    if let Some(name) = v.get("tool_name").and_then(Value::as_str) {
-        if !name.is_empty() {
+    if let Some(name) = v.get("tool_name").and_then(Value::as_str)
+        && !name.is_empty() {
             let args = v.get("tool_args").cloned().unwrap_or(Value::Object(Default::default()));
             return Some(serde_json::json!({"name": name, "arguments": args}));
         }
-    }
 
     None
 }

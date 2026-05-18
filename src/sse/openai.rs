@@ -90,9 +90,8 @@ impl OpenAIParser {
         let choice = body.get("choices").and_then(Value::as_array)
             .and_then(|arr| arr.first()).cloned().unwrap_or(Value::Null);
 
-        if let Some(r) = choice.get("finish_reason").and_then(Value::as_str) {
-            if !r.is_empty() && r != "null" { self.stop_reason = r.into(); }
-        }
+        if let Some(r) = choice.get("finish_reason").and_then(Value::as_str)
+            && !r.is_empty() && r != "null" { self.stop_reason = r.into(); }
 
         let delta = choice.get("delta").cloned().unwrap_or(Value::Null);
         if let Some(content) = delta.get("content").and_then(Value::as_str) {
@@ -115,11 +114,9 @@ impl OpenAIParser {
         if let Some(reasoning) = delta.get("reasoning_content")
             .or_else(|| delta.get("reasoning"))
             .and_then(Value::as_str)
-        {
-            if !reasoning.is_empty() {
+            && !reasoning.is_empty() {
                 emit(Event::Thinking(ThinkingEvent { content: reasoning.into() }))?;
             }
-        }
 
         if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
             for tc in tool_calls {
