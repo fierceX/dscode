@@ -317,6 +317,7 @@ async fn run_interactive(
                 println!("Commands:");
                 println!("  /flash        Switch to flash tier");
                 println!("  /pro          Switch to pro tier");
+                println!("  /compact      Force context compaction");
                 println!("  /skills       List available skills");
                 println!("  /help         Show this help");
                 println!("  exit / quit   Exit REPL");
@@ -324,6 +325,12 @@ async fn run_interactive(
             }
             if line == "/skills" {
                 list_skills();
+                continue;
+            }
+            if line == "/compact" {
+                let (done_tx, done_rx) = oneshot::channel();
+                if cmd_tx.send(OrchCmd::Compact { done: done_tx }).is_err() { break; }
+                let _ = done_rx.blocking_recv();
                 continue;
             }
             if line == "/flash" || line == "/pro" {
@@ -368,9 +375,13 @@ fn simple_stdin_loop(cmd_tx: &mpsc::UnboundedSender<OrchCmd>, cancel: &Cancellat
         if line.is_empty() { continue; }
         if line.starts_with('/') {
             if line == "/help" {
-                println!("Commands: /flash, /pro, /skills, /help");
+                println!("Commands: /flash, /pro, /compact, /skills, /help");
             } else if line == "/skills" {
                 list_skills();
+            } else if line == "/compact" {
+                let (done_tx, done_rx) = oneshot::channel();
+                let _ = cmd_tx.send(OrchCmd::Compact { done: done_tx });
+                let _ = done_rx.blocking_recv();
             } else if line == "/flash" || line == "/pro" {
                 let model = line.trim_start_matches('/');
                 let _ = cmd_tx.send(OrchCmd::SetModel(model.to_string()));

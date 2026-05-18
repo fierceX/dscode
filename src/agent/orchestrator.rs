@@ -27,6 +27,7 @@ pub struct OrchActor {
 pub enum OrchCmd {
     UserInput { input: String, done: oneshot::Sender<()> },
     SetModel(String),
+    Compact { done: oneshot::Sender<()> },
     SubAgentResult(SubAgentReport),
 }
 
@@ -64,6 +65,59 @@ impl OrchActor {
                     }
                     Some(OrchCmd::SetModel(model)) => {
                         self.handle_model_command(&model).await;
+                    }
+                    Some(OrchCmd::Compact { done }) => {
+                        self.ctx.display.render_info("Compressing...");
+
+                        let stats = self.ctx.stats.snapshot().await;
+                        let result = self.ctx.compaction.evaluate_and_compact(
+                            "manual",
+                            stats.current_context_tokens as usize,
+                        ).await;
+
+                        match &result {
+                            Ok((true, _reason)) => {
+                                *self.ctx.immutable_prefix.lock().unwrap() = None;
+
+                                // Show the compacted summary once, as normal content (no prefix, no gray)
+                                if let Some(summary) = self.ctx.compaction.read_summary().await {
+                                    let clean = crate::session::compaction::strip_tool_labels(&summary);
+                                    let trimmed = clean.trim();
+                                    if !trimmed.is_empty() {
+                                        self.ctx.display.render_text(trimmed);
+                                        if !trimmed.ends_with('\n') {
+                                            self.ctx.display.render_text("\n");
+                                        }
+                                    }
+                                }
+
+                                self.ctx.log_event(serde_json::json!({"type":"compact","trigger":"manual","result":_reason}));
+                                // Refresh title bar
+                                let new_stats = self.ctx.stats.snapshot().await;
+                                let snapshot = crate::ui::StatsSnapshot {
+                                    current_turn_count: new_stats.current_turn_count,
+                                    agent_request_count: new_stats.agent_request_count,
+                                    total_input_tokens: new_stats.total_input_tokens,
+                                    total_output_tokens: new_stats.total_output_tokens,
+                                    current_context_tokens: new_stats.current_context_tokens,
+                                    max_context_tokens: self.ctx.config.max_context_tokens as u64,
+                                    total_cache_read_tokens: new_stats.total_cache_read_tokens,
+                                    total_cache_creation_tokens: new_stats.total_cache_creation_tokens,
+                                    flash_cost_micros: new_stats.flash_cost_micros,
+                                    pro_cost_micros: new_stats.pro_cost_micros,
+                                };
+                                let model_label = crate::config::resolve_model_label(&self.ctx.config.model);
+                                self.ctx.display.render_title_update(model_label, &snapshot);
+                            }
+                            Ok((false, reason)) => {
+                                self.ctx.display.render_info(&format!("Compact skipped: {reason}"));
+                            }
+                            Err(e) => {
+                                self.ctx.display.render_error(&format!("Compact failed: {e}"));
+                            }
+                        }
+
+                        let _ = done.send(());
                     }
                     Some(OrchCmd::SubAgentResult(report)) => {
                         self.handle_sub_agent_result(report).await;

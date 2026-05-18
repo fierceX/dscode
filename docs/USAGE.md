@@ -148,8 +148,9 @@ prompt 为空且 stdin 是终端时自动进入交互模式。
 
 | 命令 | 说明 |
 |------|------|
-| `/flash` | 切换到 flash 模型（deepseek-v4-flash） |
-| `/pro` | 切换到 pro 模型（deepseek-v4-pro） |
+| `/flash` | 切换到 flash 模型 |
+| `/pro` | 切换到 pro 模型 |
+| `/compact` | 强制上下文压缩 |
 | `/skills` | 列出所有可用 skill |
 | `/help` | 显示可用的命令列表 |
 | `exit` / `quit` | 退出 REPL |

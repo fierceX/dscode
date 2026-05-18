@@ -48,8 +48,19 @@ impl CompactionEngine {
         Self { store, summary_path, plan_path, plan_draft_path, cwd, home, skills, api_url, api_key: config.api_key.clone(), config: config.clone(), stats, client, compact_pct }
     }
 
+    /// Path to the summary file written after each compaction.
+    pub fn summary_path(&self) -> &std::path::Path {
+        &self.summary_path
+    }
+
+    /// Read the current summary file content, with DSML tags stripped.
+    pub async fn read_summary(&self) -> Option<String> {
+        let raw = tokio::fs::read_to_string(&self.summary_path).await.ok()?;
+        Some(strip_dsml_tags(raw.trim()))
+    }
+
     fn should_compact(&self, trigger: &str, context_tokens: usize) -> bool {
-        if trigger == "plan_clear" || trigger == "plan_confirm" {
+        if trigger == "plan_clear" || trigger == "plan_confirm" || trigger == "manual" {
             return true;
         }
         if self.config.max_context_tokens == 0 {
@@ -121,7 +132,25 @@ impl CompactionEngine {
     }
 
     async fn run_summary_call(&self, dropped_lines: &[Value]) -> Result<String> {
-        let summary_instruction = "[CONVERSATION HISTORY SUMMARY — earlier turns compacted for context efficiency]\n\nUpdate the existing summary snapshot using the messages above. Use exactly these fields:\nTask focus:\nLatest request:\nProgress:\nTool evidence:\nReflections:\n\nIMPORTANT: Do NOT use any tools. Do NOT think. Just output the summary directly as plain text.";
+        let summary_instruction = "\
+Summarise the conversation turns above into a concise context snapshot.
+Output exactly the 5 fields below, one field per line.
+After each colon, write the content — do not leave the field empty.
+
+Task focus:
+  (one sentence: what task or topic the user is working on)
+Latest request:
+  (the most recent user instruction or question)
+Progress:
+  (what has been completed, what remains, any blockers)
+Tool evidence:
+  (describe tool actions in plain language — do NOT write tool call syntax
+   like Read(path), Bash(cmd), [tool], Grep(pattern) etc.)
+Reflections:
+  (insights, decisions, open questions)
+
+Start directly with \"Task focus:\" — no preamble, no markdown, no code fences.";
+
         let mut messages: Vec<Value> = dropped_lines.to_vec();
         messages.push(json!({"role":"user","content":summary_instruction}));
 
@@ -182,7 +211,7 @@ impl CompactionEngine {
                 if last_error.is_empty() { "none" } else { &last_error }
             );
         }
-        Ok(out)
+        Ok(strip_dsml_tags(&out))
     }
 
     fn log_compact_event(&self, usage: &UsageEvent) {
@@ -204,7 +233,26 @@ impl CompactionEngine {
 }
 
 fn is_plan_trigger(trigger: &str) -> bool {
-    trigger == "plan_clear" || trigger == "plan_confirm"
+    trigger == "plan_clear" || trigger == "plan_confirm" || trigger == "manual"
+}
+
+/// Strip DSML (DeepSeek Markup Language) and common XML-like tags
+/// that some models inject into generated text (e.g. `<ds_safety>`,
+/// `<ds_copyright>`, `<ds_suffix>`, etc.).
+fn strip_dsml_tags(text: &str) -> String {
+    // Pattern: <ds_...>...</ds_...> or <ds_.../> (self-closing)
+    let re = regex::Regex::new(r"</?ds_\w+[^>]*>").unwrap();
+    re.replace_all(text, "").into_owned()
+}
+
+/// Strip tool-call labels from summary text for clean user display.
+/// Removes [tool] prefixes and Name(args) patterns that look like raw
+/// tool-call syntax leaked by an LLM into the summary output.
+pub fn strip_tool_labels(text: &str) -> String {
+    let re_tool = regex::Regex::new(r"\[tool\]\s*").unwrap();
+    let re_call = regex::Regex::new(r"\b(Read|Bash|Grep|Edit|Write|Glob|WebSearch|WebFetch|Skill|TodoWrite|SubAgent|PlanConfirm|PlanClear)\([^)]*\)").unwrap();
+    let s = re_tool.replace_all(text, "");
+    re_call.replace_all(&s, "").into_owned()
 }
 
 #[cfg(test)]
