@@ -247,10 +247,14 @@ impl OrchActor {
                 // Update model selector based on outcome
                 if self.auto_model_enabled {
                     let success = matches!(decision, TurnDecision::Stop);
-                    self.model_selector.update(&model, success);
+                    // Use tier label ("pro"/"flash") not API model name, to avoid phantom entries
+                    let tier_label = crate::config::ModelTier::parse(&model)
+                        .map(|t| t.label().to_string())
+                        .unwrap_or_else(|_| model.clone());
+                    self.model_selector.update(&tier_label, success);
                     self.ctx.log_event(serde_json::json!({
                         "type": "model_selector_update",
-                        "model": &model,
+                        "model": &tier_label,
                         "success": success,
                         "beliefs": self.model_selector.format_beliefs(),
                     }));
