@@ -17,8 +17,6 @@ pub struct SubAgentResult {
 
 /// SubAgentExecutor runs a child agent in an isolated context.
 pub struct SubAgentExecutor {
-    #[allow(dead_code)]
-    session_id: String,
     child_store: Arc<ConversationStore>,
     child_ctx: Arc<AgentSharedContext>,
 }
@@ -92,7 +90,6 @@ impl SubAgentExecutor {
         });
 
         Ok(Self {
-            session_id: session_id.to_string(),
             child_store,
             child_ctx,
         })

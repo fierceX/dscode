@@ -394,47 +394,6 @@ fn extract_skill_summary(content: &str) -> String {
     fallback
 }
 
-/// Append feedforward hints to the system prompt based on task keywords.
-/// Does not replace existing guidance — only appends 1-2 context-specific lines.
-///
-/// ⚠ DEPRECATED: Disabled because it breaks prefix-cache alignment.
-///     Every turn's system_prompt was getting unique suffix bytes based
-///     on user_input, preventing token-level reuse. If re-enabled, the
-///     hints MUST be moved out of system_prompt (e.g. appended as a
-///     conversation message) so the system prefix stays byte-identical.
-#[allow(dead_code)]
-pub fn append_feedforward_hints(system_prompt: &mut String, user_input: &str) {
-    let input_lower = user_input.to_lowercase();
-    let mut hints = Vec::new();
-
-    if has_any(&input_lower, &["bug", "fix", "debug", "调试", "修复"]) {
-        hints.push("For debugging: prefer Grep→Read→Edit workflow. Use pattern searches to locate code before editing.");
-    }
-    if has_any(&input_lower, &["refactor", "重构", "架构", "architecture"]) {
-        hints.push("For refactoring: use PlanConfirm before making large-scale changes. Verify existing tests still pass after changes.");
-    }
-    if has_any(&input_lower, &["write", "implement", "实现", "编写", "build"]) {
-        hints.push("For new feature development: write tests alongside implementation code. Follow the project's existing patterns.");
-    }
-    if has_any(&input_lower, &["test", "测试", "测试用例"]) {
-        hints.push("For testing: prefer the project's existing test framework. Run tests with the project's standard test command.");
-    }
-
-    if hints.is_empty() {
-        return;
-    }
-
-    let hint_text = format!(
-        "\n<feedforward-hints>\n{}\n</feedforward-hints>",
-        hints.join("\n")
-    );
-    system_prompt.push_str(&hint_text);
-}
-
-fn has_any(input: &str, keywords: &[&str]) -> bool {
-    keywords.iter().any(|k| input.contains(k))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

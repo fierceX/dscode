@@ -1,9 +1,7 @@
-use std::collections::VecDeque;
-
-/// Controller state machine for stall detection and control actions.
-///
-/// Uses P(stall) = 1 - 0.5^k for continuous Bayesian-inspired stall probability,
-/// replacing the old hard-count threshold approach.
+//! Controller state machine for stall detection and control actions.
+//!
+//! Uses P(stall) = 1 - 0.5^k for continuous Bayesian-inspired stall probability,
+//! replacing the old hard-count threshold approach.
 pub struct Controller {
     // Bayesian stall probability
     no_progress_count: u32,
@@ -12,10 +10,6 @@ pub struct Controller {
     // Fix loop detection (per user turn)
     tool_call_count: u32,
     had_end_turn: bool,
-
-    // Context pressure history (sliding window)
-    context_pressure_history: VecDeque<f32>,
-    cache_hit_history: VecDeque<u8>,
 }
 
 /// Control action produced by the controller.
@@ -37,8 +31,6 @@ impl Controller {
             stall_probability: 0.0,
             tool_call_count: 0,
             had_end_turn: false,
-            context_pressure_history: VecDeque::new(),
-            cache_hit_history: VecDeque::new(),
         }
     }
 
@@ -77,22 +69,6 @@ impl Controller {
     /// Record an error (convenience wrapper: no progress).
     pub fn note_error(&mut self, error_decreased: bool) {
         self.note_progress(error_decreased);
-    }
-
-    /// Record context pressure observation.
-    pub fn record_context_pressure(&mut self, pressure: f32) {
-        self.context_pressure_history.push_back(pressure);
-        if self.context_pressure_history.len() > 10 {
-            self.context_pressure_history.pop_front();
-        }
-    }
-
-    /// Record cache hit ratio observation.
-    pub fn record_cache_hit(&mut self, hit: u8) {
-        self.cache_hit_history.push_back(hit);
-        if self.cache_hit_history.len() > 10 {
-            self.cache_hit_history.pop_front();
-        }
     }
 
     /// Current stall probability.
@@ -277,15 +253,6 @@ mod tests {
         c.reset_per_turn();
         assert_eq!(c.tool_call_count, 0);
         assert!(!c.had_end_turn);
-    }
-
-    #[test]
-    fn record_context_pressure_maintains_window() {
-        let mut c = Controller::new();
-        for i in 0..20 {
-            c.record_context_pressure(i as f32 / 10.0);
-        }
-        assert!(c.context_pressure_history.len() <= 10);
     }
 
     #[test]

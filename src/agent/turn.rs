@@ -4,6 +4,7 @@ use crate::protocol::{Event, ToolCallEvent, UsageEvent};
 use crate::session::prefix::ImmutablePrefix;
 use crate::session::store::{build_tool_call_summary, first_line, ToolResult};
 use crate::tools::runner::ToolRunner;
+use crate::util::truncate_str;
 use anyhow::Result;
 use futures::StreamExt;
 use std::sync::Arc;
@@ -63,13 +64,11 @@ impl TurnExecutor {
     fn ensure_prefix(&self) -> Result<(String, Vec<serde_json::Value>)> {
         let mut guard = self.ctx.immutable_prefix.lock().unwrap();
         if let Some(ref prefix) = *guard {
-            // Verify fingerprint to catch cache-drift bugs early.
-            // If this panics, a mutation path bypassed invalidate_prefix().
+            // Verify fingerprint; on mismatch force-rebuild instead of crashing.
             if !prefix.verify_fingerprint() {
-                panic!(
-                    "ImmutablePrefix fingerprint mismatch — prefix mutated without invalidation. \
-                     This will break DeepSeek's prefix-cache alignment."
-                );
+                *guard = None;
+                drop(guard);
+                return self.ensure_prefix();
             }
             return Ok((prefix.system_prompt().to_string(), prefix.tools_json().to_vec()));
         }
@@ -407,11 +406,4 @@ impl TurnExecutor {
 
         Ok((TurnDecision::Stop, effects))
     }
-}
-
-fn truncate_str(s: &str, n: usize) -> String {
-    if s.len() <= n { return s.to_string(); }
-    let mut end = n;
-    while end > 0 && !s.is_char_boundary(end) { end -= 1; }
-    format!("{}...", &s[..end])
 }

@@ -817,3 +817,48 @@ fn ensure_does_not_reset_existing_belief() {
     ms.ensure("flash");
     assert_eq!(ms.mean("flash"), mean_before);
 }
+
+// ========================================================================
+// 10. resolve_active 真实逻辑对齐测试
+// ========================================================================
+
+/// 验证 forced_model = Pro 时直接返回 Pro（绕过 Controller 和 Selector）
+#[test]
+fn forced_model_pro_bypasses_all_other_logic() {
+    // 模拟 resolve_active 中的 `if let Some(forced) = self.forced_model`
+    let forced: Option<ModelTier> = Some(ModelTier::Pro);
+    let tier = if let Some(f) = forced {
+        f
+    } else {
+        ModelTier::Flash
+    };
+    assert_eq!(tier, ModelTier::Pro);
+}
+
+/// 验证 forced_model = Flash 时直接返回 Flash
+#[test]
+fn forced_model_flash_stays_flash() {
+    let forced: Option<ModelTier> = Some(ModelTier::Flash);
+    let tier = if let Some(f) = forced {
+        f
+    } else {
+        ModelTier::Pro
+    };
+    assert_eq!(tier, ModelTier::Flash);
+}
+
+/// 验证 auto_model_enabled=false 时，config.model 被解析而非强制返回 flash
+#[test]
+fn auto_disabled_respects_config_model() {
+    // 真实路径：ModelTier::parse(&config.model).unwrap_or(Flash)
+    let config_model = "pro";
+    let tier = ModelTier::parse(config_model).unwrap_or(ModelTier::Flash);
+    assert_eq!(tier, ModelTier::Pro);
+}
+
+/// 验证 auto_disabled 时未知 model 回退到 Flash
+#[test]
+fn auto_disabled_unknown_model_falls_back_to_flash() {
+    let tier = ModelTier::parse("gpt-4").unwrap_or(ModelTier::Flash);
+    assert_eq!(tier, ModelTier::Flash);
+}

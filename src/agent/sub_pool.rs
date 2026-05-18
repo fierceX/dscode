@@ -17,8 +17,6 @@ pub struct SubAgentReport {
 /// SubAgentPool limits concurrent sub-agent execution using a Semaphore.
 pub struct SubAgentPool {
     semaphore: Arc<Semaphore>,
-    #[allow(dead_code)]
-    max_concurrent: usize,
     active: Arc<AtomicUsize>,
     result_tx: mpsc::UnboundedSender<SubAgentReport>,
 }
@@ -27,7 +25,6 @@ impl SubAgentPool {
     pub fn new(max_concurrent: usize, result_tx: mpsc::UnboundedSender<SubAgentReport>) -> Self {
         Self {
             semaphore: Arc::new(Semaphore::new(max_concurrent)),
-            max_concurrent,
             active: Arc::new(AtomicUsize::new(0)),
             result_tx,
         }

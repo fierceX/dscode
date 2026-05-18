@@ -5,6 +5,7 @@ use crate::agent::model_selector::ModelSelector;
 use crate::context::AgentSharedContext;
 use crate::llm::client::{AsyncLlClient, LlmClient};
 use crate::errors;
+use crate::util::truncate_str;
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
@@ -419,6 +420,7 @@ impl OrchActor {
             }
             TurnDecision::Stop => {
                 // Successful turn → reset stall probability
+                self.controller.note_end_turn();
                 self.controller.note_progress(true);
                 self.controller.reset_stall();
             }
@@ -478,13 +480,6 @@ impl OrchActor {
             }
         }
     }
-}
-
-fn truncate_str(s: &str, n: usize) -> String {
-    if s.len() <= n { return s.to_string(); }
-    let mut end = n;
-    while end > 0 && !s.is_char_boundary(end) { end -= 1; }
-    format!("{}...", &s[..end])
 }
 
 fn chrono_now() -> String {
