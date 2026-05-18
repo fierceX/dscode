@@ -1,0 +1,57 @@
+# dscode configuration file
+# Place in ~/.dscoderc (user-level) or <project>/.dscoderc (project-level)
+# Priority: CLI args > project .dscoderc > user ~/.dscoderc > defaults
+
+# API key (also via DEEPSEEK_API_KEY or OPENAI_API_KEY env)
+# api_key = "sk-xxx"
+
+# API base URL (also via DEEPSEEK_BASE_URL or OPENAI_BASE_URL env)
+# base_url = "https://api.deepseek.com/v1"
+
+# Default model
+# model = "deepseek-v4-flash"
+
+# Max output tokens per response
+# max_tokens = 81920
+
+# Max agent turns per session
+# max_turns = 40
+
+# Max context token limit (supports K/M suffix)
+# max_context = "1M"
+
+# Tool execution timeout in seconds
+# tool_timeout = 600
+
+# Auto-model upgrade (flash → pro on repeated failures)
+# auto_model = false
+
+# Target model for auto-upgrade
+# secondary_model = "deepseek-v4-pro"
+
+# Auto-upgrade threshold (default: 4)
+# auto_upgrade_threshold = 4
+
+# Enable NEEDS_PRO self-report upgrade
+# auto_self_report = false
+
+# Context compaction trigger percentage (default: 85)
+# context_compact_pct = 85
+
+# Enable event logging (default: true)
+# log_events = true
+
+# --- Advanced: Control System Features (新增) ---
+
+# Auto-model upgrade (flash → pro on repeated failures)
+# Uses P(stall) = 1 - 0.5^k Bayesian stall detection
+# auto_model = false
+
+# Target model for auto-upgrade
+# secondary_model = "deepseek-v4-pro"
+
+# Auto-upgrade threshold — deprecated, no longer used
+# auto_upgrade_threshold = 4
+
+# Enable NEEDS_PRO self-report upgrade
+# auto_self_report = false
