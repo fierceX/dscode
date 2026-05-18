@@ -9,7 +9,7 @@ use super::web;
 use super::{is_tool_mutating, is_storm_exempt};
 
 use crate::guard::storm::{StormBreaker, StormDecision};
-use crate::context::AgentSharedContext;
+use crate::context::ToolContext;
 use crate::protocol::ToolCallEvent;
 
 /// ToolExec defines the execution contract for a tool.
@@ -22,7 +22,7 @@ pub trait ToolExec: Send + Sync {
     fn execute(
         &self,
         input: &serde_json::Value,
-        ctx: &AgentSharedContext,
+        ctx: &ToolContext,
     ) -> anyhow::Result<(String, bool, String)>;
 }
 
@@ -44,7 +44,7 @@ fn tool_table() -> Vec<Box<dyn ToolExec>> {
 
 /// ToolRunner dispatches tool calls to their implementations.
 pub struct ToolRunner {
-    ctx: Arc<AgentSharedContext>,
+    ctx: Arc<ToolContext>,
     storm: Mutex<StormBreaker>,
     tools: Vec<Box<dyn ToolExec>>,
 }
@@ -60,7 +60,7 @@ pub struct ToolRunResult {
     pub sub_agent_prompt: Option<String>,
     pub sub_agent_description: Option<String>,
     pub sub_agent_fork: bool,
-    pub sensor_signals: Vec<crate::guard::sensor::SensorSignal>,
+    pub signals: Vec<crate::guard::collector::Signal>,
 }
 
 #[derive(serde::Deserialize)]
@@ -70,7 +70,7 @@ struct TodoArg {
 }
 
 impl ToolRunner {
-    pub fn new(ctx: Arc<AgentSharedContext>) -> Self {
+    pub fn new(ctx: Arc<ToolContext>) -> Self {
         Self {
             ctx,
             storm: Mutex::new(StormBreaker::new(6, 3)),
@@ -116,7 +116,7 @@ impl ToolRunner {
                             sub_agent_prompt: None,
                             sub_agent_description: None,
                             sub_agent_fork: false,
-                            sensor_signals: Vec::new(),
+                            signals: Vec::new(),
                         })
                     }));
                     continue;
@@ -150,11 +150,11 @@ impl ToolRunner {
     }
 
     fn execute_one_sync(
-        ctx: &AgentSharedContext,
+        ctx: &ToolContext,
         call: &ToolCallEvent,
         tool_fn: Option<&dyn ToolExec>,
     ) -> Result<ToolRunResult> {
-        let _start = std::time::Instant::now();
+        let start = std::time::Instant::now();
         // Dispatch via ToolExec if available, otherwise handle built-in tools
         let (output, is_bash, mut conv_content) = if let Some(t) = tool_fn {
             let result = t.execute(&call.input_json, ctx);
@@ -210,14 +210,13 @@ impl ToolRunner {
             output
         };
 
-        // Run sensor for error detection (graceful: ignore failures)
-        let sensor_signals = {
-            let elapsed = _start.elapsed().as_millis() as u64;
+        // Collect signals (error detection, slow execution, large output)
+        use crate::guard::collector::SignalCollector;
+        let signals = {
+            let elapsed = start.elapsed().as_millis() as u64;
             let bytes = final_output.len();
-            match crate::guard::sensor::run_sensor("error", &call.name, elapsed, bytes, &final_output) {
-                Ok(signals) => signals,
-                Err(_) => Vec::new(),
-            }
+            let collector = SignalCollector::new();
+            collector.collect(&call.name, elapsed, bytes, &final_output)
         };
 
         let spawns_sub_agent = call.name == "SubAgent";
@@ -236,7 +235,7 @@ impl ToolRunner {
             sub_agent_prompt,
             sub_agent_description,
             sub_agent_fork,
-            sensor_signals,
+            signals,
         })
     }
 }
@@ -257,7 +256,7 @@ fn todo_write_tool(todos: &[TodoArg]) -> Result<String> {
     Ok(lines.join("\n"))
 }
 
-fn skill_tool(ctx: &AgentSharedContext, name: &str) -> Result<String> {
+fn skill_tool(ctx: &ToolContext, name: &str) -> Result<String> {
     let name = name.trim();
     if name.is_empty() { bail!("Error: no skill name provided"); }
 

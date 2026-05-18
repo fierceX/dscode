@@ -1,8 +1,6 @@
 use dscode::config::{api_url, apply_provider_defaults, apply_config_file, parse_args};
 use dscode::session::paths;
-use dscode::session::stats::StatsTracker;
 use dscode::session::compaction::CompactionEngine;
-use dscode::session::store::ConversationStore;
 use dscode::ui::engine::TerminalDisplay;
 use dscode::ui::Display;
 use dscode::ui::replay::replay_last_turns;
@@ -68,25 +66,11 @@ async fn run(args: Vec<String>) -> Result<()> {
     cfg.session_id = sid.clone();
 
     let spaths = paths::paths_for(&home, &cwd, &sid);
-    paths::ensure_dir(&spaths.base_dir).await?;
-    paths::ensure_dir(&spaths.session_dir).await?;
 
     let new_session = !spaths.events.exists();
-    for f in [&spaths.conversation, &spaths.events, &spaths.summary, &spaths.plan, &spaths.plan_draft] {
-        if !f.exists() {
-            let _ = tokio::fs::File::create(f).await;
-        }
-    }
 
-    if new_session {
-        let initial_stats = r#"{"current_turn_count":0,"agent_request_count":0,"compact_request_count":0,"sub_agent_request_count":0,"total_input_tokens":0,"total_output_tokens":0,"total_cache_read_tokens":0,"total_cache_creation_tokens":0,"current_context_tokens":0,"last_updated":""}"#;
-        tokio::fs::write(&spaths.stats, format!("{initial_stats}\n")).await?;
-    }
-
-    let store = Arc::new(ConversationStore::new(spaths.conversation.clone()));
-    store.ensure().await?;
-
-    let stats = StatsTracker::load(&spaths.stats).await?;
+    // 共享会话初始化
+    let (store, stats) = dscode::session::init::init_session_base(&home, &cwd, &sid).await?;
     let api_url_str = api_url(&cfg);
 
     // Determine interactive mode early, before ctx creation
@@ -141,7 +125,7 @@ async fn run(args: Vec<String>) -> Result<()> {
     let (sub_result_tx, mut sub_result_rx) = mpsc::unbounded_channel();
     let sub_pool = Arc::new(SubAgentPool::new(8, sub_result_tx));
 
-    let (orchestrator, cmd_tx) = new_orchestrator(ctx.clone(), sub_pool.clone(), spaths.model_beliefs.clone());
+    let (orchestrator, cmd_tx) = new_orchestrator(ctx.clone(), sub_pool.clone());
 
     // Bridge sub_agent results → orchestrator commands
     let cmd_tx_clone = cmd_tx.clone();

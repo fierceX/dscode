@@ -1,6 +1,5 @@
 // Core modules (unchanged)
 pub mod assets;
-pub mod compact_dp;
 pub mod config;
 pub mod errors;
 pub mod prompt;

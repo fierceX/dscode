@@ -19,6 +19,7 @@ pub struct SubAgentResult {
 pub struct SubAgentExecutor {
     child_store: Arc<ConversationStore>,
     child_ctx: Arc<AgentSharedContext>,
+    session_id: String,
 }
 
 impl SubAgentExecutor {
@@ -32,14 +33,10 @@ impl SubAgentExecutor {
         );
         crate::session::paths::ensure_dir(&paths.session_dir).await?;
 
-        // Create child files
-        if !paths.conversation.exists() { let _ = tokio::fs::File::create(&paths.conversation).await; }
-        if !paths.events.exists() { let _ = tokio::fs::File::create(&paths.events).await; }
-        if !paths.summary.exists() { let _ = tokio::fs::File::create(&paths.summary).await; }
-        if !paths.plan.exists() { let _ = tokio::fs::File::create(&paths.plan).await; }
-        if !paths.plan_draft.exists() { let _ = tokio::fs::File::create(&paths.plan_draft).await; }
-
-        let child_store = Arc::new(ConversationStore::new(paths.conversation.clone()));
+        // 共享初始化：创建文件、store、stats
+        let (child_store, child_stats) = crate::session::init::init_session_base(
+            &parent_ctx.home, &parent_ctx.cwd, session_id,
+        ).await?;
 
         if fork {
             // Copy parent conversation, summary, plan to child session (ignore errors)
@@ -47,12 +44,6 @@ impl SubAgentExecutor {
             if parent_conv.exists() { let _ = tokio::fs::copy(parent_conv, &paths.conversation).await; }
             if parent_ctx.summary_path.exists() { let _ = tokio::fs::copy(&parent_ctx.summary_path, &paths.summary).await; }
             if parent_ctx.plan_path.exists() { let _ = tokio::fs::copy(&parent_ctx.plan_path, &paths.plan).await; }
-        }
-
-        let child_stats = crate::session::stats::StatsTracker::load(&paths.stats).await?;
-        if !paths.stats.exists() || tokio::fs::metadata(&paths.stats).await.map_or(0, |m| m.len()) == 0 {
-            let initial = r#"{"current_turn_count":0,"agent_request_count":0,"compact_request_count":0,"sub_agent_request_count":0,"total_input_tokens":0,"total_output_tokens":0,"total_cache_read_tokens":0,"total_cache_creation_tokens":0,"current_context_tokens":0,"last_updated":""}"#;
-            let _ = tokio::fs::write(&paths.stats, format!("{initial}\n")).await;
         }
 
         let child_compaction = Arc::new(crate::session::compaction::CompactionEngine::new(
@@ -92,11 +83,15 @@ impl SubAgentExecutor {
         Ok(Self {
             child_store,
             child_ctx,
+            session_id: session_id.to_string(),
         })
     }
 
     /// Execute the sub-agent with the given prompt.
     pub async fn execute(&self, prompt: &str) -> SubAgentResult {
+        self.child_ctx.display.render_sub_agent_status(
+            &self.session_id, "running", 0, 0,
+        );
         let result = self.run_impl(prompt).await;
 
         let stats = self.child_ctx.stats.snapshot().await;

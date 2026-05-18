@@ -218,7 +218,7 @@ pub struct EditTool;
 
 impl super::runner::ToolExec for ReadTool {
     fn name(&self) -> &'static str { "Read" }
-    fn execute(&self, input: &serde_json::Value, _ctx: &crate::context::AgentSharedContext) -> anyhow::Result<(String, bool, String)> {
+    fn execute(&self, input: &serde_json::Value, _ctx: &crate::context::ToolContext) -> anyhow::Result<(String, bool, String)> {
         #[derive(serde::Deserialize)]
         struct Args { path: String, #[serde(default)] offset: Option<usize>, #[serde(default)] limit: Option<usize> }
         let args: Args = serde_json::from_value(input.clone())?;
@@ -228,7 +228,7 @@ impl super::runner::ToolExec for ReadTool {
 
 impl super::runner::ToolExec for WriteTool {
     fn name(&self) -> &'static str { "Write" }
-    fn execute(&self, input: &serde_json::Value, ctx: &crate::context::AgentSharedContext) -> anyhow::Result<(String, bool, String)> {
+    fn execute(&self, input: &serde_json::Value, ctx: &crate::context::ToolContext) -> anyhow::Result<(String, bool, String)> {
         #[derive(serde::Deserialize)]
         struct Args { path: String, content: String }
         let args: Args = serde_json::from_value(input.clone())?;
@@ -238,7 +238,7 @@ impl super::runner::ToolExec for WriteTool {
 
 impl super::runner::ToolExec for EditTool {
     fn name(&self) -> &'static str { "Edit" }
-    fn execute(&self, input: &serde_json::Value, ctx: &crate::context::AgentSharedContext) -> anyhow::Result<(String, bool, String)> {
+    fn execute(&self, input: &serde_json::Value, ctx: &crate::context::ToolContext) -> anyhow::Result<(String, bool, String)> {
         #[derive(serde::Deserialize)]
         struct Args { path: String, old_string: String, new_string: String }
         let args: Args = serde_json::from_value(input.clone())?;

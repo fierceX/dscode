@@ -13,7 +13,6 @@ pub struct ToolResult {
     pub tool_args: std::collections::BTreeMap<String, String>,
     pub content: String,
     pub conv_content: String,
-    pub sensor_signals: Vec<crate::guard::sensor::SensorSignal>,
 }
 
 /// ConversationStore provides async JSONL conversation persistence.
@@ -218,7 +217,6 @@ mod tests {
         let results = vec![ToolResult {
             tool_use_id: "id1".into(), tool_name: "Bash".into(),
             tool_args: Default::default(), content: "output".into(), conv_content: "".into(),
-            sensor_signals: Vec::new(),
         }];
         store.add_tool_results(&results).await.unwrap();
         let lines = store.lines().await.unwrap();

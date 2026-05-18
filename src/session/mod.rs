@@ -1,3 +1,4 @@
+pub mod init;
 pub mod stats;
 pub mod store;
 pub mod paths;

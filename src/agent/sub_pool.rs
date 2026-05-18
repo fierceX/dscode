@@ -32,17 +32,23 @@ impl SubAgentPool {
 
     /// Launch a sub-agent. Returns the session_id immediately.
     /// The sub-agent runs in a tokio task; results are sent via result_tx.
+    /// If `session_id` is empty, a new chronological ID is generated.
     pub async fn launch(
         &self,
         ctx: Arc<super::super::context::AgentSharedContext>,
         prompt: String,
         _description: String,
         fork: bool,
+        session_id: String,
     ) -> Result<String, tokio::sync::AcquireError> {
         let permit = self.semaphore.clone().acquire_owned().await?;
         self.active.fetch_add(1, Ordering::SeqCst);
 
-        let session_id = format!("sub_{}", crate::session::paths::chrono_session_id());
+        let session_id = if session_id.is_empty() {
+            format!("sub_{}", crate::session::paths::chrono_session_id())
+        } else {
+            session_id
+        };
         let id = session_id.clone();
         let tx = self.result_tx.clone();
         let active = self.active.clone();

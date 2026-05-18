@@ -187,7 +187,7 @@ fn is_retryable(code: u16) -> bool {
 }
 
 fn can_retry(attempt: u32, start: std::time::Instant) -> bool {
-    attempt < MAX_RETRIES && start.elapsed() + RETRY_DELAY <= RETRY_MAX_TIME
+    attempt < MAX_RETRIES && start.elapsed() <= RETRY_MAX_TIME
 }
 
 pub struct SseEventStream {

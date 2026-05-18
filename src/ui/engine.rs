@@ -166,7 +166,7 @@ impl Display for TerminalDisplay {
     }
 
     fn render_sub_agent_status(&self, session_id: &str, status: &str, in_tokens: u64, out_tokens: u64) {
-        if status == "ok" || status == "launched" {
+        if status == "ok" || status == "launched" || status == "running" {
             self.write_err(&format!(
                 "\x1b[35m[sub-agent {}] {} (in={}, out={})\x1b[0m\n",
                 session_id, status, in_tokens, out_tokens

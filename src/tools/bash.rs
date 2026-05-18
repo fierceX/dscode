@@ -147,7 +147,7 @@ pub struct BashTool;
 
 impl super::runner::ToolExec for BashTool {
     fn name(&self) -> &'static str { "Bash" }
-    fn execute(&self, input: &serde_json::Value, ctx: &crate::context::AgentSharedContext) -> anyhow::Result<(String, bool, String)> {
+    fn execute(&self, input: &serde_json::Value, ctx: &crate::context::ToolContext) -> anyhow::Result<(String, bool, String)> {
         #[derive(serde::Deserialize)]
         struct Args { command: String, #[serde(default)] timeout: Option<u64> }
         let args: Args = serde_json::from_value(input.clone())?;

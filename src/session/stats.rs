@@ -8,9 +8,8 @@ use tokio::sync::RwLock;
 
 /// Accumulated session statistics: token usage, cost, turn counts.
 /// Persisted to stats.json and read back on session resume.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-#[derive(Default)]
 pub struct Stats {
     pub current_turn_count: u64,
     pub agent_request_count: u64,

@@ -17,10 +17,8 @@ pub struct TurnExecutor {
     tools: Arc<ToolRunner>,
     compacted_this_turn: bool,
     tool_call_count: u32,
-    accumulated_signals: Vec<crate::guard::sensor::SensorSignal>,
     tool_error_count: u32,
-    flash_quality: f64,
-    flash_observations: u64,
+    signals: Vec<crate::guard::collector::Signal>,
 }
 
 /// Represents the outcome of a turn that needs to be actioned.
@@ -47,8 +45,8 @@ pub enum TurnDecision {
 
 impl TurnExecutor {
     pub fn new(ctx: Arc<AgentSharedContext>, llm: Arc<dyn LlmClient>) -> Self {
-        let tools = Arc::new(ToolRunner::new(ctx.clone()));
-        Self { ctx, llm, tools, compacted_this_turn: false, tool_call_count: 0, accumulated_signals: Vec::new(), tool_error_count: 0, flash_quality: 0.0, flash_observations: 0 }
+        let tools = Arc::new(ToolRunner::new(Arc::new(crate::context::ToolContext::from(ctx.as_ref()))));
+        Self { ctx, llm, tools, compacted_this_turn: false, tool_call_count: 0, tool_error_count: 0, signals: Vec::new() }
     }
 
     /// Return the total number of tool calls made during this turn.
@@ -56,20 +54,14 @@ impl TurnExecutor {
         self.tool_call_count
     }
 
-    /// Return accumulated sensor signals from all tool calls in this turn.
-    pub fn accumulated_signals(&self) -> &[crate::guard::sensor::SensorSignal] {
-        &self.accumulated_signals
-    }
-
     /// Number of tool calls that produced at least one tool_error signal.
     pub fn tool_error_count(&self) -> u32 {
         self.tool_error_count
     }
 
-    /// Set flash quality values so title bar updates show real Q during execution.
-    pub fn set_flash_quality(&mut self, q: f64, n: u64) {
-        self.flash_quality = q;
-        self.flash_observations = n;
+    /// Collected signals from all tool calls in this turn.
+    pub fn collected_signals(&self) -> &[crate::guard::collector::Signal] {
+        &self.signals
     }
 
     /// Build or reuse the ImmutablePrefix. Returns the current system_prompt and tools_json.
@@ -113,8 +105,8 @@ impl TurnExecutor {
         self.tools.reset_storm();
         self.compacted_this_turn = false;
         self.tool_call_count = 0;
-        self.accumulated_signals.clear();
         self.tool_error_count = 0;
+        self.signals.clear();
 
         self.ctx.store.add_user(user_input).await?;
         self.ctx.stats.record_turn().await;
@@ -298,12 +290,11 @@ impl TurnExecutor {
 
                 let mut processed_results = Vec::new();
                 for mut result in results {
-                    // Accumulate sensor signals
-                    if !result.sensor_signals.is_empty() {
-                        self.accumulated_signals.extend(result.sensor_signals.clone());
-                        if result.sensor_signals.iter().any(|s| s.kind == "tool_error") {
-                            self.tool_error_count += 1;
-                        }
+                    // Collect signals for controller
+                    self.signals.extend(result.signals.iter().cloned());
+                    // Track tool errors for model upgrade decisions
+                    if result.signals.iter().any(|s| matches!(s.kind, crate::guard::collector::SignalKind::ToolError)) {
+                        self.tool_error_count += 1;
                     }
                     if result.tool_name == "PlanClear" {
                         let _ = self.ctx.compaction.evaluate_and_compact(
@@ -355,7 +346,6 @@ impl TurnExecutor {
                         tool_args: r.tool_args.clone(),
                         content: r.content.clone(),
                         conv_content: r.conv_content.clone(),
-                        sensor_signals: r.sensor_signals.clone(),
                     }
                 }).collect();
 
@@ -395,8 +385,8 @@ impl TurnExecutor {
                 total_cache_creation_tokens: stats.total_cache_creation_tokens,
                 flash_cost_micros: stats.flash_cost_micros,
                 pro_cost_micros: stats.pro_cost_micros,
-                flash_quality: self.flash_quality,
-                flash_observations: self.flash_observations,
+                flash_quality: 0.0,
+                flash_observations: 0,
             });
             if needs_pro {
                 effects.push(TurnEffect::NeedsPro);

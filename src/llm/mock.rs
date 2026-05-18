@@ -42,7 +42,6 @@ impl LlmClient for MockLlmClient {
 mod tests {
     use super::*;
     use crate::protocol::*;
-    use futures::StreamExt;
 
     #[tokio::test]
     async fn mock_empty_sequence() {

@@ -10,6 +10,31 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+/// ToolContext — 工具层只需要这些字段，不依赖 LLM、cancel、compaction 等。
+/// 从 `AgentSharedContext` 通过 `From` trait 创建。
+#[derive(Clone)]
+pub struct ToolContext {
+    pub cwd: PathBuf,
+    pub home: PathBuf,
+    pub store: Arc<ConversationStore>,
+    pub tool_timeout_secs: i32,
+    pub tool_result_max_bytes: usize,
+    pub file_write_max_bytes: usize,
+}
+
+impl From<&AgentSharedContext> for ToolContext {
+    fn from(ctx: &AgentSharedContext) -> Self {
+        Self {
+            cwd: ctx.cwd.clone(),
+            home: ctx.home.clone(),
+            store: ctx.store.clone(),
+            tool_timeout_secs: ctx.tool_timeout_secs,
+            tool_result_max_bytes: ctx.tool_result_max_bytes,
+            file_write_max_bytes: ctx.file_write_max_bytes,
+        }
+    }
+}
+
 /// AgentSharedContext holds all shared resources accessible by every component.
 pub struct AgentSharedContext {
     pub config: Config,

@@ -31,7 +31,7 @@ pub struct GrepTool;
 
 impl super::runner::ToolExec for GlobTool {
     fn name(&self) -> &'static str { "Glob" }
-    fn execute(&self, input: &serde_json::Value, _ctx: &crate::context::AgentSharedContext) -> anyhow::Result<(String, bool, String)> {
+    fn execute(&self, input: &serde_json::Value, _ctx: &crate::context::ToolContext) -> anyhow::Result<(String, bool, String)> {
         #[derive(serde::Deserialize)]
         struct Args { pattern: String, #[serde(default)] path: Option<String> }
         let args: Args = serde_json::from_value(input.clone())?;
@@ -41,7 +41,7 @@ impl super::runner::ToolExec for GlobTool {
 
 impl super::runner::ToolExec for GrepTool {
     fn name(&self) -> &'static str { "Grep" }
-    fn execute(&self, input: &serde_json::Value, _ctx: &crate::context::AgentSharedContext) -> anyhow::Result<(String, bool, String)> {
+    fn execute(&self, input: &serde_json::Value, _ctx: &crate::context::ToolContext) -> anyhow::Result<(String, bool, String)> {
         #[derive(serde::Deserialize)]
         struct Args { pattern: String, #[serde(default)] path: Option<String>, #[serde(default)] glob: Option<String>, #[serde(default)] context: Option<usize> }
         let args: Args = serde_json::from_value(input.clone())?;

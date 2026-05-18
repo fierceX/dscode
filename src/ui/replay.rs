@@ -2,6 +2,9 @@ use serde_json::Value;
 use std::io::Write;
 use std::path::Path;
 
+use crate::session::store::first_line;
+use crate::util::truncate_str;
+
 /// Replay last N turns from events.jsonl synchronously to stdout/stderr.
 pub fn replay_last_turns(events_path: &Path) {
     if !events_path.exists() {
@@ -181,13 +184,4 @@ fn build_label(name: &str, fields: &std::collections::BTreeMap<String, String>) 
         _ => String::new(),
     };
     if label.is_empty() { name.to_string() } else { format!("{name}({label})") }
-}
-
-fn first_line(s: &str) -> &str { s.lines().next().unwrap_or(s) }
-
-fn truncate_str(s: &str, n: usize) -> String {
-    if s.len() <= n { return s.to_string(); }
-    let mut end = n;
-    while end > 0 && !s.is_char_boundary(end) { end -= 1; }
-    format!("{}...", &s[..end])
 }

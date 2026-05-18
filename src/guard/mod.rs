@@ -1,2 +1,2 @@
 pub mod storm;
-pub mod sensor;
+pub mod collector;

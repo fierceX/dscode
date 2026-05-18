@@ -1,13 +1,12 @@
 use crate::agent::sub_pool::{SubAgentPool, SubAgentReport};
 use crate::agent::turn::{TurnExecutor, TurnDecision, TurnEffect};
-use crate::agent::controller::{Controller, ControlAction};
-use crate::agent::model_selector::ModelSelector;
+use crate::agent::decision::{Controller, Decision};
+use crate::guard::collector::{Signal, SignalKind};
 use crate::context::AgentSharedContext;
 use crate::llm::client::{AsyncLlClient, LlmClient};
 use crate::errors;
 use crate::util::truncate_str;
 use anyhow::Result;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
@@ -18,11 +17,7 @@ pub struct OrchActor {
     cmd_rx: mpsc::UnboundedReceiver<OrchCmd>,
     sub_pool: Arc<SubAgentPool>,
     controller: Controller,
-    model_selector: ModelSelector,
-    model_beliefs_path: PathBuf,
     forced_model: Option<crate::config::ModelTier>,
-    auto_model_enabled: bool,
-    self_report_enabled: bool,
 }
 
 /// Commands received by the orchestrator.
@@ -38,22 +33,11 @@ impl OrchActor {
         ctx: Arc<AgentSharedContext>,
         cmd_rx: mpsc::UnboundedReceiver<OrchCmd>,
         sub_pool: Arc<SubAgentPool>,
-        model_beliefs_path: PathBuf,
     ) -> Self {
-        let auto_model = std::env::var("AUTO_MODEL").map(|v| v == "1" || v == "true").unwrap_or(false);
-        let self_report_enabled = std::env::var("AUTO_SELF_REPORT")
-            .map(|v| v == "1" || v == "true").unwrap_or(false);
-        let mut model_selector = ModelSelector::new();
-        // Load historical beliefs if continuing a session
-        let _ = model_selector.load_from_path(&model_beliefs_path);
         Self {
             ctx, cmd_rx, sub_pool,
             controller: Controller::new(),
-            model_selector,
-            model_beliefs_path,
             forced_model: None,
-            auto_model_enabled: auto_model,
-            self_report_enabled,
         }
     }
 
@@ -81,8 +65,6 @@ impl OrchActor {
                         match &result {
                             Ok((true, _reason)) => {
                                 *self.ctx.immutable_prefix.lock().unwrap_or_else(|e| e.into_inner()) = None;
-
-                                // Show the compacted summary once, as normal content (no prefix, no gray)
                                 if let Some(summary) = self.ctx.compaction.read_summary().await {
                                     let clean = crate::session::compaction::strip_tool_labels(&summary);
                                     let trimmed = clean.trim();
@@ -93,9 +75,7 @@ impl OrchActor {
                                         }
                                     }
                                 }
-
                                 self.ctx.log_event(serde_json::json!({"type":"compact","trigger":"manual","result":_reason}));
-                                // Refresh title bar
                                 self.refresh_title().await;
                             }
                             Ok((false, reason)) => {
@@ -105,7 +85,6 @@ impl OrchActor {
                                 self.ctx.display.render_error(&format!("Compact failed: {e}"));
                             }
                         }
-
                         let _ = done.send(());
                     }
                     Some(OrchCmd::SubAgentResult(report)) => {
@@ -119,201 +98,161 @@ impl OrchActor {
                 }
             }
 
-            // Exit if non-interactive and no active sub-agents
             if !self.ctx.interactive() && self.sub_pool.active_count() == 0 {
                 break;
             }
         }
 
-        // Graceful shutdown
         self.sub_pool.drain().await;
         let _ = self.ctx.stats.flush().await;
         Ok(())
     }
 
     async fn handle_user_input(&mut self, input: String) {
-        // Fresh user turn: reset controller per-turn counters
-        self.controller.reset_per_turn();
-
-        // Register models for selector if auto-model is enabled
-        if self.auto_model_enabled {
-            self.model_selector.ensure("flash");
-            self.model_selector.ensure("pro");
-        }
-
-        let (model, api_url) = self.resolve_active();
-
-        // [LOG] Turn start: model selection + system state
-        self.ctx.log_event(serde_json::json!({
-            "type": "turn_start",
-            "model": &model,
-            "auto_model_enabled": self.auto_model_enabled,
-            "controller": self.controller.snapshot(),
-            "model_selector": self.model_selector.snapshot_beliefs(),
-            "forced_model": self.forced_model.map(|t| t.label()),
-        }));
-
-        let llm: Arc<dyn LlmClient> = match AsyncLlClient::new(
-            &model, self.ctx.api_key(), &api_url,
-        ) {
-            Ok(c) => Arc::new(c),
+        let prepared = self.prepare_turn().await;
+        let (model, _api_url, mut executor) = match prepared {
+            Ok(v) => v,
             Err(e) => {
-                self.ctx.display.render_error(&format!("Failed to create LLM client: {e}"));
+                self.ctx.display.render_error(&format!("Failed to prepare turn: {e}"));
                 return;
             }
         };
 
-        let mut executor = TurnExecutor::new(self.ctx.clone(), llm);
-        // Pass current flash quality so title shows Q during execution
-        executor.set_flash_quality(
-            self.model_selector.mean("flash"),
-            self.model_selector.observations("flash"),
-        );
-
         match executor.execute(&input).await {
             Ok((decision, effects)) => {
-                // Track tool call count from executor for fix loop detection
-                let tool_call_count = executor.tool_call_count();
-                for _ in 0..tool_call_count {
-                    self.controller.note_tool_call();
-                }
-
-                for effect in effects {
-                    match effect {
-                        TurnEffect::SubAgentLaunched { session_id, prompt, description, fork } => {
-                            self.ctx.log_event(serde_json::json!({
-                                "type":"sub_agent_start",
-                                "session_id": &session_id,
-                                "timestamp": chrono_now(),
-                                "prompt": &prompt,
-                                "description": &description,
-                                "fork": fork,
-                            }));
-                            match self.sub_pool.launch(
-                                self.ctx.clone(), prompt.clone(), description.clone(), fork,
-                            ).await {
-                                Ok(_) => {
-                                    self.ctx.display.render_sub_agent_status(&session_id, "launched", 0, 0);
-                                }
-                                Err(e) => {
-                                    self.ctx.display.render_error(&format!("SubAgent launch failed: {e}"));
-                                }
-                            }
-                        }
-                        TurnEffect::PlanCleared => {
-                            self.ctx.display.render_info("Plan cleared.");
-                        }
-                        TurnEffect::PlanConfirmed => {
-                            self.ctx.display.render_info("Plan confirmed.");
-                        }
-                        TurnEffect::NeedsPro => {
-                            if self.self_report_enabled && self.auto_model_enabled && !self.controller.is_locked() {
-                                self.controller.note_error(false);
-                                self.controller.note_error(false);
-                                self.controller.note_error(false);
-                                self.ctx.display.render_info("Model requested upgrade (NEEDS_PRO).");
-                            }
-                        }
-                    }
-                }
-
-                // [信号简化: error.sh → Beta 信念 → resolve_active]
-                // 轮次内紧急升级在 TurnExecutor 内部处理 (tool_error_count ≥ 4 时切 Pro)
-                // 长期质量由 ModelSelector 追踪, resolve_active 检查 Q < 0.50 && N ≥ 16
-                // fix_loop 检测保留 (tool_call_count > 15)
-
-                // Check control actions after each turn
-                self.handle_control_actions().await;
-
-                // Update model selector based on outcome
-                if self.auto_model_enabled {
-                    let success = matches!(decision, TurnDecision::Stop);
-                    // Use tier label ("pro"/"flash") not API model name, to avoid phantom entries
-                    let tier_label = crate::config::ModelTier::parse(&model)
-                        .map(|t| t.label().to_string())
-                        .unwrap_or_else(|_| model.clone());
-
-                    // 工具级更新: error.sh 检测结果反映 flash 真实出错率
-                    let total = executor.tool_call_count();
-                    let errors = executor.tool_error_count();
-                    let clean = total.saturating_sub(errors);
-                    // 只有 1 个工具调用且无错误时保留 task-level update
-                    // 否则使用更精确的工具级更新
-                    if total > 1 || errors > 0 {
-                        for _ in 0..clean { self.model_selector.update(&tier_label, true); }
-                        for _ in 0..errors { self.model_selector.update(&tier_label, false); }
-                    } else {
-                        let success = matches!(decision, TurnDecision::Stop);
-                        self.model_selector.update(&tier_label, success);
-                    }
-                    // Persist beliefs to disk for session resume
-                    let _ = self.model_selector.save_to_path(&self.model_beliefs_path);
-                    let update_type = if total > 1 || errors > 0 { "tool" } else { "task" };
-                    self.ctx.log_event(serde_json::json!({
-                        "type": "model_selector_update",
-                        "model": &tier_label,
-                        "update_type": update_type,
-                        "tool_total": total,
-                        "tool_errors": errors,
-                        "beliefs": self.model_selector.format_beliefs(),
-                    }));
-                }
-
-                // [LOG] Turn end: comprehensive tracking snapshot
-                {
-                    let signals = executor.accumulated_signals();
-                    let decision_str = match &decision {
-                        TurnDecision::Stop => "Stop",
-                        TurnDecision::Continue => "Continue",
-                        TurnDecision::Interrupted => "Interrupted",
-                        TurnDecision::Failed(_) => "Failed",
-                    };
-                    let signal_kinds: Vec<&str> = signals.iter().map(|s| s.kind.as_str()).collect();
-                    let signal_details: Vec<&str> = signals.iter().map(|s| s.detail.as_str()).collect();
-                    self.ctx.log_event(serde_json::json!({
-                        "type": "turn_tracking",
-                        "decision": decision_str,
-                        "tool_call_count": executor.tool_call_count(),
-                        "signal_count": signals.len(),
-                        "signal_kinds": signal_kinds,
-                        "signal_details": signal_details,
-                        "controller": self.controller.snapshot(),
-                        "model_selector": self.model_selector.snapshot_beliefs(),
-                        "model": &model,
-                    }));
-                }
-
-                if let TurnDecision::Failed(ref msg) = decision
-                    && msg != "interrupted" {
-                        self.ctx.display.render_error(msg);
-                    }
+                self.post_process_turn(decision, effects, &executor, &model).await;
             }
             Err(e) => {
-                let info = errors::classify_anyhow(&e);
-                self.controller.note_error(false);
-                // [LOG] Turn error with full context
-                self.ctx.log_event(serde_json::json!({
-                    "type": "turn_error",
-                    "error": format!("{e}"),
-                    "category": format!("{:?}", info.category),
-                    "severity": format!("{:?}", info.severity),
-                    "controller": self.controller.snapshot(),
-                    "model_selector": self.model_selector.snapshot_beliefs(),
-                    "model": &model,
-                }));
-                if info.severity == errors::ErrorSeverity::Fatal {
-                    self.ctx.display.render_error(&format!("Fatal error: {e}"));
-                } else {
-                    self.ctx.display.render_error(&format!("Turn execution error: {e}"));
-                }
+                self.handle_turn_error(e, &model).await;
             }
         }
 
-        // Refresh title bar with current flash quality info
         self.refresh_title().await;
     }
 
-    /// Update the terminal title bar with current stats and flash quality.
+    async fn prepare_turn(&mut self) -> Result<(String, String, TurnExecutor)> {
+        self.controller.reset();
+        let (model, api_url) = self.resolve_active();
+
+        self.ctx.log_event(serde_json::json!({
+            "type": "turn_start",
+            "model": &model,
+            "controller": self.controller.snapshot(),
+            "forced_model": self.forced_model.map(|t| t.label()),
+        }));
+
+        let llm: Arc<dyn LlmClient> = Arc::new(AsyncLlClient::new(&model, self.ctx.api_key(), &api_url)?);
+        let executor = TurnExecutor::new(self.ctx.clone(), llm);
+        Ok((model, api_url, executor))
+    }
+
+    async fn post_process_turn(
+        &mut self,
+        decision: TurnDecision,
+        effects: Vec<TurnEffect>,
+        executor: &TurnExecutor,
+        model: &str,
+    ) {
+        for effect in effects {
+            match effect {
+                TurnEffect::SubAgentLaunched { session_id, prompt, description, fork } => {
+                    self.ctx.log_event(serde_json::json!({
+                        "type":"sub_agent_start",
+                        "session_id": &session_id,
+                        "timestamp": chrono_now(),
+                        "prompt": &prompt,
+                        "description": &description,
+                        "fork": fork,
+                    }));
+                    match self.sub_pool.launch(
+                        self.ctx.clone(), prompt.clone(), description.clone(), fork, session_id.clone(),
+                    ).await {
+                        Ok(_) => {
+                            self.ctx.display.render_sub_agent_status(&session_id, "launched", 0, 0);
+                        }
+                        Err(e) => {
+                            self.ctx.display.render_error(&format!("SubAgent launch failed: {e}"));
+                        }
+                    }
+                }
+                TurnEffect::PlanCleared => {
+                    self.ctx.display.render_info("Plan cleared.");
+                }
+                TurnEffect::PlanConfirmed => {
+                    self.ctx.display.render_info("Plan confirmed.");
+                }
+                TurnEffect::NeedsPro => {} // 已移除自动模型切换，仅日志
+            }
+        }
+
+        // Feed signals to controller
+        for signal in executor.collected_signals() {
+            self.controller.feed(signal);
+        }
+
+        // Act on controller decision
+        let tool_error_count = executor.tool_error_count();
+        match self.controller.decide() {
+            Decision::None => {}
+            Decision::InjectHint(hint) => {
+                self.ctx.display.render_info(&format!(
+                    "Controller: {} tool errors — {}.", tool_error_count, hint
+                ));
+            }
+            Decision::Abort => {
+                self.ctx.display.render_error(&format!(
+                    "Controller: {} tool errors — aborting. Requesting human intervention.",
+                    tool_error_count
+                ));
+            }
+        }
+
+        self.log_turn_end(executor, &decision, model);
+
+        if let TurnDecision::Failed(ref msg) = decision
+            && msg != "interrupted" {
+                self.ctx.display.render_error(msg);
+            }
+    }
+
+    fn log_turn_end(&self, executor: &TurnExecutor, decision: &TurnDecision, model: &str) {
+        let decision_str = match decision {
+            TurnDecision::Stop => "Stop",
+            TurnDecision::Continue => "Continue",
+            TurnDecision::Interrupted => "Interrupted",
+            TurnDecision::Failed(_) => "Failed",
+        };
+        self.ctx.log_event(serde_json::json!({
+            "type": "turn_tracking",
+            "decision": decision_str,
+            "tool_call_count": executor.tool_call_count(),
+            "tool_error_count": executor.tool_error_count(),
+            "controller": self.controller.snapshot(),
+            "model": model,
+        }));
+    }
+
+    async fn handle_turn_error(&mut self, e: anyhow::Error, model: &str) {
+        let info = errors::classify_anyhow(&e);
+        self.controller.feed(&Signal {
+            kind: SignalKind::ToolError, severity: 0.8,
+            source: "turn".into(), detail: format!("turn error: {e}"),
+        });
+        self.ctx.log_event(serde_json::json!({
+            "type": "turn_error",
+            "error": format!("{e}"),
+            "category": format!("{:?}", info.category),
+            "severity": format!("{:?}", info.severity),
+            "controller": self.controller.snapshot(),
+            "model": model,
+        }));
+        if info.severity == errors::ErrorSeverity::Fatal {
+            self.ctx.display.render_error(&format!("Fatal error: {e}"));
+        } else {
+            self.ctx.display.render_error(&format!("Turn execution error: {e}"));
+        }
+    }
+
     async fn refresh_title(&self) {
         let new_stats = self.ctx.stats.snapshot().await;
         let snapshot = crate::ui::StatsSnapshot {
@@ -327,8 +266,8 @@ impl OrchActor {
             total_cache_creation_tokens: new_stats.total_cache_creation_tokens,
             flash_cost_micros: new_stats.flash_cost_micros,
             pro_cost_micros: new_stats.pro_cost_micros,
-            flash_quality: self.model_selector.mean("flash"),
-            flash_observations: self.model_selector.observations("flash"),
+            flash_quality: 0.0,
+            flash_observations: 0,
         };
         let model_label = crate::config::resolve_model_label(&self.ctx.config.model);
         self.ctx.display.render_title_update(model_label, &snapshot);
@@ -376,7 +315,6 @@ impl OrchActor {
             self.ctx.display.render_info(&truncate_str(&report.text, 120));
         }
 
-        // Inject sub-agent result into conversation and re-run agent loop
         let context = format!(
             "[sub-agent {}] {} (in={}, out={})\nThinking: {}\nText: {}",
             report.session_id, report.status,
@@ -390,18 +328,14 @@ impl OrchActor {
     async fn handle_model_command(&mut self, model: &str) {
         match crate::config::ModelTier::parse(model) {
             Ok(t) => {
-                let label = t.label();
                 if t == crate::config::ModelTier::Flash {
                     self.forced_model = None;
-                    // Reset flash beliefs to gentle prior: Beta(3,3)
-                    // → mean=0.50, giving flash a fair chance to prove itself
-                    self.model_selector.reset_belief("flash", 3.0, 3.0);
-                    self.controller.reset_stall();
-                    self.ctx.display.render_info("切回 flash，重置观察记录 (Beta(3,3))。");
+                    self.controller.reset();
+                    self.ctx.display.render_info("切回 flash。");
                 } else {
                     self.forced_model = Some(t);
                 }
-                self.ctx.display.render_info(&format!("Switched to {label} model."));
+                self.ctx.display.render_info(&format!("Switched to {} model.", t.label()));
             }
             Err(_) => {
                 self.ctx.display.render_error(&format!("Unknown model tier: {model}. Use /flash or /pro"));
@@ -412,80 +346,11 @@ impl OrchActor {
     fn resolve_active(&self) -> (String, String) {
         let tier = if let Some(forced) = self.forced_model {
             forced
-        } else if !self.auto_model_enabled {
-            crate::config::ModelTier::parse(&self.ctx.config.model).unwrap_or(crate::config::ModelTier::Flash)
-        } else if self.flash_quality_triggers_upgrade()
-            || self.controller.has_fix_loop()
-        {
-            // 长期质量: Q < 0.50 && N ≥ 16 → Pro
-            // 修复循环: 工具调用 > 15 且无 end_turn → Pro
-            crate::config::ModelTier::Pro
         } else {
-            // Default: flash
-            crate::config::ModelTier::Flash
+            crate::config::ModelTier::parse(&self.ctx.config.model)
+                .unwrap_or(crate::config::ModelTier::Flash)
         };
         (tier.model_name().to_string(), self.ctx.api_url.clone())
-    }
-
-    /// Upgrade to pro if flash has accumulated enough failure evidence.
-    /// Q(flash) = α/(α+β) < 0.50  and  ≥16 observations (tool-level).
-    fn flash_quality_triggers_upgrade(&self) -> bool {
-        let q = self.model_selector.mean("flash");
-        let n = self.model_selector.observations("flash");
-        q < 0.50 && n >= 16
-    }
-
-    async fn handle_control_actions(&mut self) {
-        let Some(action) = self.controller.get_control_action() else {
-            return;
-        };
-
-        let action_str = match action {
-            ControlAction::InjectReflectionHint => "InjectReflectionHint",
-            ControlAction::UpgradeModel => "UpgradeModel",
-            ControlAction::Abort => "Abort",
-        };
-
-        // [LOG] Control action taken with full context
-        self.ctx.log_event(serde_json::json!({
-            "type": "control_action",
-            "action": action_str,
-            "P_stall": self.controller.stall_probability(),
-            "k": self.controller.no_progress_count(),
-            "fix_loop": self.controller.has_fix_loop(),
-            "controller_snapshot": self.controller.snapshot(),
-        }));
-
-        match action {
-            ControlAction::InjectReflectionHint => {
-                self.ctx.display.render_info(&format!(
-                    "Controller: P(stall)={:.3} — injecting reflection hint.",
-                    self.controller.stall_probability()
-                ));
-            }
-            ControlAction::UpgradeModel => {
-                self.ctx.display.render_info(&format!(
-                    "Controller: P(stall)={:.3} — upgrading to Pro.",
-                    self.controller.stall_probability()
-                ));
-                self.ctx.log_event(serde_json::json!({
-                    "type": "model_upgrade",
-                    "reason": format!("P(stall)={:.3}, k={}", self.controller.stall_probability(), self.controller.no_progress_count()),
-                    "new_model": self.resolve_active().0,
-                }));
-            }
-            ControlAction::Abort => {
-                self.ctx.display.render_error(&format!(
-                    "Controller: P(stall)={:.3}, k={} — agent is stuck. Requesting human intervention.",
-                    self.controller.stall_probability(),
-                    self.controller.no_progress_count()
-                ));
-                self.ctx.log_event(serde_json::json!({
-                    "type": "controller_abort",
-                    "reason": format!("P(stall)={:.3}, k={}", self.controller.stall_probability(), self.controller.no_progress_count()),
-                }));
-            }
-        }
     }
 }
 
@@ -501,13 +366,11 @@ fn chrono_now() -> String {
     format!("{}-{:04x}", base, rand_suffix)
 }
 
-/// Creates the OrchActor + command sender pair.
 pub fn new_orchestrator(
     ctx: Arc<AgentSharedContext>,
     sub_pool: Arc<SubAgentPool>,
-    model_beliefs_path: PathBuf,
 ) -> (OrchActor, mpsc::UnboundedSender<OrchCmd>) {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-    let actor = OrchActor::new(ctx, cmd_rx, sub_pool, model_beliefs_path);
+    let actor = OrchActor::new(ctx, cmd_rx, sub_pool);
     (actor, cmd_tx)
 }

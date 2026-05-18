@@ -1,4 +1,3 @@
-use crate::compact_dp::{CompactionTier, compact_turn_keep};
 use crate::config::Config;
 use crate::llm::transport::build_openai_body;
 use crate::prompt;
@@ -60,7 +59,7 @@ impl CompactionEngine {
     }
 
     fn should_compact(&self, trigger: &str, context_tokens: usize) -> bool {
-        if trigger == "plan_clear" || trigger == "plan_confirm" || trigger == "manual" {
+        if is_plan_trigger(trigger) {
             return true;
         }
         if self.config.max_context_tokens == 0 {
@@ -255,6 +254,68 @@ pub fn strip_tool_labels(text: &str) -> String {
     re_call.replace_all(&s, "").into_owned()
 }
 
+// ====================================================================
+// CompactionTier + compact_turn_keep (原在 compact_dp.rs，现在内联)
+// ====================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionTier {
+    Conservative,
+    Aggressive,
+    ForceSummary,
+    Emergency,
+}
+
+impl CompactionTier {
+    pub fn from_ratio(current_tokens: usize, max_tokens: usize) -> Self {
+        if max_tokens == 0 {
+            return CompactionTier::Conservative;
+        }
+        let ratio = (current_tokens * 100) / max_tokens;
+        if ratio >= 95 { CompactionTier::Emergency }
+        else if ratio >= 80 { CompactionTier::ForceSummary }
+        else if ratio >= 70 { CompactionTier::Aggressive }
+        else { CompactionTier::Conservative }
+    }
+
+    pub fn tail_budget_ratio(&self) -> f64 {
+        match self {
+            CompactionTier::Conservative => 0.20,
+            CompactionTier::Aggressive => 0.10,
+            CompactionTier::ForceSummary => 0.05,
+            CompactionTier::Emergency => 0.05,
+        }
+    }
+}
+
+/// 按 turn 对齐计算需要保留的行数
+pub fn compact_turn_keep(lines: &[Value], min_keep_ratio: f64) -> Option<usize> {
+    if lines.is_empty() { return None; }
+
+    let mut is_user = Vec::with_capacity(lines.len());
+    let mut total_turns = 0usize;
+    for line in lines {
+        let user = line.get("role").and_then(Value::as_str) == Some("user")
+            && line.get("content").is_some_and(|c| c.is_string());
+        is_user.push(user);
+        if user { total_turns += 1; }
+    }
+
+    let target = {
+        let t = (total_turns as f64 * min_keep_ratio + 0.5) as usize;
+        t.max(1).min(total_turns)
+    };
+
+    let mut keep = 0usize;
+    let mut found = 0usize;
+    for i in (0..lines.len()).rev() {
+        if found >= target { break; }
+        keep += 1;
+        if is_user[i] { found += 1; }
+    }
+    if keep == 0 { None } else { Some(keep) }
+}
+
 #[cfg(test)]
 mod tests {
     // Test should_compact logic inline (CompactionEngine requires async construction)
@@ -316,35 +377,35 @@ mod tests {
 
     #[test]
     fn compact_tier_from_ratio_emergency() {
-        use crate::compact_dp::CompactionTier;
+        use super::CompactionTier;
         assert_eq!(CompactionTier::from_ratio(95, 100), CompactionTier::Emergency);
         assert_eq!(CompactionTier::from_ratio(100, 100), CompactionTier::Emergency);
     }
 
     #[test]
     fn compact_tier_from_ratio_force_summary() {
-        use crate::compact_dp::CompactionTier;
+        use super::CompactionTier;
         assert_eq!(CompactionTier::from_ratio(80, 100), CompactionTier::ForceSummary);
         assert_eq!(CompactionTier::from_ratio(94, 100), CompactionTier::ForceSummary);
     }
 
     #[test]
     fn compact_tier_from_ratio_aggressive() {
-        use crate::compact_dp::CompactionTier;
+        use super::CompactionTier;
         assert_eq!(CompactionTier::from_ratio(70, 100), CompactionTier::Aggressive);
         assert_eq!(CompactionTier::from_ratio(79, 100), CompactionTier::Aggressive);
     }
 
     #[test]
     fn compact_tier_from_ratio_conservative() {
-        use crate::compact_dp::CompactionTier;
+        use super::CompactionTier;
         assert_eq!(CompactionTier::from_ratio(0, 100), CompactionTier::Conservative);
         assert_eq!(CompactionTier::from_ratio(69, 100), CompactionTier::Conservative);
     }
 
     #[test]
     fn compact_tier_zero_max_returns_conservative() {
-        use crate::compact_dp::CompactionTier;
+        use super::CompactionTier;
         assert_eq!(CompactionTier::from_ratio(100, 0), CompactionTier::Conservative);
     }
 }

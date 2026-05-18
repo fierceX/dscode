@@ -40,7 +40,7 @@ pub struct WebFetchTool;
 
 impl super::runner::ToolExec for WebSearchTool {
     fn name(&self) -> &'static str { "WebSearch" }
-    fn execute(&self, input: &serde_json::Value, _ctx: &crate::context::AgentSharedContext) -> anyhow::Result<(String, bool, String)> {
+    fn execute(&self, input: &serde_json::Value, _ctx: &crate::context::ToolContext) -> anyhow::Result<(String, bool, String)> {
         #[derive(serde::Deserialize)]
         struct Args { query: String }
         let args: Args = serde_json::from_value(input.clone())?;
@@ -50,7 +50,7 @@ impl super::runner::ToolExec for WebSearchTool {
 
 impl super::runner::ToolExec for WebFetchTool {
     fn name(&self) -> &'static str { "WebFetch" }
-    fn execute(&self, input: &serde_json::Value, _ctx: &crate::context::AgentSharedContext) -> anyhow::Result<(String, bool, String)> {
+    fn execute(&self, input: &serde_json::Value, _ctx: &crate::context::ToolContext) -> anyhow::Result<(String, bool, String)> {
         #[derive(serde::Deserialize)]
         struct Args { url: String }
         let args: Args = serde_json::from_value(input.clone())?;

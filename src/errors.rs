@@ -39,20 +39,6 @@ impl fmt::Display for ErrorInfo {
     }
 }
 
-/// Returns true if this error category should contribute to auto-model upgrade score.
-pub fn is_upgrade_signal(cat: ErrorCategory) -> bool {
-    matches!(cat, ErrorCategory::Parse | ErrorCategory::Tool)
-}
-
-/// Returns the upgrade weight for a given error category.
-pub fn upgrade_weight(cat: ErrorCategory) -> u32 {
-    match cat {
-        ErrorCategory::Parse => 2,
-        ErrorCategory::Tool => 1,
-        _ => 0,
-    }
-}
-
 pub fn classify_error_from_message(msg: &str) -> ErrorInfo {
     let lower = msg.to_lowercase();
 
@@ -102,26 +88,6 @@ pub fn classify_anyhow(err: &anyhow::Error) -> ErrorInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn network_error_not_upgrade_signal() {
-        assert!(!is_upgrade_signal(ErrorCategory::Network));
-        assert!(!is_upgrade_signal(ErrorCategory::Auth));
-        assert!(!is_upgrade_signal(ErrorCategory::RateLimit));
-    }
-
-    #[test]
-    fn parse_and_tool_are_upgrade_signals() {
-        assert!(is_upgrade_signal(ErrorCategory::Parse));
-        assert!(is_upgrade_signal(ErrorCategory::Tool));
-    }
-
-    #[test]
-    fn upgrade_weights() {
-        assert_eq!(upgrade_weight(ErrorCategory::Parse), 2);
-        assert_eq!(upgrade_weight(ErrorCategory::Tool), 1);
-        assert_eq!(upgrade_weight(ErrorCategory::Network), 0);
-    }
 
     #[test]
     fn json_parse_error_is_parse() {
