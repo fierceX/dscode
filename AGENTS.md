@@ -31,7 +31,7 @@ make test
 
 ---
 
-## 控制系统（新增）
+## 控制系统
 
 基于控制论 + 贝叶斯 + 因果推断的三层架构：
 
@@ -39,8 +39,39 @@ make test
 Phase 0  因果推断提示    → 每次代码修改前引导因果推理
 Phase 1  传感器层        → error.sh 自动检测工具错误（70+ 模式）
 Phase 2  控制器          → P(stall) = 1 - 0.5^k 贝叶斯停滞检测
-Phase 3  模型选择器       → Thompson Sampling (Greedy) 自动切换 flash/pro
+Phase 3  模型选择器       → 单边监控 flash 质量，证明不够好才切 pro
 ```
+
+### 模型选择器设计（当前实现）
+
+**核心思想**：flash 是默认模型，pro 是保底方案。不需要比较 flash vs pro——只需要证明 flash "不够好"。
+
+```
+resolve_active():
+  ① forced_model  → 手动指定（/flash, /pro）
+  ② !auto_model   → 配置文件中的模型
+  ③ is_locked()   → Pro（短期停滞，P(stall) > 0.80）
+  ④ flash Q < 0.50 && N ≥ 8 → Pro（长期质量低于阈值）
+  ⑤ 默认 → Flash
+```
+
+**Q = α/(α+β)**：flash 的 Beta 后验均值
+**N = α+β-2**：总观测次数
+**/flash 复位**：flash 信念重置为 Beta(3,3)，给公平证明机会
+
+### 传感器层
+
+`assets/sensors/error.sh` 内置 70+ 种错误检测模式，覆盖：
+
+| 类别 | 模式数 | 权重 |
+|:----:|:------:|:----:|
+| Rust | 12 | 1.0 |
+| Python | 11 | 1.0 / 0.8 |
+| Node.js | 7 | 1.0 / 0.8 |
+| Go/Java/Docker/网络/文件系统/进程 | 30+ | 0.3-1.0 |
+| 性能（慢执行/大输出） | 2 | 0.3-0.5 |
+
+每次工具执行后自动调用。信号通过 `accumulated_signals` 聚合后喂入 Controller。
 
 ### 运行时日志
 
@@ -63,17 +94,29 @@ grep '"type":"turn_tracking"' events.jsonl | jq '{decision, controller: {k: .con
 grep '"type":"control_action"' events.jsonl | jq '{action, P_stall, k}'
 ```
 
+### 标题栏实时状态
+
+```
+flash Q:0.68/33 T:12 R:45 I:200K(50%) O:20K C:400K(40%) ¥0.120
+      ^^^^^^^^
+      Q = flash 成功率, /33 = 观测数
+```
+
+Q < 0.50 且观测数 ≥ 8 时自动升级到 Pro。在 Pro 上不显示 Q 信息。
+
 ### 会话持久化
 
 | 文件 | 内容 |
 |------|------|
 | `stats.json` | 累积统计（tokens, costs, turns） |
-| `model_beliefs.json` | ModelSelector 信念（α/β 值），session 续接时自动恢复 |
+| `model_beliefs.json` | 模型 β 信念（α/β 值），session 续接时自动恢复 |
 
 ### 手动模型切换
 
-- `/flash` — 手动切到 flash
-- `/pro` — 手动切到 pro
+```
+/flash — 切回 flash，信念重置为 Beta(3,3)
+/pro   — 强制 pro，直到用户切回
+```
 
 ### 启用自动模型切换
 
