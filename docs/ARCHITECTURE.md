@@ -226,9 +226,8 @@ reslove_active() 决定当前轮次使用 flash 还是 pro：
 
 Beta-Bernoulli 追踪 flash 的成功率：
 
-- Q = α/(α+β)
-- N = α+β-2 (观测次数)
-- Q < 0.50 且 N ≥ 8 → flash 被证明不够好 → 升级 Pro
+- Q = α/(α+β)，N = α+β-2 (工具调用观测次数)
+- Q < 0.50 且 N ≥ 16 → flash 被证明不够好 → 升级 Pro
 - /flash 手动降级时重置为 Beta(3,3)
 
 ### 信号源
