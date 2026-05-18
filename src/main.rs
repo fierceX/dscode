@@ -315,8 +315,8 @@ async fn run_interactive(
             }
             if line == "/help" {
                 println!("Commands:");
-                println!("  /flash        Switch to flash model (deepseek-v4-flash)");
-                println!("  /pro          Switch to pro model (deepseek-v4-pro)");
+                println!("  /flash        Switch to flash tier");
+                println!("  /pro          Switch to pro tier");
                 println!("  /skills       List available skills");
                 println!("  /help         Show this help");
                 println!("  exit / quit   Exit REPL");
@@ -436,7 +436,7 @@ fn print_usage() {
     println!("Usage: dscode [options] [prompt]");
     println!();
     println!("Options:");
-    println!("  -m, --model MODEL       Model name (default: deepseek-v4-flash)");
+    println!("  -m, --model MODEL       Model tier: flash | pro (default: flash)");
     println!("  --max-tokens N          Max output tokens (default: 81920)");
     println!("  --tool-timeout N        Tool execution timeout in seconds (default: 600)");
     println!("  --skill NAME            Load skill from .claude/skills/NAME/SKILL.md");
@@ -455,7 +455,7 @@ fn print_usage() {
     println!("  -h, --help              Show this help");
     println!();
     println!("Environment:");
-    println!("  DEEPSEEK_API_KEY        DeepSeek API key (also reads OPENAI_API_KEY)");
+    println!("  DEEPSEEK_API_KEY        DeepSeek API key");
     println!("  DEEPSEEK_BASE_URL       DeepSeek base URL (default: https://api.deepseek.com/v1)");
     println!("  AUTO_MODEL              Enable auto-model upgrade (true/1)");
     println!("  SECONDARY_MODEL         Auto-model upgrade target model");

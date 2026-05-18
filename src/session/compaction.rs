@@ -136,7 +136,7 @@ impl CompactionEngine {
         .build_system_prompt()?;
 
         let body = build_openai_body(
-            &self.config.model, &messages, &[], &system_prompt,
+            &crate::config::resolve_model_name(&self.config.model), &messages, &[], &system_prompt,
             self.config.max_tokens,
         )?;
 

@@ -86,8 +86,6 @@ log_events = true                      # 事件日志
 |------|--------|------|
 | `DEEPSEEK_API_KEY` | — | **必需。** API 密钥 |
 | `DEEPSEEK_BASE_URL` | `https://api.deepseek.com/v1` | 自定义 API 端点 |
-| `OPENAI_API_KEY` | — | 回退密钥（`DEEPSEEK_API_KEY` 未设置时尝试） |
-| `OPENAI_BASE_URL` | — | 回退端点 |
 | `JINA_API_KEY` | — | WebSearch/WebFetch 工具需要的 API 密钥 |
 | `CONTEXT_COMPACT_PCT` | `85` | 上下文压缩触发百分比（1-99） |
 | `AUTO_MODEL` | `false` | 设为 `true` 启用自动模型升级 |
@@ -165,12 +163,12 @@ prompt 为空且 stdin 是终端时自动进入交互模式。
 当前活动模型和实时统计信息显示在终端标题栏（macOS 终端顶部标签页名称或 iTerm2 标题栏）：
 
 ```
-deepseek-v4-flash T:5 R:12 I:890K(85%) O:12K C:742K(74%)
+deepseek-v4-flash T:5 R:12 I:890K(85%) O:12K C:742K(74%) ¥0.42
 │                  │  │  │              │        │           │
-│                  │  │  │              │        │            └─ 上下文使用率（当前/max）
-│                  │  │  │              │        └── 当前上下文 token 数
-│                  │  │  │              └─────────── 输出总 token 数（含缓存的命中）
-│                  │  │  └──────────────────────── 输入总 token 数（含缓存命中），括号内为缓存命中率
+│                  │  │  │              │        │            └─ 估计成本（基于累计 token × DeepSeek 定价）
+│                  │  │  │              │        └── 当前上下文 + 使用率（当前/max）
+│                  │  │  │              └─────────── 输出总 token（K 为单位）
+│                  │  │  └──────────────────────── 输入总 token + 缓存命中率（K 为单位）
 │                  │  └─────────────────────────── API 请求数（agent + compact + sub-agent）
 │                  └────────────────────────────── 当前用户轮次
 └───────────────────────────────────────────────── 当前模型名（/flash 或 /pro 切换后自动更新）
@@ -470,9 +468,7 @@ dscode -m deepseek-v4-flash --print "fix the bug" | jq 'select(.type=="text") | 
 
 ```
 DEEPSEEK_API_KEY      ← 首选
-OPENAI_API_KEY        ← 回退
 DEEPSEEK_BASE_URL     ← 首选
-OPENAI_BASE_URL       ← 回退
 ```
 
 ### 大小限制（`apply_provider_defaults`）

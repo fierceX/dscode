@@ -32,7 +32,7 @@ pub struct AgentSharedContext {
 }
 
 impl AgentSharedContext {
-    pub fn model(&self) -> &str { &self.config.model }
+    pub fn model(&self) -> &str { crate::config::resolve_model_name(&self.config.model) }
     pub fn max_turns(&self) -> i32 { self.config.max_turns }
     pub fn max_tokens(&self) -> i32 { self.config.max_tokens }
     pub fn api_key(&self) -> &str { &self.config.api_key }

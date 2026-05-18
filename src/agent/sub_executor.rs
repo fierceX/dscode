@@ -121,10 +121,10 @@ impl SubAgentExecutor {
     }
 
     async fn run_impl(&self, prompt: &str) -> Result<(String, String)> {
-        let model = &self.child_ctx.config.model;
+        let model_name = crate::config::resolve_model_name(&self.child_ctx.config.model);
         let api_url = &self.child_ctx.api_url;
         let llm: Arc<dyn LlmClient> = Arc::new(AsyncLlClient::new(
-            model, &self.child_ctx.config.api_key, api_url,
+            model_name, &self.child_ctx.config.api_key, api_url,
         )?);
         let mut executor = TurnExecutor::new(self.child_ctx.clone(), llm);
         let (decision, _effects) = executor.execute(prompt).await?;

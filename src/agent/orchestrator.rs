@@ -16,9 +16,8 @@ pub struct OrchActor {
     sub_pool: Arc<SubAgentPool>,
     auto_upgrade_score: u32,
     model_locked: bool,
-    forced_model: Option<String>,
+    forced_model: Option<crate::config::ModelTier>,
     upgrade_threshold: u32,
-    secondary_model: String,
     failure_tracker: TurnFailureTracker,
     auto_model_enabled: bool,
     self_report_enabled: bool,
@@ -40,7 +39,6 @@ impl OrchActor {
         let auto_model = std::env::var("AUTO_MODEL").map(|v| v == "1" || v == "true").unwrap_or(false);
         let threshold = std::env::var("AUTO_UPGRADE_THRESHOLD")
             .ok().and_then(|v| v.parse().ok()).unwrap_or(4);
-        let secondary = std::env::var("SECONDARY_MODEL").unwrap_or_default();
         let self_report_enabled = std::env::var("AUTO_SELF_REPORT")
             .map(|v| v == "1" || v == "true").unwrap_or(false);
         Self {
@@ -49,7 +47,6 @@ impl OrchActor {
             model_locked: false,
             forced_model: None,
             upgrade_threshold: threshold,
-            secondary_model: secondary,
             failure_tracker: TurnFailureTracker::new(threshold),
             auto_model_enabled: auto_model,
             self_report_enabled,
@@ -223,41 +220,35 @@ impl OrchActor {
     }
 
     async fn handle_model_command(&mut self, model: &str) {
-        match model {
-            "flash" | "deepseek-v4-flash" => {
-                self.forced_model = None;  // clear forced, fall back to resolve_active
+        match crate::config::ModelTier::parse(model) {
+            Ok(t) => {
+                let label = t.label();
+                if t == crate::config::ModelTier::Flash {
+                    self.forced_model = None;
+                } else {
+                    self.forced_model = Some(t);
+                }
                 self.model_locked = false;
                 self.auto_upgrade_score = 0;
-                self.ctx.display.render_info("Switched to flash model.");
+                self.ctx.display.render_info(&format!("Switched to {label} model."));
             }
-            "pro" | "deepseek-v4-pro" => {
-                self.forced_model = Some("deepseek-v4-pro".to_string());
-                self.model_locked = false;
-                self.auto_upgrade_score = 0;
-                self.ctx.display.render_info("Switched to pro model.");
-            }
-            _ => {
-                self.ctx.display.render_error(&format!("Unknown model: {model}"));
+            Err(_) => {
+                self.ctx.display.render_error(&format!("Unknown model tier: {model}. Use /flash or /pro"));
             }
         }
     }
 
     fn resolve_active(&self) -> (String, String) {
-        if let Some(ref forced) = self.forced_model {
-            return (forced.clone(), self.ctx.api_url.clone());
-        }
-        if !self.auto_model_enabled {
-            return (self.ctx.config.model.clone(), self.ctx.api_url.clone());
-        }
-        if self.model_locked || self.auto_upgrade_score >= self.upgrade_threshold {
-            let model = if self.secondary_model.is_empty() {
-                self.ctx.config.model.clone()
-            } else {
-                self.secondary_model.clone()
-            };
-            return (model, self.ctx.api_url.clone());
-        }
-        (self.ctx.config.model.clone(), self.ctx.api_url.clone())
+        let tier = if let Some(forced) = self.forced_model {
+            forced
+        } else if !self.auto_model_enabled {
+            crate::config::ModelTier::parse(&self.ctx.config.model).unwrap_or(crate::config::ModelTier::Flash)
+        } else if self.model_locked || self.auto_upgrade_score >= self.upgrade_threshold {
+            crate::config::ModelTier::Pro
+        } else {
+            crate::config::ModelTier::parse(&self.ctx.config.model).unwrap_or(crate::config::ModelTier::Flash)
+        };
+        (tier.model_name().to_string(), self.ctx.api_url.clone())
     }
 
     fn update_after_turn(&mut self, decision: &TurnDecision) {

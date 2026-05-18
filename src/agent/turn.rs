@@ -258,7 +258,9 @@ impl TurnExecutor {
             self.ctx.store.add_assistant(&text, &thinking, &calls).await?;
 
             if let Some(ref u) = usage {
-                self.ctx.stats.record_usage(u).await;
+                let tier = crate::config::ModelTier::parse(self.llm.model())
+                    .unwrap_or(crate::config::ModelTier::Flash);
+                self.ctx.stats.record_usage_with_tier(u, tier).await;
             }
 
             // Phase 3: Execute tools
@@ -343,7 +345,9 @@ impl TurnExecutor {
             // Phase 4: Decide
             let _ = self.ctx.stats.flush_if_dirty().await;
             let stats = self.ctx.stats.snapshot().await;
-            self.ctx.display.render_title_update(self.llm.model(), &crate::ui::StatsSnapshot {
+            self.ctx.display.render_title_update(
+                crate::config::resolve_model_label(self.llm.model()),
+                &crate::ui::StatsSnapshot {
                 current_turn_count: stats.current_turn_count,
                 agent_request_count: stats.agent_request_count,
                 total_input_tokens: stats.total_input_tokens,
@@ -351,6 +355,9 @@ impl TurnExecutor {
                 current_context_tokens: stats.current_context_tokens,
                 max_context_tokens: self.ctx.config.max_context_tokens as u64,
                 total_cache_read_tokens: stats.total_cache_read_tokens,
+                total_cache_creation_tokens: stats.total_cache_creation_tokens,
+                flash_cost_micros: stats.flash_cost_micros,
+                pro_cost_micros: stats.pro_cost_micros,
             });
             if needs_pro {
                 effects.push(TurnEffect::NeedsPro);

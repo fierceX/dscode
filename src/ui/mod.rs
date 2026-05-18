@@ -28,9 +28,15 @@ pub struct StatsSnapshot {
     pub current_context_tokens: u64,
     pub max_context_tokens: u64,
     pub total_cache_read_tokens: u64,
+    pub total_cache_creation_tokens: u64,
+    pub flash_cost_micros: u64,
+    pub pro_cost_micros: u64,
 }
 
 impl StatsSnapshot {
+    fn cost_micros(&self) -> u64 {
+        self.flash_cost_micros + self.pro_cost_micros
+    }
     pub fn cache_pct(&self) -> String {
         let total = self.total_input_tokens + self.total_cache_read_tokens;
         if total > 0 {
@@ -46,6 +52,17 @@ impl StatsSnapshot {
             format!("{}%", pct)
         } else {
             "—".to_string()
+        }
+    }
+
+    pub fn format_cost(&self) -> String {
+        let micros = self.cost_micros();
+        if micros < 1_000 {
+            "¥0.00".to_string()
+        } else if micros < 1_000_000 {
+            format!("¥{:.3}", micros as f64 / 1_000_000.0)
+        } else {
+            format!("¥{:.2}", micros as f64 / 1_000_000.0)
         }
     }
 

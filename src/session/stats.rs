@@ -18,9 +18,11 @@ pub struct Stats {
     pub total_cache_read_tokens: u64,
     pub total_cache_creation_tokens: u64,
     pub current_context_tokens: u64,
+    /// Per-tier accumulated cost in micro-dollars (1/1,000,000 USD).
+    pub flash_cost_micros: u64,
+    pub pro_cost_micros: u64,
     pub last_updated: String,
 }
-
 
 /// StatsTracker provides thread-safe, batched stats persistence.
 /// Read operations use RwLock (read); writes mark dirty and flush occurs once per turn.
@@ -69,7 +71,8 @@ impl StatsTracker {
         self.dirty.store(true, Ordering::Release);
     }
 
-    pub async fn record_usage(&self, u: &UsageEvent) {
+    /// Record usage with a specific model tier for per-tier cost tracking.
+    pub async fn record_usage_with_tier(&self, u: &UsageEvent, tier: crate::config::ModelTier) {
         let mut s = self.stats.write().await;
         s.agent_request_count += 1;
         s.total_input_tokens += u.input_tokens as u64;
@@ -80,6 +83,19 @@ impl StatsTracker {
             + u.output_tokens
             + u.cache_read_input_tokens
             + u.cache_creation_input_tokens) as u64;
+
+        // Per-tier cost accumulation
+        let input_cost = (u.input_tokens as f64) * tier.price_input_per_m() / 1_000_000.0;
+        let output_cost = (u.output_tokens as f64) * tier.price_output_per_m() / 1_000_000.0;
+        let cache_read_cost = (u.cache_read_input_tokens as f64) * tier.price_cache_read_per_m() / 1_000_000.0;
+        let cache_creation_cost = (u.cache_creation_input_tokens as f64) * tier.price_input_per_m() / 1_000_000.0;
+        let delta_micros = ((input_cost + output_cost + cache_read_cost + cache_creation_cost) * 1_000_000.0) as u64;
+
+        match tier {
+            crate::config::ModelTier::Flash => s.flash_cost_micros += delta_micros,
+            crate::config::ModelTier::Pro => s.pro_cost_micros += delta_micros,
+        }
+
         s.last_updated = chrono_now_rfc3339();
         self.dirty.store(true, Ordering::Release);
     }
@@ -149,8 +165,8 @@ mod tests {
     #[tokio::test]
     async fn record_usage_accumulates_tokens() {
         let (t, _) = temp_tracker().await;
-        t.record_usage(&UsageEvent { input_tokens: 100, output_tokens: 50, cache_read_input_tokens: 30, cache_creation_input_tokens: 10 }).await;
-        t.record_usage(&UsageEvent { input_tokens: 200, output_tokens: 80, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }).await;
+        t.record_usage_with_tier(&UsageEvent { input_tokens: 100, output_tokens: 50, cache_read_input_tokens: 30, cache_creation_input_tokens: 10 }, crate::config::ModelTier::Flash).await;
+        t.record_usage_with_tier(&UsageEvent { input_tokens: 200, output_tokens: 80, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, crate::config::ModelTier::Pro).await;
         let snap = t.snapshot().await;
         assert_eq!(snap.agent_request_count, 2);
         assert_eq!(snap.total_input_tokens, 300);

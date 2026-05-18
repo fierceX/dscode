@@ -6,6 +6,65 @@ pub enum OutputFormat {
     StreamJson,
 }
 
+/// Model tier — only two options. Maps internally to DeepSeek API model names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ModelTier {
+    #[default]
+    Flash,
+    Pro,
+}
+
+impl ModelTier {
+    /// Convert tier to DeepSeek API model name.
+    pub fn model_name(&self) -> &'static str {
+        match self {
+            ModelTier::Flash => "deepseek-v4-flash",
+            ModelTier::Pro => "deepseek-v4-pro",
+        }
+    }
+
+    /// Convert tier to display label for the title bar.
+    pub fn label(&self) -> &'static str {
+        match self {
+            ModelTier::Flash => "flash",
+            ModelTier::Pro => "pro",
+        }
+    }
+
+    /// Price per million input tokens (uncached).
+    pub fn price_input_per_m(&self) -> f64 {
+        match self {
+            ModelTier::Flash => 1.0,
+            ModelTier::Pro => 3.0,
+        }
+    }
+
+    /// Price per million output tokens.
+    pub fn price_output_per_m(&self) -> f64 {
+        match self {
+            ModelTier::Flash => 2.0,
+            ModelTier::Pro => 6.0,
+        }
+    }
+
+    /// Price per million cache-read tokens.
+    pub fn price_cache_read_per_m(&self) -> f64 {
+        match self {
+            ModelTier::Flash => 0.02,
+            ModelTier::Pro => 0.025,
+        }
+    }
+
+    /// Parse from CLI flag or config file string.
+    pub fn parse(s: &str) -> Result<Self> {
+        match s.to_lowercase().as_str() {
+            "flash" | "deepseek-v4-flash" => Ok(ModelTier::Flash),
+            "pro" | "deepseek-v4-pro" => Ok(ModelTier::Pro),
+            _ => bail!("unknown model tier: {s}. Use 'flash' or 'pro'"),
+        }
+    }
+}
+
 /// TOML config file structure (optional, loaded from ~/.dscoderc or <project>/.dscoderc).
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct DscodeConfigFile {
@@ -81,7 +140,9 @@ pub fn parse_args(args: Vec<String>) -> Result<Config> {
         let arg = &args[i];
         match arg.as_str() {
             "-m" | "--model" => {
-                cfg.model = require_value(&args, i)?;
+                let val = require_value(&args, i)?;
+                ModelTier::parse(&val)?;  // validate
+                cfg.model = val;
                 i += 2;
             }
             "--max-tokens" => {
@@ -255,24 +316,22 @@ pub fn apply_config_file(cfg: &mut Config) {
         cfg.log_events = v != "0" && v != "false" && v != "no";
     }
 
-    // API key: DEEPSEEK_API_KEY > OPENAI_API_KEY > CLI flag
+    // API key: DEEPSEEK_API_KEY > CLI flag
     if cfg.api_key.is_empty() {
         cfg.api_key = std::env::var("DEEPSEEK_API_KEY")
-            .or_else(|_| std::env::var("OPENAI_API_KEY"))
             .unwrap_or_default();
     }
-    // Base URL: DEEPSEEK_BASE_URL > OPENAI_BASE_URL > CLI flag > default
+    // Base URL: DEEPSEEK_BASE_URL > CLI flag > default
     if cfg.base_url.is_empty() {
         cfg.base_url = std::env::var("DEEPSEEK_BASE_URL")
-            .or_else(|_| std::env::var("OPENAI_BASE_URL"))
             .unwrap_or_default();
     }
-    // Default model
+    // Default model tier
     if cfg.model.is_empty() {
-        cfg.model = "deepseek-v4-flash".to_string();
+        cfg.model = "flash".to_string();
     }
     if cfg.api_key.is_empty() && cfg.base_url.is_empty() {
-        bail!("no API key. Set DEEPSEEK_API_KEY or OPENAI_API_KEY or use --api-key");
+        bail!("no API key. Set DEEPSEEK_API_KEY or use --api-key");
     }
     Ok(())
 }
@@ -284,6 +343,21 @@ pub fn api_url(cfg: &Config) -> String {
         cfg.base_url.as_str()
     };
     format!("{}/chat/completions", base.trim_end_matches('/'))
+}
+
+/// Resolve the actual API model name from a Config model string.
+/// "flash" → "deepseek-v4-flash", "pro" → "deepseek-v4-pro"
+pub fn resolve_model_name(model: &str) -> &'static str {
+    ModelTier::parse(model)
+        .map(|t| t.model_name())
+        .unwrap_or("deepseek-v4-flash")
+}
+
+/// Resolve the display label for the title bar.
+pub fn resolve_model_label(model: &str) -> &'static str {
+    ModelTier::parse(model)
+        .map(|t| t.label())
+        .unwrap_or("flash")
 }
 
 pub fn parse_size_bytes(raw: &str) -> Result<usize> {
@@ -337,8 +411,13 @@ mod tests {
 
     #[test]
     fn parse_args_model_provider() {
-        let cfg = parse_args(vec!["-m".into(), "deepseek-v4-flash".into()]).unwrap();
-        assert_eq!(cfg.model, "deepseek-v4-flash");
+        let cfg = parse_args(vec!["-m".into(), "flash".into()]).unwrap();
+        assert_eq!(cfg.model, "flash");
+    }
+
+    #[test]
+    fn parse_args_model_rejects_unknown() {
+        assert!(parse_args(vec!["-m".into(), "gpt-4".into()]).is_err());
     }
 
     #[test]
@@ -365,13 +444,13 @@ mod tests {
     #[test]
     fn parse_config_file_overrides_model() {
         let toml_str = r#"
-model = "deepseek-v4-pro"
+model = "pro"
 max_tokens = 163840
 max_context = "500K"
 tool_timeout = 120
 "#;
         let parsed: DscodeConfigFile = toml::from_str(toml_str).unwrap();
-        assert_eq!(parsed.model.unwrap(), "deepseek-v4-pro");
+        assert_eq!(parsed.model.unwrap(), "pro");
         assert_eq!(parsed.max_tokens.unwrap(), 163840);
         assert_eq!(parsed.max_context.unwrap(), "500K");
         assert_eq!(parsed.tool_timeout.unwrap(), 120);
@@ -381,13 +460,13 @@ tool_timeout = 120
     fn parse_config_file_auto_model_fields() {
         let toml_str = r#"
 auto_model = true
-secondary_model = "deepseek-v4-pro"
+secondary_model = "pro"
 auto_upgrade_threshold = 3
 context_compact_pct = 70
 "#;
         let parsed: DscodeConfigFile = toml::from_str(toml_str).unwrap();
         assert!(parsed.auto_model.unwrap());
-        assert_eq!(parsed.secondary_model.unwrap(), "deepseek-v4-pro");
+        assert_eq!(parsed.secondary_model.unwrap(), "pro");
         assert_eq!(parsed.auto_upgrade_threshold.unwrap(), 3);
         assert_eq!(parsed.context_compact_pct.unwrap(), 70);
     }
