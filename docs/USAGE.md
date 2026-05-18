@@ -41,6 +41,7 @@ echo "list the files" | ./target/release/dscode -m deepseek-v4-flash
 | `--session [NAME]` | 自动生成 | 命名会话。提供名称可恢复 |
 | `--continue` | — | 恢复最近的 session |
 | `--list-sessions` | — | 列出所有 session |
+| `--list-skills` | — | 列出内置 skill |
 | `-v` / `--verbose` | `false` | 详细日志 |
 | `-i` / `--interactive` | auto | 交互式 REPL |
 | `-h` / `--help` | — | 显示帮助 |
@@ -123,6 +124,7 @@ prompt 为空且 stdin 是终端时自动进入交互模式。
 |------|------|
 | `/flash` | 切换到 flash 模型（deepseek-v4-flash） |
 | `/pro` | 切换到 pro 模型（deepseek-v4-pro） |
+| `/skills` | 列出所有可用 skill |
 | `/help` | 显示可用的命令列表 |
 | `exit` / `quit` | 退出 REPL |
 | Ctrl+C | 取消当前正在执行的 turn |

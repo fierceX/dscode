@@ -50,6 +50,10 @@ async fn run(args: Vec<String>) -> Result<()> {
         list_sessions(&home, &cwd).await?;
         return Ok(());
     }
+    if cfg.list_skills {
+        list_skills();
+        return Ok(());
+    }
 
     apply_provider_defaults(&mut cfg)?;
 
@@ -191,6 +195,86 @@ async fn run(args: Vec<String>) -> Result<()> {
     Ok(())
 }
 
+fn list_skills() {
+    let embedded = dscode::assets::embedded_skills::all();
+    let mut seen_fs = std::collections::HashSet::new();
+    let mut fs_skills: Vec<String> = Vec::new();
+
+    // Scan file-system skill dirs
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let home = std::path::PathBuf::from(
+        std::env::var("DSCODE_HOME")
+            .or_else(|_| std::env::var("HOME"))
+            .unwrap_or_else(|_| String::from(".")),
+    );
+    let bases = find_list_skill_dirs(&cwd, &home);
+    for base in &bases {
+        if !base.is_dir() { continue; }
+        for entry in (std::fs::read_dir(base).into_iter().flatten()).flatten() {
+            let path = entry.path();
+            if !path.is_dir() { continue; }
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            if name.starts_with('.') || !seen_fs.insert(name.clone()) { continue; }
+            let skill_file = path.join("SKILL.md");
+            if !skill_file.exists() { continue; }
+            let content = std::fs::read_to_string(&skill_file).unwrap_or_default();
+            let desc = extract_frontmatter_field_for_list(&content, "description:")
+                .unwrap_or_else(|| String::from("(no description)"));
+            fs_skills.push(format!("{}: {}", name, desc));
+        }
+    }
+
+    // Show embedded skills
+    println!("BUILT-IN SKILLS");
+    println!("{}", "-".repeat(60));
+    for skill in &embedded {
+        let marker = if seen_fs.contains(skill.name) { "▶" } else { " " };
+        println!("{}  {}", marker, skill.name);
+        println!("{}     {}", marker, skill.description);
+        println!();
+    }
+
+    // Show filesystem-only skills
+    let fs_only: Vec<_> = fs_skills.iter()
+        .filter(|s| !embedded.iter().any(|e| s.starts_with(&format!("{}:", e.name))))
+        .collect();
+    if !fs_only.is_empty() {
+        println!("FILESYSTEM SKILLS");
+        println!("{}", "-".repeat(60));
+        for s in &fs_only {
+            println!("   {}", s);
+        }
+        println!();
+    }
+
+    println!("Load with --skill NAME or Skill(name).");
+}
+
+fn find_list_skill_dirs(cwd: &std::path::Path, home: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let project = cwd.join(".claude/skills");
+    if project.is_dir() { out.push(project); }
+    let project_dev = cwd.join("skills");
+    if project_dev.is_dir() { out.push(project_dev); }
+    let global = home.join(".claude/skills");
+    if global.is_dir() { out.push(global); }
+    out
+}
+
+fn extract_frontmatter_field_for_list(content: &str, field: &str) -> Option<String> {
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.first()?.trim() != "---" { return None; }
+    for line in &lines[1..] {
+        let trimmed = line.trim();
+        if trimmed == "---" { break; }
+        if let Some(value) = trimmed.strip_prefix(field) {
+            let val = value.trim().trim_matches('"').trim_matches('\'');
+            if !val.is_empty() { return Some(val.to_string()); }
+        }
+    }
+    None
+}
+
 async fn run_interactive(
     cmd_tx: mpsc::UnboundedSender<OrchCmd>,
     cancel: CancellationToken,
@@ -232,8 +316,13 @@ async fn run_interactive(
                 println!("Commands:");
                 println!("  /flash        Switch to flash model (deepseek-v4-flash)");
                 println!("  /pro          Switch to pro model (deepseek-v4-pro)");
+                println!("  /skills       List available skills");
                 println!("  /help         Show this help");
                 println!("  exit / quit   Exit REPL");
+                continue;
+            }
+            if line == "/skills" {
+                list_skills();
                 continue;
             }
             if line == "/flash" || line == "/pro" {
@@ -278,7 +367,9 @@ fn simple_stdin_loop(cmd_tx: &mpsc::UnboundedSender<OrchCmd>, cancel: &Cancellat
         if line.is_empty() { continue; }
         if line.starts_with('/') {
             if line == "/help" {
-                println!("Commands: /flash, /pro, /help");
+                println!("Commands: /flash, /pro, /skills, /help");
+            } else if line == "/skills" {
+                list_skills();
             } else if line == "/flash" || line == "/pro" {
                 let model = line.trim_start_matches('/');
                 let _ = cmd_tx.send(OrchCmd::SetModel(model.to_string()));
@@ -357,6 +448,7 @@ fn print_usage() {
     println!("  --session [NAME]        Use named session");
     println!("  --continue              Continue most recent session");
     println!("  --list-sessions         List saved sessions");
+    println!("  --list-skills           List built-in skills");
     println!("  -v, --verbose           Verbose mode");
     println!("  -i, --interactive       Interactive mode (REPL)");
     println!("  -h, --help              Show this help");

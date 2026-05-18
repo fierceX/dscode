@@ -25,6 +25,7 @@ pub struct Config {
     pub session_id: String,
     pub continue_session: bool,
     pub list_sessions: bool,
+    pub list_skills: bool,
     pub log_events: bool,
 }
 
@@ -48,6 +49,7 @@ impl Default for Config {
             session_id: String::new(),
             continue_session: false,
             list_sessions: false,
+            list_skills: false,
             log_events: true,
         }
     }
@@ -121,6 +123,10 @@ pub fn parse_args(args: Vec<String>) -> Result<Config> {
             }
             "--list-sessions" => {
                 cfg.list_sessions = true;
+                i += 1;
+            }
+            "--list-skills" => {
+                cfg.list_skills = true;
                 i += 1;
             }
             "-v" | "--verbose" => {
