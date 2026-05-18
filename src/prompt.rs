@@ -135,6 +135,20 @@ impl Builder {
             &plan_lifecycle_guidance,
             None,
         ));
+        sections.push(wrap_section(
+            "causal-reasoning",
+            concat!(
+                "Before every code change, answer silently:\n",
+                "1. What specific behavior will this change affect? (cause)\n",
+                "2. What observable result do I expect? (effect)\n",
+                "3. How will I verify the cause-effect link? (verify)\n",
+                "\n",
+                "If you cannot answer all three, DO NOT make the change.\n",
+                "One change at a time — multiple changes confound causality.\n",
+                "Verify immediately after each change to confirm cause-effect."
+            ),
+            None,
+        ));
         if let Some(s) = self.build_instruction_files_section()? {
             sections.push(wrap_section("instruction-files", &s, None));
         }

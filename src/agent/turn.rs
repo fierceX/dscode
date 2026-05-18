@@ -15,6 +15,8 @@ pub struct TurnExecutor {
     llm: Arc<dyn LlmClient>,
     tools: Arc<ToolRunner>,
     compacted_this_turn: bool,
+    tool_call_count: u32,
+    accumulated_signals: Vec<crate::guard::sensor::SensorSignal>,
 }
 
 /// Represents the outcome of a turn that needs to be actioned.
@@ -42,7 +44,17 @@ pub enum TurnDecision {
 impl TurnExecutor {
     pub fn new(ctx: Arc<AgentSharedContext>, llm: Arc<dyn LlmClient>) -> Self {
         let tools = Arc::new(ToolRunner::new(ctx.clone()));
-        Self { ctx, llm, tools, compacted_this_turn: false }
+        Self { ctx, llm, tools, compacted_this_turn: false, tool_call_count: 0, accumulated_signals: Vec::new() }
+    }
+
+    /// Return the total number of tool calls made during this turn.
+    pub fn tool_call_count(&self) -> u32 {
+        self.tool_call_count
+    }
+
+    /// Return accumulated sensor signals from all tool calls in this turn.
+    pub fn accumulated_signals(&self) -> &[crate::guard::sensor::SensorSignal] {
+        &self.accumulated_signals
     }
 
     /// Build or reuse the ImmutablePrefix. Returns the current system_prompt and tools_json.
@@ -87,6 +99,8 @@ impl TurnExecutor {
         // New user intent: reset storm breaker window and compact guard
         self.tools.reset_storm();
         self.compacted_this_turn = false;
+        self.tool_call_count = 0;
+        self.accumulated_signals.clear();
 
         self.ctx.store.add_user(user_input).await?;
         self.ctx.stats.record_turn().await;
@@ -265,10 +279,15 @@ impl TurnExecutor {
 
             // Phase 3: Execute tools
             if !calls.is_empty() {
+                self.tool_call_count += calls.len() as u32;
                 let results = self.tools.execute_all(calls.clone()).await?;
 
                 let mut processed_results = Vec::new();
                 for mut result in results {
+                    // Accumulate sensor signals
+                    if !result.sensor_signals.is_empty() {
+                        self.accumulated_signals.extend(result.sensor_signals.clone());
+                    }
                     if result.tool_name == "PlanClear" {
                         let _ = self.ctx.compaction.evaluate_and_compact(
                             "plan_clear", 0,
@@ -319,6 +338,7 @@ impl TurnExecutor {
                         tool_args: r.tool_args.clone(),
                         content: r.content.clone(),
                         conv_content: r.conv_content.clone(),
+                        sensor_signals: r.sensor_signals.clone(),
                     }
                 }).collect();
 

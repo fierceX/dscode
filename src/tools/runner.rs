@@ -60,6 +60,7 @@ pub struct ToolRunResult {
     pub sub_agent_prompt: Option<String>,
     pub sub_agent_description: Option<String>,
     pub sub_agent_fork: bool,
+    pub sensor_signals: Vec<crate::guard::sensor::SensorSignal>,
 }
 
 #[derive(serde::Deserialize)]
@@ -115,6 +116,7 @@ impl ToolRunner {
                             sub_agent_prompt: None,
                             sub_agent_description: None,
                             sub_agent_fork: false,
+                            sensor_signals: Vec::new(),
                         })
                     }));
                     continue;
@@ -152,6 +154,7 @@ impl ToolRunner {
         call: &ToolCallEvent,
         tool_fn: Option<&dyn ToolExec>,
     ) -> Result<ToolRunResult> {
+        let _start = std::time::Instant::now();
         // Dispatch via ToolExec if available, otherwise handle built-in tools
         let (output, is_bash, mut conv_content) = if let Some(t) = tool_fn {
             let result = t.execute(&call.input_json, ctx);
@@ -207,6 +210,16 @@ impl ToolRunner {
             output
         };
 
+        // Run sensor for error detection (graceful: ignore failures)
+        let sensor_signals = {
+            let elapsed = _start.elapsed().as_millis() as u64;
+            let bytes = final_output.len();
+            match crate::guard::sensor::run_sensor("error", &call.name, elapsed, bytes, &final_output) {
+                Ok(signals) => signals,
+                Err(_) => Vec::new(),
+            }
+        };
+
         let spawns_sub_agent = call.name == "SubAgent";
         let sub_agent_prompt = if spawns_sub_agent { call.fields.get("prompt").cloned() } else { None };
         let sub_agent_description = if spawns_sub_agent { call.fields.get("description").cloned() } else { None };
@@ -223,6 +236,7 @@ impl ToolRunner {
             sub_agent_prompt,
             sub_agent_description,
             sub_agent_fork,
+            sensor_signals,
         })
     }
 }

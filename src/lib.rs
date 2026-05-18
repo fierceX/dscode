@@ -20,3 +20,6 @@ pub mod guard;
 
 pub mod agent;
 pub mod ui;
+
+#[cfg(test)]
+pub mod test_mock;

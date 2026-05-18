@@ -1,6 +1,7 @@
 use crate::agent::sub_pool::{SubAgentPool, SubAgentReport};
 use crate::agent::turn::{TurnExecutor, TurnDecision, TurnEffect};
-use crate::agent::failure_tracker::{TurnFailureTracker, category_to_signal_kind};
+use crate::agent::controller::{Controller, ControlAction};
+use crate::agent::model_selector::ModelSelector;
 use crate::context::AgentSharedContext;
 use crate::llm::client::{AsyncLlClient, LlmClient};
 use crate::errors;
@@ -14,11 +15,9 @@ pub struct OrchActor {
     ctx: Arc<AgentSharedContext>,
     cmd_rx: mpsc::UnboundedReceiver<OrchCmd>,
     sub_pool: Arc<SubAgentPool>,
-    auto_upgrade_score: u32,
-    model_locked: bool,
+    controller: Controller,
+    model_selector: ModelSelector,
     forced_model: Option<crate::config::ModelTier>,
-    upgrade_threshold: u32,
-    failure_tracker: TurnFailureTracker,
     auto_model_enabled: bool,
     self_report_enabled: bool,
 }
@@ -38,17 +37,13 @@ impl OrchActor {
         sub_pool: Arc<SubAgentPool>,
     ) -> Self {
         let auto_model = std::env::var("AUTO_MODEL").map(|v| v == "1" || v == "true").unwrap_or(false);
-        let threshold = std::env::var("AUTO_UPGRADE_THRESHOLD")
-            .ok().and_then(|v| v.parse().ok()).unwrap_or(4);
         let self_report_enabled = std::env::var("AUTO_SELF_REPORT")
             .map(|v| v == "1" || v == "true").unwrap_or(false);
         Self {
             ctx, cmd_rx, sub_pool,
-            auto_upgrade_score: 0,
-            model_locked: false,
+            controller: Controller::new(),
+            model_selector: ModelSelector::new(),
             forced_model: None,
-            upgrade_threshold: threshold,
-            failure_tracker: TurnFailureTracker::new(threshold),
             auto_model_enabled: auto_model,
             self_report_enabled,
         }
@@ -143,8 +138,14 @@ impl OrchActor {
     }
 
     async fn handle_user_input(&mut self, input: String) {
-        // Fresh user turn: reset failure tracker (new intent)
-        self.failure_tracker.reset();
+        // Fresh user turn: reset controller per-turn counters
+        self.controller.reset_per_turn();
+
+        // Register models for selector if auto-model is enabled
+        if self.auto_model_enabled {
+            self.model_selector.ensure("flash");
+            self.model_selector.ensure("pro");
+        }
 
         let (model, api_url) = self.resolve_active();
         let llm: Arc<dyn LlmClient> = match AsyncLlClient::new(
@@ -161,6 +162,12 @@ impl OrchActor {
 
         match executor.execute(&input).await {
             Ok((decision, effects)) => {
+                // Track tool call count from executor for fix loop detection
+                let tool_call_count = executor.tool_call_count();
+                for _ in 0..tool_call_count {
+                    self.controller.note_tool_call();
+                }
+
                 for effect in effects {
                     match effect {
                         TurnEffect::SubAgentLaunched { session_id, prompt, description, fork } => {
@@ -190,18 +197,48 @@ impl OrchActor {
                             self.ctx.display.render_info("Plan confirmed.");
                         }
                         TurnEffect::NeedsPro => {
-                            if self.self_report_enabled && self.auto_model_enabled && !self.model_locked {
-                                self.auto_upgrade_score += 3;
+                            if self.self_report_enabled && self.auto_model_enabled && !self.controller.is_locked() {
+                                self.controller.note_error(false);
+                                self.controller.note_error(false);
+                                self.controller.note_error(false);
                                 self.ctx.display.render_info("Model requested upgrade (NEEDS_PRO).");
-                                if self.auto_upgrade_score >= self.upgrade_threshold {
-                                    self.model_locked = true;
-                                }
                             }
                         }
                     }
                 }
 
                 self.update_after_turn(&decision);
+
+                // 将传感器信号（聚合后）喂入 Controller
+                // 一轮中无论多少个错误信号，只计 1 次 note_error(false)
+                // 仅在轮次失败时补充，成功轮次（Stop）已由 update_after_turn 重置
+                if matches!(decision, TurnDecision::Failed{..}) {
+                    let signals = executor.accumulated_signals();
+                    if signals.iter().any(|s| s.kind == "tool_error") {
+                        self.controller.note_error(false);
+                        self.ctx.log_event(serde_json::json!({
+                            "type": "sensor_signal_aggregated",
+                            "signal_count": signals.len(),
+                            "controller_k": self.controller.no_progress_count(),
+                            "controller_p": self.controller.stall_probability(),
+                        }));
+                    }
+                }
+
+                // Check control actions after each turn
+                self.handle_control_actions().await;
+
+                // Update model selector based on outcome
+                if self.auto_model_enabled {
+                    let success = matches!(decision, TurnDecision::Stop);
+                    self.model_selector.update(&model, success);
+                    self.ctx.log_event(serde_json::json!({
+                        "type": "model_selector_update",
+                        "model": &model,
+                        "success": success,
+                        "beliefs": self.model_selector.format_beliefs(),
+                    }));
+                }
 
                 if let TurnDecision::Failed(ref msg) = decision
                     && msg != "interrupted" {
@@ -210,7 +247,7 @@ impl OrchActor {
             }
             Err(e) => {
                 let info = errors::classify_anyhow(&e);
-                self.record_error_signal(info.category);
+                self.controller.note_error(false);
                 if info.severity == errors::ErrorSeverity::Fatal {
                     self.ctx.display.render_error(&format!("Fatal error: {e}"));
                 } else {
@@ -282,8 +319,7 @@ impl OrchActor {
                 } else {
                     self.forced_model = Some(t);
                 }
-                self.model_locked = false;
-                self.auto_upgrade_score = 0;
+                self.controller.reset_stall();
                 self.ctx.display.render_info(&format!("Switched to {label} model."));
             }
             Err(_) => {
@@ -297,10 +333,12 @@ impl OrchActor {
             forced
         } else if !self.auto_model_enabled {
             crate::config::ModelTier::parse(&self.ctx.config.model).unwrap_or(crate::config::ModelTier::Flash)
-        } else if self.model_locked || self.auto_upgrade_score >= self.upgrade_threshold {
+        } else if self.controller.is_locked() || matches!(self.controller.get_control_action(), Some(ControlAction::UpgradeModel) | Some(ControlAction::Abort)) {
             crate::config::ModelTier::Pro
         } else {
-            crate::config::ModelTier::parse(&self.ctx.config.model).unwrap_or(crate::config::ModelTier::Flash)
+            // Use Thompson Sampling / Greedy selector for normal model choice
+            let selected = self.model_selector.select_greedy();
+            crate::config::ModelTier::parse(selected).unwrap_or(crate::config::ModelTier::Flash)
         };
         (tier.model_name().to_string(), self.ctx.api_url.clone())
     }
@@ -312,66 +350,68 @@ impl OrchActor {
 
         match decision {
             TurnDecision::Failed(msg) if msg != "interrupted" => {
-                let category = classify_failure_message(msg);
-                let kind = category_to_signal_kind(category);
-                let weight = errors::upgrade_weight(category);
+                // Use Bayesian stall probability update
+                self.controller.note_error(false);
 
-                if self.failure_tracker.note_and_crossed_threshold(kind) {
-                    self.auto_upgrade_score += weight;
-                }
-                self.apply_supervisory_degradation();
+                let state = self.controller.format_state();
+                self.ctx.log_event(serde_json::json!({
+                    "type": "controller_state",
+                    "state": state,
+                    "decision": "failed",
+                }));
 
-                if self.auto_upgrade_score >= self.upgrade_threshold && !self.model_locked {
-                    self.model_locked = true;
-                    self.ctx.log_event(serde_json::json!({
-                        "type": "model_upgrade",
-                        "reason": format!("score={}, signals=[{}]", self.auto_upgrade_score, self.failure_tracker.format_breakdown()),
-                        "new_model": self.resolve_active().0,
-                    }));
+                // Show advisory when stall probability is elevated
+                if self.controller.stall_probability() > 0.8 {
                     self.ctx.display.render_info(&format!(
-                        "Auto-upgrade: switching to {} (score={})",
-                        self.resolve_active().0, self.auto_upgrade_score
+                        "Repeated failures: P(stall)={:.3}. Consider /pro or Ctrl-C.",
+                        self.controller.stall_probability()
                     ));
                 }
             }
             TurnDecision::Stop => {
-                if !self.model_locked {
-                    self.auto_upgrade_score = 0;
-                    self.failure_tracker.reset();
-                }
+                // Successful turn → reset stall probability
+                self.controller.note_progress(true);
+                self.controller.reset_stall();
             }
             _ => {}
         }
     }
 
-    fn record_error_signal(&mut self, category: errors::ErrorCategory) {
-        if self.auto_model_enabled && errors::is_upgrade_signal(category) {
-            let kind = category_to_signal_kind(category);
-            let weight = errors::upgrade_weight(category);
-            self.failure_tracker.note_and_crossed_threshold(kind);
-            self.auto_upgrade_score += weight;
-            if self.auto_upgrade_score >= self.upgrade_threshold && !self.model_locked {
-                self.model_locked = true;
-                self.ctx.display.render_info(&format!(
-                    "Auto-upgrade: switching to {} (signal={:?})",
-                    self.resolve_active().0, category
-                ));
-            }
-        }
-    }
+    async fn handle_control_actions(&mut self) {
+        let Some(action) = self.controller.get_control_action() else {
+            return;
+        };
 
-    fn apply_supervisory_degradation(&mut self) {
-        // Check accumulated signals — when the tracker crosses at
-        // threshold (signals on the verge of escalation) show a user
-        // advisory so they know something is trending wrong.
-        if self.failure_tracker.format_breakdown().contains("×") {
-            // Show breakdown on the 2nd accumulated signal (visible before escalation at threshold)
-        }
-        if self.auto_upgrade_score >= self.upgrade_threshold.saturating_sub(1) && self.auto_upgrade_score > 0 {
-            self.ctx.display.render_info(&format!(
-                "Repeated failures: {}. Consider /pro or Ctrl-C.",
-                self.failure_tracker.format_breakdown()
-            ));
+        match action {
+            ControlAction::InjectReflectionHint => {
+                self.ctx.display.render_info(&format!(
+                    "Controller: P(stall)={:.3} — injecting reflection hint.",
+                    self.controller.stall_probability()
+                ));
+                // Future: inject a reflection prompt into the conversation
+            }
+            ControlAction::UpgradeModel => {
+                self.ctx.display.render_info(&format!(
+                    "Controller: P(stall)={:.3} — upgrading to Pro.",
+                    self.controller.stall_probability()
+                ));
+                self.ctx.log_event(serde_json::json!({
+                    "type": "model_upgrade",
+                    "reason": format!("P(stall)={:.3}, k={}", self.controller.stall_probability(), self.controller.no_progress_count()),
+                    "new_model": self.resolve_active().0,
+                }));
+            }
+            ControlAction::Abort => {
+                self.ctx.display.render_error(&format!(
+                    "Controller: P(stall)={:.3}, k={} — agent is stuck. Requesting human intervention.",
+                    self.controller.stall_probability(),
+                    self.controller.no_progress_count()
+                ));
+                self.ctx.log_event(serde_json::json!({
+                    "type": "controller_abort",
+                    "reason": format!("P(stall)={:.3}, k={}", self.controller.stall_probability(), self.controller.no_progress_count()),
+                }));
+            }
         }
     }
 }
@@ -381,10 +421,6 @@ fn truncate_str(s: &str, n: usize) -> String {
     let mut end = n;
     while end > 0 && !s.is_char_boundary(end) { end -= 1; }
     format!("{}...", &s[..end])
-}
-
-fn classify_failure_message(msg: &str) -> errors::ErrorCategory {
-    errors::classify_error_from_message(msg).category
 }
 
 fn chrono_now() -> String {
