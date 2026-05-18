@@ -32,14 +32,18 @@ dscode 是一个 Rust 实现的轻量 agent 内核，专为 DeepSeek 优化。�
        └───────┬────────┘
                ▼
         ┌──────────────────┐
-        │   OrchActor       │
-        │  ┌──────────────┐ │
-        │  │TurnFailure   │ │
-        │  │Tracker       │ │
-        │  │(multi-signal │ │
-        │  │ escalation)  │ │
-        │  └──────────────┘ │
-        │  dispatches via   │
+        │   OrchActor           │
+        │  ┌──────────────────┐│
+        │  │ Controller       ││
+        │  │ P(stall) Bayesian││
+        │  │ stall detection  ││
+        │  └──────────────────┘│
+        │  ┌──────────────────┐│
+        │  │ ModelSelector    ││
+        │  │ Beta-Bernoulli   ││
+        │  │ flash quality    ││
+        │  └──────────────────┘│
+        │  dispatches via      │
         │  TurnExecutor     │
         └────────┬─────────┘
                  │
@@ -198,17 +202,40 @@ CLI 参数 > 环境变量 > 代码默认值
 
 所有配置合并发生在 `config.rs` 的 `apply_provider_defaults()` 函数中。
 
-## 升级决策
+## 模型选择决策
 
-基于多信号 TurnFailureTracker：
+reslove_active() 决定当前轮次使用 flash 还是 pro：
 
-| 信号 | 来源 | 升级权重 |
-|------|------|:--------:|
-| Tool 执行失败 | `TurnDecision::Failed` | 2 |
-| Parse 错误 | SSE/JSON 解析失败 | 2 |
-| Network 错误 | 连接/超时 | 0（不触发） |
-| RateLimit | 429 | 0（不触发） |
-| Auth 错误 | 401/403 | 0（不触发） |
-| NEEDS_PRO 自报告 | `<<<NEEDS_PRO>>>` 标记 | 3 |
+```
+① forced_model?      → 手动指定 (/flash, /pro)
+② !auto_model_enabled → config.model 中的值
+③ is_locked()?        → Pro (短期停滞, P(stall)>0.80)
+④ flash Q<0.50, N≥8?  → Pro (长期质量不足)
+⑤ 默认                → Flash
+```
 
-决策逻辑：Track reset 每轮 → 累计达阈值 → 设置 `model_locked` → 永不降级。
+### 短期停滞 (Controller)
+
+贝叶斯 `P(stall) = 1 - 0.5^k`：
+
+- k = 连续无进展轮数
+- 成功（Stop）时 k=0，失败时 k+=1
+- P > 0.80 自动锁定 Pro，P < 0.80 解锁
+
+### 长期质量 (ModelSelector)
+
+Beta-Bernoulli 追踪 flash 的成功率：
+
+- Q = α/(α+β)
+- N = α+β-2 (观测次数)
+- Q < 0.50 且 N ≥ 8 → flash 被证明不够好 → 升级 Pro
+- /flash 手动降级时重置为 Beta(3,3)
+
+### 信号源
+
+| 信号 | 来源 | 权重 |
+|------|------|:----:|
+| Tool 执行失败 | error.sh 传感器 (70+ 模式) | 1.0/0.8/0.5 |
+| NEEDS_PRO 自报告 | `<<<NEEDS_PRO>>>` 标记 | — |
+
+所有错误信号聚合后喂入 Controller 的 `note_error()`。

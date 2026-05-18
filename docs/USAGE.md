@@ -405,35 +405,39 @@ LLM 自动调用 SubAgent 工具。
 ### 启用
 
 ```bash
-AUTO_MODEL=true dscode -m deepseek-v4-flash -i
+AUTO_MODEL=1 ./target/release/dscode -m deepseek-v4-flash -i
 ```
 
-### 触发条件
+### 升级机制
 
-升级分数（`auto_upgrade_score`）达到阈值时锁定模型升级：
+基于贝叶斯 P(stall) + flash 质量监控，无需权重配置：
 
-| 信号 | 权重 | 触发路径 |
-|------|:----:|---------|
-| Parse 错误（JSON/SSE） | 2 | `TurnDecision::Failed` |
-| Tool 执行失败 | 1 | `TurnDecision::Failed` |
-| 引擎层异常 | 2/1 | `Err(e)` 分支（直接累加） |
-| `<<<NEEDS_PRO>>>` 自报告 | 3 | 流中检测标记 |
+| 信号 | 来源 | 作用 |
+|------|------|------|
+| Controller 停滞 | 连续失败轮次 | P(stall) > 0.80 → 强制 Pro |
+| flash 长期质量 | Beta(α,β) 后验 | Q<0.50, N≥8 → 证明不够好 → Pro |
+| 传感器 | error.sh (70+ 模式) | 聚合后喂入 Controller |
 
-不触发升级：Network 错误、Auth 错误、RateLimit。
+**降级仅手动**：`/flash` 将 flash 重置为 Beta(3,3)。
 
-**锁定后永不降级**。（`resolve_active()` 始终返回 secondary_model）
+### 标题栏实时指标
+
+```
+flash Q:0.68/33 T:12 R:45 I:200K(50%) O:20K C:400K(40%) ¥0.12
+      ^^^^^^^^
+      Q = flash 成功率 α/(α+β), /33 = 观测数
+```
+
+Q < 0.50 且 N ≥ 8 时自动升级。在 Pro 上不显示 Q。
 
 ### 配置
 
 ```bash
-# 默认阈值 4
-AUTO_UPGRADE_THRESHOLD=3 dscode -m deepseek-v4-flash -i      # 更敏感
+# 启用自动模型切换
+AUTO_MODEL=1 ./target/release/dscode
 
-# 升级目标
-AUTO_MODEL=true SECONDARY_MODEL=deepseek-reasoner dscode -m deepseek-v4-flash -i
-
-# 启用自报告升级
-AUTO_MODEL=true AUTO_SELF_REPORT=true dscode -m deepseek-v4-flash -i
+# 传感器目录搜索（可选）
+# .dscode/sensors/*.sh 或 ~/.dscode/sensors/*.sh 可覆盖内置 error.sh
 ```
 
 ---

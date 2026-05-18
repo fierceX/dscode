@@ -318,62 +318,46 @@ pub enum ErrorSeverity {
 - `is_upgrade_signal()`：只有 Parse（权重 2）和 Tool（权重 1）触发模型升级
 - `classify_anyhow()`：遍历 error chain，根据 status code 或消息内容确定分类
 
-### 多信号升级跟踪器
+### 模型选择
 
-`src/agent/failure_tracker.rs`
-
-```rust
-pub struct TurnFailureTracker {
-    count: u32,
-    threshold: u32,      // 默认 4，通过 AUTO_UPGRADE_THRESHOLD 配置
-    breakdown: Vec<(&'static str, u32)>,
-}
-```
-
-**每轮生命周期**：
+`src/agent/orchestrator.rs` — `resolve_active()`
 
 ```
-execute() 入口 → tracker.reset() + auto_upgrade_score 保留
-  → TurnExecutor::execute()
-    → LLM 流式请求失败 → TurnDecision::Failed(msg)
-    → SSE parse 错误 → TurnDecision::Failed(msg)
-    → 工具执行失败 → TurnDecision::Failed(msg)
-    → 其他异常 → Err(e)
-  → update_after_turn(decision)
-    → 如果是 Failed: classify → category_to_signal_kind → note()
-    → 首次跨过 threshold → auto_upgrade_score += weight
-    → 累计达 upgrade_threshold → model_locked = true
-  → execute() Err(e) 分支
-    → record_error_signal(category)
-    → note() + auto_upgrade_score += weight（直接累加）
-execute() 出口（Stop时）→ tracker.reset() + auto_upgrade_score = 0
+① forced_model?      → 手动指定 (/flash, /pro)
+② !auto_model_enabled → config.model 中的值
+③ is_locked()?        → Pro (短期停滞, P(stall)>0.80)
+④ flash Q<0.50, N≥8?  → Pro (长期质量不足)
+⑤ 默认                → Flash
 ```
 
-**权重累加的两个入口**：
+**短期停滞**（`src/agent/controller.rs`）：贝叶斯 `P(stall) = 1 - 0.5^k`
 
-1. `update_after_turn()`（`TurnDecision::Failed`）：仅在 tracker 首次跨过阈值时加一次权重
-2. `record_error_signal()`（`Err(e)`）：每次都加权重，tracker 返回值被忽略
+- k = 连续无进展次数，成功（Stop）时 k=0，失败时 k+=1
+- P > 0.80 → `is_locked()=true` → 强制 Pro
+- 三个动作阈值：P > 0.80 → InjectReflectionHint, P > 0.95 → UpgradeModel, P > 0.99 → Abort
 
-**与旧方案的区别**：旧方案使用简单的 `failure_count` 连续计数，不清零直到 Stop。新方案按**信号种类**分类统计、每轮开始清零、提供 breakdown 供用户查看。
+**长期质量**（`src/agent/model_selector.rs`）：Beta-Bernoulli 追踪 flash 成功率
 
-### 模型锁定
+- Q = α/(α+β)，N = α+β-2
+- Q < 0.50 且 N ≥ 8 → flash 被证明不够好 → 升级 Pro
+- /flash 降级时重置为 Beta(3,3)
+- 信念持久化到 `<session>/model_beliefs.json`，session 续接时自动恢复
 
-升级是单向的：`model_locked` 一旦设为 true，永不降级。后续所有 `resolve_active()` 调用都返回 secondary_model（或原始模型，如果未配置 secondary）。
+### 传感器层
 
-```rust
-fn resolve_active(&self) -> (String, String) {
-    if self.model_locked || self.auto_upgrade_score >= self.upgrade_threshold {
-        let model = if self.secondary_model.is_empty() {
-            self.ctx.config.model.clone()
-        } else {
-            self.secondary_model.clone()
-        };
-        return (model, self.api_url.clone());
-    }
-    (self.ctx.config.model.clone(), self.ctx.api_url.clone())
-}
-```
+`assets/sensors/error.sh` 内置 70+ 错误模式，每次工具执行后自动调用：
 
+| 类别 | 模式数 | 权重 |
+|:----:|:------:|:----:|
+| Rust | 12 | 1.0 |
+| Python | 11 | 1.0 / 0.8 |
+| Node.js | 7 | 1.0 / 0.8 |
+| Go/Java/Docker/网络/文件系统/进程 | 30+ | 0.3-1.0 |
+| 性能 (慢执行/大输出) | 2 | 0.3-0.5 |
+
+传感器信号通过 `accumulated_signals` 聚合，在失败轮次喂入 Controller。
+
+### Session 持久化
 ---
 
 ## 主题六：工具执行模型
