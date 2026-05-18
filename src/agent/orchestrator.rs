@@ -217,25 +217,10 @@ impl OrchActor {
                     }
                 }
 
-                self.update_after_turn(&decision);
-
-                // 将传感器信号（聚合后）喂入 Controller —·—不受 Stop/Failed 限制
-                // 一轮中无论多少个工具错误，只计 1 次 note_error(false)
-                // 执行顺序在 update_after_turn 之后，不会被 note_progress(true) 擦除
-                if executor.tool_error_count() > 0 {
-                    self.controller.note_error(false);
-                    let signals = executor.accumulated_signals();
-                    let signal_kinds: Vec<&str> = signals.iter().map(|s| s.kind.as_str()).collect();
-                    let signal_details: Vec<&str> = signals.iter().map(|s| s.detail.as_str()).collect();
-                    self.ctx.log_event(serde_json::json!({
-                        "type": "sensor_signal_aggregated",
-                        "signal_count": signals.len(),
-                        "signal_kinds": signal_kinds,
-                        "signal_details": signal_details,
-                        "controller_k": self.controller.no_progress_count(),
-                        "controller_p": self.controller.stall_probability(),
-                    }));
-                }
+                // [信号简化: error.sh → Beta 信念 → resolve_active]
+                // 轮次内紧急升级在 TurnExecutor 内部处理 (tool_error_count ≥ 4 时切 Pro)
+                // 长期质量由 ModelSelector 追踪, resolve_active 检查 Q < 0.50 && N ≥ 16
+                // fix_loop 检测保留 (tool_call_count > 15)
 
                 // Check control actions after each turn
                 self.handle_control_actions().await;
@@ -429,14 +414,14 @@ impl OrchActor {
             forced
         } else if !self.auto_model_enabled {
             crate::config::ModelTier::parse(&self.ctx.config.model).unwrap_or(crate::config::ModelTier::Flash)
-        } else if self.controller.is_locked()
-            || matches!(self.controller.get_control_action(), Some(ControlAction::UpgradeModel) | Some(ControlAction::Abort))
-            || self.flash_quality_triggers_upgrade()
+        } else if self.flash_quality_triggers_upgrade()
+            || self.controller.has_fix_loop()
         {
+            // 长期质量: Q < 0.50 && N ≥ 16 → Pro
+            // 修复循环: 工具调用 > 15 且无 end_turn → Pro
             crate::config::ModelTier::Pro
         } else {
-            // Default: flash is presumed good until proven otherwise.
-            // Controller tracks short-term stall; ModelSelector tracks long-term quality.
+            // Default: flash
             crate::config::ModelTier::Flash
         };
         (tier.model_name().to_string(), self.ctx.api_url.clone())
@@ -448,41 +433,6 @@ impl OrchActor {
         let q = self.model_selector.mean("flash");
         let n = self.model_selector.observations("flash");
         q < 0.50 && n >= 16
-    }
-
-    fn update_after_turn(&mut self, decision: &TurnDecision) {
-        if !self.auto_model_enabled {
-            return;
-        }
-
-        match decision {
-            TurnDecision::Failed(msg) if msg != "interrupted" => {
-                // Use Bayesian stall probability update
-                self.controller.note_error(false);
-
-                let state = self.controller.format_state();
-                self.ctx.log_event(serde_json::json!({
-                    "type": "controller_state",
-                    "state": state,
-                    "decision": "failed",
-                }));
-
-                // Show advisory when stall probability is elevated
-                if self.controller.stall_probability() > 0.8 {
-                    self.ctx.display.render_info(&format!(
-                        "Repeated failures: P(stall)={:.3}. Consider /pro or Ctrl-C.",
-                        self.controller.stall_probability()
-                    ));
-                }
-            }
-            TurnDecision::Stop => {
-                // Successful turn → reset stall probability
-                self.controller.note_end_turn();
-                self.controller.note_progress(true);
-                self.controller.reset_stall();
-            }
-            _ => {}
-        }
     }
 
     async fn handle_control_actions(&mut self) {

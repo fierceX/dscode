@@ -403,6 +403,21 @@ impl TurnExecutor {
             }
             match stop.as_str() {
                 "tool_use" | "tool_calls" => {
+                    // Mid-task emergency upgrade: if too many tool errors, switch to Pro
+                    if self.tool_error_count >= 4
+                        && !matches!(self.llm.model(), "deepseek-v4-pro")
+                    {
+                        if let Ok(new_llm) = crate::llm::client::AsyncLlClient::new(
+                            "deepseek-v4-pro",
+                            self.ctx.api_key(),
+                            &self.ctx.api_url,
+                        ) {
+                            self.llm = Arc::new(new_llm);
+                            self.ctx.display.render_info(
+                                "Mid-task: switching to Pro (≥4 tool errors)."
+                            );
+                        }
+                    }
                     messages = self.ctx.store.lines().await?;
                     continue;
                 }
