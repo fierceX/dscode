@@ -97,12 +97,24 @@ grep '"type":"control_action"' events.jsonl | jq '{action, P_stall, k}'
 ### 标题栏实时状态
 
 ```
-flash Q:0.68/33 T:12 R:45 I:200K(50%) O:20K C:400K(40%) ¥0.120
-      ^^^^^^^^
-      Q = flash 成功率, /33 = 观测数
+flash Q:0.68/33 T:12 R:45 I:200K(50%) O:20K C:400K(40%) ¥0.12
+
+≥1M 时自动切换为 M 单位:
+pro  Q:—    T:40 R:150 I:1.23M(60%) O:50K C:800K(80%) ¥2.35
+       ^^ 在 Pro 上不显示 Q
 ```
 
-Q < 0.50 且观测数 ≥ 8 时自动升级到 Pro。在 Pro 上不显示 Q 信息。
+**字段说明**：
+
+| 字段 | 含义 |
+|------|------|
+| Q:0.68/33 | flash 成功率 α/(α+β) / 观测数 |
+| T | turn 数 |
+| R | request 数 |
+| I | input tokens（缓存命中率） |
+| O | output tokens |
+| C | context tokens（使用率） |
+| ¥ | 总成本（美元） |
 
 ### 会话持久化
 
