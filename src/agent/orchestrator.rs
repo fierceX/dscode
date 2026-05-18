@@ -7,6 +7,7 @@ use crate::llm::client::{AsyncLlClient, LlmClient};
 use crate::errors;
 use crate::util::truncate_str;
 use anyhow::Result;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
@@ -18,6 +19,7 @@ pub struct OrchActor {
     sub_pool: Arc<SubAgentPool>,
     controller: Controller,
     model_selector: ModelSelector,
+    model_beliefs_path: PathBuf,
     forced_model: Option<crate::config::ModelTier>,
     auto_model_enabled: bool,
     self_report_enabled: bool,
@@ -36,14 +38,19 @@ impl OrchActor {
         ctx: Arc<AgentSharedContext>,
         cmd_rx: mpsc::UnboundedReceiver<OrchCmd>,
         sub_pool: Arc<SubAgentPool>,
+        model_beliefs_path: PathBuf,
     ) -> Self {
         let auto_model = std::env::var("AUTO_MODEL").map(|v| v == "1" || v == "true").unwrap_or(false);
         let self_report_enabled = std::env::var("AUTO_SELF_REPORT")
             .map(|v| v == "1" || v == "true").unwrap_or(false);
+        let mut model_selector = ModelSelector::new();
+        // Load historical beliefs if continuing a session
+        let _ = model_selector.load_from_path(&model_beliefs_path);
         Self {
             ctx, cmd_rx, sub_pool,
             controller: Controller::new(),
-            model_selector: ModelSelector::new(),
+            model_selector,
+            model_beliefs_path,
             forced_model: None,
             auto_model_enabled: auto_model,
             self_report_enabled,
@@ -252,6 +259,8 @@ impl OrchActor {
                         .map(|t| t.label().to_string())
                         .unwrap_or_else(|_| model.clone());
                     self.model_selector.update(&tier_label, success);
+                    // Persist beliefs to disk for session resume
+                    let _ = self.model_selector.save_to_path(&self.model_beliefs_path);
                     self.ctx.log_event(serde_json::json!({
                         "type": "model_selector_update",
                         "model": &tier_label,
@@ -502,8 +511,9 @@ fn chrono_now() -> String {
 pub fn new_orchestrator(
     ctx: Arc<AgentSharedContext>,
     sub_pool: Arc<SubAgentPool>,
+    model_beliefs_path: PathBuf,
 ) -> (OrchActor, mpsc::UnboundedSender<OrchCmd>) {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-    let actor = OrchActor::new(ctx, cmd_rx, sub_pool);
+    let actor = OrchActor::new(ctx, cmd_rx, sub_pool, model_beliefs_path);
     (actor, cmd_tx)
 }

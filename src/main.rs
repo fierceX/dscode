@@ -141,7 +141,7 @@ async fn run(args: Vec<String>) -> Result<()> {
     let (sub_result_tx, mut sub_result_rx) = mpsc::unbounded_channel();
     let sub_pool = Arc::new(SubAgentPool::new(8, sub_result_tx));
 
-    let (orchestrator, cmd_tx) = new_orchestrator(ctx.clone(), sub_pool.clone());
+    let (orchestrator, cmd_tx) = new_orchestrator(ctx.clone(), sub_pool.clone(), spaths.model_beliefs.clone());
 
     // Bridge sub_agent results → orchestrator commands
     let cmd_tx_clone = cmd_tx.clone();

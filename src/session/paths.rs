@@ -12,6 +12,7 @@ pub struct Paths {
     pub plan: PathBuf,
     pub plan_draft: PathBuf,
     pub stats: PathBuf,
+    pub model_beliefs: PathBuf,
 }
 
 /// Derive a filesystem-safe project key from the working directory path.
@@ -46,6 +47,7 @@ pub fn paths_for(home: &Path, cwd: &Path, session_id: &str) -> Paths {
         plan: session_dir.join("plan.md"),
         plan_draft: session_dir.join("plan.draft"),
         stats: session_dir.join("stats.json"),
+        model_beliefs: session_dir.join("model_beliefs.json"),
     }
 }
 

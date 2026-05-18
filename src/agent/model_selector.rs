@@ -15,11 +15,11 @@ pub struct ModelSelector {
 }
 
 /// Belief state for a single model.
-#[derive(Debug, Clone)]
-struct ModelBelief {
-    name: String,
-    alpha: f64, // success + 1 (uniform prior)
-    beta: f64,  // failure + 1 (uniform prior)
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ModelBelief {
+    pub name: String,
+    pub alpha: f64, // success + 1 (uniform prior)
+    pub beta: f64,  // failure + 1 (uniform prior)
 }
 
 impl ModelBelief {
@@ -121,6 +121,29 @@ impl ModelSelector {
             "greedy_choice": self.select_greedy(),
         })
     }
+
+    /// Save beliefs to a JSON file for session persistence.
+    /// Returns Ok(true) if written, Ok(false) if no beliefs to save.
+    pub fn save_to_path(&self, path: &std::path::Path) -> anyhow::Result<bool> {
+        if self.beliefs.is_empty() {
+            return Ok(false);
+        }
+        let json = serde_json::to_string(&self.beliefs)?;
+        std::fs::write(path, json)?;
+        Ok(true)
+    }
+
+    /// Load beliefs from a JSON file, replacing current beliefs.
+    /// If the file doesn't exist or is unreadable, keeps current state.
+    pub fn load_from_path(&mut self, path: &std::path::Path) -> anyhow::Result<bool> {
+        if !path.exists() {
+            return Ok(false);
+        }
+        let data = std::fs::read_to_string(path)?;
+        let beliefs: Vec<ModelBelief> = serde_json::from_str(&data)?;
+        self.beliefs = beliefs;
+        Ok(true)
+    }
 }
 
 impl Default for ModelSelector {
@@ -204,6 +227,45 @@ mod tests {
         assert!(s.contains("flash"));
         assert!(s.contains("pro"));
         assert!(s.contains("mean="));
+    }
+
+    #[test]
+    fn save_and_load_roundtrip_preserves_beliefs() {
+        let mut ms = ModelSelector::new();
+        ms.ensure("flash");
+        ms.ensure("pro");
+        ms.update("pro", true);
+        ms.update("pro", true);
+        ms.update("flash", false);
+        let pro_mean = ms.mean("pro");
+        let flash_mean = ms.mean("flash");
+
+        let dir = std::env::temp_dir().join(format!("model-beliefs-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("model_beliefs.json");
+
+        assert!(ms.save_to_path(&path).unwrap());
+        let mut ms2 = ModelSelector::new();
+        assert!(ms2.load_from_path(&path).unwrap());
+        assert!((ms2.mean("pro") - pro_mean).abs() < 1e-10);
+        assert!((ms2.mean("flash") - flash_mean).abs() < 1e-10);
+        assert_eq!(ms2.select_greedy(), ms.select_greedy());
+    }
+
+    #[test]
+    fn load_from_nonexistent_file_returns_false() {
+        let mut ms = ModelSelector::new();
+        let path = std::path::Path::new("/tmp/__nonexistent_model_beliefs_xyz.json");
+        assert!(!ms.load_from_path(path).unwrap());
+    }
+
+    #[test]
+    fn save_empty_beliefs_returns_false() {
+        let ms = ModelSelector::new();
+        let dir = std::env::temp_dir().join(format!("empty-beliefs-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("empty.json");
+        assert!(!ms.save_to_path(&path).unwrap());
     }
 
     #[test]
