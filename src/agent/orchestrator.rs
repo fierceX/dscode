@@ -1,7 +1,7 @@
 use crate::agent::sub_pool::{SubAgentPool, SubAgentReport};
 use crate::agent::turn::{TurnExecutor, TurnDecision, TurnEffect};
-use crate::agent::decision::{Controller, Decision};
-use crate::guard::collector::{Signal, SignalKind};
+use crate::agent::decision::{DecisionEngine, Decision};
+use crate::agent::belief::BeliefTracker;
 use crate::context::AgentSharedContext;
 use crate::llm::client::{AsyncLlClient, LlmClient};
 use crate::errors;
@@ -16,7 +16,8 @@ pub struct OrchActor {
     ctx: Arc<AgentSharedContext>,
     cmd_rx: mpsc::UnboundedReceiver<OrchCmd>,
     sub_pool: Arc<SubAgentPool>,
-    controller: Controller,
+    belief: BeliefTracker,
+    decision_engine: DecisionEngine,
     forced_model: Option<crate::config::ModelTier>,
 }
 
@@ -36,7 +37,8 @@ impl OrchActor {
     ) -> Self {
         Self {
             ctx, cmd_rx, sub_pool,
-            controller: Controller::new(),
+            belief: BeliefTracker::new(16),
+            decision_engine: DecisionEngine::new(),
             forced_model: None,
         }
     }
@@ -108,7 +110,36 @@ impl OrchActor {
         Ok(())
     }
 
+    /// 根据信念度追加提示词。返回 (input, should_abort)
+    /// 子代理结果跳过注入（input 以 "[sub-agent" 开头）
+    fn maybe_inject(&mut self, input: String) -> (String, bool) {
+        if input.starts_with("[sub-agent") {
+            return (input, false);
+        }
+        let b = self.belief.belief();
+        let decision = self.decision_engine.decide(b, &self.belief.recent_errors);
+        match decision {
+            Decision::None => (input, false),
+            Decision::Inject(msg) => {
+                self.ctx.display.render_info(&format!("Injecting hint (belief {:.2})", b));
+                (format!("{input}\n\n{msg}"), false)
+            }
+            Decision::Abort => {
+                self.ctx.display.render_error(&format!(
+                    "DecisionEngine: aborting (belief {:.2}). Requesting human intervention.", b
+                ));
+                (input, true)
+            }
+        }
+    }
+
     async fn handle_user_input(&mut self, input: String) {
+        // 先检查上一轮的信念（决定是否注入/中止），再重置本轮的
+        let (input, should_abort) = self.maybe_inject(input);
+        if should_abort {
+            return;
+        }
+        self.belief.reset();
         let prepared = self.prepare_turn().await;
         let (model, _api_url, mut executor) = match prepared {
             Ok(v) => v,
@@ -118,7 +149,7 @@ impl OrchActor {
             }
         };
 
-        match executor.execute(&input).await {
+        match executor.execute(&input, Some(&mut self.belief)).await {
             Ok((decision, effects)) => {
                 self.post_process_turn(decision, effects, &executor, &model).await;
             }
@@ -131,13 +162,12 @@ impl OrchActor {
     }
 
     async fn prepare_turn(&mut self) -> Result<(String, String, TurnExecutor)> {
-        self.controller.reset();
         let (model, api_url) = self.resolve_active();
 
         self.ctx.log_event(serde_json::json!({
             "type": "turn_start",
             "model": &model,
-            "controller": self.controller.snapshot(),
+            "belief": self.belief.belief(),
             "forced_model": self.forced_model.map(|t| t.label()),
         }));
 
@@ -185,28 +215,6 @@ impl OrchActor {
             }
         }
 
-        // Feed signals to controller
-        for signal in executor.collected_signals() {
-            self.controller.feed(signal);
-        }
-
-        // Act on controller decision
-        let tool_error_count = executor.tool_error_count();
-        match self.controller.decide() {
-            Decision::None => {}
-            Decision::InjectHint(hint) => {
-                self.ctx.display.render_info(&format!(
-                    "Controller: {} tool errors — {}.", tool_error_count, hint
-                ));
-            }
-            Decision::Abort => {
-                self.ctx.display.render_error(&format!(
-                    "Controller: {} tool errors — aborting. Requesting human intervention.",
-                    tool_error_count
-                ));
-            }
-        }
-
         self.log_turn_end(executor, &decision, model);
 
         if let TurnDecision::Failed(ref msg) = decision
@@ -227,23 +235,19 @@ impl OrchActor {
             "decision": decision_str,
             "tool_call_count": executor.tool_call_count(),
             "tool_error_count": executor.tool_error_count(),
-            "controller": self.controller.snapshot(),
+            "belief": self.belief.belief(),
             "model": model,
         }));
     }
 
     async fn handle_turn_error(&mut self, e: anyhow::Error, model: &str) {
         let info = errors::classify_anyhow(&e);
-        self.controller.feed(&Signal {
-            kind: SignalKind::ToolError, severity: 0.8,
-            source: "turn".into(), detail: format!("turn error: {e}"),
-        });
         self.ctx.log_event(serde_json::json!({
             "type": "turn_error",
             "error": format!("{e}"),
             "category": format!("{:?}", info.category),
             "severity": format!("{:?}", info.severity),
-            "controller": self.controller.snapshot(),
+            "belief": self.belief.belief(),
             "model": model,
         }));
         if info.severity == errors::ErrorSeverity::Fatal {
@@ -266,8 +270,7 @@ impl OrchActor {
             total_cache_creation_tokens: new_stats.total_cache_creation_tokens,
             flash_cost_micros: new_stats.flash_cost_micros,
             pro_cost_micros: new_stats.pro_cost_micros,
-            flash_quality: 0.0,
-            flash_observations: 0,
+            belief: self.belief.belief(),
         };
         let model_label = crate::config::resolve_model_label(&self.ctx.config.model);
         self.ctx.display.render_title_update(model_label, &snapshot);
@@ -330,7 +333,7 @@ impl OrchActor {
             Ok(t) => {
                 if t == crate::config::ModelTier::Flash {
                     self.forced_model = None;
-                    self.controller.reset();
+                    self.belief.reset();
                     self.ctx.display.render_info("切回 flash。");
                 } else {
                     self.forced_model = Some(t);

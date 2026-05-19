@@ -15,6 +15,7 @@ pub struct TurnExecutor {
     ctx: Arc<AgentSharedContext>,
     llm: Arc<dyn LlmClient>,
     tools: Arc<ToolRunner>,
+    signal_collector: crate::guard::collector::SignalCollector,
     compacted_this_turn: bool,
     tool_call_count: u32,
     tool_error_count: u32,
@@ -46,7 +47,7 @@ pub enum TurnDecision {
 impl TurnExecutor {
     pub fn new(ctx: Arc<AgentSharedContext>, llm: Arc<dyn LlmClient>) -> Self {
         let tools = Arc::new(ToolRunner::new(Arc::new(crate::context::ToolContext::from(ctx.as_ref()))));
-        Self { ctx, llm, tools, compacted_this_turn: false, tool_call_count: 0, tool_error_count: 0, signals: Vec::new() }
+        Self { ctx, llm, tools, signal_collector: crate::guard::collector::SignalCollector::new(), compacted_this_turn: false, tool_call_count: 0, tool_error_count: 0, signals: Vec::new() }
     }
 
     /// Return the total number of tool calls made during this turn.
@@ -100,7 +101,7 @@ impl TurnExecutor {
     }
 
     /// Execute a full turn: send user input, stream response, execute tools, decide next.
-    pub async fn execute(&mut self, user_input: &str) -> Result<(TurnDecision, Vec<TurnEffect>)> {
+    pub async fn execute(&mut self, user_input: &str, mut belief: Option<&mut crate::agent::belief::BeliefTracker>) -> Result<(TurnDecision, Vec<TurnEffect>)> {
         // New user intent: reset storm breaker window and compact guard
         self.tools.reset_storm();
         self.compacted_this_turn = false;
@@ -290,9 +291,35 @@ impl TurnExecutor {
 
                 let mut processed_results = Vec::new();
                 for mut result in results {
-                    // Collect signals for controller
-                    self.signals.extend(result.signals.iter().cloned());
-                    // Track tool errors for model upgrade decisions
+                    // Collect signals using shared SignalCollector (跨调用维护历史)
+                    let new_signals = self.signal_collector.collect(&result.tool_name, &result.content);
+                    result.signals = new_signals.clone();
+                    self.signals.extend(new_signals);
+
+                    // Feed to BeliefTracker (per tool call, so max merging works correctly)
+                    if let Some(ref mut bt) = belief {
+                        bt.observe(&result.signals);
+                        // 实时更新标题栏信念度
+                        let cur_stats = self.ctx.stats.snapshot().await;
+                        self.ctx.display.render_title_update(
+                            crate::config::resolve_model_label(self.llm.model()),
+                            &crate::ui::StatsSnapshot {
+                                current_turn_count: cur_stats.current_turn_count,
+                                agent_request_count: cur_stats.agent_request_count,
+                                total_input_tokens: cur_stats.total_input_tokens,
+                                total_output_tokens: cur_stats.total_output_tokens,
+                                current_context_tokens: cur_stats.current_context_tokens,
+                                max_context_tokens: self.ctx.config.max_context_tokens as u64,
+                                total_cache_read_tokens: cur_stats.total_cache_read_tokens,
+                                total_cache_creation_tokens: cur_stats.total_cache_creation_tokens,
+                                flash_cost_micros: cur_stats.flash_cost_micros,
+                                pro_cost_micros: cur_stats.pro_cost_micros,
+                                belief: bt.belief(),
+                            },
+                        );
+                    }
+
+                    // Track tool errors
                     if result.signals.iter().any(|s| matches!(s.kind, crate::guard::collector::SignalKind::ToolError)) {
                         self.tool_error_count += 1;
                     }
@@ -372,6 +399,7 @@ impl TurnExecutor {
             // Phase 4: Decide
             let _ = self.ctx.stats.flush_if_dirty().await;
             let stats = self.ctx.stats.snapshot().await;
+            let current_belief = belief.as_ref().map_or(0.0, |bt| bt.belief());
             self.ctx.display.render_title_update(
                 crate::config::resolve_model_label(self.llm.model()),
                 &crate::ui::StatsSnapshot {
@@ -385,8 +413,7 @@ impl TurnExecutor {
                 total_cache_creation_tokens: stats.total_cache_creation_tokens,
                 flash_cost_micros: stats.flash_cost_micros,
                 pro_cost_micros: stats.pro_cost_micros,
-                flash_quality: 0.0,
-                flash_observations: 0,
+                belief: current_belief,
             });
             if needs_pro {
                 effects.push(TurnEffect::NeedsPro);

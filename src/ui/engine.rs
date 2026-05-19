@@ -142,16 +142,13 @@ impl Display for TerminalDisplay {
 
     fn render_title_update(&self, model: &str, stats: &StatsSnapshot) {
         let total_in = stats.total_input_tokens + stats.total_cache_read_tokens;
-        let quality = if stats.flash_observations > 0 || stats.flash_quality > 0.0 {
-            format!(" Q:{:.2}/{}", stats.flash_quality, stats.flash_observations)
+        let belief_str = if stats.belief > 0.0 {
+            format!(" B:{:.2}", stats.belief)
         } else {
             String::new()
         };
-        // Show Q whenever flash has been registered (mean > 0 or observations > 0).
-        // Default StatsSnapshot has (0.0, 0) → no Q.
-        // After ensure() only (0.5, 0) or after update() (0.33+, 1+) → Q shows.
         let msg = format!(
-            "\x1b]0;{}{quality} T:{} R:{} I:{}({}) O:{} C:{}({}) ${}\x07",
+            "\x1b]0;{}{belief_str} T:{} R:{} I:{}({}) O:{} C:{}({}) {}\x07",
             model,
             StatsSnapshot::fmt_num(stats.current_turn_count),
             StatsSnapshot::fmt_num(stats.agent_request_count),

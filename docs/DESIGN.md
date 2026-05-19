@@ -47,6 +47,9 @@ pub async fn execute(&mut self, user_input: &str)
 阶段 4: Scavenge 回收（从 thinking/text 复原工具调用）
 阶段 5: 持久化（store.add_assistant）
 阶段 6: 工具执行（ToolRunner::execute_all）
+  ├── 每工具调用后:
+  │   ├── SignalCollector.collect(name, output)  ← 采集信号
+  │   └── BeliefTracker.observe(signals)         ← 更新信念
 阶段 7: 继续/停止决策
 ```
 
@@ -291,7 +294,68 @@ StormDecision::Suppress(reason) => {
 
 ---
 
-## 主题五：错误处理与升级
+## 主题五：信号驱动的信念系统
+
+### Three-Phase 采集
+
+每次工具执行后，`SignalCollector` 根据工具输出和调用历史采集三类信号：
+
+| 信号 | 检测方式 | 严重度 | 可信度 |
+|------|---------|--------|--------|
+| `NonZeroExit` | 退出码正则匹配 | 0.8~0.9 | 最高（命令自报告失败） |
+| `ToolError` | 输出内容 regex 匹配（Rust 编译错、测试失败等） | 0.3~1.0 | 中等（启发式） |
+| `EditLoop` | 滑动窗口 W=6 检测编辑-检查循环 | 0.4~0.9 | 高（序列模式） |
+
+**EditLoop 触发条件**：
+- Edit 调用 > 4 次（窗口内），按次数分级 0.6/0.8/0.9
+- Edit↔Diff 交替且无 Bash/Grep/Read，按交替数分级 0.4/0.7/0.9
+
+`SignalCollector` 自维护调用历史（`VecDeque<String>`），跨多次工具调用追踪序列。
+
+### BeliefTracker
+
+信号通过拉普拉斯平滑合并为单一信念度：
+
+```rust
+// 一次工具调用的多个信号 → 取 max(severity)，不叠加
+success_weight = 1.0 - max_severity
+failure_weight = max_severity
+
+// 滑动窗口（默认 16 次工具调用）
+α = 1 + Σ success_weight_i
+β = 1 + Σ failure_weight_i
+
+B = α / (α + β) ∈ [0, 1]
+```
+
+**关键特性**：
+- 拉普拉斯先验 α=β=1：无观测时 B=0.5（无偏）
+- max 合并：NonZeroExit(0.9) + ToolError(0.8) → failure=0.9（不重复计数）
+- 滑动窗口：旧错误自然退出，信念自动恢复
+- 每轮用户输入重置窗口
+
+### DecisionEngine
+
+```rust
+pub fn decide(belief: f64, errors: &[String]) -> Decision {
+    if belief < 0.30 → Abort
+    if belief < 0.50 → Inject(warning + 最近 5 条错误)
+    if belief < 0.70 → Inject(reminder + 最近 3 条错误)
+    else              → None
+}
+```
+
+**注入位置**：追加到用户消息末尾（不修改 system prompt，保护前缀缓存）。
+
+**注入内容包含具体错误信息**：LLM 收到的不再是泛泛的 "something went wrong"，而是：
+
+```
+[System note: Multiple failures detected (belief 0.37). Adjust approach.
+Recent errors:
+- Bash(cargo build): process exited with code 1
+- Bash(cargo build): Rust compilation error (error[E0308])
+- Grep(pattern="xxx"): No such file]
+```
 
 ### 错误分类
 
@@ -306,59 +370,17 @@ pub enum ErrorCategory {
     Tool,       // 工具执行失败
     Internal,   // 其他
 }
-
-pub enum ErrorSeverity {
-    Warning,    // 可恢复
-    Error,      // 不可恢复但非致命
-    Fatal,      // 进程退出
-}
 ```
 
-分类用于两个场景：
-- `is_upgrade_signal()`：只有 Parse（权重 2）和 Tool（权重 1）触发模型升级
-- `classify_anyhow()`：遍历 error chain，根据 status code 或消息内容确定分类
+分类仅用于日志，不驱动任何决策（旧 `is_upgrade_signal`/`upgrade_weight` 已删除）。
 
-### 模型选择
+### 标题栏信念度
 
-`src/agent/orchestrator.rs` — `resolve_active()`
+标题栏实时显示信念度（`B:`），每轮结束后更新：
 
 ```
-① forced_model?      → 手动指定 (/flash, /pro)
-② !auto_model_enabled → config.model 中的值
-③ is_locked()?        → Pro (短期停滞, P(stall)>0.80)
-④ flash Q<0.50, N≥8?  → Pro (长期质量不足)
-⑤ 默认                → Flash
+flash B:0.73 T:12 R:45 I:200K(50%) O:20K C:400K(40%) ¥0.12
 ```
-
-**短期停滞**（`src/agent/controller.rs`）：贝叶斯 `P(stall) = 1 - 0.5^k`
-
-- k = 连续无进展次数，成功（Stop）时 k=0，失败时 k+=1
-- P > 0.80 → `is_locked()=true` → 强制 Pro
-- 三个动作阈值：P > 0.80 → InjectReflectionHint, P > 0.95 → UpgradeModel, P > 0.99 → Abort
-
-**长期质量**（`src/agent/model_selector.rs`）：Beta-Bernoulli 追踪 flash 成功率
-
-- Q = α/(α+β)，N = α+β-2
-- Q < 0.50 且 N ≥ 8 → flash 被证明不够好 → 升级 Pro
-- /flash 降级时重置为 Beta(3,3)
-- 信念持久化到 `<session>/model_beliefs.json`，session 续接时自动恢复
-
-### 传感器层
-
-`assets/sensors/error.sh` 内置 70+ 错误模式，每次工具执行后自动调用：
-
-| 类别 | 模式数 | 权重 |
-|:----:|:------:|:----:|
-| Rust | 12 | 1.0 |
-| Python | 11 | 1.0 / 0.8 |
-| Node.js | 7 | 1.0 / 0.8 |
-| Go/Java/Docker/网络/文件系统/进程 | 30+ | 0.3-1.0 |
-| 性能 (慢执行/大输出) | 2 | 0.3-0.5 |
-
-传感器信号通过 `accumulated_signals` 聚合，在失败轮次喂入 Controller。
-
-### Session 持久化
----
 
 ## 主题六：工具执行模型
 

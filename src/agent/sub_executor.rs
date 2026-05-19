@@ -119,7 +119,7 @@ impl SubAgentExecutor {
             model_name, &self.child_ctx.config.api_key, api_url,
         )?);
         let mut executor = TurnExecutor::new(self.child_ctx.clone(), llm);
-        let (decision, _effects) = executor.execute(prompt).await?;
+        let (decision, _effects) = executor.execute(prompt, None).await?;
 
         match decision {
             TurnDecision::Stop | TurnDecision::Continue => {

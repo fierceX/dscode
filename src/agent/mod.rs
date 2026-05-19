@@ -3,3 +3,4 @@ pub mod sub_executor;
 pub mod sub_pool;
 pub mod orchestrator;
 pub mod decision;
+pub mod belief;

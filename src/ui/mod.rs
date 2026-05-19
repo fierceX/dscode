@@ -31,11 +31,8 @@ pub struct StatsSnapshot {
     pub total_cache_creation_tokens: u64,
     pub flash_cost_micros: u64,
     pub pro_cost_micros: u64,
-    /// Flash model quality tracking: α/(α+β) mean success rate.
-    /// 0.0 means not tracked (auto_model disabled or running on pro).
-    pub flash_quality: f64,
-    /// Flash model total observations: α+β-2.
-    pub flash_observations: u64,
+    /// 信念度 B ∈ [0, 1]。0.0 表示未追踪
+    pub belief: f64,
 }
 
 impl StatsSnapshot {

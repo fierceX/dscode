@@ -1,109 +1,112 @@
-//! 控制器 — 接收信号，做出决策。不关心信号怎么采集的。
+//! 决策引擎 — 纯决策。根据信念度 + 错误列表输出 Decision。
 
-use crate::guard::collector::{Signal, SignalKind};
-
-/// 决策结果
-#[derive(Debug, Clone, PartialEq)]
 pub enum Decision {
     None,
-    InjectHint(String),
+    Inject(String),
     Abort,
 }
 
-/// 控制器 — 内部计数，基于阈值做出决策。
-pub struct Controller {
-    error_count: u32,
-    slow_count: u32,
-    repeated_count: u32,
-
-    max_errors_before_abort: u32,
+pub struct DecisionEngine {
+    abort_threshold: f64,
+    warn_threshold: f64,
+    remind_threshold: f64,
+    consecutive_abort_required: u32,
+    consecutive_abort_count: u32,
 }
 
-impl Controller {
+impl DecisionEngine {
     pub fn new() -> Self {
         Self {
-            error_count: 0,
-            slow_count: 0,
-            repeated_count: 0,
-            max_errors_before_abort: 5,
+            abort_threshold: 0.30,
+            warn_threshold: 0.50,
+            remind_threshold: 0.70,
+            consecutive_abort_required: 1,
+            consecutive_abort_count: 0,
         }
     }
 
-    pub fn reset(&mut self) {
-        self.error_count = 0;
-        self.slow_count = 0;
-        self.repeated_count = 0;
-    }
-
-    pub fn feed(&mut self, signal: &Signal) {
-        match signal.kind {
-            SignalKind::ToolError => self.error_count += 1,
-            SignalKind::SlowExecution => self.slow_count += 1,
-            SignalKind::MassiveOutput => {}
-            SignalKind::RepeatedCall => self.repeated_count += 1,
+    pub fn decide(&mut self, belief: f64, errors: &[String]) -> Decision {
+        if belief < self.abort_threshold {
+            self.consecutive_abort_count += 1;
+            if self.consecutive_abort_count >= self.consecutive_abort_required {
+                return Decision::Abort;
+            }
+            return Decision::Inject(Self::format_critical(belief, errors));
         }
-    }
+        self.consecutive_abort_count = 0;
 
-    pub fn decide(&self) -> Decision {
-        if self.error_count >= self.max_errors_before_abort {
-            return Decision::Abort;
+        if belief < self.warn_threshold {
+            return Decision::Inject(Self::format_warning(belief, errors));
         }
-        if self.repeated_count >= 3 {
-            return Decision::InjectHint("尝试不同的方法".into());
+        if belief < self.remind_threshold {
+            return Decision::Inject(Self::format_reminder(belief, errors));
         }
         Decision::None
     }
 
-    pub fn error_count(&self) -> u32 { self.error_count }
+    fn format_reminder(b: f64, errors: &[String]) -> String {
+        let error_section = if errors.is_empty() { String::new() } else {
+            format!("\nRecent:\n{}", format_errors(errors, 3))
+        };
+        format!(
+            "[System note: Some tool executions showed issues (belief {:.2}).{}]",
+            b, error_section,
+        )
+    }
 
-    pub fn snapshot(&self) -> serde_json::Value {
-        serde_json::json!({
-            "error_count": self.error_count,
-            "slow_count": self.slow_count,
-            "repeated_count": self.repeated_count,
-            "decision": format!("{:?}", self.decide()),
-        })
+    fn format_warning(b: f64, errors: &[String]) -> String {
+        let error_section = if errors.is_empty() { String::new() } else {
+            format!("\nRecent errors:\n{}", format_errors(errors, 5))
+        };
+        format!(
+            "[System note: Multiple failures detected (belief {:.2}). Adjust approach.{}]",
+            b, error_section,
+        )
+    }
+
+    fn format_critical(b: f64, errors: &[String]) -> String {
+        let error_section = if errors.is_empty() { String::new() } else {
+            format!("\nErrors:\n{}", format_errors(errors, errors.len().min(10)))
+        };
+        format!(
+            "[CRITICAL: Execution quality severely degraded (belief {:.2}).{}]",
+            b, error_section,
+        )
     }
 }
 
-impl Default for Controller {
+fn format_errors(errors: &[String], n: usize) -> String {
+    errors.iter().rev().take(n)
+        .map(|e| format!("- {}", e))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+impl Default for DecisionEngine {
     fn default() -> Self { Self::new() }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::guard::collector::SignalKind;
 
-    fn sig(kind: SignalKind) -> Signal {
-        Signal { kind, severity: 1.0, source: "test".into(), detail: "test".into() }
+    #[test]
+    fn good_belief_does_nothing() {
+        let mut de = DecisionEngine::new();
+        assert!(matches!(de.decide(0.9, &[]), Decision::None));
     }
 
     #[test]
-    fn no_errors_no_decision() {
-        let c = Controller::new();
-        assert_eq!(c.decide(), Decision::None);
+    fn warn_belief_injects() {
+        let mut de = DecisionEngine::new();
+        let d = de.decide(0.4, &["Rust error".into()]);
+        assert!(matches!(d, Decision::Inject(_)));
     }
 
     #[test]
-    fn repeated_calls_inject_hint() {
-        let mut c = Controller::new();
-        for _ in 0..3 { c.feed(&sig(SignalKind::RepeatedCall)); }
-        assert_eq!(c.decide(), Decision::InjectHint("尝试不同的方法".into()));
-    }
-
-    #[test]
-    fn five_errors_abort() {
-        let mut c = Controller::new();
-        for _ in 0..5 { c.feed(&sig(SignalKind::ToolError)); }
-        assert_eq!(c.decide(), Decision::Abort);
-    }
-
-    #[test]
-    fn reset_clears_state() {
-        let mut c = Controller::new();
-        c.feed(&sig(SignalKind::ToolError));
-        c.reset();
-        assert_eq!(c.decide(), Decision::None);
+    fn bad_belief_aborts() {
+        let mut de = DecisionEngine::new();
+        let d = de.decide(0.2, &["error".into()]);
+        assert!(matches!(d, Decision::Abort));
     }
 }

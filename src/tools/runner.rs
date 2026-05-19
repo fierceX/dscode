@@ -154,7 +154,6 @@ impl ToolRunner {
         call: &ToolCallEvent,
         tool_fn: Option<&dyn ToolExec>,
     ) -> Result<ToolRunResult> {
-        let start = std::time::Instant::now();
         // Dispatch via ToolExec if available, otherwise handle built-in tools
         let (output, is_bash, mut conv_content) = if let Some(t) = tool_fn {
             let result = t.execute(&call.input_json, ctx);
@@ -210,14 +209,8 @@ impl ToolRunner {
             output
         };
 
-        // Collect signals (error detection, slow execution, large output)
-        use crate::guard::collector::SignalCollector;
-        let signals = {
-            let elapsed = start.elapsed().as_millis() as u64;
-            let bytes = final_output.len();
-            let collector = SignalCollector::new();
-            collector.collect(&call.name, elapsed, bytes, &final_output)
-        };
+        // Signals collected later by TurnExecutor (needs shared SignalCollector for EditLoop)
+        let signals = Vec::new();
 
         let spawns_sub_agent = call.name == "SubAgent";
         let sub_agent_prompt = if spawns_sub_agent { call.fields.get("prompt").cloned() } else { None };
