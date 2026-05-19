@@ -35,10 +35,6 @@ max_tokens = 81920                     # 最大输出 token
 max_turns = 40                         # 最大轮次
 max_context = "1M"                     # 最大上下文（支持 K/M 后缀）
 tool_timeout = 600                     # 工具超时（秒）
-auto_model = false                     # 自动升级
-secondary_model = "deepseek-v4-pro"    # 升级目标模型
-auto_upgrade_threshold = 4             # 升级阈值
-auto_self_report = false               # 自报告升级
 context_compact_pct = 85               # 压缩触发百分比
 log_events = true                      # 事件日志
 ```
@@ -88,10 +84,6 @@ log_events = true                      # 事件日志
 | `DEEPSEEK_BASE_URL` | `https://api.deepseek.com/v1` | 自定义 API 端点 |
 | `JINA_API_KEY` | — | WebSearch/WebFetch 工具需要的 API 密钥 |
 | `CONTEXT_COMPACT_PCT` | `85` | 上下文压缩触发百分比（1-99） |
-| `AUTO_MODEL` | `false` | 设为 `true` 启用自动模型升级 |
-| `AUTO_UPGRADE_THRESHOLD` | `4` | 升级触发分数 |
-| `SECONDARY_MODEL` | — | 升级后切换的模型名 |
-| `AUTO_SELF_REPORT` | `false` | 启用 `<<<NEEDS_PRO>>>` 自报告升级 |
 | `TOOL_RESULT_MAX_BYTES` | `100000` | 单条工具结果截断上限 |
 | `FILE_WRITE_MAX_BYTES` | `1048576` | Write/Edit 工具写入上限 |
 | `LOG_EVENTS` | `true` | 设为 `0`/`false`/`no` 关闭 events.jsonl 记录 |
@@ -161,21 +153,24 @@ prompt 为空且 stdin 是终端时自动进入交互模式。
 
 ### 标题栏
 
-当前活动模型和实时统计信息显示在终端标题栏（macOS 终端顶部标签页名称或 iTerm2 标题栏）：
+当前活动模型、信念度和实时统计信息显示在终端标题栏：
 
 ```
-deepseek-v4-flash T:5 R:12 I:890K(85%) O:12K C:742K(74%) ¥0.42
-│                  │  │  │              │        │           │
-│                  │  │  │              │        │            └─ 估计成本（基于累计 token × DeepSeek 定价）
-│                  │  │  │              │        └── 当前上下文 + 使用率（当前/max）
-│                  │  │  │              └─────────── 输出总 token（K 为单位）
-│                  │  │  └──────────────────────── 输入总 token + 缓存命中率（K 为单位）
-│                  │  └─────────────────────────── API 请求数（agent + compact + sub-agent）
-│                  └────────────────────────────── 当前用户轮次
-└───────────────────────────────────────────────── 当前模型名（/flash 或 /pro 切换后自动更新）
+deepseek-v4-flash B:0.73 T:5 R:12 I:890K(85%) O:12K C:742K(74%) ¥0.42
+│                  │     │  │  │              │        │           │
+│                  │     │  │  │              │        │            └─ 估计成本
+│                  │     │  │  │              │        └── 当前上下文 + 使用率
+│                  │     │  │  │              └─────────── 输出总 token
+│                  │     │  │  └──────────────────────── 输入总 token + 缓存命中率
+│                  │     │  └─────────────────────────── API 请求数
+│                  │     └────────────────────────────── 当前用户轮次
+│                  └──────────────────────────────────── 信念度 B ∈ [0,1]
+└──────────────────────────────────────────────────────── 当前模型名
 ```
 
-手动切换模型后标题栏立即更新。
+**B 值含义**：0.5=初始 | >0.7=顺利 | <0.5=偶有错误 | <0.3=严重
+
+信念度在每次工具调用后实时更新（标题栏可见），低信念时会触发自动提示词注入或中止。
 
 ### 特性
 
@@ -398,50 +393,6 @@ LLM 自动调用 SubAgent 工具。
 - Token 用量计入父会话统计
 - 最多 8 个并发
 
----
-
-## Auto-Model 自动升级
-
-### 启用
-
-```bash
-AUTO_MODEL=1 ./target/release/dscode -m deepseek-v4-flash -i
-```
-
-### 升级机制
-
-基于贝叶斯 P(stall) + flash 质量监控，无需权重配置：
-
-| 信号 | 来源 | 作用 |
-|------|------|------|
-| Controller 停滞 | 连续失败轮次 | P(stall) > 0.80 → 强制 Pro |
-| flash 长期质量 | Beta(α,β) 后验 | Q<0.50, N≥8 → 证明不够好 → Pro |
-| 传感器 | error.sh (70+ 模式) | 聚合后喂入 Controller |
-
-**降级仅手动**：`/flash` 将 flash 重置为 Beta(3,3)。
-
-### 标题栏实时指标
-
-```
-flash Q:0.68/33 T:12 R:45 I:200K(50%) O:20K C:400K(40%) ¥0.12
-      ^^^^^^^^
-      Q = flash 成功率 α/(α+β), /33 = 观测数
-```
-
-Q < 0.50 且 N ≥ 16 (工具级观测) 时自动升级。在 Pro 上不显示 Q。
-
-### 配置
-
-```bash
-# 启用自动模型切换
-AUTO_MODEL=1 ./target/release/dscode
-
-# 传感器目录搜索（可选）
-# .dscode/sensors/*.sh 或 ~/.dscode/sensors/*.sh 可覆盖内置 error.sh
-```
-
----
-
 ## Stream-JSON 输出
 
 ```bash
@@ -487,15 +438,6 @@ FILE_WRITE_MAX_BYTES   ← 默认 1048576
 
 ```
 CONTEXT_COMPACT_PCT    ← 默认 85
-```
-
-### 升级（`orchestrator.rs`）
-
-```
-AUTO_MODEL             ← 默认 false
-AUTO_UPGRADE_THRESHOLD ← 默认 4
-SECONDARY_MODEL        ← 无默认
-AUTO_SELF_REPORT       ← 默认 false
 ```
 
 ### 调试（`main.rs` + `context.rs`）
