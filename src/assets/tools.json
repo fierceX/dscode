@@ -237,7 +237,7 @@
   },
   {
     "name": "SubAgent",
-    "description": "Launches a sub-agent that runs asynchronously in the background. The sub-agent executes the given prompt as an independent agent session. Returns a start acknowledgement immediately; the actual result is injected into the parent session when complete. Use this for delegating sub-tasks that can run in parallel.\n\nFork mode: pass fork=true to inherit parent session context (conversation history, plan, skills). Default is a fresh independent session.",
+    "description": "Launches a sub-agent that runs independently. The sub-agent executes the given prompt as an isolated agent session. Results are batched: ALL sub-agents complete before results are presented together. Use this for delegating sub-tasks that can run in parallel.\n\nFork mode: pass fork=true to inherit parent session context (conversation history, plan, skills). Default is a fresh independent session.",
     "input_schema": {
       "type": "object",
       "properties": {

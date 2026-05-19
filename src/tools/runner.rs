@@ -18,12 +18,12 @@ use crate::protocol::ToolCallEvent;
 pub trait ToolExec: Send + Sync {
     fn name(&self) -> &'static str;
 
-    /// Execute the tool. Returns (output_text, is_bash, conv_content).
+    /// Execute the tool. Returns (output_text, is_bash, conv_content, exit_code).
     fn execute(
         &self,
         input: &serde_json::Value,
         ctx: &ToolContext,
-    ) -> anyhow::Result<(String, bool, String)>;
+    ) -> anyhow::Result<(String, bool, String, Option<i32>)>;
 }
 
 /// Built-in tool table.
@@ -60,6 +60,7 @@ pub struct ToolRunResult {
     pub sub_agent_prompt: Option<String>,
     pub sub_agent_description: Option<String>,
     pub sub_agent_fork: bool,
+    pub exit_code: Option<i32>,
     pub signals: Vec<crate::guard::collector::Signal>,
 }
 
@@ -116,6 +117,7 @@ impl ToolRunner {
                             sub_agent_prompt: None,
                             sub_agent_description: None,
                             sub_agent_fork: false,
+                            exit_code: None,
                             signals: Vec::new(),
                         })
                     }));
@@ -155,11 +157,11 @@ impl ToolRunner {
         tool_fn: Option<&dyn ToolExec>,
     ) -> Result<ToolRunResult> {
         // Dispatch via ToolExec if available, otherwise handle built-in tools
-        let (output, is_bash, mut conv_content) = if let Some(t) = tool_fn {
+        let (output, is_bash, mut conv_content, exit_code) = if let Some(t) = tool_fn {
             let result = t.execute(&call.input_json, ctx);
             match result {
-                Ok((text, is_b, conv)) => (Ok(text), is_b, conv),
-                Err(e) => (Err(e), false, String::new()),
+                Ok((text, is_b, conv, code)) => (Ok(text), is_b, conv, code),
+                Err(e) => (Err(e), false, String::new(), None),
             }
         } else {
             match call.name.as_str() {
@@ -167,19 +169,18 @@ impl ToolRunner {
                     #[derive(serde::Deserialize)]
                     struct Args { todos: Vec<TodoArg> }
                     let args: Args = serde_json::from_value(call.input_json.clone())?;
-                    (todo_write_tool(&args.todos), false, String::new())
+                    (todo_write_tool(&args.todos), false, String::new(), None)
                 }
                 "Skill" => {
                     #[derive(serde::Deserialize)]
                     struct Args { name: String }
                     let args: Args = serde_json::from_value(call.input_json.clone())?;
-                    (skill_tool(ctx, &args.name), false, String::new())
+                    (skill_tool(ctx, &args.name), false, String::new(), None)
                 }
                 "SubAgent" | "PlanConfirm" | "PlanClear" => {
-                    // Handled in TurnExecutor layer
-                    (Ok(String::new()), false, String::new())
+                    (Ok(String::new()), false, String::new(), None)
                 }
-                _ => (Err(anyhow::anyhow!("unknown tool: {}", call.name)), false, String::new()),
+                _ => (Err(anyhow::anyhow!("unknown tool: {}", call.name)), false, String::new(), None),
             }
         };
 
@@ -228,6 +229,7 @@ impl ToolRunner {
             sub_agent_prompt,
             sub_agent_description,
             sub_agent_fork,
+            exit_code,
             signals,
         })
     }

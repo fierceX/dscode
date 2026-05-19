@@ -10,7 +10,6 @@ pub enum Event {
     Stop(StopEvent),
     Error(ErrorEvent),
     Retry(RetryEvent),
-    SelfReport(SelfReportEvent),
 }
 
 #[derive(Debug, Clone)]
@@ -35,11 +34,6 @@ pub struct ErrorEvent {
 
 #[derive(Debug, Clone)]
 pub struct RetryEvent {}
-
-#[derive(Debug, Clone)]
-pub struct SelfReportEvent {
-    pub reason: String,
-}
 
 #[derive(Debug, Clone)]
 pub struct UsageEvent {
@@ -120,11 +114,5 @@ mod tests {
         let u = UsageEvent { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
         assert_eq!(u.input_tokens, 0);
         assert_eq!(u.cache_creation_input_tokens, 0);
-    }
-
-    #[test]
-    fn self_report_event_reason() {
-        let e = SelfReportEvent { reason: "needs_pro".into() };
-        assert_eq!(e.reason, "needs_pro");
     }
 }

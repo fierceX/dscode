@@ -76,9 +76,6 @@ pub struct DscodeConfigFile {
     pub max_context: Option<String>,   // supports K/M suffix
     pub tool_timeout: Option<i32>,
     pub auto_model: Option<bool>,
-    pub secondary_model: Option<String>,
-    pub auto_upgrade_threshold: Option<u32>,
-    pub auto_self_report: Option<bool>,
     pub context_compact_pct: Option<u8>,
     pub log_events: Option<bool>,
 }
@@ -284,15 +281,6 @@ pub fn apply_config_file(cfg: &mut Config) {
         if toml_cfg.auto_model.is_some() {
             unsafe { std::env::set_var("AUTO_MODEL", if toml_cfg.auto_model.unwrap() { "true" } else { "false" }); }
         }
-        if toml_cfg.secondary_model.is_some() {
-            unsafe { std::env::set_var("SECONDARY_MODEL", &toml_cfg.secondary_model.unwrap()); }
-        }
-        if toml_cfg.auto_upgrade_threshold.is_some() {
-            unsafe { std::env::set_var("AUTO_UPGRADE_THRESHOLD", &toml_cfg.auto_upgrade_threshold.unwrap().to_string()); }
-        }
-        if toml_cfg.auto_self_report.is_some() {
-            unsafe { std::env::set_var("AUTO_SELF_REPORT", if toml_cfg.auto_self_report.unwrap() { "true" } else { "false" }); }
-        }
         if toml_cfg.context_compact_pct.is_some() {
             unsafe { std::env::set_var("CONTEXT_COMPACT_PCT", &toml_cfg.context_compact_pct.unwrap().to_string()); }
         }
@@ -460,14 +448,10 @@ tool_timeout = 120
     fn parse_config_file_auto_model_fields() {
         let toml_str = r#"
 auto_model = true
-secondary_model = "pro"
-auto_upgrade_threshold = 3
 context_compact_pct = 70
 "#;
         let parsed: DscodeConfigFile = toml::from_str(toml_str).unwrap();
         assert!(parsed.auto_model.unwrap());
-        assert_eq!(parsed.secondary_model.unwrap(), "pro");
-        assert_eq!(parsed.auto_upgrade_threshold.unwrap(), 3);
         assert_eq!(parsed.context_compact_pct.unwrap(), 70);
     }
 

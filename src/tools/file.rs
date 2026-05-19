@@ -218,31 +218,31 @@ pub struct EditTool;
 
 impl super::runner::ToolExec for ReadTool {
     fn name(&self) -> &'static str { "Read" }
-    fn execute(&self, input: &serde_json::Value, _ctx: &crate::context::ToolContext) -> anyhow::Result<(String, bool, String)> {
+    fn execute(&self, input: &serde_json::Value, _ctx: &crate::context::ToolContext) -> anyhow::Result<(String, bool, String, Option<i32>)> {
         #[derive(serde::Deserialize)]
         struct Args { path: String, #[serde(default)] offset: Option<usize>, #[serde(default)] limit: Option<usize> }
         let args: Args = serde_json::from_value(input.clone())?;
-        read(&args.path, args.offset, args.limit).map(|s| (s, false, String::new()))
+        read(&args.path, args.offset, args.limit).map(|s| (s, false, String::new(), None))
     }
 }
 
 impl super::runner::ToolExec for WriteTool {
     fn name(&self) -> &'static str { "Write" }
-    fn execute(&self, input: &serde_json::Value, ctx: &crate::context::ToolContext) -> anyhow::Result<(String, bool, String)> {
+    fn execute(&self, input: &serde_json::Value, ctx: &crate::context::ToolContext) -> anyhow::Result<(String, bool, String, Option<i32>)> {
         #[derive(serde::Deserialize)]
         struct Args { path: String, content: String }
         let args: Args = serde_json::from_value(input.clone())?;
-        write(&args.path, &args.content, ctx.file_write_max_bytes).map(|s| (s, false, String::new()))
+        write(&args.path, &args.content, ctx.file_write_max_bytes).map(|s| (s, false, String::new(), None))
     }
 }
 
 impl super::runner::ToolExec for EditTool {
     fn name(&self) -> &'static str { "Edit" }
-    fn execute(&self, input: &serde_json::Value, ctx: &crate::context::ToolContext) -> anyhow::Result<(String, bool, String)> {
+    fn execute(&self, input: &serde_json::Value, ctx: &crate::context::ToolContext) -> anyhow::Result<(String, bool, String, Option<i32>)> {
         #[derive(serde::Deserialize)]
         struct Args { path: String, old_string: String, new_string: String }
         let args: Args = serde_json::from_value(input.clone())?;
         edit(&args.path, &args.old_string, &args.new_string, ctx.file_write_max_bytes)
-            .map(|s| { let c = s.clone(); (s, false, c) })
+            .map(|s| { let c = s.clone(); (s, false, c, None) })
     }
 }

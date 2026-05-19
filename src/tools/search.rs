@@ -31,21 +31,21 @@ pub struct GrepTool;
 
 impl super::runner::ToolExec for GlobTool {
     fn name(&self) -> &'static str { "Glob" }
-    fn execute(&self, input: &serde_json::Value, _ctx: &crate::context::ToolContext) -> anyhow::Result<(String, bool, String)> {
+    fn execute(&self, input: &serde_json::Value, _ctx: &crate::context::ToolContext) -> anyhow::Result<(String, bool, String, Option<i32>)> {
         #[derive(serde::Deserialize)]
         struct Args { pattern: String, #[serde(default)] path: Option<String> }
         let args: Args = serde_json::from_value(input.clone())?;
-        glob(&args.pattern, args.path.as_deref().unwrap_or(".")).map(|s| (s, false, String::new()))
+        glob(&args.pattern, args.path.as_deref().unwrap_or(".")).map(|s| (s, false, String::new(), None))
     }
 }
 
 impl super::runner::ToolExec for GrepTool {
     fn name(&self) -> &'static str { "Grep" }
-    fn execute(&self, input: &serde_json::Value, _ctx: &crate::context::ToolContext) -> anyhow::Result<(String, bool, String)> {
+    fn execute(&self, input: &serde_json::Value, _ctx: &crate::context::ToolContext) -> anyhow::Result<(String, bool, String, Option<i32>)> {
         #[derive(serde::Deserialize)]
         struct Args { pattern: String, #[serde(default)] path: Option<String>, #[serde(default)] glob: Option<String>, #[serde(default)] context: Option<usize> }
         let args: Args = serde_json::from_value(input.clone())?;
         grep(&args.pattern, args.path.as_deref().unwrap_or("."), args.glob.as_deref().unwrap_or(""), args.context)
-            .map(|s| (s, false, String::new()))
+            .map(|s| (s, false, String::new(), None))
     }
 }

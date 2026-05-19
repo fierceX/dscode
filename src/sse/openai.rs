@@ -1,5 +1,5 @@
 use crate::protocol::{
-    ErrorEvent, Event, RetryEvent, SelfReportEvent, StopEvent, TextEvent, ThinkingEvent, UsageEvent,
+    ErrorEvent, Event, RetryEvent, StopEvent, TextEvent, ThinkingEvent, UsageEvent,
 };
 use crate::sse::toolcall::build_tool_call_event;
 use anyhow::Result;
@@ -28,11 +28,6 @@ pub struct OpenAIParser {
     pending_calls: BTreeMap<i64, PendingCall>,
     pending_usage: Option<UsageEvent>,
     pending_stop: Option<String>,
-    /// Detects self-report escalation marker `<<<NEEDS_PRO>>>` in text stream.
-    /// When detected, the marker is stripped from output and this flag is set.
-    pub needs_pro_detected: bool,
-    /// Buffer for partial marker detection across text chunks.
-    marker_buf: String,
 }
 
 impl OpenAIParser {
@@ -100,11 +95,6 @@ impl OpenAIParser {
             } else {
                 content.to_string()
             };
-            let (filtered, marker_found) = self.scan_escalation_marker(&c);
-            if marker_found {
-                self.needs_pro_detected = true;
-            }
-            let c = filtered;
             if !c.is_empty() {
                 self.saw_text = true;
                 emit(Event::Text(TextEvent { content: c }))?;
@@ -137,9 +127,6 @@ impl OpenAIParser {
 
     /// Flush pending usage + stop events.
     pub fn flush(&mut self, emit: &mut dyn FnMut(Event) -> Result<()>) -> Result<()> {
-        if self.needs_pro_detected {
-            emit(Event::SelfReport(SelfReportEvent { reason: "needs_pro".into() }))?;
-        }
         if let Some(usage) = self.pending_usage.take() {
             emit(Event::Usage(usage))?;
         }
@@ -168,38 +155,6 @@ impl OpenAIParser {
         self.pending_calls.clear();
         self.pending_usage = None;
         self.pending_stop = None;
-        self.needs_pro_detected = false;
-        self.marker_buf.clear();
-    }
-
-    const MARKER: &'static str = "<<<NEEDS_PRO>>>";
-
-    fn scan_escalation_marker(&mut self, text: &str) -> (String, bool) {
-        let combined = self.marker_buf.clone() + text;
-        let found = combined.contains(Self::MARKER);
-        if !found {
-            self.marker_buf.clear();
-            let suffix = Self::overlap_suffix(text);
-            self.marker_buf.push_str(suffix);
-            return (text.to_string(), false);
-        }
-        self.marker_buf.clear();
-        let cleaned = combined.replace(Self::MARKER, "");
-        let suffix = Self::overlap_suffix(&cleaned);
-        self.marker_buf.push_str(suffix);
-        let result = cleaned.trim_end_matches(suffix).to_string();
-        (result, true)
-    }
-
-    fn overlap_suffix(text: &str) -> &str {
-        let marker = Self::MARKER;
-        for len in (1..marker.len().min(text.len() + 1)).rev() {
-            let prefix = &marker[..len];
-            if text.ends_with(prefix) {
-                return &text[text.len() - len..];
-            }
-        }
-        ""
     }
 }
 

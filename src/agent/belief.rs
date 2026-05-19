@@ -13,7 +13,7 @@ impl Observation {
         let mut total_failure = 0.0_f64;
         for s in signals {
             match s.kind {
-                SignalKind::NonZeroExit | SignalKind::ToolError | SignalKind::EditLoop => {
+                SignalKind::ToolError | SignalKind::EditLoop | SignalKind::ToolFailed => {
                     total_failure = total_failure.max(s.severity);
                 }
             }
@@ -38,7 +38,7 @@ impl BeliefTracker {
         Self {
             window: VecDeque::with_capacity(window_size),
             window_size,
-            alpha_sum: 1.0,
+            alpha_sum: 3.0,
             beta_sum: 1.0,
             recent_errors: Vec::new(),
         }
@@ -60,7 +60,7 @@ impl BeliefTracker {
         self.window.push_back(obs);
 
         for s in signals {
-            if matches!(s.kind, SignalKind::NonZeroExit | SignalKind::ToolError) {
+            if matches!(s.kind, SignalKind::ToolError | SignalKind::ToolFailed) {
                 self.recent_errors.push(s.detail.clone());
             }
         }
@@ -74,7 +74,7 @@ impl BeliefTracker {
     /// 新用户输入时清空窗口
     pub fn reset(&mut self) {
         self.window.clear();
-        self.alpha_sum = 1.0;
+        self.alpha_sum = 3.0;
         self.beta_sum = 1.0;
         self.recent_errors.clear();
     }
@@ -90,9 +90,9 @@ mod tests {
     }
 
     #[test]
-    fn initial_belief_is_05() {
+    fn initial_belief_is_075() {
         let bt = BeliefTracker::new(4);
-        assert!((bt.belief() - 0.5).abs() < 1e-10);
+        assert!((bt.belief() - 0.75).abs() < 1e-10);
     }
 
     #[test]
@@ -105,16 +105,15 @@ mod tests {
     #[test]
     fn failure_decreases_belief() {
         let mut bt = BeliefTracker::new(4);
-        bt.observe(&[sig(SignalKind::NonZeroExit, 0.9)]);
-        assert!(bt.belief() < 0.5);
+        bt.observe(&[sig(SignalKind::ToolError, 0.9)]);
+        assert!(bt.belief() < 0.75);
     }
 
     #[test]
     fn max_prevents_double_counting() {
         let mut bt = BeliefTracker::new(4);
-        // NonZeroExit(0.9) + ToolError(0.8) → max = 0.9
-        bt.observe(&[sig(SignalKind::NonZeroExit, 0.9), sig(SignalKind::ToolError, 0.8)]);
-        assert!(bt.belief() < 0.5);
+        bt.observe(&[sig(SignalKind::ToolError, 0.9), sig(SignalKind::ToolError, 0.8)]);
+        assert!(bt.belief() < 0.75);
         // β should be 1 + 0.9 = 1.9, not 1 + 1.7 = 2.7
         assert!((bt.beta_sum - 1.9).abs() < 0.01);
     }
@@ -122,7 +121,7 @@ mod tests {
     #[test]
     fn window_slides_old_errors_out() {
         let mut bt = BeliefTracker::new(2);
-        bt.observe(&[sig(SignalKind::NonZeroExit, 0.9)]); // failure
+        bt.observe(&[sig(SignalKind::ToolError, 0.9)]); // failure
         let b1 = bt.belief();
         bt.observe(&[]); // success
         bt.observe(&[]); // success — old error slides out
@@ -134,7 +133,7 @@ mod tests {
         let mut bt = BeliefTracker::new(4);
         bt.observe(&[sig(SignalKind::ToolError, 1.0)]);
         bt.reset();
-        assert!((bt.belief() - 0.5).abs() < 1e-10);
+        assert!((bt.belief() - 0.75).abs() < 1e-10);
         assert!(bt.recent_errors.is_empty());
     }
 }

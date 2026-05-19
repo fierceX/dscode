@@ -1,10 +1,5 @@
 # 设计文档
 
-> 基于 `src/` 当前代码提取的设计决策和实现模式。
-> 描述代码"现在是什么样"，不涉及历史版本或外部项目对比。
-
----
-
 ## 主题一：Agent 主循环
 
 ### 单轮执行契约
@@ -329,10 +324,22 @@ B = α / (α + β) ∈ [0, 1]
 ```
 
 **关键特性**：
-- 拉普拉斯先验 α=β=1：无观测时 B=0.5（无偏）
-- max 合并：NonZeroExit(0.9) + ToolError(0.8) → failure=0.9（不重复计数）
+- 信任先验 α=3, β=1：无观测时 B=0.75（模型调用工具大概率成功）
+- max 合并：ToolFailed(0.9) + ToolError(0.8) → failure=1.0（不重复计数）
 - 滑动窗口：旧错误自然退出，信念自动恢复
 - 每轮用户输入重置窗口
+
+### 信号来源
+
+三类信号，两个确性定一条启发式：
+
+| 信号 | 来源 | 检测方式 | 确定性 | 说明 |
+|------|------|---------|--------|------|
+| `ToolFailed` | 工具执行结果 | exit_code ≠ 0 或 `"Error:"` 前缀 | ✅ | 命令真失败了，权重统一 1.0 |
+| `ToolError` | 输出文本 | regex 匹配 | ❌ | 输出中有错误关键词，权重 0.3~0.9 |
+| `EditLoop` | 工具序列 (W=6) | Edit > 4 或 Edit↔Diff 交替 | ✅ | 盲写循环，权重分级 0.4~0.9 |
+
+`ToolFailed` 和 `ToolError` 是两条独立链路——exit_code 通过 `child.status.code()` 从 bash 执行层获取，不经过输出文本 regex。
 
 ### DecisionEngine
 
@@ -345,7 +352,18 @@ pub fn decide(belief: f64, errors: &[String]) -> Decision {
 }
 ```
 
-**注入位置**：追加到用户消息末尾（不修改 system prompt，保护前缀缓存）。
+**注入位置：任务循环内部**。注入发生在 `turn.rs::execute()` 的循环内，工具执行完成后、下一轮 LLM 调用之前：
+
+```
+Phase 3: 工具执行 → 信号 → BeliefTracker.observe()
+Phase 4: stop = "tool_use"
+  ├─ DecisionEngine.decide(belief, errors)
+  │   ├─ Inject → store.add_user(...)  ← 写入对话存储，非追加到用户输入
+  │   └─ Abort  → 返回 Failed，中断本轮
+  └─ continue → 下一轮 LLM: messages = store.lines()（包含注入消息）
+```
+
+不在系统 prompt 中注入（保护前缀缓存），也不追加到用户输入末尾。而是作为一条独立的 User 消息（含 `[System note: ...]`）写入对话存储，LLM 在下一轮调用时自然看到。
 
 **注入内容包含具体错误信息**：LLM 收到的不再是泛泛的 "something went wrong"，而是：
 

@@ -28,7 +28,7 @@ fn record_execution_time(elapsed: Duration) {
     history.truncate(10);
 }
 
-pub fn execute(command: &str, timeout_secs: Option<u64>, default_timeout: i32) -> Result<String> {
+pub fn execute(command: &str, timeout_secs: Option<u64>, default_timeout: i32) -> Result<(String, Option<i32>)> {
     if command.trim().is_empty() {
         bail!("Error: no command provided");
     }
@@ -62,9 +62,13 @@ pub fn execute(command: &str, timeout_secs: Option<u64>, default_timeout: i32) -
 
     let start = Instant::now();
     let mut timed_out = false;
+    let mut exit_code: Option<i32> = None;
     loop {
         match child.try_wait() {
-            Ok(Some(_status)) => break,
+            Ok(Some(status)) => {
+                exit_code = status.code();
+                break;
+            }
             Ok(None) => {
                 if start.elapsed() >= timeout {
                     let _ = child.kill();
@@ -91,7 +95,12 @@ pub fn execute(command: &str, timeout_secs: Option<u64>, default_timeout: i32) -
     if timed_out {
         out.push_str(&format!("\n[... truncated, command timed out after {} seconds ...]", timeout.as_secs()));
     }
-    Ok(out)
+    if let Some(code) = exit_code {
+        if code != 0 {
+            out.push_str(&format!("\n\nProcess completed with exit code {}.", code));
+        }
+    }
+    Ok((out, exit_code))
 }
 
 fn stream_reader<R: std::io::Read>(mut pipe: R, buf: Arc<Mutex<String>>) {
@@ -119,13 +128,13 @@ mod tests {
 
     #[test]
     fn simple_echo_works() {
-        let result = execute("echo hello", None, 600).unwrap();
+        let (result, _) = execute("echo hello", None, 600).unwrap();
         assert!(result.contains("hello"));
     }
 
     #[test]
     fn timeout_kills_long_command() {
-        let result = execute("sleep 10; echo done", Some(1), 600).unwrap();
+        let (result, _) = execute("sleep 10; echo done", Some(1), 600).unwrap();
         assert!(result.contains("timed out"));
         assert!(!result.contains("done"));
     }
@@ -147,10 +156,11 @@ pub struct BashTool;
 
 impl super::runner::ToolExec for BashTool {
     fn name(&self) -> &'static str { "Bash" }
-    fn execute(&self, input: &serde_json::Value, ctx: &crate::context::ToolContext) -> anyhow::Result<(String, bool, String)> {
+    fn execute(&self, input: &serde_json::Value, ctx: &crate::context::ToolContext) -> anyhow::Result<(String, bool, String, Option<i32>)> {
         #[derive(serde::Deserialize)]
         struct Args { command: String, #[serde(default)] timeout: Option<u64> }
         let args: Args = serde_json::from_value(input.clone())?;
-        execute(&args.command, args.timeout, ctx.tool_timeout_secs).map(|s| (s, true, String::new()))
+        execute(&args.command, args.timeout, ctx.tool_timeout_secs)
+            .map(|(s, code)| (s, true, String::new(), code))
     }
 }

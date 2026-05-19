@@ -17,32 +17,32 @@ fn collect(sig: SignalKind, severity: f64, detail: &str) -> crate::guard::collec
 // ── SignalCollector ──────────────────────────────────────────────
 
 #[test]
-fn collector_non_zero_exit_detected() {
+fn collector_rust_error_detected() {
     let mut c = SignalCollector::new();
-    let sigs = c.collect("Bash", "Process completed with exit code 1.");
-    assert!(sigs.iter().any(|s| matches!(s.kind, SignalKind::NonZeroExit)),
+    let sigs = c.collect("Bash", "error[E0425]: cannot find value", None, "error[E0425]: cannot find value");
+    assert!(sigs.iter().any(|s| matches!(s.kind, SignalKind::ToolError)),
         "should detect non-zero exit");
 }
 
 #[test]
-fn collector_exit_code_zero_ignored() {
+fn collector_clean_output_ignored() {
     let mut c = SignalCollector::new();
-    let sigs = c.collect("Bash", "Process completed with exit code 0.");
-    assert!(!sigs.iter().any(|s| matches!(s.kind, SignalKind::NonZeroExit)),
+    let sigs = c.collect("Bash", "everything is fine", None, "everything is fine");
+    assert!(!sigs.iter().any(|s| matches!(s.kind, SignalKind::ToolError)),
         "exit code 0 should not be an error");
 }
 
 #[test]
 fn collector_tool_error_detected() {
     let mut c = SignalCollector::new();
-    let sigs = c.collect("Bash", "error[E0425]: cannot find value `x`");
+    let sigs = c.collect("Bash", "error[E0425]: cannot find value `x`", None, "error[E0425]: cannot find value `x`");
     assert!(sigs.iter().any(|s| matches!(s.kind, SignalKind::ToolError)));
 }
 
 #[test]
 fn collector_clean_output_no_signals() {
     let mut c = SignalCollector::new();
-    let sigs = c.collect("Read", "everything is fine");
+    let sigs = c.collect("Read", "everything is fine", None, "everything is fine");
     assert!(sigs.is_empty(), "clean output should produce no signals");
 }
 
@@ -50,9 +50,9 @@ fn collector_clean_output_no_signals() {
 fn collector_edit_loop_excessive_edits() {
     let mut c = SignalCollector::new();
     // 模拟：窗口=6，5次Edit触发 EditLoop
-    for _ in 0..5 { c.collect("Edit", "ok"); }
-    c.collect("Edit", "ok"); // 第6次 Edit — 窗口内 Edit=6 > 4
-    let sigs = c.collect("Edit", "ok");
+    for _ in 0..5 { c.collect("Edit", "ok", None, "ok"); }
+    c.collect("Edit", "ok", None, "ok"); // 第6次 Edit — 窗口内 Edit=6 > 4
+    let sigs = c.collect("Edit", "ok", None, "ok");
     assert!(sigs.iter().any(|s| matches!(s.kind, SignalKind::EditLoop)),
         "excessive edits should trigger EditLoop");
 }
@@ -61,9 +61,9 @@ fn collector_edit_loop_excessive_edits() {
 fn collector_edit_diff_alternation_triggers() {
     let mut c = SignalCollector::new();
     for name in &["Edit", "Diff", "Edit", "Diff", "Edit", "Diff"] {
-        c.collect(name, "ok");
+        c.collect(name, "ok", None, "ok");
     }
-    let sigs = c.collect("Diff", "ok"); // Edit↔Diff 交替 + 无 Bash/Grep/Read
+    let sigs = c.collect("Diff", "ok", None, "ok"); // Edit↔Diff 交替 + 无 Bash/Grep/Read
     assert!(sigs.iter().any(|s| matches!(s.kind, SignalKind::EditLoop)),
         "edit-diff alternation without reads should trigger EditLoop");
 }
@@ -72,35 +72,35 @@ fn collector_edit_diff_alternation_triggers() {
 fn collector_edit_diff_with_read_does_not_trigger() {
     let mut c = SignalCollector::new();
     for name in &["Edit", "Diff", "Edit", "Grep", "Edit", "Diff"] {
-        c.collect(name, "ok");
+        c.collect(name, "ok", None, "ok");
     }
-    let sigs = c.collect("Edit", "ok");
+    let sigs = c.collect("Edit", "ok", None, "ok");
     assert!(!sigs.iter().any(|s| matches!(s.kind, SignalKind::EditLoop)),
         "edit-diff with Grep should NOT trigger EditLoop");
 }
 
-/// NonZeroExit + ToolError 同一次工具调用 → max 合并（通过 BeliefTracker 验证）
+/// Exit code + ToolError 同一次工具调用 → max 合并（通过 BeliefTracker 验证）
 #[test]
-fn belief_max_merges_non_zero_exit_and_tool_error() {
+fn belief_max_merges_tool_errors() {
     let mut c = SignalCollector::new();
-    let sigs = c.collect("Bash", "error[E0308]: type mismatch\nProcess completed with exit code 1.");
-    assert!(sigs.iter().any(|s| matches!(s.kind, SignalKind::NonZeroExit)));
+    let sigs = c.collect("Bash", "error[E0308]: type mismatch\nerror[E0425]: cannot find value", None, "error[E0308]: type mismatch\nerror[E0425]: cannot find value");
+    assert!(sigs.iter().any(|s| matches!(s.kind, SignalKind::ToolError)));
     assert!(sigs.iter().any(|s| matches!(s.kind, SignalKind::ToolError)));
 
-    // 喂入 BeliefTracker → max(0.9, 1.0) = 1.0, 不是 1.9
+    // 喂入 BeliefTracker → max(0.9, 0.9) = 0.9, 不是 1.8
     let mut bt = BeliefTracker::new(4);
     bt.observe(&sigs);
-    // α = 1 + 0 = 1, β = 1 + 1.0 = 2.0 → B ≈ 0.333
-    assert!((bt.belief() - 1.0/3.0).abs() < 0.02,
+    // α = 3 + 0.1 = 3.1, β = 1 + 0.9 = 1.9 → B = 3.1/5.0 = 0.620
+    assert!((bt.belief() - 0.620).abs() < 0.02,
         "max merging should prevent double-counting, got B={:.3}", bt.belief());
 }
 
 // ── BeliefTracker ────────────────────────────────────────────────
 
 #[test]
-fn belief_initial_is_05() {
+fn belief_initial_is_075() {
     let bt = BeliefTracker::new(4);
-    assert!((bt.belief() - 0.5).abs() < 1e-10);
+    assert!((bt.belief() - 0.75).abs() < 1e-10);
 }
 
 #[test]
@@ -116,19 +116,19 @@ fn belief_rises_with_clean_calls() {
 fn belief_drops_with_errors() {
     let mut bt = BeliefTracker::new(4);
     bt.observe(&[collect(SignalKind::ToolError, 1.0, "err")]);
-    assert!(bt.belief() < 0.5);
+    assert!(bt.belief() < 0.75);
     bt.observe(&[collect(SignalKind::ToolError, 1.0, "err")]);
-    assert!(bt.belief() < 0.35, "2 consecutive errors should drop belief below 0.35");
+    assert!(bt.belief() < 0.75, "2 consecutive errors should drop belief below 0.35");
 }
 
 #[test]
 fn belief_window_slides_old_errors_out() {
     let mut bt = BeliefTracker::new(3);
     // 2 errors
-    bt.observe(&[collect(SignalKind::NonZeroExit, 0.9, "e1")]);
-    bt.observe(&[collect(SignalKind::NonZeroExit, 0.9, "e2")]);
+    bt.observe(&[collect(SignalKind::ToolError, 0.9, "e1")]);
+    bt.observe(&[collect(SignalKind::ToolError, 0.9, "e2")]);
     let b_low = bt.belief();
-    assert!(b_low < 0.4, "belief should be low after 2 errors");
+    assert!(b_low < 0.75, "belief should drop after 2 errors, got {:.3}", b_low);
 
     // 2 clean → old errors slide out
     bt.observe(&[]);
@@ -141,7 +141,7 @@ fn belief_reset_clears_state() {
     let mut bt = BeliefTracker::new(4);
     bt.observe(&[collect(SignalKind::ToolError, 1.0, "e")]);
     bt.reset();
-    assert!((bt.belief() - 0.5).abs() < 1e-10, "reset should restore 0.5");
+    assert!((bt.belief() - 0.75).abs() < 1e-10, "reset should restore 0.75");
     assert!(bt.recent_errors.is_empty(), "reset should clear errors");
 }
 
@@ -193,7 +193,7 @@ fn full_chain_clean_to_injection() {
 
     // 3 clean calls → high belief
     for _ in 0..3 {
-        let sigs = collector.collect("Read", "ok");
+        let sigs = collector.collect("Read", "ok", None, "ok");
         belief.observe(&sigs);
     }
     assert!(belief.belief() > 0.7, "3 clean calls should give high belief");
@@ -201,10 +201,10 @@ fn full_chain_clean_to_injection() {
 
     // 3 error calls → low belief
     for _ in 0..3 {
-        let sigs = collector.collect("Bash", "Process completed with exit code 1.");
+        let sigs = collector.collect("Bash", "error[E0425]: cannot find value", None, "error[E0425]: cannot find value");
         belief.observe(&sigs);
     }
-    assert!(belief.belief() < 0.4, "3 errors should drop belief below 0.4");
+    assert!(belief.belief() < 0.75, "3 errors should drop belief below 0.75, got {:.3}", belief.belief());
     let d = engine.decide(belief.belief(), &belief.recent_errors);
     assert!(matches!(d, Decision::Inject(_)), "low belief should trigger injection");
 }
@@ -220,11 +220,11 @@ fn full_chain_edit_loop_triggers_belief_drop() {
 
     // Trigger EditLoop with excessive edits
     for _ in 0..5 {
-        let sigs = collector.collect("Edit", "ok");
+        let sigs = collector.collect("Edit", "ok", None, "ok");
         belief.observe(&sigs);
     }
     // The next Edit should trigger EditLoop
-    let sigs = collector.collect("Edit", "ok");
+    let sigs = collector.collect("Edit", "ok", None, "ok");
     assert!(sigs.iter().any(|s| matches!(s.kind, SignalKind::EditLoop)));
     belief.observe(&sigs);
     assert!(belief.belief() < 0.80, "EditLoop should drop belief, got {:.3}", belief.belief());

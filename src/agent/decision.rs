@@ -10,8 +10,6 @@ pub struct DecisionEngine {
     abort_threshold: f64,
     warn_threshold: f64,
     remind_threshold: f64,
-    consecutive_abort_required: u32,
-    consecutive_abort_count: u32,
 }
 
 impl DecisionEngine {
@@ -20,20 +18,13 @@ impl DecisionEngine {
             abort_threshold: 0.30,
             warn_threshold: 0.50,
             remind_threshold: 0.70,
-            consecutive_abort_required: 1,
-            consecutive_abort_count: 0,
         }
     }
 
-    pub fn decide(&mut self, belief: f64, errors: &[String]) -> Decision {
+    pub fn decide(&self, belief: f64, errors: &[String]) -> Decision {
         if belief < self.abort_threshold {
-            self.consecutive_abort_count += 1;
-            if self.consecutive_abort_count >= self.consecutive_abort_required {
-                return Decision::Abort;
-            }
-            return Decision::Inject(Self::format_critical(belief, errors));
+            return Decision::Abort;
         }
-        self.consecutive_abort_count = 0;
 
         if belief < self.warn_threshold {
             return Decision::Inject(Self::format_warning(belief, errors));
@@ -63,16 +54,6 @@ impl DecisionEngine {
             b, error_section,
         )
     }
-
-    fn format_critical(b: f64, errors: &[String]) -> String {
-        let error_section = if errors.is_empty() { String::new() } else {
-            format!("\nErrors:\n{}", format_errors(errors, errors.len().min(10)))
-        };
-        format!(
-            "[CRITICAL: Execution quality severely degraded (belief {:.2}).{}]",
-            b, error_section,
-        )
-    }
 }
 
 fn format_errors(errors: &[String], n: usize) -> String {
@@ -92,20 +73,20 @@ mod tests {
 
     #[test]
     fn good_belief_does_nothing() {
-        let mut de = DecisionEngine::new();
+        let de = DecisionEngine::new();
         assert!(matches!(de.decide(0.9, &[]), Decision::None));
     }
 
     #[test]
     fn warn_belief_injects() {
-        let mut de = DecisionEngine::new();
+        let de = DecisionEngine::new();
         let d = de.decide(0.4, &["Rust error".into()]);
         assert!(matches!(d, Decision::Inject(_)));
     }
 
     #[test]
     fn bad_belief_aborts() {
-        let mut de = DecisionEngine::new();
+        let de = DecisionEngine::new();
         let d = de.decide(0.2, &["error".into()]);
         assert!(matches!(d, Decision::Abort));
     }

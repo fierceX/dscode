@@ -33,7 +33,6 @@ pub enum TurnEffect {
     },
     PlanCleared,
     PlanConfirmed,
-    NeedsPro,
 }
 
 #[derive(Debug, PartialEq)]
@@ -173,7 +172,6 @@ impl TurnExecutor {
             let mut calls: Vec<ToolCallEvent> = Vec::new();
             let mut stop = String::new();
             let mut usage: Option<UsageEvent> = None;
-            let mut needs_pro = false;
 
             // Phase 1: Stream LLM response
             while let Some(result) = stream.next().await {
@@ -225,10 +223,6 @@ impl TurnExecutor {
                     Event::Error(e) => {
                         self.ctx.log_event(serde_json::json!({"type":"error","message":e.message}));
                         return Ok((TurnDecision::Failed(e.message), effects));
-                    }
-                    Event::SelfReport(e) => {
-                        self.ctx.log_event(serde_json::json!({"type":"self_report","reason":e.reason}));
-                        needs_pro = true;
                     }
                     Event::Retry(_) => {
                         self.ctx.log_event(serde_json::json!({"type":"retry"}));
@@ -291,11 +285,12 @@ impl TurnExecutor {
 
                 let mut processed_results = Vec::new();
                 for mut result in results {
-                    // Collect signals using shared SignalCollector (跨调用维护历史)
-                    let new_signals = self.signal_collector.collect(&result.tool_name, &result.content);
-                    result.signals = new_signals.clone();
-                    self.signals.extend(new_signals);
-
+                    // Collect signals using shared SignalCollector（所有信号统一入口）
+                    let new_signals = self.signal_collector.collect(
+                        &result.tool_name, &result.content, result.exit_code, &result.content,
+                    );
+                    result.signals = new_signals;
+                    self.signals.extend(result.signals.clone());
                     // Feed to BeliefTracker (per tool call, so max merging works correctly)
                     if let Some(ref mut bt) = belief {
                         bt.observe(&result.signals);
@@ -415,26 +410,30 @@ impl TurnExecutor {
                 pro_cost_micros: stats.pro_cost_micros,
                 belief: current_belief,
             });
-            if needs_pro {
-                effects.push(TurnEffect::NeedsPro);
-            }
             match stop.as_str() {
                 "tool_use" | "tool_calls" => {
-                    // Mid-task emergency upgrade: if too many tool errors, switch to Pro
-                    if self.tool_error_count >= 4
-                        && !matches!(self.llm.model(), "deepseek-v4-pro")
-                    {
-                        if let Ok(new_llm) = crate::llm::client::AsyncLlClient::new(
-                            "deepseek-v4-pro",
-                            self.ctx.api_key(),
-                            &self.ctx.api_url,
-                        ) {
-                            self.llm = Arc::new(new_llm);
-                            self.ctx.display.render_info(
-                                "Mid-task: switching to Pro (≥4 tool errors)."
-                            );
+                    // 本轮工具执行后，由 DecisionEngine 决策是否注入
+                    if let Some(ref bt) = belief {
+                        let b = bt.belief();
+                        let engine = crate::agent::decision::DecisionEngine::new();
+                        match engine.decide(b, &bt.recent_errors) {
+                            crate::agent::decision::Decision::Inject(msg) => {
+                                self.ctx.display.render_info(&format!(
+                                    "Injecting hint (belief {:.2}) into task loop.", b
+                                ));
+                                self.ctx.store.add_user(&msg).await?;
+                            }
+                            crate::agent::decision::Decision::Abort => {
+                                self.ctx.display.render_error(&format!(
+                                    "DecisionEngine: aborting (belief {:.2}).", b
+                                ));
+                                return Ok((TurnDecision::Failed("aborted by DecisionEngine".into()), effects));
+                            }
+                            _ => {}
                         }
                     }
+
+                    // 信念注入（由 DecisionEngine 处理，见上）
                     messages = self.ctx.store.lines().await?;
                     continue;
                 }

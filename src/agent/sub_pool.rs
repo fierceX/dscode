@@ -1,8 +1,8 @@
 use crate::agent::sub_executor::SubAgentExecutor;
 use crate::session::stats::Stats;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use tokio::sync::{Semaphore, mpsc};
+use std::sync::Arc;
+use tokio::sync::{Semaphore, mpsc, oneshot};
 
 /// Report sent back to the orchestrator when a sub-agent completes.
 #[derive(Debug, Clone)]
@@ -30,9 +30,8 @@ impl SubAgentPool {
         }
     }
 
-    /// Launch a sub-agent. Returns the session_id immediately.
-    /// The sub-agent runs in a tokio task; results are sent via result_tx.
-    /// If `session_id` is empty, a new chronological ID is generated.
+    /// Launch a sub-agent. Returns (session_id, wait_rx) immediately.
+    /// `wait_rx` resolves when the sub-agent completes (for sync waiting).
     pub async fn launch(
         &self,
         ctx: Arc<super::super::context::AgentSharedContext>,
@@ -40,7 +39,7 @@ impl SubAgentPool {
         _description: String,
         fork: bool,
         session_id: String,
-    ) -> Result<String, tokio::sync::AcquireError> {
+    ) -> Result<(String, oneshot::Receiver<SubAgentReport>), tokio::sync::AcquireError> {
         let permit = self.semaphore.clone().acquire_owned().await?;
         self.active.fetch_add(1, Ordering::SeqCst);
 
@@ -52,6 +51,7 @@ impl SubAgentPool {
         let id = session_id.clone();
         let tx = self.result_tx.clone();
         let active = self.active.clone();
+        let (wait_tx, wait_rx) = oneshot::channel();
 
         tokio::spawn(async move {
             let _permit = permit;
@@ -59,31 +59,35 @@ impl SubAgentPool {
             let executor = match SubAgentExecutor::new(&ctx, &id, fork).await {
                 Ok(e) => e,
                 Err(err) => {
-                    let _ = tx.send(SubAgentReport {
+                    let report = SubAgentReport {
                         session_id: id,
                         status: "failed".into(),
                         thinking: String::new(),
                         text: format!("Failed to create sub-agent: {err}"),
                         usage: Stats::default(),
-                    });
+                    };
+                    let _ = tx.send(report.clone());
+                    let _ = wait_tx.send(report);
                     active.fetch_sub(1, Ordering::SeqCst);
                     return;
                 }
             };
             let result = executor.execute(&prompt).await;
 
-            let _ = tx.send(SubAgentReport {
+            let report = SubAgentReport {
                 session_id: id,
                 status: result.status,
                 thinking: result.thinking,
                 text: result.text,
                 usage: result.usage,
-            });
+            };
+            let _ = tx.send(report.clone());
+            let _ = wait_tx.send(report);
 
             active.fetch_sub(1, Ordering::SeqCst);
         });
 
-        Ok(session_id)
+        Ok((session_id, wait_rx))
     }
 
     /// Returns the number of currently active sub-agents.

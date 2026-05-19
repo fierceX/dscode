@@ -35,7 +35,7 @@ dscode 是一个 Rust 实现的轻量 agent 内核，专为 DeepSeek 优化。�
         │   OrchActor          │
         │  ┌──────────────────┐│
         │  │ SignalCollector  ││
-        │  │ → NonZeroExit    ││
+        │  │ → ToolFailed    ││
         │  │ → ToolError      ││
         │  │ → EditLoop       ││
         │  └──────────────────┘│
@@ -87,7 +87,7 @@ dscode 是一个 Rust 实现的轻量 agent 内核，专为 DeepSeek 优化。�
 | **agent/decision** | `agent/decision.rs` | DecisionEngine：阈值判断 → Inject/Abort |
 | **agent/sub_pool** | `agent/sub_pool.rs` | 子代理并发池，Semaphore 限流 |
 | **agent/sub_executor** | `agent/sub_executor.rs` | 子代理独立上下文执行 |
-| **guard/collector** | `guard/collector.rs` | SignalCollector：NonZeroExit/ToolError/EditLoop |
+| **guard/collector** | `guard/collector.rs` | SignalCollector：ToolFailed/ToolError/EditLoop |
 | **guard/storm** | `guard/storm.rs` | StormBreaker：重复调用抑制 |
 | **session/store** | `session/store.rs` | ConversationStore：JSONL 持久化 |
 | **session/stats** | `session/stats.rs` | Token 用量统计 |
@@ -112,8 +112,8 @@ dscode 是一个 Rust 实现的轻量 agent 内核，专为 DeepSeek 优化。�
 工具执行完毕 (tools/runner.rs)
      │
 SignalCollector.collect(name, output)
-     ├── NonZeroExit — 退出码 ≠ 0 (severity 0.8~0.9)
-     ├── ToolError   — regex 匹配 (severity 0.3~1.0)
+     ├── ToolFailed — 确定性失败 (exit_code≠0 / "Error:"前缀, 统一 1.0)
+     ├── ToolError   — regex 匹配 (severity 0.3~0.9)
      └── EditLoop    — 序列检测 (W=6, severity 0.4~0.9)
      │
      ▼
@@ -136,26 +136,25 @@ DecisionEngine.decide(B, errors)
 
 | B 值 | 含义 |
 |------|------|
-| 0.5 | 初始状态（无偏先验） |
+| 0.75 | 初始状态（信任先验 α=3） |
 | > 0.7 | 🟢 顺利 |
 | < 0.5 | 🟡 偶有错误 |
 | < 0.3 | 🔴 严重，需中止 |
 
-### 提示词注入
+### 提示词注入（任务循环内）
 
-低信念时自动追加到**用户消息末尾**（不修改 system prompt，保护前缀缓存）：
+注入发生在 `turn.rs::execute()` 的循环内，工具执行完成后、下一轮 LLM 调用之前：
 
 ```
-用户输入:
-$ fix the test
-
-实际发送 (B=0.37):
-$ fix the test
-
-[System note: Multiple failures detected (belief 0.37). Adjust approach.
-Recent errors:
-- Bash(cargo build): process exited with code 1]
+Phase 3: 工具执行 → 信号 → BeliefTracker.observe()
+Phase 4: stop = "tool_use"
+  ├─ DecisionEngine.decide(belief, errors)
+  │   ├─ Inject → store.add_user("[System note: ...]")  ← 写入对话存储
+  │   └─ Abort  → 返回 Failed，中断本轮
+  └─ continue → 下一轮 LLM: messages = store.lines()（包含注入消息）
 ```
+
+注入消息作为一条独立的 User 消息写入对话存储，LLM 在下一轮调用时自然看到。不修改 system prompt（保护前缀缓存），也不追加到用户输入末尾。
 
 ## 核心数据流 — 单轮执行
 

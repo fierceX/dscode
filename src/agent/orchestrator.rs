@@ -1,11 +1,9 @@
 use crate::agent::sub_pool::{SubAgentPool, SubAgentReport};
 use crate::agent::turn::{TurnExecutor, TurnDecision, TurnEffect};
-use crate::agent::decision::{DecisionEngine, Decision};
 use crate::agent::belief::BeliefTracker;
 use crate::context::AgentSharedContext;
 use crate::llm::client::{AsyncLlClient, LlmClient};
 use crate::errors;
-use crate::util::truncate_str;
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
@@ -17,8 +15,9 @@ pub struct OrchActor {
     cmd_rx: mpsc::UnboundedReceiver<OrchCmd>,
     sub_pool: Arc<SubAgentPool>,
     belief: BeliefTracker,
-    decision_engine: DecisionEngine,
     forced_model: Option<crate::config::ModelTier>,
+    /// 等待本轮子代理完成的 receiver 列表
+    pending_sub_agents: Vec<tokio::sync::oneshot::Receiver<crate::agent::sub_pool::SubAgentReport>>,
 }
 
 /// Commands received by the orchestrator.
@@ -38,8 +37,8 @@ impl OrchActor {
         Self {
             ctx, cmd_rx, sub_pool,
             belief: BeliefTracker::new(16),
-            decision_engine: DecisionEngine::new(),
             forced_model: None,
+            pending_sub_agents: Vec::new(),
         }
     }
 
@@ -50,6 +49,10 @@ impl OrchActor {
                 cmd = self.cmd_rx.recv() => match cmd {
                     Some(OrchCmd::UserInput { input, done }) => {
                         self.handle_user_input(input).await;
+
+                        // 等待本轮所有子代理完成（同步阻塞，取最长时间）
+                        self.wait_pending_sub_agents().await;
+
                         let _ = done.send(());
                     }
                     Some(OrchCmd::SetModel(model)) => {
@@ -90,7 +93,12 @@ impl OrchActor {
                         let _ = done.send(());
                     }
                     Some(OrchCmd::SubAgentResult(report)) => {
-                        self.handle_sub_agent_result(report).await;
+                        // 已通过 wait_pending_sub_agents 同步等待，这里只记录日志
+                        self.ctx.log_event(serde_json::json!({
+                            "type":"sub_agent_result_ignored",
+                            "session_id": &report.session_id,
+                            "status": &report.status,
+                        }));
                     }
                     None => break,
                 },
@@ -110,36 +118,83 @@ impl OrchActor {
         Ok(())
     }
 
-    /// 根据信念度追加提示词。返回 (input, should_abort)
-    /// 子代理结果跳过注入（input 以 "[sub-agent" 开头）
-    fn maybe_inject(&mut self, input: String) -> (String, bool) {
-        if input.starts_with("[sub-agent") {
-            return (input, false);
+    /// 同步等待本轮所有子代理完成，批量注入结果
+    async fn wait_pending_sub_agents(&mut self) {
+        if self.pending_sub_agents.is_empty() {
+            return;
         }
-        let b = self.belief.belief();
-        let decision = self.decision_engine.decide(b, &self.belief.recent_errors);
-        match decision {
-            Decision::None => (input, false),
-            Decision::Inject(msg) => {
-                self.ctx.display.render_info(&format!("Injecting hint (belief {:.2})", b));
-                (format!("{input}\n\n{msg}"), false)
+
+        let mut reports = Vec::new();
+        let max_wait = std::time::Duration::from_secs(120);
+        let deadline = tokio::time::Instant::now() + max_wait;
+
+        for rx in self.pending_sub_agents.drain(..) {
+            let timeout = deadline - tokio::time::Instant::now();
+            if timeout.is_zero() {
+                self.ctx.display.render_error("Sub-agent wait timeout, discarding remaining.");
+                break;
             }
-            Decision::Abort => {
-                self.ctx.display.render_error(&format!(
-                    "DecisionEngine: aborting (belief {:.2}). Requesting human intervention.", b
-                ));
-                (input, true)
+            match tokio::time::timeout(timeout, rx).await {
+                Ok(Ok(report)) => {
+                    reports.push(report);
+                }
+                _ => {
+                    self.ctx.display.render_error("Sub-agent wait timeout.");
+                }
             }
         }
+
+        if reports.is_empty() {
+            return;
+        }
+
+        // 批量注入: 把所有子代理结果合并成一条用户消息
+        let mut context = String::new();
+        for (i, report) in reports.iter().enumerate() {
+            if i > 0 { context.push('\n'); }
+            context.push_str(&format!(
+                "[sub-agent {}] {} (in={}, out={})\nThinking: {}\nText: {}",
+                report.session_id, report.status,
+                report.usage.total_input_tokens, report.usage.total_output_tokens,
+                report.thinking, report.text
+            ));
+            // 显示状态
+            if report.status == "ok" {
+                self.ctx.display.render_sub_agent_status(
+                    &report.session_id, "ok",
+                    report.usage.total_input_tokens, report.usage.total_output_tokens,
+                );
+            } else {
+                self.ctx.display.render_error(&format!("[sub-agent {}] failed", report.session_id));
+            }
+            // 显示子代理的 thinking 和 text 摘要
+            if !report.thinking.is_empty() {
+                let trimmed: String = report.thinking.chars().take(120).collect();
+                self.ctx.display.render_info(&trimmed);
+            }
+            if !report.text.is_empty() {
+                let trimmed: String = report.text.chars().take(120).collect();
+                self.ctx.display.render_info(&trimmed);
+            }
+            if !report.thinking.is_empty() || !report.text.is_empty() {
+                self.ctx.stats.record_sub_agent(
+                    report.usage.agent_request_count,
+                    report.usage.total_input_tokens,
+                    report.usage.total_output_tokens,
+                    report.usage.total_cache_read_tokens,
+                    report.usage.total_cache_creation_tokens,
+                ).await;
+            }
+        }
+
+        // 一次性喂入 LLM（belief 保持上一轮的，不清空）
+        self.ctx.log_event(serde_json::json!({"type":"sub_agent_batch","count":reports.len()}));
+        self.handle_user_input(context).await;
     }
 
     async fn handle_user_input(&mut self, input: String) {
-        // 先检查上一轮的信念（决定是否注入/中止），再重置本轮的
-        let (input, should_abort) = self.maybe_inject(input);
-        if should_abort {
-            return;
-        }
         self.belief.reset();
+        self.refresh_title().await;
         let prepared = self.prepare_turn().await;
         let (model, _api_url, mut executor) = match prepared {
             Ok(v) => v,
@@ -197,8 +252,9 @@ impl OrchActor {
                     match self.sub_pool.launch(
                         self.ctx.clone(), prompt.clone(), description.clone(), fork, session_id.clone(),
                     ).await {
-                        Ok(_) => {
+                        Ok((_, rx)) => {
                             self.ctx.display.render_sub_agent_status(&session_id, "launched", 0, 0);
+                            self.pending_sub_agents.push(rx);
                         }
                         Err(e) => {
                             self.ctx.display.render_error(&format!("SubAgent launch failed: {e}"));
@@ -211,7 +267,6 @@ impl OrchActor {
                 TurnEffect::PlanConfirmed => {
                     self.ctx.display.render_info("Plan confirmed.");
                 }
-                TurnEffect::NeedsPro => {} // 已移除自动模型切换，仅日志
             }
         }
 
@@ -274,58 +329,6 @@ impl OrchActor {
         };
         let model_label = crate::config::resolve_model_label(&self.ctx.config.model);
         self.ctx.display.render_title_update(model_label, &snapshot);
-    }
-
-    async fn handle_sub_agent_result(&mut self, report: SubAgentReport) {
-        self.ctx.stats.record_sub_agent(
-            report.usage.agent_request_count,
-            report.usage.total_input_tokens,
-            report.usage.total_output_tokens,
-            report.usage.total_cache_read_tokens,
-            report.usage.total_cache_creation_tokens,
-        ).await;
-
-        self.ctx.log_event(serde_json::json!({
-            "type":"sub_agent_end",
-            "session_id": &report.session_id,
-            "timestamp": chrono_now(),
-            "status": &report.status,
-        }));
-        self.ctx.log_event(serde_json::json!({
-            "type":"usage",
-            "input_tokens": report.usage.total_input_tokens,
-            "output_tokens": report.usage.total_output_tokens,
-            "cache_read_input_tokens": report.usage.total_cache_read_tokens,
-            "cache_creation_input_tokens": report.usage.total_cache_creation_tokens,
-            "kind":"sub_agent",
-            "sub_session_id": &report.session_id,
-        }));
-
-        if report.status == "ok" {
-            self.ctx.display.render_sub_agent_status(
-                &report.session_id, "ok",
-                report.usage.total_input_tokens,
-                report.usage.total_output_tokens,
-            );
-        } else {
-            self.ctx.display.render_error(&format!("[sub-agent {}] failed", report.session_id));
-        }
-
-        if !report.thinking.is_empty() {
-            self.ctx.display.render_info(&truncate_str(&report.thinking, 120));
-        }
-        if !report.text.is_empty() {
-            self.ctx.display.render_info(&truncate_str(&report.text, 120));
-        }
-
-        let context = format!(
-            "[sub-agent {}] {} (in={}, out={})\nThinking: {}\nText: {}",
-            report.session_id, report.status,
-            report.usage.total_input_tokens, report.usage.total_output_tokens,
-            report.thinking, report.text
-        );
-
-        self.handle_user_input(context).await;
     }
 
     async fn handle_model_command(&mut self, model: &str) {
