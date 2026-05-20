@@ -100,7 +100,20 @@ async fn run(args: Vec<String>) -> Result<()> {
 
     let cancel = CancellationToken::new();
     let is_stream_json = cfg.output_format == dscode::config::OutputFormat::StreamJson;
-    let display: Arc<dyn Display> = Arc::new(TerminalDisplay::new(is_interactive, is_stream_json));
+
+    // TUI channels (if tui_mode). Created before display so signal_tx is available.
+    let tui_tx = if cfg.tui_mode {
+        let (signal_tx, signal_rx) = std::sync::mpsc::channel::<dscode::tui::TuiSignal>();
+        Some((signal_tx, signal_rx))
+    } else {
+        None
+    };
+
+    let display: Arc<dyn Display> = if let Some((ref tx, ..)) = tui_tx {
+        Arc::new(dscode::tui::TuiDisplay::new(tx.clone())) as Arc<dyn Display>
+    } else {
+        Arc::new(TerminalDisplay::new(is_interactive, is_stream_json))
+    };
 
     let ctx = Arc::new(AgentSharedContext {
         config: cfg.clone(),
@@ -146,7 +159,13 @@ async fn run(args: Vec<String>) -> Result<()> {
         ctx.log_event(serde_json::json!({"type":"session_start","session_id":sid}));
     }
 
-    if is_interactive {
+    if cfg.tui_mode {
+        if let Some((_, signal_rx)) = tui_tx {
+            if let Err(e) = dscode::tui::run_tui(signal_rx, cmd_tx.clone(), &spaths.events) {
+                eprintln!("TUI error: {e}");
+            }
+        }
+    } else if is_interactive {
         display.render_info("dscode interactive mode (type 'exit' or Ctrl+D to quit)");
         if !new_session {
             replay_last_turns(&spaths.events);
@@ -447,6 +466,7 @@ fn print_usage() {
     println!("  --list-skills           List built-in skills");
     println!("  -v, --verbose           Verbose mode");
     println!("  -i, --interactive       Interactive mode (REPL)");
+    println!("  --tui                   TUI mode (alternate screen with status bar)");
     println!("  -h, --help              Show this help");
     println!();
     println!("Environment:");

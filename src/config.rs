@@ -89,6 +89,7 @@ pub struct Config {
     pub file_write_max_bytes: usize,
     pub output_format: OutputFormat,
     pub verbose: bool,
+    pub tui_mode: bool,
     pub api_key: String,
     pub base_url: String,
     pub prompt: String,
@@ -113,6 +114,7 @@ impl Default for Config {
             file_write_max_bytes: 1_048_576,
             output_format: OutputFormat::Human,
             verbose: false,
+            tui_mode: false,
             api_key: String::new(),
             base_url: String::new(),
             prompt: String::new(),
@@ -207,6 +209,10 @@ pub fn parse_args(args: Vec<String>) -> Result<Config> {
             }
             "-v" | "--verbose" => {
                 cfg.verbose = true;
+                i += 1;
+            }
+            "--tui" => {
+                cfg.tui_mode = true;
                 i += 1;
             }
             "-i" | "--interactive" => {

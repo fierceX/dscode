@@ -19,6 +19,7 @@ pub mod guard;
 
 pub mod agent;
 pub mod ui;
+pub mod tui;
 pub mod util;
 
 #[cfg(test)]
