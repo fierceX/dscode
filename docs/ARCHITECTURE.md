@@ -2,269 +2,277 @@
 
 ## 项目定位
 
-dscode 是一个 Rust 实现的轻量 agent 内核，专为 DeepSeek 优化。目标：
-- 可在终端独立运行
-- 可被其他程序嵌入和编排的单二进制
-- Session 为一等公民，JSONL 持久化
+dscode 是一个 Rust 实现的轻量 AI coding agent，专为 DeepSeek 优化。单二进制，零运行时依赖。
+
+目标：
+- 可在终端独立运行，也可嵌入其他程序
+- Session 为一等公民，JSONL 持久化，支持恢复和重放
 - Cache-Aligned 上下文压缩，最大化 DeepSeek prefix-cache 命中率
+
+---
 
 ## 核心原则
 
-- **单 agent、单进程主循环**
-- **机器协议优先** — stream-json 输出结构化事件
-- **Session 为一等公民** — 持久化、恢复、重放
-- **Context budget 是硬约束** — 自适应三级压缩保持上下文在窗口内
+- **单 agent、单进程主循环** — 无分布式依赖，无守护进程
+- **机器协议优先** — `--print` 模式输出 ndjson 事件流，方便嵌入和编排
+- **Session 持久化** — JSONL 格式，天然追加友好，崩溃安全
+- **Context budget 是硬约束** — 自适应三级压缩，持续保持上下文在窗口内
 - **工具边界可预测** — 每个工具的执行时间、输出大小、副作用明确
-- **信念驱动干预** — 工具执行质量通过拉普拉斯平滑计算信念度 B ∈ [0,1]，低信念时自动注入提示词或中止
+- **信念驱动干预** — 工具执行质量通过贝叶斯推断计算信念度，低信念时自动干预
+
+---
 
 ## 运行时分层
 
 ```
-                    main.rs
-         parse_args → apply_provider_defaults
-         → init_session → new_orchestrator
-               │
-       ┌───────┴────────┐
-       ▼                ▼
-  Interactive       Single/Stdin
-  (rustyline REPL)  (prompt|pipe)
-       │                │
-       └───────┬────────┘
-               ▼
-        ┌──────────────────────┐
-        │   OrchActor          │
-        │  ┌──────────────────┐│
-        │  │ SignalCollector  ││
-        │  │ → ToolFailed    ││
-        │  │ → ToolError      ││
-        │  │ → EditLoop       ││
-        │  └──────────────────┘│
-        │  ┌──────────────────┐│
-        │  │ BeliefTracker    ││
-        │  │ Laplace + window ││
-        │  └──────────────────┘│
-        │  ┌──────────────────┐│
-        │  │ DecisionEngine   ││
-        │  │ → Inject/Abort   ││
-        │  └──────────────────┘│
-        │  dispatches via      │
-        │  TurnExecutor        │
-        └────────┬─────────────┘
-                 │
-        ┌────────┴─────────────┐
-        │  TurnExecutor        │
-        │                      │
-        │  1. store.add_user   │
-        │  2. ensure_prefix    │
-        │     (Immutable)      │
-        │  3. compact check    │
-        │     (same-turn       │
-        │      guard)          │
-        │  4. LLM stream       │
-        │  5. Scavenge         │
-        │     (DSML/JSON       │
-        │      recovery)       │
-        │  6. Persist          │
-        │  7. ToolRunner       │
-        │     (Truncation +    │
-        │      StormBreaker)   │
-        │     → SignalCollect  │
-        │     → BeliefTracker  │
-        │  8. Decide           │
-        └──────────────────────┘
+main.rs
+  │  CLI 参数解析 → 配置合并（CLI > .dscoderc > 环境变量 > 默认值）
+  │  → Session 初始化 → 启动 Orchestrator
+  ▼
+┌────── Orchestrator 层 ──────────────────┐
+│ agent/orchestrator.rs                   │
+│  主循环：持有全局上下文、信念追踪器、   │
+│  决策引擎，调度 TurnExecutor 执行每轮   │
+└─────────────────────────────────────────┘
+         │
+┌────── Turn 执行层 ──────────────────────┐
+│ agent/turn.rs                           │
+│  1. 上下文压缩检查（同轮最多一次）      │
+│  2. LLM 流式请求（通过 LLM 层）         │
+│  3. Scavenge 回收（修复遗漏调用）       │
+│  4. 持久化 assistant 消息               │
+│  5. 工具执行（通过工具层）              │
+│  6. 决策（继续/停止/中止）              │
+└─────────────────────────────────────────┘
+         │
+┌────── LLM 通信层 ───────────────────────┐
+│ llm/client.rs       HTTP 客户端 + 重试  │
+│ llm/transport.rs    API 请求体构造      │
+│ sse/openai.rs       SSE 增量解析        │
+└─────────────────────────────────────────┘
+         │
+┌────── 工具执行层 ───────────────────────┐
+│ tools/runner.rs     分发 + 截断修复     │
+│ tools/file.rs       Read/Write/Edit     │
+│ tools/bash.rs       Bash 执行           │
+│ tools/web.rs        WebSearch/Fetch     │
+│ tools/search.rs     Grep/Glob           │
+└─────────────────────────────────────────┘
+         │
+┌────── 信号与防护层 ─────────────────────┐
+│ guard/collector.rs  信号采集            │
+│ guard/storm.rs      重复调用抑制        │
+│ agent/belief.rs     信念度计算          │
+│ agent/decision.rs   决策引擎            │
+│ safety.rs           命令安全过滤        │
+└─────────────────────────────────────────┘
+         │
+┌────── 持久化层 ─────────────────────────┐
+│ session/store.rs    JSONL 存储          │
+│ session/stats.rs    Token 统计          │
+│ session/compaction  三级上下文压缩      │
+│ session/prefix      缓存管理            │
+└─────────────────────────────────────────┘
+         │
+┌────── 终端 UI 层 ───────────────────────┐
+│ ui/mod.rs     Display trait + 统计结构  │
+│ ui/engine.rs  TerminalDisplay（REPL）   │
+│ tui/mod.rs    TuiDisplay + TUI 框架     │
+│ ui/replay.rs  Session 重放渲染          │
+└─────────────────────────────────────────┘
 ```
+
+---
 
 ## 模块职责
 
-| 模块 | 文件 | 职责 |
-|------|------|------|
-| **main** | `main.rs` | CLI 参数解析 → Session → 启动 Orchestrator |
-| **config** | `config.rs` | 配置结构体、CLI 参数、环境变量合并 |
-| **context** | `context.rs` | AgentSharedContext（全局） + ToolContext（工具层） |
-| **agent/orchestrator** | `agent/orchestrator.rs` | 主循环，持有 BeliefTracker + DecisionEngine |
-| **agent/turn** | `agent/turn.rs` | 单轮执行器：LLM 流 → 工具 → 决策 |
-| **agent/belief** | `agent/belief.rs` | BeliefTracker：拉普拉斯平滑 + 滑动窗口 |
-| **agent/decision** | `agent/decision.rs` | DecisionEngine：阈值判断 → Inject/Abort |
-| **agent/sub_pool** | `agent/sub_pool.rs` | 子代理并发池，Semaphore 限流 |
-| **agent/sub_executor** | `agent/sub_executor.rs` | 子代理独立上下文执行 |
-| **guard/collector** | `guard/collector.rs` | SignalCollector：ToolFailed/ToolError/EditLoop |
-| **guard/storm** | `guard/storm.rs` | StormBreaker：重复调用抑制 |
-| **session/store** | `session/store.rs` | ConversationStore：JSONL 持久化 |
-| **session/stats** | `session/stats.rs` | Token 用量统计 |
-| **session/compaction** | `session/compaction.rs` | 上下文压缩引擎 + CompactionTier |
-| **session/prefix** | `session/prefix.rs` | ImmutablePrefix：缓存稳定性保障 |
-| **session/paths** | `session/paths.rs` | Session 路径计算 |
-| **session/init** | `session/init.rs` | 共享会话初始化（main + sub 共用） |
-| **llm/client** | `llm/client.rs` | HTTP 客户端 + 重试 + SSE 流 |
-| **llm/transport** | `llm/transport.rs` | OpenAI API 请求构造 |
-| **sse/openai** | `sse/openai.rs` | SSE 流解析 |
-| **tools/runner** | `tools/runner.rs` | 工具分发器 + StormBreaker + Truncation |
-| **repair/scavenge** | `repair/scavenge.rs` | DSML/XML/JSON 回收 + 截断修复 |
-| **errors** | `errors.rs` | 错误分类 |
-| **protocol** | `protocol.rs` | Event enum |
-| **prompt** | `prompt.rs` | System prompt 构建器 |
-| **ui/engine** | `ui/engine.rs` | 终端渲染 + 标题栏 |
-| **ui/replay** | `ui/replay.rs` | Session 重放 |
+### 入口与基础
 
-## 核心数据流 — 信号链路
-
-```
-工具执行完毕 (tools/runner.rs)
-     │
-SignalCollector.collect(name, output)
-     ├── ToolFailed — 确定性失败 (exit_code≠0 / "Error:"前缀, 统一 1.0)
-     ├── ToolError   — regex 匹配 (severity 0.3~0.9)
-     └── EditLoop    — 序列检测 (W=6, severity 0.4~0.9)
-     │
-     ▼
-TurnExecutor 每工具调用后调用 belief.observe(signals)
-     ├── Observation.from_signals: 多信号取 max(severity)
-     ├── 滑动窗口 (默认 16): 满则 pop 最旧
-     └── α = 1 + Σ success, β = 1 + Σ failure
-     │
-     ▼
-BeliefTracker.belief() = α / (α + β) ∈ [0, 1]
-     │
-     ▼
-DecisionEngine.decide(B, errors)
-     ├── B ≥ 0.7 → None
-     ├── 0.3 ≤ B < 0.7 → Inject(含具体错误详情，引擎内部激活冷却)
-     └── B < 0.3 → Abort（绕过冷却）
-```
-
-### 冷却机制
-
-`DecisionEngine` 内部维护冷却计数器。注入后自动跳过接下来的 3 次 `decide()` 调用，确保不会每次工具循环都重复注入。冷却由引擎自主管理，turn.rs 无感知。
-
-| 事件 | 行为 |
+| 文件 | 职责 |
 |------|------|
-| Inject 发生 | `cooldown_remaining = 3` |
-| 冷却期内再次调用 | 递减计数器，跳过注入 |
-| B < 0.30 | 绕过冷却，直接 Abort |
-| 新用户输入 | `engine.reset()` 清零 |
+| `main.rs` | CLI 入口：参数解析 → 配置合并 → Session 初始化 → 启动 Orchestrator 或 TUI |
+| `config.rs` | Config 结构体、parse_args()、apply_config_file()、apply_provider_defaults()、size 解析 |
+| `context.rs` | AgentSharedContext（全局共享状态）+ ToolContext（工具执行上下文） |
+| `assets.rs` | 嵌入的 tools.json 定义、内置 skill 列表 |
+| `cancel.rs` | CancellationToken 父子传播 |
+| `safety.rs` | 危险命令黑名单（rm -rf /、sudo、shutdown 等） |
+| `util.rs` | 通用工具函数（truncate_str 等） |
+| `errors.rs` | ErrorCategory 分类（Network/Auth/RateLimit/Parse/Tool/Internal） |
+| `protocol.rs` | Event enum 定义 |
 
-### 信念度语义
+### Agent 核心
 
-| B 值 | 含义 |
+| 文件 | 职责 |
 |------|------|
-| 0.75 | 初始状态（信任先验 α=3） |
-| > 0.7 | 🟢 顺利 |
-| < 0.5 | 🟡 偶有错误 |
-| < 0.3 | 🔴 严重，需中止 |
+| `agent/orchestrator.rs` | 主循环：接收用户输入 → 创建 TurnExecutor → 处理 TurnEffect（子代理/计划变更） |
+| `agent/turn.rs` | 单轮执行器：LLM 流 → 工具 → 决策，内循环（tool_use 循环） |
+| `agent/belief.rs` | BeliefTracker：信号合并、拉普拉斯平滑、滑动窗口 |
+| `agent/decision.rs` | DecisionEngine：阈值判断、注入格式化、冷却计数器管理 |
+| `agent/sub_pool.rs` | 子代理并发池（Semaphore 限流） |
+| `agent/sub_executor.rs` | 子代理独立上下文创建、fork 模式、结果收集 |
 
-### 提示词注入（任务循环内）
+### LLM 通信
 
-注入发生在 `turn.rs::execute()` 的循环内，工具执行完成后、下一轮 LLM 调用之前。`DecisionEngine` 由 TurnExecutor 持久持有，内部管理冷却计数器：
+| 文件 | 职责 |
+|------|------|
+| `llm/client.rs` | HTTP 流式客户端 + 指数退避重试 + 模型名解析 |
+| `llm/transport.rs` | OpenAI chat/completions 请求体构造（含缓存控制标记） |
+| `llm/mock.rs` | Mock LLM 客户端（测试用） |
+| `sse/openai.rs` | SSE 增量解析器：跨 chunk 合并 tool_call、提取 thinking/usage/stop_reason |
+| `sse/toolcall.rs` | SSE 中 tool_call 字段提取 |
 
-```
-Phase 3: 工具执行 → 信号 → BeliefTracker.observe()
-Phase 4: stop = "tool_use"
-  ├─ DecisionEngine.decide(belief, errors)
-  │   ├─ 引擎内部检查冷却 → 跳过注入  ← 冷却期内不注入
-  │   ├─ Inject → store.add_user("[System note: ...]")  ← 写入对话存储 + 激活冷却
-  │   └─ Abort  → 返回 Failed，中断本轮（绕过冷却）
-  └─ continue → 下一轮 LLM: messages = store.lines()（包含注入消息）
-```
+### 工具系统
 
-注入消息作为一条独立的 User 消息写入对话存储，LLM 在下一轮调用时自然看到。不修改 system prompt（保护前缀缓存），也不追加到用户输入末尾。
+| 文件 | 职责 |
+|------|------|
+| `tools/runner.rs` | 批量分发：StormBreaker 检查 → Truncation 修复 → execute_one_sync |
+| `tools/file.rs` | Read（offset/limit）、Write、Edit（diff 格式）、Glob、Grep |
+| `tools/bash.rs` | Bash 命令执行：超时控制、输出截断、ANSI 过滤、安全校验 |
+| `tools/web.rs` | WebSearch（Tavily API）+ WebFetch（HTTP GET） |
+| `tools/search.rs` | 搜索工具辅助函数 |
 
-## 核心数据流 — 单轮执行
+### 信号与防护
+
+| 文件 | 职责 |
+|------|------|
+| `guard/collector.rs` | SignalCollector：exit_code 检测 + regex 错误匹配 + EditLoop 序列检测 |
+| `guard/storm.rs` | StormBreaker：滑动窗口 (tool, args) 重复检测与抑制 |
+
+### Session 与持久化
+
+| 文件 | 职责 |
+|------|------|
+| `session/store.rs` | ConversationStore：JSONL 追加、延迟加载缓存、trim 截断 |
+| `session/stats.rs` | Token 用量统计 + 费用估算 + JSON 持久化 |
+| `session/compaction.rs` | 三级压缩引擎 + turn 对齐截断 + 摘要生成 |
+| `session/prefix.rs` | ImmutablePrefix：system prompt + tools 缓存 + fingerprint 校验 |
+| `session/paths.rs` | Session 目录路径计算（project_key 安全转义） |
+| `session/init.rs` | 共享 Session 初始化（主进程 + 子代理共用） |
+
+### 终端 UI
+
+| 文件 | 职责 |
+|------|------|
+| `ui/mod.rs` | Display trait 定义 + StatsSnapshot（信念度/tokens/费用统计结构） |
+| `ui/engine.rs` | TerminalDisplay：REPL 模式同步渲染器（stderr 输出 + ANSI 标题栏） |
+| `tui/mod.rs` | TuiDisplay + TUI 事件循环：ratatui 全屏界面（状态栏、消息列表、输入区） |
+| `ui/replay.rs` | Session 历史事件重放渲染 |
+
+### 维修
+
+| 文件 | 职责 |
+|------|------|
+| `repair/scavenge.rs` | DSML/XML/JSON/bracket 五种格式工具调用回收 + JSON 截断修复 |
+| `prompt.rs` | System prompt 按序构建器（多个 `<section>` 段） |
+
+---
+
+## 核心数据流
+
+### 单轮执行流程
 
 ```
 用户输入
   │
   ▼
 OrchActor.handle_user_input()
-  ├── maybe_inject()           ← 检查上一轮信念，决定注入/中止
-  ├── belief.reset()           ← 新轮开始
-  ├── prepare_turn()           ← 解析模型，创建 LLM 客户端
+  ├── maybe_inject()         ← 检查上一轮信念
+  ├── belief.reset()         ← 新轮开始
+  ├── prepare_turn()         ← 创建 LLM 客户端
   │
   ▼
 TurnExecutor::execute(belief)
   │
-  ├── reset_storm()
-  ├── store.add_user(input)
-  ├── ensure_prefix()
+  ├── reset_storm()          ← 重置重复检测窗口
+  ├── store.add_user(input)  ← 持久化用户消息
+  ├── ensure_prefix()        ← 构建/复用 system prompt 缓存
+  │
   ├── while turn < max_turns:
-  │   ├── compact check
-  │   ├── preflight emergency
-  │   ├── LLM stream
-  │   │   ├── Thinking/Text
-  │   │   ├── ToolCall
-  │   │   └── Stop (tool_use/end_turn)
-  │   ├── Scavenge
+  │   ├── 上下文压缩检查（compact_pct ≥ 85%）
+  │   ├── Preflight 紧急压缩（>95% 时触发）
+  │   ├── LLM 流式请求（SSE → Event）
+  │   ├── Scavenge 回收（修复遗漏调用）
   │   ├── store.add_assistant()
   │   ├── ToolRunner::execute_all()
-  │   │   ├── StormBreaker
-  │   │   ├── Truncation repair
-  │   │   └── execute_one
-  │   ├── 每工具调用后:
-  │   │   ├── SignalCollect.collect(name, output)
-  │   │   └── belief.observe(signals)   ← 实时更新信念
+  │   │   ├── StormBreaker 检查
+  │   │   ├── Truncation 修复
+  │   │   └── 每工具调用: signal → belief
   │   ├── store.add_tool_results()
-  │   └── Decide (continue/stop)
+  │   └── DecisionEngine.decide()
+  │       ├── B ≥ 0.70 → continue
+  │       ├── B < 0.70 → Inject + 冷却
+  │       ├── B < 0.30 → Abort
+  │       └── stop == "tool_use" → 继续循环
   │
-  └── 返回 TurnDecision + TurnEffect
+  └── 返回 TurnDecision
 ```
+
+### 信号系统流程
+
+```
+工具执行完毕 → SignalCollector → BeliefTracker → DecisionEngine
+                    │                  │               │
+              ToolFailed         拉普拉斯平滑      阈值判断
+              ToolError          滑动窗口 W=16    Inject/Abort
+              EditLoop           B ∈ [0, 1]      内部冷却 3 轮
+```
+
+信号系统完整设计见 [`设计哲学-信号系统.md`](设计哲学-信号系统.md)。
+
+---
 
 ## 上下文压缩
 
 ```
-should_compact() 检查 context_tokens / max_context_tokens ≥ compact_pct
+should_compact() 检查 context_tokens / max_context_tokens ≥ compact_pct (默认 85%)
   │
   ├── CompactionTier::from_ratio()
-  │   ├── Conservative  (<70%)   keep=20%
-  │   ├── Aggressive    (70-80%)  keep=10%
-  │   ├── ForceSummary  (80-95%)  keep=5%
-  │   └── Emergency     (≥95%)    keep=1-5 lines
+  │   ├── Conservative  (<70%)   keep=20%   ← 仅通过更低 compact_pct 可达
+  │   ├── Aggressive    (70-80%)  keep=10%   ← 仅通过更低 compact_pct 可达
+  │   ├── ForceSummary  (80-95%)  keep=5%    ← 默认首次触发区间
+  │   └── Emergency     (≥95%)    keep=1-5   ← 紧急压缩
   │
-  ├── compact_turn_keep()         ← turn 对齐截断
-  ├── run_summary_call()          ← LLM 生成摘要
-  ├── store.trim_keep_last()
-  └── invalidate_prefix()
+  ├── compact_turn_keep()    ← 按 user 消息边界 turn 对齐截断
+  ├── run_summary_call()     ← LLM 生成摘要（写入 summary.txt）
+  ├── store.trim_keep_last() ← 保留末尾轮次
+  └── invalidate_prefix()    ← 使 system prompt 缓存失效
 ```
+
+**防护**：同轮最多压缩一次（`compacted_this_turn` 标记）；压缩收益 <10% 时跳过；Preflight 在发送 LLM 请求前做紧急压缩。
+
+---
 
 ## Session 结构
 
 ```
 ~/.dscode/projects/<project_key>/<session_id>/
 ├── conversation.jsonl    ← 对话消息（JSONL 逐行追加）
-├── events.jsonl          ← 事件日志
-├── summary.txt           ← 压缩后的上下文快照
+├── events.jsonl          ← 结构化事件日志
+├── summary.txt           ← 压缩后的上下文摘要
 ├── plan.md / plan.draft  ← 计划文件
 └── stats.json            ← Token 用量统计
 ```
 
-## 信念度实时展示
+`project_key` 由工作目录路径安全转义生成，确保项目隔离。`--continue` 模式自动选择最近 session。
 
-信念度在每次工具调用后实时更新，通过两种渠道展示：
+---
 
-### TUI 状态栏
+## 配置系统
 
-```
-flash B:0.73 T:12 R:45 I:200K(50%) O:20K C:400K(40%) ¥0.12
-```
-
-- 由 `render_status()` 在 TUI Frame 中渲染
-- `B:0.73` 为当前信念度，更新于 `render_title_update()` 调用
-
-### 终端标题栏
-
-非 TUI 模式下通过 ANSI escape `\x1b]0;...\x07` 设置终端窗口标题，格式与 TUI 状态栏一致。
-
-## 模型切换
-
-手动切换（无自动模型选择）：
+### 优先级
 
 ```
-/flash — 切回 flash（重置信念）
-/pro   — 强制 pro
+CLI 参数 > 项目 .dscoderc > 用户 ~/.dscoderc > 环境变量 > 代码默认值
 ```
 
-## 配置优先级
+### 关键环境变量
 
-```
-CLI 参数 > 环境变量 > 代码默认值
-```
-
-关键环境变量：`DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL`, `TOOL_RESULT_MAX_BYTES`, `FILE_WRITE_MAX_BYTES`, `CONTEXT_COMPACT_PCT`, `LOG_EVENTS`
+| 变量 | 说明 |
+|------|------|
+| `DEEPSEEK_API_KEY` | API 密钥 |
+| `DEEPSEEK_BASE_URL` | API 端点（默认 `https://api.deepseek.com/v1`） |
+| `TOOL_RESULT_MAX_BYTES` | 工具结果截断阈值（默认 100000） |
+| `FILE_WRITE_MAX_BYTES` | 文件写入上限（默认 1048576） |
+| `CONTEXT_COMPACT_PCT` | 压缩触发百分比（默认 85） |
+| `LOG_EVENTS` | 事件日志开关 |
+| `DSCODE_HOME` | 数据目录（默认 `~/.dscode`） |

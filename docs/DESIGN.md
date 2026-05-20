@@ -291,14 +291,22 @@ StormDecision::Suppress(reason) => {
 
 ## 主题五：信号驱动的信念系统
 
-### Three-Phase 采集
+### 设计思想
+
+信号系统的设计根植于两个学科。从工程控制论出发，它构建了一个负反馈回路：信念度是系统的测量值，注入/中止是控制动作，LLM 行为是被控对象。信念度偏低时施加修正，回升后撤销干预——修正力始终与偏差反向。冷却机制对应控制论中的抗积分饱和（anti-windup），防止执行器因重复提示而过早饱和。
+
+从贝叶斯统计出发，信念度不是拍脑袋的评分，而是 Beta-Binomial 模型的均值。α=3, β=1 的信任先验编码了"模型大概率能正确使用工具"的初始假设。每次工具调用是一次伯努利试验，多条错误信号取 max 不叠加——因为一次调用只有成功或失败两种真实状态，重复计数违反试验独立性。
+
+两者交汇在置信度加权反馈：贝叶斯推断将离散的间接信号（退出码、错误文本）合成为一个稳定的统计量 B，控制论的回路再用这个 B 做决策。
+
+### 信号采集流程
 
 每次工具执行后，`SignalCollector` 根据工具输出和调用历史采集三类信号：
 
 | 信号 | 检测方式 | 严重度 | 可信度 |
 |------|---------|--------|--------|
-| `NonZeroExit` | 退出码正则匹配 | 0.8~0.9 | 最高（命令自报告失败） |
-| `ToolError` | 输出内容 regex 匹配（Rust 编译错、测试失败等） | 0.3~1.0 | 中等（启发式） |
+| `ToolFailed` | 退出码检测 / `"Error:"` 前缀 | 1.0 | 最高（命令自报告失败） |
+| `ToolError` | 输出内容 regex 匹配（Rust 编译错、测试失败等） | 0.3~0.9 | 中等（启发式） |
 | `EditLoop` | 滑动窗口 W=6 检测编辑-检查循环 | 0.4~0.9 | 高（序列模式） |
 
 **EditLoop 触发条件**：
@@ -385,6 +393,8 @@ Recent errors:
 - Grep(pattern="xxx"): No such file]
 ```
 
+**信念度感知**：系统提示词中包含 `<belief-awareness>` 区块，提前告知模型存在信念度机制和注入触发条件。模型在被注入时能理解上下文，按指引先读后写、逐步验证，而不是继续盲目操作。区块位于 `verification-gate` 之后、`stop-triggers` 之前，纯英文。
+
 ### 错误分类
 
 `src/errors.rs`
@@ -402,13 +412,14 @@ pub enum ErrorCategory {
 
 分类仅用于日志，不驱动任何决策（旧 `is_upgrade_signal`/`upgrade_weight` 已删除）。
 
-### 标题栏信念度
+### 信念度展示
 
-标题栏实时显示信念度（`B:`），每轮结束后更新：
+信念度实时显示在终端界面上：
 
-```
-flash B:0.73 T:12 R:45 I:200K(50%) O:20K C:400K(40%) ¥0.12
-```
+- **TUI 模式**（`--tui`）：状态栏 `flash B:0.73 T:12 R:45 I:200K(50%)...`
+- **REPL/CLI 模式**（`-i` / 单次）：ANSI 标题栏 `\x1b]0;...\x07` 相同格式
+
+两种模式共享同一套统计数据结构（`StatsSnapshot`），每轮工具执行后由 `render_title_update()` 刷新。
 
 ## 主题六：工具执行模型
 
@@ -495,8 +506,6 @@ usage.get("cached_tokens")
     .or_else(|| usage.get("prompt_tokens_details")
         .and_then(|d| d.get("cached_tokens")))
 ```
-
-**NEEDS_PRO 检测**：流式文本中检测 `<<<NEEDS_PRO>>>` 标记，剥离后标记 `needs_pro_detected`，在 flush 时发出 `Event::SelfReport`。
 
 ### usage 事件延迟发出
 
@@ -704,7 +713,6 @@ pub enum Event {
     Usage(UsageEvent),        // Token 用量
     Stop(StopEvent),          // 停止原因
     Error(ErrorEvent),        // 错误
-    SelfReport(SelfReportEvent), // 模型自报告
     Retry(RetryEvent),        // 重试信号
 }
 ```

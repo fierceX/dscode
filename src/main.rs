@@ -472,8 +472,5 @@ fn print_usage() {
     println!("Environment:");
     println!("  DEEPSEEK_API_KEY        DeepSeek API key");
     println!("  DEEPSEEK_BASE_URL       DeepSeek base URL (default: https://api.deepseek.com/v1)");
-    println!("  AUTO_MODEL              Enable auto-model upgrade (true/1)");
-    println!("  SECONDARY_MODEL         Auto-model upgrade target model");
-    println!("  AUTO_SELF_REPORT        Enable NEEDS_PRO self-report upgrade (true/1)");
     println!("  LOG_EVENTS              Enable event logging (default: true, 0/false/no disables)");
 }

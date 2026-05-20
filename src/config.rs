@@ -75,7 +75,6 @@ pub struct DscodeConfigFile {
     pub max_turns: Option<i32>,
     pub max_context: Option<String>,   // supports K/M suffix
     pub tool_timeout: Option<i32>,
-    pub auto_model: Option<bool>,
     pub context_compact_pct: Option<u8>,
     pub log_events: Option<bool>,
 }
@@ -284,9 +283,6 @@ pub fn apply_config_file(cfg: &mut Config) {
         if cfg.tool_timeout_secs == 600 && toml_cfg.tool_timeout.is_some() {
             cfg.tool_timeout_secs = toml_cfg.tool_timeout.unwrap();
         }
-        if toml_cfg.auto_model.is_some() {
-            unsafe { std::env::set_var("AUTO_MODEL", if toml_cfg.auto_model.unwrap() { "true" } else { "false" }); }
-        }
         if toml_cfg.context_compact_pct.is_some() {
             unsafe { std::env::set_var("CONTEXT_COMPACT_PCT", &toml_cfg.context_compact_pct.unwrap().to_string()); }
         }
@@ -448,17 +444,6 @@ tool_timeout = 120
         assert_eq!(parsed.max_tokens.unwrap(), 163840);
         assert_eq!(parsed.max_context.unwrap(), "500K");
         assert_eq!(parsed.tool_timeout.unwrap(), 120);
-    }
-
-    #[test]
-    fn parse_config_file_auto_model_fields() {
-        let toml_str = r#"
-auto_model = true
-context_compact_pct = 70
-"#;
-        let parsed: DscodeConfigFile = toml::from_str(toml_str).unwrap();
-        assert!(parsed.auto_model.unwrap());
-        assert_eq!(parsed.context_compact_pct.unwrap(), 70);
     }
 
     #[test]

@@ -5,22 +5,156 @@
 ```bash
 # 编译
 make build
+# 或
+cargo build --release
 
 # 设置 API Key
 export DEEPSEEK_API_KEY="sk-xxx"
 
 # 单次任务
-./target/release/dscode -m deepseek-v4-flash "scan this project"
+./target/release/dscode -m flash "scan this project"
 
-# 交互式 REPL
-./target/release/dscode -m deepseek-v4-flash -i
+# REPL 交互模式
+./target/release/dscode -m flash -i
 
-# stdin 管道输入
-echo "list the files" | ./target/release/dscode -m deepseek-v4-flash
+# TUI 全屏模式
+./target/release/dscode -m flash --tui
 
 # 继续上次会话
-./target/release/dscode -m deepseek-v4-flash --continue -i
+./target/release/dscode -m flash --continue -i
+
+# stdin 管道输入
+echo "list the files" | ./target/release/dscode -m flash
 ```
+
+---
+
+## 两种终端模式
+
+项目提供两种交互式终端模式，一种非交互 CLI 模式。
+
+### REPL 模式（`-i`）
+
+基于 rustyline 的行编辑器。适合日常编码交互：
+
+```
+dscode interactive mode (type 'exit' or Ctrl+D to quit)
+> scan this project for Rust errors
+[tool] Bash(command="cargo check")
+...
+```
+
+- 输入：rustyline 行编辑（历史、Tab 补全、Ctrl+W/Del）
+- 输出：stderr 渲染（灰色 thinking、黄色 tool call、普通 text）
+- 标题栏：ANSI escape 更新终端窗口标题
+- 历史记录：持久化到 `~/.dscode/history`
+
+### TUI 模式（`--tui`）
+
+基于 ratatui 的全屏终端界面。适合长时间编码会话：
+
+```
+flash B:0.73 T:12 R:45 I:200K(50%) O:20K C:400K(40%) ¥0.12 [idle]
+────────────────────────────────────────────────────────────────
+ 消息列表（历史对话、工具调用、工具结果）
+────────────────────────────────────────────────────────────────
+ > 输入区域（多行输入）
+```
+
+**状态栏字段含义**：
+
+| 字段 | 示例 | 含义 |
+|------|------|------|
+| `flash` | 模型名 | 当前模型 |
+| `B:0.73` | 信念度 | 工具执行可靠性评分（0.0~1.0，0.0 表示未追踪） |
+| `T:12` | 对话轮次 | 当前对话的用户输入轮数 |
+| `R:45` | API 请求 | 累计 LLM API 请求次数 |
+| `I:200K` | 输入 tokens | 总输入 tokens（含缓存读取），括号内为缓存命中率 |
+| `O:20K` | 输出 tokens | 总输出 tokens |
+| `C:400K` | 上下文 | 当前对话上下文 tokens，括号内为上下文使用率 |
+| `¥0.12` | 费用 | 累计费用（按模型单价实时计算） |
+| `[idle]` | 工作状态 | idle / thinking / generating / working |
+
+**B 值含义**：
+
+| B 值 | 含义 |
+|------|------|
+| 0.75 | 初始（信任先验） |
+| > 0.7 | 🟢 顺利 |
+| 0.5~0.7 | 🟡 偶有小错 |
+| 0.3~0.5 | 🟠 频繁出错 |
+| < 0.3 | 🔴 严重 |
+
+### 标题栏（REPL/CLI 模式）
+
+非 TUI 模式下，终端窗口标题显示相同统计信息，通过 ANSI escape `\x1b]0;...\x07` 设置：
+
+```
+flash B:0.73 T:12 R:45 I:200K(50%) O:20K C:400K(40%) ¥0.12
+```
+
+信念度在每次工具调用后实时更新。低于阈值时，系统会在同一次任务循环内的下一轮 LLM 调用前注入提示词或中止任务。
+
+### 非交互 CLI 模式
+
+```bash
+# 单次查询
+./target/release/dscode -m flash "explain this"
+
+# 管道输入
+cat main.rs | ./target/release/dscode -m flash "review"
+
+# ndjson 结构化输出
+./target/release/dscode --print "list files"
+```
+
+prompt 为空且 stdin 是终端时自动进入交互模式。非终端 stdin 时读取 stdin 作为 prompt。
+
+---
+
+## REPL 内置命令
+
+| 命令 | 说明 |
+|------|------|
+| `/flash` | 切换到 flash 模型 |
+| `/pro` | 切换到 pro 模型 |
+| `/compact` | 强制上下文压缩 |
+| `/skills` | 列出所有可用 skill |
+| `/help` | 显示可用的命令列表 |
+| `exit` / `quit` | 退出 |
+| Ctrl+C | 取消当前正在执行的 turn |
+| Ctrl+D | 退出 |
+
+`/flash` 和 `/pro` 命令立即生效，不会发送给 LLM。切换后下一轮 LLM 调用使用新模型。所有其他输入作为普通消息发送给 LLM。
+
+---
+
+## CLI 参数
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `PROMPT` | — | 用户输入（位置参数） |
+| `-m` / `--model` | `flash` | 模型名：`flash` / `pro` / `deepseek-v4-flash` / `deepseek-v4-pro` |
+| `--max-tokens` | `81920` | 每次 LLM 响应的最大 token 数 |
+| `--max-turns` | `40` | 每用户输入的最大 LLM 调用轮数 |
+| `--max-context` | `1000000` | 上下文 token 上限。支持 `k`/`m` 后缀（如 `500K` / `1M`） |
+| `--tool-timeout` | `600` | 工具执行超时（秒） |
+| `--skill NAME` | — | 加载 skill（可重复使用） |
+| `--session [NAME]` | 自动生成 | 命名会话。提供名称可恢复 |
+| `--continue` | — | 恢复最近的 session |
+| `--list-sessions` | — | 列出所有 session |
+| `--list-skills` | — | 列出内置 skill |
+| `-i` / `--interactive` | auto | REPL 交互模式 |
+| `--tui` | — | TUI 全屏模式 |
+| `--print` | — | ndjson 结构化输出（`--output-format stream-json` 别名） |
+| `--output-format FMT` | `human` | 输出格式：`human` / `stream-json` |
+| `--api-key KEY` | env | 覆盖 API Key |
+| `--base-url URL` | 默认端点 | 覆盖 API 端点 |
+| `-v` / `--verbose` | `false` | 详细日志 |
+| `-h` / `--help` | — | 显示帮助 |
+
+---
+
 ## 配置文件
 
 `~/.dscoderc`（用户级）和 `<project>/.dscoderc`（项目级）可选配置。
@@ -28,51 +162,19 @@ echo "list the files" | ./target/release/dscode -m deepseek-v4-flash
 
 ```toml
 # ~/.dscoderc 示例
-api_key = "sk-xxx"                    # API 密钥
+api_key = "sk-xxx"                        # API 密钥
 base_url = "https://api.deepseek.com/v1"  # API 端点
-model = "deepseek-v4-flash"            # 默认模型
-max_tokens = 81920                     # 最大输出 token
-max_turns = 40                         # 最大轮次
-max_context = "1M"                     # 最大上下文（支持 K/M 后缀）
-tool_timeout = 600                     # 工具超时（秒）
-context_compact_pct = 85               # 压缩触发百分比
-log_events = true                      # 事件日志
+model = "flash"                           # 默认模型
+max_tokens = 81920                        # 最大输出 token
+max_turns = 40                            # 最大轮次
+max_context = "1M"                        # 最大上下文（支持 K/M 后缀）
+tool_timeout = 600                        # 工具超时（秒）
+context_compact_pct = 85                  # 压缩触发百分比
+log_events = true                         # 事件日志
 ```
 
 项目级 `.dscoderc` 覆盖用户级，CLI 参数覆盖所有文件设置。
 所有字段可选，未设置的字段使用默认值或环境变量。
-
-完整示例见 `.dscoderc.example`。
-
----
-
-
-
-## CLI 参数
-
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `-m` / `--model` | `deepseek-v4-flash` | 模型名 |
-| `--max-tokens` | `81920` | 最大输出 token 数 |
-| `--tool-timeout` | `600` | 工具执行超时（秒） |
-| `--skill NAME` | — | 加载 skill（可重复） |
-| `--max-turns` | `40` | 最大 agent 轮次 |
-| `--max-context` | `1000000` | 上下文 token 上限。支持 `k`/`m` 后缀 |
-| `--api-key KEY` | env | 覆盖 API Key |
-| `--base-url URL` | `https://api.deepseek.com/v1` | 覆盖 API 端点 |
-| `--output-format FMT` | `human` | 输出格式：`human` / `stream-json` |
-| `--print` | — | `--output-format stream-json` 别名 |
-| `--session [NAME]` | 自动生成 | 命名会话。提供名称可恢复 |
-| `--continue` | — | 恢复最近的 session |
-| `--list-sessions` | — | 列出所有 session |
-| `--list-skills` | — | 列出内置 skill |
-| `-v` / `--verbose` | `false` | 详细日志 |
-| `-i` / `--interactive` | auto | 交互式 REPL |
-| `-h` / `--help` | — | 显示帮助 |
-
-不提供 prompt 参数且 stdin 是终端时自动进入交互模式。
-非终端 stdin 时读取 stdin 作为 prompt。
-
 
 ---
 
@@ -100,7 +202,7 @@ log_events = true                      # 事件日志
 ├── history                    ← 交互式 REPL 历史
 └── projects/<project_key>/
     └── <session_id>/
-        ├── conversation.jsonl ← 对话消息（JSONL）
+        ├── conversation.jsonl ← 对话消息（JSONL 逐行追加）
         ├── events.jsonl       ← 事件日志
         ├── summary.txt        ← 压缩后的上下文快照
         ├── plan.md            ← 确认后的计划
@@ -112,71 +214,19 @@ log_events = true                      # 事件日志
 
 ```bash
 # 命名会话
-dscode -m deepseek-v4-flash --session my-fix "fix the bug"
+dscode -m flash --session my-fix "fix the bug"
 
 # 恢复命名会话（保持上下文）
-dscode -m deepseek-v4-flash --session my-fix -i
+dscode -m flash --session my-fix -i
 
 # 恢复最近会话
-dscode -m deepseek-v4-flash --continue -i
+dscode -m flash --continue -i
 
 # 列出所有
 dscode --list-sessions
 ```
 
-`--continue` 自动选择最近修改的 session，replay 最近 10 轮 LLM 响应。
-
----
-
-## 交互式 REPL
-
-```bash
-dscode -m deepseek-v4-flash -i
-```
-
-prompt 为空且 stdin 是终端时自动进入交互模式。
-
-### 内置命令
-
-| 命令 | 说明 |
-|------|------|
-| `/flash` | 切换到 flash 模型 |
-| `/pro` | 切换到 pro 模型 |
-| `/compact` | 强制上下文压缩 |
-| `/skills` | 列出所有可用 skill |
-| `/help` | 显示可用的命令列表 |
-| `exit` / `quit` | 退出 REPL |
-| Ctrl+C | 取消当前正在执行的 turn |
-| Ctrl+D | 退出 REPL |
-
-`/flash` 和 `/pro` 命令立即生效，不会发送给 LLM。切换后下一轮 LLM 调用使用新模型。所有其他输入作为普通消息发送给 LLM。
-
-### 标题栏
-
-当前活动模型、信念度和实时统计信息显示在终端标题栏：
-
-```
-deepseek-v4-flash B:0.73 T:5 R:12 I:890K(85%) O:12K C:742K(74%) ¥0.42
-│                  │     │  │  │              │        │           │
-│                  │     │  │  │              │        │            └─ 估计成本
-│                  │     │  │  │              │        └── 当前上下文 + 使用率
-│                  │     │  │  │              └─────────── 输出总 token
-│                  │     │  │  └──────────────────────── 输入总 token + 缓存命中率
-│                  │     │  └─────────────────────────── API 请求数
-│                  │     └────────────────────────────── 当前用户轮次
-│                  └──────────────────────────────────── 信念度 B ∈ [0,1]
-└──────────────────────────────────────────────────────── 当前模型名
-```
-
-**B 值含义**：0.75=初始（信任先验） | >0.7=顺利 | <0.5=偶有错误 | <0.3=严重
-
-信念度在每次工具调用后实时更新（标题栏可见）。低于阈值时，系统会在**同一次任务循环内**的下一轮 LLM 调用前注入提示词或中止任务。
-
-### 特性
-
-- `> ` 提示符，rustyline 编辑（Ctrl+W/Del/方向键）
-- 历史持久化到 `~/.dscode/history`
-- 会话结束时打印恢复命令
+`--continue` 自动选择最近修改的 session。恢复时会 replay 最近 10 轮 LLM 响应事件，在交互式终端重新渲染历史对话。
 
 ---
 
@@ -197,7 +247,6 @@ deepseek-v4-flash B:0.73 T:5 R:12 I:890K(85%) O:12K C:742K(74%) ¥0.42
 │    → system prompt 中出现 <current-plan> 段
 ├─ 执行阶段
 │  → LLM 逐步完成任务，更新 TodoWrite
-│  → 每一步完成后可调用 PlanClear
 └─ 计划完成
    → LLM 调用 PlanClear 工具
      → plan.md 清空
@@ -209,32 +258,18 @@ deepseek-v4-flash B:0.73 T:5 R:12 I:890K(85%) O:12K C:742K(74%) ¥0.42
 
 **触发条件**：用户明确确认 plan 后。**非**规划阶段或用户要求修改时。
 
-```
-参数：无
-行为：plan.draft → plan.md + 触发压缩 + 重建 system prompt
-返回："Plan confirmed and locked in."
-```
-
-如果 plan.draft 为空（用户未创建草稿就要求确认），返回错误信息。
+- 参数：无
+- 行为：plan.draft → plan.md + 触发压缩 + 重建 system prompt
+- 返回："Plan confirmed and locked in."
+- 如果 plan.draft 为空（用户未创建草稿就要求确认），返回错误信息
 
 ### PlanClear
 
 **触发条件**：计划所有任务完成后。
 
-```
-参数：无
-行为：清空 plan.md + 触发压缩 + 重建 system prompt
-返回："Plan cleared."
-```
-
-### 系统提示词中的引导
-
-`plan-lifecycle-guidance` 段嵌入在 system prompt 中，指导 LLM 正确使用计划系统：
-
-- 草稿阶段写入 `plan.draft`，确认后才写入 `plan.md`
-- `PlanConfirm` 在用户确认后才调用
-- `PlanClear` 在所有任务完成后调用
-- 计划执行完毕后 system prompt 不再包含 plan section
+- 参数：无
+- 行为：清空 plan.md + 触发压缩 + 重建 system prompt
+- 返回："Plan cleared."
 
 ---
 
@@ -263,9 +298,9 @@ deepseek-v4-flash B:0.73 T:5 R:12 I:890K(85%) O:12K C:742K(74%) ¥0.42
 ### 调优
 
 ```bash
-CONTEXT_COMPACT_PCT=70 dscode -m deepseek-v4-flash -i    # 70% 触发（更频繁）
-CONTEXT_COMPACT_PCT=90 dscode -m deepseek-v4-flash -i    # 90% 触发（更激进）
-dscode -m deepseek-v4-flash --max-context 1M -i          # 1M 上下文窗口
+CONTEXT_COMPACT_PCT=70 dscode -m flash -i          # 70% 触发（更频繁）
+CONTEXT_COMPACT_PCT=90 dscode -m flash -i          # 90% 触发（更激进）
+dscode -m flash --max-context 1M -i                # 1M 上下文窗口
 ```
 
 ---
@@ -276,11 +311,11 @@ dscode -m deepseek-v4-flash --max-context 1M -i          # 1M 上下文窗口
 
 ### Scavenge — 回收
 
-从 LLM 的 `reasoning_content` 和文本回复中回收遗漏的工具调用。支持格式：
+从 LLM 的 `reasoning_content`（思考过程）和文本回复中回收遗漏的工具调用。支持 6 种格式：
 
 | 格式 | 示例 |
 |------|------|
-| DSML invoke（DeepSeek 原生） | `<\|DSML\|invoke name="Read">...<\|DSML\|parameter name="path" string="true">/x<\|DSML\|parameter><\|DSML\|invoke>` |
+| DSML invoke（DeepSeek 原生） | `<\|DSML\|invoke name="Read">...<\|DSML\|invoke>` |
 | XML 包装 | `<tool_call>{"name":"Bash","arguments":{"command":"ls"}}</tool_call>` |
 | Bracket 包装 | `[TOOL_CALL]{"name":"Read"...}[/TOOL_CALL]` |
 | 裸 JSON | `{"name":"Grep","arguments":{"pattern":"foo"}}` |
@@ -293,7 +328,7 @@ dscode -m deepseek-v4-flash --max-context 1M -i          # 1M 上下文窗口
 
 ### StormBreaker — 重复抑制
 
-滑动窗口（size=6）检测 `(工具名, 参数)` 重复。同一对出现 3 次时抑制该调用并返回抑制原因。mutating 工具（Bash/Write/Edit）执行时清空只读条目。
+滑动窗口（size=6）检测 `(工具名, 参数)` 重复。同一对出现 3 次时抑制该调用。mutating 工具（Bash/Write/Edit）执行时清空只读条目，允许 edit→re-read 正常模式。
 
 ---
 
@@ -325,19 +360,18 @@ dscode -m deepseek-v4-flash --max-context 1M -i          # 1M 上下文窗口
 
 ```bash
 # CLI 加载
-dscode -m deepseek-v4-flash --skill debugging
+dscode -m flash --skill debugging -i
 
 # 加载多个
-dscode -m deepseek-v4-flash --skill debugging --skill tdd
+dscode -m flash --skill debugging --skill tdd -i
 
-# 按需加载（由 LLM 的 Skill 工具触发）
-# LLM 从 system prompt 的 skill-index 段中选择 → Skill(name) → 加载 SKILL.md
+# 查看可用技能
+dscode --list-skills
 ```
 
 ### 内置技能（编译时嵌入）
 
-所有 `skills/<name>/SKILL.md` 文件在编译时自动嵌入到二进制中。
-添加新技能只需创建文件，不需要修改 Rust 代码。
+所有 `skills/<name>/SKILL.md` 文件在编译时自动嵌入到二进制中。添加新技能只需创建文件，不需要修改 Rust 代码。
 
 | 技能名 | 描述 | 适用场景 |
 |--------|------|---------|
@@ -367,7 +401,7 @@ dscode -m deepseek-v4-flash --skill debugging --skill tdd
 
 ### 调用方式
 
-LLM 自动调用 SubAgent 工具。
+LLM 自动调用 SubAgent 工具。支持并发执行（最多 8 个并发）。
 
 ### 参数
 
@@ -381,76 +415,42 @@ LLM 自动调用 SubAgent 工具。
 
 | 模式 | 上下文 | 适用 |
 |------|--------|------|
-| 独立（默认，不带 `fork`） | 全新空会话 | 文件调查、搜索、隔离的假设验证 |
+| 独立（默认） | 全新空会话 | 文件调查、搜索、隔离的假设验证 |
 | Fork（`fork=true`） | 继承父会话对话/计划/技能 | 需要父上下文的延续性任务 |
 
-### 行为
+### 结果格式
 
-- 同一轮中多个 SubAgent 调用**并发**执行
-- 结果**异步逐个返回**：收到一个结果时其他仍在运行，只需等待，不要重复启动
-- 返回格式：`[sub-agent <id>] <status> (in=<n>, out=<n>)\nThinking: ...\nText: ...`
-- 失败时（`status=failed`）结果可能为空，不要自动重试
-- Token 用量计入父会话统计
-- 最多 8 个并发
+```
+[sub-agent <id>] <status> (in=<n>, out=<n>)
+Thinking: ...
+Text: ...
+```
+
+失败时（`status=failed`）结果可能为空，不要自动重试。Token 用量计入父会话统计。
+
+---
 
 ## Stream-JSON 输出
 
 ```bash
-dscode -m deepseek-v4-flash --print "explain this"
+dscode -m flash --print "explain this"
 ```
 
-每行一个 JSON：
+每行一个 JSON 事件：
 
 ```json
 {"type":"thinking","content":"Let me analyze..."}
 {"type":"text","content":"Here is the explanation..."}
 {"type":"tool_call","name":"Read","id":"...","input":{"path":"/x"}}
 {"type":"tool_result","tool_use_id":"...","name":"Read","content":"..."}
-{"type":"usage","input_tokens":100,"output_tokens":50,"cache_read_input_tokens":40}
+{"type":"usage","input_tokens":100,"output_tokens":50}
 {"type":"stop","reason":"end_turn"}
 ```
 
 JQ 下游处理：
 
 ```bash
-dscode -m deepseek-v4-flash --print "fix the bug" | jq 'select(.type=="text") | .content'
-```
-
----
-
-## 环境变量完整参考（按来源分类）
-
-### API（`apply_provider_defaults`）
-
-```
-DEEPSEEK_API_KEY      ← 首选
-DEEPSEEK_BASE_URL     ← 首选
-```
-
-### 大小限制（`apply_provider_defaults`）
-
-```
-TOOL_RESULT_MAX_BYTES  ← 默认 100000
-FILE_WRITE_MAX_BYTES   ← 默认 1048576
-```
-
-### 压缩（`compaction.rs`）
-
-```
-CONTEXT_COMPACT_PCT    ← 默认 85
-```
-
-### 调试（`main.rs` + `context.rs`）
-
-```
-LOG_EVENTS             ← 默认 true
-DSCODE_HOME        ← 默认 $HOME
-```
-
-### Web 搜索（`tools/web.rs`）
-
-```
-JINA_API_KEY           ← 无默认（WebSearch/WebFetch 必需）
+dscode -m flash --print "fix the bug" | jq 'select(.type=="text") | .content'
 ```
 
 ---
@@ -462,11 +462,17 @@ JINA_API_KEY           ← 无默认（WebSearch/WebFetch 必需）
 curl -H "Authorization: Bearer $DEEPSEEK_API_KEY" https://api.deepseek.com/v1/models
 
 # verbose 模式
-dscode -m deepseek-v4-flash -v "hello"
+dscode -m flash -v "hello"
 
 # 扩大上下文窗口避免溢出
-dscode -m deepseek-v4-flash --max-context 1M -i
+dscode -m flash --max-context 1M -i
 
 # 查看 session 列表
 dscode --list-sessions
+
+# 查看事件日志中的信念变化
+grep '"belief"' events.jsonl | jq '{type, belief}'
+
+# 查看注入历史
+grep '"Injecting hint"' events.jsonl
 ```

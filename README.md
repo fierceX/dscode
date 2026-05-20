@@ -1,82 +1,64 @@
 # dscode
 
-**简体中文 | [English](README.en.md)**
+**简体中文**
 
 极简 AI coding agent。Rust 原生实现，专为 DeepSeek 优化。
 
-## 特点
+单二进制，零运行时依赖，可在终端独立运行或被其他程序嵌入编排。
 
-- **DeepSeek 原生优化** — 单二进制，零运行时依赖
-- **信号驱动的信念系统** — 每次工具调用采集信号（错误码、错误模式、编辑循环），通过拉普拉斯平滑计算信念度 B ∈ [0,1]。低信念时自动注入提示词到用户消息末尾（保护前缀缓存）
-- **缓存感知压缩** — 基于三级阈值的自适应上下文管理，最大化 prefix-cache 命中率
-- **维修流水线** — Scavenge（DSML/JSON 回收）→ Truncation（截断修复）→ Storm Breaker（重复调用抑制）
-- **Session 持久化** — JSONL 格式，天然追加友好，崩溃安全
-- **机器友好** — `stream-json` 输出结构化事件
-- **技能系统** — 按需加载 skill，不污染后续 prompt
-- **子代理（SubAgent）** — 隔离或继承上下文的并行子任务执行
+---
+
+## 特性
+
+- **DeepSeek 原生优化** — 针对 DeepSeek V4 系列设计，最大化 prefix-cache 命中率
+- **两种终端模式** — REPL（`-i`，rustyline 行编辑）和 TUI（`--tui`，ratatui 全屏界面）
+- **信号驱动的信念系统** — 自动检测工具执行错误，低信念时注入修正提示，冷却防重复
+- **自适应上下文压缩** — 三级压缩，自动摘要，保持上下文在窗口内
+- **维修流水线** — Scavenge → Truncation → Storm Breaker，三段自动修复
+- **Session 持久化** — JSONL 格式，`--continue` 无缝恢复
+- **子代理（SubAgent）** — 隔离或 fork 上下文，并发执行
+- **技能系统** — 按需加载 skill 文件，不污染后续 prompt
+- **机器协议** — `--print` 输出 ndjson 事件流
+
+---
 
 ## 快速开始
 
 ```bash
+# 前置：Rust 1.85+，设置 DEEPSEEK_API_KEY
+
 # 编译
 cargo build --release
-./target/release/dscode "scan this repo"
-
-# 或使用 Makefile
-make build
-./target/release/dscode -i               # 交互模式
-./target/release/dscode --print "hello"  # stream-json 输出
-```
-
-```bash
-# 设置 API Key
-export DEEPSEEK_API_KEY="sk-xxx"
-
-# 交互模式
-./target/release/dscode -m deepseek-chat -i
-```
-
-## 安装
-
-```bash
-# 编译
+# 或
 make build
 
-# 运行
-./target/release/dscode -m deepseek-chat "hello"
+# REPL 交互模式
+./target/release/dscode -m flash -i
 
-# 别名
-alias agent='./target/release/dscode -m deepseek-chat'
-agent -i
-```
+# TUI 全屏模式
+./target/release/dscode -m flash --tui
 
-## 使用示例
-
-```bash
 # 单次查询
-dscode -m deepseek-v4-flash "explain the architecture"
+./target/release/dscode -m flash "explain this project"
 
-# 交互式 REPL
-dscode -m deepseek-v4-flash -i
-
-# 回到上次会话继续
-dscode --continue -i
-
-# 指定上下文窗口和轮次上限
-dscode -m deepseek-v4-flash --max-context 1M --max-turns 1000 -i
-
-# 加载技能
-dscode -m deepseek-v4-flash --skill debugging -i
+# 继续上次会话
+./target/release/dscode -m flash --continue -i
 ```
 
-## 文档
+---
+
+## 文档索引
 
 | 文档 | 说明 |
 |------|------|
-| [使用手册](docs/USAGE.md) | CLI 参数、环境变量、会话管理、工具参考 |
-| [架构说明](docs/ARCHITECTURE.md) | 运行时分层、模块职责、数据流 |
-| [设计文档](docs/DESIGN.md) | 设计哲学、关键决策、实现取舍 |
+| [使用手册](docs/USAGE.md) | 完整 CLI 参数、配置、环境变量、会话管理、工具、技能 |
+| [架构说明](docs/ARCHITECTURE.md) | 运行时分层、模块职责、核心数据流 |
+| [设计文档](docs/DESIGN.md) | 14 个主题的设计哲学与实现取舍 |
+| [信号系统设计](docs/设计哲学-信号系统.md) | 控制论 + 贝叶斯、冷却机制、信念度展示 |
+| [Agent 开发指南](AGENTS.md) | 面向 AI agent：项目结构、模块索引、开发惯例 |
 | [工具参考](docs/tools.md) | 内置工具参数与行为 |
+
+---
 
 ## 许可
 
