@@ -128,9 +128,20 @@ BeliefTracker.belief() = α / (α + β) ∈ [0, 1]
      ▼
 DecisionEngine.decide(B, errors)
      ├── B ≥ 0.7 → None
-     ├── 0.3 ≤ B < 0.7 → Inject(含具体错误详情)
-     └── B < 0.3 → Abort
+     ├── 0.3 ≤ B < 0.7 → Inject(含具体错误详情，引擎内部激活冷却)
+     └── B < 0.3 → Abort（绕过冷却）
 ```
+
+### 冷却机制
+
+`DecisionEngine` 内部维护冷却计数器。注入后自动跳过接下来的 3 次 `decide()` 调用，确保不会每次工具循环都重复注入。冷却由引擎自主管理，turn.rs 无感知。
+
+| 事件 | 行为 |
+|------|------|
+| Inject 发生 | `cooldown_remaining = 3` |
+| 冷却期内再次调用 | 递减计数器，跳过注入 |
+| B < 0.30 | 绕过冷却，直接 Abort |
+| 新用户输入 | `engine.reset()` 清零 |
 
 ### 信念度语义
 
@@ -143,14 +154,15 @@ DecisionEngine.decide(B, errors)
 
 ### 提示词注入（任务循环内）
 
-注入发生在 `turn.rs::execute()` 的循环内，工具执行完成后、下一轮 LLM 调用之前：
+注入发生在 `turn.rs::execute()` 的循环内，工具执行完成后、下一轮 LLM 调用之前。`DecisionEngine` 由 TurnExecutor 持久持有，内部管理冷却计数器：
 
 ```
 Phase 3: 工具执行 → 信号 → BeliefTracker.observe()
 Phase 4: stop = "tool_use"
   ├─ DecisionEngine.decide(belief, errors)
-  │   ├─ Inject → store.add_user("[System note: ...]")  ← 写入对话存储
-  │   └─ Abort  → 返回 Failed，中断本轮
+  │   ├─ 引擎内部检查冷却 → 跳过注入  ← 冷却期内不注入
+  │   ├─ Inject → store.add_user("[System note: ...]")  ← 写入对话存储 + 激活冷却
+  │   └─ Abort  → 返回 Failed，中断本轮（绕过冷却）
   └─ continue → 下一轮 LLM: messages = store.lines()（包含注入消息）
 ```
 
@@ -222,6 +234,23 @@ should_compact() 检查 context_tokens / max_context_tokens ≥ compact_pct
 ├── plan.md / plan.draft  ← 计划文件
 └── stats.json            ← Token 用量统计
 ```
+
+## 信念度实时展示
+
+信念度在每次工具调用后实时更新，通过两种渠道展示：
+
+### TUI 状态栏
+
+```
+flash B:0.73 T:12 R:45 I:200K(50%) O:20K C:400K(40%) ¥0.12
+```
+
+- 由 `render_status()` 在 TUI Frame 中渲染
+- `B:0.73` 为当前信念度，更新于 `render_title_update()` 调用
+
+### 终端标题栏
+
+非 TUI 模式下通过 ANSI escape `\x1b]0;...\x07` 设置终端窗口标题，格式与 TUI 状态栏一致。
 
 ## 模型切换
 

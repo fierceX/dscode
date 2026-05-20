@@ -343,14 +343,23 @@ B = α / (α + β) ∈ [0, 1]
 
 ### DecisionEngine
 
+`DecisionEngine` 由 `TurnExecutor` 持久持有，内部管理冷却计数器：
+
 ```rust
-pub fn decide(belief: f64, errors: &[String]) -> Decision {
-    if belief < 0.30 → Abort
-    if belief < 0.50 → Inject(warning + 最近 5 条错误)
-    if belief < 0.70 → Inject(reminder + 最近 3 条错误)
-    else              → None
+pub fn decide(&mut self, belief: f64, errors: &[String]) -> Decision {
+    if belief < 0.30    → Abort（绕过冷却）
+    if cooldown > 0     → cooldown -= 1 → None（跳过注入）
+    if belief < 0.50    → Inject(warning + 最近 5 条错误) + 激活冷却
+    if belief < 0.70    → Inject(reminder + 最近 3 条错误) + 激活冷却
+    else                → None
 }
+
+// 新增方法
+pub fn reset(&mut self)              // 新用户输入时清零冷却
+pub fn cooldown_remaining(&self)     // 查询剩余冷却轮数
 ```
+
+`decide()` 改为 `&mut self`，冷却计数器由引擎自主管理，调用方 turn.rs 不传任何冷却相关参数。
 
 **注入位置：任务循环内部**。注入发生在 `turn.rs::execute()` 的循环内，工具执行完成后、下一轮 LLM 调用之前：
 
@@ -358,8 +367,9 @@ pub fn decide(belief: f64, errors: &[String]) -> Decision {
 Phase 3: 工具执行 → 信号 → BeliefTracker.observe()
 Phase 4: stop = "tool_use"
   ├─ DecisionEngine.decide(belief, errors)
-  │   ├─ Inject → store.add_user(...)  ← 写入对话存储，非追加到用户输入
-  │   └─ Abort  → 返回 Failed，中断本轮
+  │   ├─ 引擎内部检查冷却 → 跳过注入
+  │   ├─ Inject → store.add_user(...)  + 引擎内部激活冷却
+  │   └─ Abort  → 返回 Failed，中断本轮（绕过冷却）
   └─ continue → 下一轮 LLM: messages = store.lines()（包含注入消息）
 ```
 
