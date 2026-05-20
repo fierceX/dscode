@@ -20,6 +20,8 @@ pub struct TurnExecutor {
     tool_call_count: u32,
     tool_error_count: u32,
     signals: Vec<crate::guard::collector::Signal>,
+    /// 决策引擎（含冷却逻辑，由引擎内部管理）。
+    decision_engine: crate::agent::decision::DecisionEngine,
 }
 
 /// Represents the outcome of a turn that needs to be actioned.
@@ -46,7 +48,7 @@ pub enum TurnDecision {
 impl TurnExecutor {
     pub fn new(ctx: Arc<AgentSharedContext>, llm: Arc<dyn LlmClient>) -> Self {
         let tools = Arc::new(ToolRunner::new(Arc::new(crate::context::ToolContext::from(ctx.as_ref()))));
-        Self { ctx, llm, tools, signal_collector: crate::guard::collector::SignalCollector::new(), compacted_this_turn: false, tool_call_count: 0, tool_error_count: 0, signals: Vec::new() }
+        Self { ctx, llm, tools, signal_collector: crate::guard::collector::SignalCollector::new(), compacted_this_turn: false, tool_call_count: 0, tool_error_count: 0, signals: Vec::new(), decision_engine: crate::agent::decision::DecisionEngine::new() }
     }
 
     /// Return the total number of tool calls made during this turn.
@@ -101,12 +103,13 @@ impl TurnExecutor {
 
     /// Execute a full turn: send user input, stream response, execute tools, decide next.
     pub async fn execute(&mut self, user_input: &str, mut belief: Option<&mut crate::agent::belief::BeliefTracker>) -> Result<(TurnDecision, Vec<TurnEffect>)> {
-        // New user intent: reset storm breaker window and compact guard
+        // New user intent: reset storm breaker window, compact guard, and decision engine
         self.tools.reset_storm();
         self.compacted_this_turn = false;
         self.tool_call_count = 0;
         self.tool_error_count = 0;
         self.signals.clear();
+        self.decision_engine.reset();
 
         self.ctx.store.add_user(user_input).await?;
         self.ctx.stats.record_turn().await;
@@ -412,11 +415,10 @@ impl TurnExecutor {
             });
             match stop.as_str() {
                 "tool_use" | "tool_calls" => {
-                    // 本轮工具执行后，由 DecisionEngine 决策是否注入
+                    // 本轮工具执行后，由 DecisionEngine 决策是否注入（含内部冷却逻辑）
                     if let Some(ref bt) = belief {
                         let b = bt.belief();
-                        let engine = crate::agent::decision::DecisionEngine::new();
-                        match engine.decide(b, &bt.recent_errors) {
+                        match self.decision_engine.decide(b, &bt.recent_errors) {
                             crate::agent::decision::Decision::Inject(msg) => {
                                 self.ctx.display.render_info(&format!(
                                     "Injecting hint (belief {:.2}) into task loop.", b

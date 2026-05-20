@@ -57,6 +57,20 @@ impl Builder {
             None,
         ));
 
+        // Belief awareness — help the model understand the belief tracking system
+        let belief_awareness =
+            "This agent has a belief tracking system that monitors tool execution quality.\n\
+             - Each tool call is evaluated for errors (compile failures, test failures, edit loops)\n\
+             - A \"belief score\" (0.0–1.0) reflects recent tool execution reliability\n\
+             - When belief drops below 0.70, a [System note] may be injected with recent errors\n\
+             - When belief drops below 0.30, the task may be aborted\n\n\
+             When you see [System note: ...] injected after your tool results:\n\
+             1. Stop and review what went wrong\n\
+             2. Use Read/Grep/Bash to verify state before making changes\n\
+             3. Make smaller, more deliberate edits\n\
+             4. Verify each fix before moving on";
+        sections.push(wrap_section("belief-awareness", belief_awareness, None));
+
         // Stop triggers — red-flag patterns that force a pause
         sections.push(wrap_section(
             "stop-triggers",
@@ -432,6 +446,7 @@ mod tests {
             "<environment>",
             "<rules>",
             "<verification-gate>",
+            "<belief-awareness>",
             "<stop-triggers>",
             "<rationalization-table>",
             "<using-your-tools>",
