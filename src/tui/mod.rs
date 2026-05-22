@@ -129,6 +129,8 @@ pub(crate) struct TuiState {
     pub cached_width: u16,
     pub cached_all: Option<Vec<Line<'static>>>,
     pub quit: bool,
+    /// 系统忙（等待 API / 工具执行），非 idle
+    pub busy: bool,
     pub view: View,
 }
 
@@ -171,6 +173,7 @@ impl Default for TuiState {
             cached_width: 0,
             cached_all: None,
             quit: false,
+            busy: false,
             view: View::Main,
         }
     }
@@ -220,6 +223,7 @@ impl TuiState {
                 self.stream_kind = MsgKind::StreamThinking;
                 self.streaming = true;
                 self.stream_line.push_str(c);
+                self.busy = false; // 开始流式输出，不再"waiting"
             }
             TuiSignal::Text(c) => {
                 if !self.stream_line.is_empty() && self.stream_kind != MsgKind::StreamText {
@@ -229,12 +233,18 @@ impl TuiState {
                 self.stream_kind = MsgKind::StreamText;
                 self.streaming = true;
                 self.stream_line.push_str(c);
+                self.busy = false; // 开始流式输出，不再"waiting"
             }
-            TuiSignal::Stop | TuiSignal::Retry => {
+            TuiSignal::Stop => {
+                self.finalize_stream();
+                self.busy = false; // 本轮结束，进入 idle
+            }
+            TuiSignal::Retry => {
                 self.finalize_stream();
             }
             TuiSignal::ToolCall(name, summary) => {
                 self.finalize_stream();
+                self.busy = true; // 工具已发出，等待执行结果
                 let text = if summary.is_empty() { format!("[tool] {name}") } else { format!("[tool] {summary}") };
                 self.lines.push(MsgLine {
                     text,
@@ -264,6 +274,7 @@ impl TuiState {
             }
             TuiSignal::Error(m) => {
                 self.finalize_stream();
+                self.busy = false; // 错误终止当前任务
                 self.lines.push(MsgLine {
                     text: format!("Error: {m}"),
                     kind: MsgKind::Error,
@@ -275,12 +286,13 @@ impl TuiState {
             }
             TuiSignal::TitleUpdate(m, s) => { self.model = m.clone(); self.stats = s.clone(); }
             TuiSignal::SubAgentStatus(l) => {
-                // "launched" 行创建带空 detail，使其可点击并支持实时流
-                let sub_detail = if l.contains("launched") {
+                let launched = l.contains("launched");
+                let sub_detail = if launched {
                     Some(SubAgentDetail { thinking: String::new(), text: String::new() })
                 } else {
                     None
                 };
+                self.busy = launched; // launched → wait for sub-agent result
                 self.lines.push(MsgLine { text: l.clone(), kind: MsgKind::SubAgent, collapsed: false, cached_lines: None, cached_collapsed: false, sub_detail });
             }
             TuiSignal::SubAgentStream { session_id, kind, content } => {
@@ -468,11 +480,17 @@ pub fn run_tui(
     events_path: &Path,
 ) -> anyhow::Result<()> {
     let mut terminal = ratatui::init();
-    crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
+    crossterm::execute!(std::io::stdout(),
+        crossterm::event::EnableMouseCapture,
+        crossterm::event::EnableBracketedPaste,
+    )?;
     struct RestoreGuard;
     impl Drop for RestoreGuard {
         fn drop(&mut self) {
-            let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
+            let _ = crossterm::execute!(std::io::stdout(),
+                crossterm::event::DisableBracketedPaste,
+                crossterm::event::DisableMouseCapture,
+            );
             ratatui::restore();
         }
     }
@@ -777,6 +795,16 @@ fn handle_event(
             }
         }
         Event::Resize(..) => {}
+        Event::Paste(content) => {
+            // 批量过滤并插入，避免单字符 insert() 的 O(n²)
+            let to_insert: String = content.chars()
+                .filter(|&ch| !ch.is_control() || ch == '\n' || ch == '\t')
+                .collect();
+            if !to_insert.is_empty() {
+                state.input_buf.insert_str(state.input_cursor, &to_insert);
+                state.input_cursor += to_insert.len();
+            }
+        }
         _ => {}
     }
     false
@@ -791,22 +819,39 @@ fn render(f: &mut Frame, state: &mut TuiState) {
     let view = state.view.clone();
     match &view {
         View::Main => {
+            // 输入框内边宽度（去除 borders）
+            let inner_w = area.width.saturating_sub(2).max(1) as usize;
+            // 用 split_at_visual_width 直接计算实际行数，与渲染完全一致
+            let vis_lines = split_at_visual_width(&state.input_buf, inner_w);
+            let content_lines = vis_lines.len().min(5).max(1);
+            let input_height = content_lines + 2; // +2 for borders
+
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Min(1),
-                    Constraint::Length(3),
+                    Constraint::Length(input_height as u16),
                     Constraint::Length(1),
                 ])
                 .split(area);
 
             state.content_y = chunks[0].y;
             render_content(f, chunks[0], state);
-            render_input(f, chunks[1], state);
+            render_input(f, chunks[1], state, &vis_lines);
 
-            let cursor_x = (chunks[1].x + 3 + unicode_width::UnicodeWidthStr::width(&state.input_buf[..state.input_cursor]) as u16)
+            // 光标位置：用 split_at_visual_width 切分光标前的文本，
+            // 行 = 行数-1, 列 = 最后一行视觉宽度
+            let lines_before = split_at_visual_width(&state.input_buf[..state.input_cursor], inner_w);
+            let row = lines_before.len().saturating_sub(1);
+            let col = if lines_before.is_empty() {
+                0
+            } else {
+                unicode_width::UnicodeWidthStr::width(lines_before.last().unwrap().as_str())
+            };
+            let cursor_x = (chunks[1].x + 1 + col as u16)
                 .min(chunks[1].right().saturating_sub(2));
-            let cursor_y = chunks[1].y + 1;
+            let cursor_y = (chunks[1].y + 1 + row as u16)
+                .min(chunks[1].bottom().saturating_sub(2));
             f.set_cursor_position((cursor_x, cursor_y));
 
             render_status(f, chunks[2], state);
@@ -1085,6 +1130,21 @@ fn push_msg(lines: &mut Vec<Line<'static>>, text: &str, kind: MsgKind) {
         MsgKind::Text | MsgKind::StreamText => {
             render_md_with_tables(lines, text);
         }
+        MsgKind::ToolResult => {
+            // 检查是否为 unified diff（包含 ---/+++ 或 @@ 行首）
+            let is_diff = text.lines().take(3).any(|l| {
+                let t = l.trim();
+                t.starts_with("--- ") || t.starts_with("+++ ") || t.starts_with("@@")
+            });
+            if is_diff {
+                render_diff(lines, text);
+            } else {
+                let base = style_for_kind(kind);
+                for raw in text.split('\n') {
+                    lines.push(Line::from(Span::styled(raw.to_string(), base)));
+                }
+            }
+        }
         _ => {
             let base = style_for_kind(kind);
             for raw in text.split('\n') {
@@ -1092,6 +1152,51 @@ fn push_msg(lines: &mut Vec<Line<'static>>, text: &str, kind: MsgKind) {
             }
         }
     }
+}
+
+/// 渲染 unified diff：---/+++ 黄色，- 行红色，+ 行绿色，@@ 青色
+/// 自动剥离内容中的 ANSI 转义码（Edit 工具输出包含颜色代码）。
+fn render_diff(lines: &mut Vec<Line<'static>>, text: &str) {
+    let gray = Style::default().fg(Color::Rgb(100, 100, 100));
+    let red = Style::default().fg(Color::Rgb(255, 100, 100));
+    let green = Style::default().fg(Color::Rgb(100, 200, 100));
+    let cyan = Style::default().fg(Color::Cyan);
+    let yellow = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+
+    for raw in text.split('\n') {
+        let clean = strip_ansi(raw);
+        let trimmed = clean.trim();
+        let style = if trimmed.starts_with("--- ") || trimmed.starts_with("+++ ") {
+            yellow
+        } else if trimmed.starts_with("@@") {
+            cyan
+        } else if clean.starts_with('-') && !clean.starts_with("---") {
+            red
+        } else if clean.starts_with('+') && !clean.starts_with("+++") {
+            green
+        } else {
+            gray
+        };
+        lines.push(Line::from(Span::styled(clean, style)));
+    }
+}
+
+/// 剥离 ANSI 转义序列（如 `\x1b[31m`、`\x1b[0m` 等）。
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_escape = false;
+    for ch in s.chars() {
+        if in_escape {
+            if ch == 'm' {
+                in_escape = false;
+            }
+        } else if ch == '\x1b' {
+            in_escape = true;
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 /// Render markdown with manual table handling: extract table rows and render them raw
@@ -1124,7 +1229,7 @@ fn render_md_with_tables(lines: &mut Vec<Line<'static>>, text: &str) {
     }
 }
 
-fn render_input(f: &mut Frame, area: Rect, state: &TuiState) {
+fn render_input(f: &mut Frame, area: Rect, _state: &TuiState, vis_lines: &[String]) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray));
@@ -1132,10 +1237,34 @@ fn render_input(f: &mut Frame, area: Rect, state: &TuiState) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let prompt = Span::styled("> ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD));
-    let input = Span::raw(&state.input_buf);
-    let line = Line::from(vec![prompt, input]);
-    f.render_widget(Paragraph::new(line), inner);
+    // 用预先计算好的 vis_lines 直接渲染，避免重复 split
+    let text = Text::from(vis_lines.join("\n"));
+    f.render_widget(Paragraph::new(text), inner);
+}
+
+/// 按视觉宽度切分字符串，CJK 字符宽度 2，ASCII 宽度 1。
+/// 与光标计算中的 `visual_width / inner_w` 完全一致。
+fn split_at_visual_width(s: &str, max_width: usize) -> Vec<String> {
+    if s.is_empty() {
+        return vec![String::new()];
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut cur_w = 0usize;
+    for ch in s.chars() {
+        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if cur_w + cw > max_width && !cur.is_empty() {
+            lines.push(cur);
+            cur = String::new();
+            cur_w = 0;
+        }
+        cur.push(ch);
+        cur_w += cw;
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    lines
 }
 
 fn render_status(f: &mut Frame, area: Rect, state: &TuiState) {
@@ -1148,6 +1277,8 @@ fn render_status(f: &mut Frame, area: Rect, state: &TuiState) {
             MsgKind::StreamText => "generating",
             _ => "working",
         }
+    } else if state.busy {
+        "waiting"
     } else {
         "idle"
     };

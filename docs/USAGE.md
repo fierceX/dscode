@@ -139,6 +139,7 @@ prompt 为空且 stdin 是终端时自动进入交互模式。非终端 stdin �
 | `--max-turns` | `40` | 每用户输入的最大 LLM 调用轮数 |
 | `--max-context` | `1000000` | 上下文 token 上限。支持 `k`/`m` 后缀（如 `500K` / `1M`） |
 | `--tool-timeout` | `600` | 工具执行超时（秒） |
+| `--sub-agent-timeout` | `300` | 子代理执行超时（秒） |
 | `--skill NAME` | — | 加载 skill（可重复使用） |
 | `--session [NAME]` | 自动生成 | 命名会话。提供名称可恢复 |
 | `--continue` | — | 恢复最近的 session |
@@ -169,6 +170,7 @@ max_tokens = 81920                        # 最大输出 token
 max_turns = 40                            # 最大轮次
 max_context = "1M"                        # 最大上下文（支持 K/M 后缀）
 tool_timeout = 600                        # 工具超时（秒）
+sub_agent_timeout = 120                   # 子代理超时（秒）
 context_compact_pct = 85                  # 压缩触发百分比
 log_events = true                         # 事件日志
 ```
@@ -427,6 +429,10 @@ Text: ...
 ```
 
 失败时（`status=failed`）结果可能为空，不要自动重试。Token 用量计入父会话统计。
+
+### 超时
+
+子代理默认超时 300 秒（5 分钟），可通过 `--sub-agent-timeout` 参数或配置文件的 `sub_agent_timeout` 字段调整。超时后子代理被标记为 `failed`，父会话继续执行。
 
 ---
 

@@ -440,6 +440,7 @@ fn print_usage() {
     println!("  -m, --model MODEL       Model tier: flash | pro (default: flash)");
     println!("  --max-tokens N          Max output tokens (default: 81920)");
     println!("  --tool-timeout N        Tool execution timeout in seconds (default: 600)");
+    println!("  --sub-agent-timeout N   Sub-agent execution timeout in seconds (default: 300)");
     println!("  --skill NAME            Load skill from .claude/skills/NAME/SKILL.md");
     println!("  --max-turns N           Max agent turns (default: 40)");
     println!("  --max-context N         Max stored context tokens (default: 1M)");

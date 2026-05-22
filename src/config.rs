@@ -75,6 +75,7 @@ pub struct DscodeConfigFile {
     pub max_turns: Option<i32>,
     pub max_context: Option<String>,   // supports K/M suffix
     pub tool_timeout: Option<i32>,
+    pub sub_agent_timeout: Option<i32>,
     pub context_compact_pct: Option<u8>,
     pub log_events: Option<bool>,
 }
@@ -84,6 +85,7 @@ pub struct Config {
     pub model: String,
     pub max_tokens: i32,
     pub tool_timeout_secs: i32,
+    pub sub_agent_timeout_secs: i32,
     pub tool_result_max_bytes: usize,
     pub file_write_max_bytes: usize,
     pub output_format: OutputFormat,
@@ -109,6 +111,7 @@ impl Default for Config {
             model: String::new(),
             max_tokens: 81920,
             tool_timeout_secs: 600,
+            sub_agent_timeout_secs: 300,
             tool_result_max_bytes: 100_000,
             file_write_max_bytes: 1_048_576,
             output_format: OutputFormat::Human,
@@ -149,6 +152,10 @@ pub fn parse_args(args: Vec<String>) -> Result<Config> {
             }
             "--tool-timeout" => {
                 cfg.tool_timeout_secs = require_value(&args, i)?.parse()?;
+                i += 2;
+            }
+            "--sub-agent-timeout" => {
+                cfg.sub_agent_timeout_secs = require_value(&args, i)?.parse()?;
                 i += 2;
             }
             "--skill" => {
@@ -282,6 +289,9 @@ pub fn apply_config_file(cfg: &mut Config) {
         }
         if cfg.tool_timeout_secs == 600 && toml_cfg.tool_timeout.is_some() {
             cfg.tool_timeout_secs = toml_cfg.tool_timeout.unwrap();
+        }
+        if cfg.sub_agent_timeout_secs == 300 && toml_cfg.sub_agent_timeout.is_some() {
+            cfg.sub_agent_timeout_secs = toml_cfg.sub_agent_timeout.unwrap();
         }
         if toml_cfg.context_compact_pct.is_some() {
             unsafe { std::env::set_var("CONTEXT_COMPACT_PCT", &toml_cfg.context_compact_pct.unwrap().to_string()); }

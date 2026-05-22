@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 #[derive(Clone)]
 pub struct ToolConfig {
     pub tool_timeout_secs: i32,
+    pub sub_agent_timeout_secs: i32,
     pub tool_result_max_bytes: usize,
     pub file_write_max_bytes: usize,
 }
@@ -22,6 +23,7 @@ impl ToolConfig {
     pub fn from_config(cfg: &crate::config::Config) -> Self {
         Self {
             tool_timeout_secs: cfg.tool_timeout_secs,
+            sub_agent_timeout_secs: cfg.sub_agent_timeout_secs,
             tool_result_max_bytes: cfg.tool_result_max_bytes,
             file_write_max_bytes: cfg.file_write_max_bytes,
         }

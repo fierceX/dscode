@@ -370,7 +370,8 @@ impl TurnExecutor {
             }
         }
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        let timeout = self.ctx.tool_config.sub_agent_timeout_secs;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout as u64);
         drop(sub_result_tx);
         let mut sub_completed = 0usize;
         while sub_completed < sub_expected {
@@ -380,7 +381,7 @@ impl TurnExecutor {
             }
             let now = std::time::Instant::now();
             if now >= deadline {
-                self.ctx.display.render_error("Sub-agent batch timed out after 120s.");
+                self.ctx.display.render_error(&format!("Sub-agent batch timed out after {}s.", timeout));
                 break;
             }
             let remaining = deadline.saturating_duration_since(now);
