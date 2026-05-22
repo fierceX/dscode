@@ -189,7 +189,7 @@ impl ToolRunner {
             Err(e) => format!("Error: tool execution failed: {e}"),
         };
 
-        let output = format_tool_result(&output, ctx.tool_result_max_bytes);
+        let output = format_tool_result(&output, ctx.tool_config.tool_result_max_bytes);
 
         let output = if is_bash {
             filter_bash_noise(&output)

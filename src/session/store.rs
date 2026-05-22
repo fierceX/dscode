@@ -134,6 +134,22 @@ pub fn first_line(s: &str) -> &str {
     s.lines().next().unwrap_or(s)
 }
 
+/// Extract fields from a JSON event's "input" field and build a tool call summary.
+/// Shared by TUI replay and REPL replay to avoid duplication.
+pub fn build_tool_summary_from_json(name: &str, evt: &serde_json::Value) -> String {
+    let input = evt.get("input").cloned().unwrap_or(serde_json::Value::Null);
+    let mut fields = std::collections::BTreeMap::new();
+    if let Some(obj) = input.as_object() {
+        for (k, v) in obj {
+            match v {
+                serde_json::Value::String(s) => { fields.insert(k.clone(), s.clone()); }
+                _ => { fields.insert(k.clone(), v.to_string()); }
+            }
+        }
+    }
+    build_tool_call_summary(name, &fields)
+}
+
 pub fn build_tool_call_summary(
     name: &str,
     fields: &std::collections::BTreeMap<String, String>,

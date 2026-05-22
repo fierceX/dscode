@@ -1,4 +1,3 @@
-use crate::agent::sub_pool::{SubAgentPool, SubAgentReport};
 use crate::agent::turn::{TurnExecutor, TurnDecision, TurnEffect};
 use crate::agent::belief::BeliefTracker;
 use crate::context::AgentSharedContext;
@@ -8,16 +7,13 @@ use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
-/// OrchActor is the central orchestrator: receives user inputs and sub-agent results,
+/// OrchActor is the central orchestrator: receives user inputs,
 /// dispatches them to TurnExecutor, and manages the lifecycle.
 pub struct OrchActor {
     ctx: Arc<AgentSharedContext>,
     cmd_rx: mpsc::UnboundedReceiver<OrchCmd>,
-    sub_pool: Arc<SubAgentPool>,
     belief: BeliefTracker,
     forced_model: Option<crate::config::ModelTier>,
-    /// 等待本轮子代理完成的 receiver 列表
-    pending_sub_agents: Vec<tokio::sync::oneshot::Receiver<crate::agent::sub_pool::SubAgentReport>>,
 }
 
 /// Commands received by the orchestrator.
@@ -25,20 +21,17 @@ pub enum OrchCmd {
     UserInput { input: String, done: oneshot::Sender<()> },
     SetModel(String),
     Compact { done: oneshot::Sender<()> },
-    SubAgentResult(SubAgentReport),
 }
 
 impl OrchActor {
     pub fn new(
         ctx: Arc<AgentSharedContext>,
         cmd_rx: mpsc::UnboundedReceiver<OrchCmd>,
-        sub_pool: Arc<SubAgentPool>,
     ) -> Self {
         Self {
-            ctx, cmd_rx, sub_pool,
+            ctx, cmd_rx,
             belief: BeliefTracker::new(16),
             forced_model: None,
-            pending_sub_agents: Vec::new(),
         }
     }
 
@@ -49,10 +42,6 @@ impl OrchActor {
                 cmd = self.cmd_rx.recv() => match cmd {
                     Some(OrchCmd::UserInput { input, done }) => {
                         self.handle_user_input(input).await;
-
-                        // 等待本轮所有子代理完成（同步阻塞，取最长时间）
-                        self.wait_pending_sub_agents().await;
-
                         let _ = done.send(());
                     }
                     Some(OrchCmd::SetModel(model)) => {
@@ -92,14 +81,6 @@ impl OrchActor {
                         }
                         let _ = done.send(());
                     }
-                    Some(OrchCmd::SubAgentResult(report)) => {
-                        // 已通过 wait_pending_sub_agents 同步等待，这里只记录日志
-                        self.ctx.log_event(serde_json::json!({
-                            "type":"sub_agent_result_ignored",
-                            "session_id": &report.session_id,
-                            "status": &report.status,
-                        }));
-                    }
                     None => break,
                 },
                 _ = self.ctx.cancel.cancelled() => {
@@ -107,89 +88,10 @@ impl OrchActor {
                     break;
                 }
             }
-
-            if !self.ctx.interactive() && self.sub_pool.active_count() == 0 {
-                break;
-            }
         }
 
-        self.sub_pool.drain().await;
         let _ = self.ctx.stats.flush().await;
         Ok(())
-    }
-
-    /// 同步等待本轮所有子代理完成，批量注入结果
-    async fn wait_pending_sub_agents(&mut self) {
-        if self.pending_sub_agents.is_empty() {
-            return;
-        }
-
-        let mut reports = Vec::new();
-        let max_wait = std::time::Duration::from_secs(120);
-        let deadline = tokio::time::Instant::now() + max_wait;
-
-        for rx in self.pending_sub_agents.drain(..) {
-            let timeout = deadline - tokio::time::Instant::now();
-            if timeout.is_zero() {
-                self.ctx.display.render_error("Sub-agent wait timeout, discarding remaining.");
-                break;
-            }
-            match tokio::time::timeout(timeout, rx).await {
-                Ok(Ok(report)) => {
-                    reports.push(report);
-                }
-                _ => {
-                    self.ctx.display.render_error("Sub-agent wait timeout.");
-                }
-            }
-        }
-
-        if reports.is_empty() {
-            return;
-        }
-
-        // 批量注入: 把所有子代理结果合并成一条用户消息
-        let mut context = String::new();
-        for (i, report) in reports.iter().enumerate() {
-            if i > 0 { context.push('\n'); }
-            context.push_str(&format!(
-                "[sub-agent {}] {} (in={}, out={})\nThinking: {}\nText: {}",
-                report.session_id, report.status,
-                report.usage.total_input_tokens, report.usage.total_output_tokens,
-                report.thinking, report.text
-            ));
-            // 显示状态
-            if report.status == "ok" {
-                self.ctx.display.render_sub_agent_status(
-                    &report.session_id, "ok",
-                    report.usage.total_input_tokens, report.usage.total_output_tokens,
-                );
-            } else {
-                self.ctx.display.render_error(&format!("[sub-agent {}] failed", report.session_id));
-            }
-            // 显示子代理的 thinking 和 text 摘要
-            if !report.thinking.is_empty() {
-                let trimmed: String = report.thinking.chars().take(120).collect();
-                self.ctx.display.render_info(&trimmed);
-            }
-            if !report.text.is_empty() {
-                let trimmed: String = report.text.chars().take(120).collect();
-                self.ctx.display.render_info(&trimmed);
-            }
-            if !report.thinking.is_empty() || !report.text.is_empty() {
-                self.ctx.stats.record_sub_agent(
-                    report.usage.agent_request_count,
-                    report.usage.total_input_tokens,
-                    report.usage.total_output_tokens,
-                    report.usage.total_cache_read_tokens,
-                    report.usage.total_cache_creation_tokens,
-                ).await;
-            }
-        }
-
-        // 一次性喂入 LLM（belief 保持上一轮的，不清空）
-        self.ctx.log_event(serde_json::json!({"type":"sub_agent_batch","count":reports.len()}));
-        self.handle_user_input(context).await;
     }
 
     async fn handle_user_input(&mut self, input: String) {
@@ -238,29 +140,8 @@ impl OrchActor {
         executor: &TurnExecutor,
         model: &str,
     ) {
-        for effect in effects {
+        for effect in &effects {
             match effect {
-                TurnEffect::SubAgentLaunched { session_id, prompt, description, fork } => {
-                    self.ctx.log_event(serde_json::json!({
-                        "type":"sub_agent_start",
-                        "session_id": &session_id,
-                        "timestamp": chrono_now(),
-                        "prompt": &prompt,
-                        "description": &description,
-                        "fork": fork,
-                    }));
-                    match self.sub_pool.launch(
-                        self.ctx.clone(), prompt.clone(), description.clone(), fork, session_id.clone(),
-                    ).await {
-                        Ok((_, rx)) => {
-                            self.ctx.display.render_sub_agent_status(&session_id, "launched", 0, 0);
-                            self.pending_sub_agents.push(rx);
-                        }
-                        Err(e) => {
-                            self.ctx.display.render_error(&format!("SubAgent launch failed: {e}"));
-                        }
-                    }
-                }
                 TurnEffect::PlanCleared => {
                     self.ctx.display.render_info("Plan cleared.");
                 }
@@ -360,23 +241,10 @@ impl OrchActor {
     }
 }
 
-fn chrono_now() -> String {
-    use time::format_description::FormatItem;
-    use time::macros::format_description;
-    static FMT: &[FormatItem<'_>] = format_description!("[year][month][day]-[hour][minute][second]");
-    let base = time::OffsetDateTime::now_utc().format(FMT).unwrap_or_else(|_| String::new());
-    let rand_suffix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos() as u16)
-        .unwrap_or(0);
-    format!("{}-{:04x}", base, rand_suffix)
-}
-
 pub fn new_orchestrator(
     ctx: Arc<AgentSharedContext>,
-    sub_pool: Arc<SubAgentPool>,
 ) -> (OrchActor, mpsc::UnboundedSender<OrchCmd>) {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-    let actor = OrchActor::new(ctx, cmd_rx, sub_pool);
+    let actor = OrchActor::new(ctx, cmd_rx);
     (actor, cmd_tx)
 }

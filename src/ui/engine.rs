@@ -1,4 +1,5 @@
 use super::{Display, StatsSnapshot};
+use crate::util::fmt_k;
 use std::io::{self, Write};
 use std::sync::Mutex;
 
@@ -173,6 +174,31 @@ impl Display for TerminalDisplay {
         }
     }
 
+    fn render_sub_agent_output(
+        &self,
+        session_id: &str,
+        status: &str,
+        thinking: &str,
+        text: &str,
+        in_tokens: u64,
+        out_tokens: u64,
+    ) {
+        self.write_out(&format!(
+            "[sub-agent {}] {} (in={}, out={})\n",
+            session_id, status, in_tokens, out_tokens,
+        ));
+        if !thinking.is_empty() {
+            self.write_out("── Thinking ──\n");
+            self.write_out(thinking);
+            if !thinking.ends_with('\n') { self.write_out("\n"); }
+        }
+        if !text.is_empty() {
+            self.write_out("── Text ──\n");
+            self.write_out(text);
+            if !text.ends_with('\n') { self.write_out("\n"); }
+        }
+    }
+
     fn render_prompt(&self) {
         self.write_err("\x1b[32m> \x1b[0m");
     }
@@ -185,22 +211,4 @@ impl Display for TerminalDisplay {
 fn normalize_display_text(s: &str, interactive: bool) -> String {
     let normalized = s.replace("\r\n", "\n").replace('\r', "\n");
     if interactive { normalized.replace('\n', "\r\n") } else { normalized }
-}
-
-/// Format a token count for title bar display.
-/// Raw stats remain unchanged — this is purely a display transformation.
-/// Examples: 0 → "0", 500 → "500", 1234 → "1.2K", 1234567 → "1.23M"
-fn fmt_k(n: u64) -> String {
-    if n < 1000 {
-        return n.to_string();
-    }
-    if n >= 1_000_000 {
-        let m = n / 1_000_000;
-        let rest = n % 1_000_000;
-        format!("{}.{:02}M", m, rest / 10_000)
-    } else {
-        let k = n / 1000;
-        let rem = n % 1000;
-        format!("{}.{}K", k, rem / 100)
-    }
 }

@@ -232,7 +232,7 @@ impl super::runner::ToolExec for WriteTool {
         #[derive(serde::Deserialize)]
         struct Args { path: String, content: String }
         let args: Args = serde_json::from_value(input.clone())?;
-        write(&args.path, &args.content, ctx.file_write_max_bytes).map(|s| (s, false, String::new(), None))
+        write(&args.path, &args.content, ctx.tool_config.file_write_max_bytes).map(|s| (s, false, String::new(), None))
     }
 }
 
@@ -242,7 +242,7 @@ impl super::runner::ToolExec for EditTool {
         #[derive(serde::Deserialize)]
         struct Args { path: String, old_string: String, new_string: String }
         let args: Args = serde_json::from_value(input.clone())?;
-        edit(&args.path, &args.old_string, &args.new_string, ctx.file_write_max_bytes)
+        edit(&args.path, &args.old_string, &args.new_string, ctx.tool_config.file_write_max_bytes)
             .map(|s| { let c = s.clone(); (s, false, c, None) })
     }
 }

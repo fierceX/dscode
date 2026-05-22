@@ -145,43 +145,10 @@ fn flush_newline(stdout: &mut std::io::Stdout, last_char: &mut char, prev_was_th
 }
 
 fn build_replay_tool_summary(name: &str, evt: &Value) -> String {
-    let input = evt.get("input").cloned().unwrap_or(Value::Null);
-    let fields = parse_input_fields(&input);
-    build_label(name, &fields)
+    crate::session::store::build_tool_summary_from_json(name, evt)
 }
 
 fn build_legacy_tool_summary(name: &str, tc: &Value) -> String {
-    let input = tc.get("input").cloned().unwrap_or(Value::Null);
-    let fields = parse_input_fields(&input);
-    build_label(name, &fields)
-}
+    crate::session::store::build_tool_summary_from_json(name, tc)
 
-fn parse_input_fields(input: &Value) -> std::collections::BTreeMap<String, String> {
-    let mut fields = std::collections::BTreeMap::new();
-    if let Some(obj) = input.as_object() {
-        for (k, v) in obj {
-            match v {
-                Value::String(s) => { fields.insert(k.clone(), s.clone()); }
-                _ => { fields.insert(k.clone(), v.to_string()); }
-            }
-        }
-    }
-    fields
-}
-
-fn build_label(name: &str, fields: &std::collections::BTreeMap<String, String>) -> String {
-    let label = match name {
-        "Read" | "Write" | "Edit" => fields.get("path").cloned().unwrap_or_default(),
-        "Glob" | "Grep" => fields.get("pattern").cloned().unwrap_or_default(),
-        "Bash" => {
-            let cmd = fields.get("command").cloned().unwrap_or_default().replace('\n', " ");
-            if cmd.chars().count() > 80 {
-                format!("{}...", cmd.chars().take(77).collect::<String>())
-            } else { cmd }
-        }
-        "Skill" => fields.get("name").cloned().unwrap_or_default(),
-        "SubAgent" => fields.get("description").cloned().unwrap_or_default(),
-        _ => String::new(),
-    };
-    if label.is_empty() { name.to_string() } else { format!("{name}({label})") }
 }

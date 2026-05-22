@@ -10,6 +10,24 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+/// Tool-level configuration extracted from Config, embedded in AgentSharedContext.
+#[derive(Clone)]
+pub struct ToolConfig {
+    pub tool_timeout_secs: i32,
+    pub tool_result_max_bytes: usize,
+    pub file_write_max_bytes: usize,
+}
+
+impl ToolConfig {
+    pub fn from_config(cfg: &crate::config::Config) -> Self {
+        Self {
+            tool_timeout_secs: cfg.tool_timeout_secs,
+            tool_result_max_bytes: cfg.tool_result_max_bytes,
+            file_write_max_bytes: cfg.file_write_max_bytes,
+        }
+    }
+}
+
 /// ToolContext — 工具层只需要这些字段，不依赖 LLM、cancel、compaction 等。
 /// 从 `AgentSharedContext` 通过 `From` trait 创建。
 #[derive(Clone)]
@@ -17,9 +35,7 @@ pub struct ToolContext {
     pub cwd: PathBuf,
     pub home: PathBuf,
     pub store: Arc<ConversationStore>,
-    pub tool_timeout_secs: i32,
-    pub tool_result_max_bytes: usize,
-    pub file_write_max_bytes: usize,
+    pub tool_config: ToolConfig,
 }
 
 impl From<&AgentSharedContext> for ToolContext {
@@ -28,9 +44,7 @@ impl From<&AgentSharedContext> for ToolContext {
             cwd: ctx.cwd.clone(),
             home: ctx.home.clone(),
             store: ctx.store.clone(),
-            tool_timeout_secs: ctx.tool_timeout_secs,
-            tool_result_max_bytes: ctx.tool_result_max_bytes,
-            file_write_max_bytes: ctx.file_write_max_bytes,
+            tool_config: ctx.tool_config.clone(),
         }
     }
 }
@@ -46,9 +60,9 @@ pub struct AgentSharedContext {
     pub compaction: Arc<CompactionEngine>,
     pub cancel: CancellationToken,
     pub display: Arc<dyn Display>,
-    pub tool_timeout_secs: i32,
-    pub tool_result_max_bytes: usize,
-    pub file_write_max_bytes: usize,
+    /// TUI-only: mpsc sender for sub-agent streaming. Set in main.rs for TUI mode.
+    pub sub_stream_tx: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    pub tool_config: ToolConfig,
     pub events_path: PathBuf,
     pub summary_path: PathBuf,
     pub plan_path: PathBuf,

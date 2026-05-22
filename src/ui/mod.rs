@@ -15,6 +15,17 @@ pub trait Display: Send + Sync {
     fn render_info(&self, msg: &str);
     fn render_title_update(&self, model: &str, stats: &StatsSnapshot);
     fn render_sub_agent_status(&self, session_id: &str, status: &str, in_tokens: u64, out_tokens: u64);
+    /// Sub-agent complete output (thinking + text), sent after execution.
+    /// Implementations: TUI stores for click-to-view detail; REPL prints directly.
+    fn render_sub_agent_output(
+        &self,
+        _session_id: &str,
+        _status: &str,
+        _thinking: &str,
+        _text: &str,
+        _in_tokens: u64,
+        _out_tokens: u64,
+    ) {}
     fn render_prompt(&self);
     fn render_clear_line(&self);
 }

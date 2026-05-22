@@ -18,7 +18,7 @@ pub trait LlmClient: Send + Sync {
     async fn stream(
         &self,
         ctx: &AgentSharedContext,
-        messages_json: Vec<serde_json::Value>,
+        messages_json: &[serde_json::Value],
         tools_json: &[serde_json::Value],
         system_prompt: &str,
     ) -> Result<Box<dyn futures::Stream<Item = Result<Event>> + Unpin + Send>>;
@@ -156,7 +156,7 @@ impl LlmClient for AsyncLlClient {
     async fn stream(
         &self,
         ctx: &AgentSharedContext,
-        messages_json: Vec<serde_json::Value>,
+        messages_json: &[serde_json::Value],
         tools_json: &[serde_json::Value],
         system_prompt: &str,
     ) -> Result<Box<dyn futures::Stream<Item = Result<Event>> + Unpin + Send>> {

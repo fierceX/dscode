@@ -2,7 +2,7 @@
 
 use crate::agent::orchestrator::OrchCmd;
 use crate::ui::{Display, StatsSnapshot};
-use crate::util::truncate_str;
+use crate::util::{fmt_k, truncate_str};
 use crossterm::event::{Event, KeyCode, KeyModifiers, MouseEventKind};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -30,6 +30,19 @@ pub enum TuiSignal {
     Info(String),
     TitleUpdate(String, StatsSnapshot),
     SubAgentStatus(String),
+    SubAgentStream {
+        session_id: String,
+        kind: SubAgentStreamKind,
+        content: String,
+    },
+    SubAgentOutput {
+        session_id: String,
+        status: String,
+        thinking: String,
+        text: String,
+        in_tokens: u64,
+        out_tokens: u64,
+    },
     Shutdown,
 }
 
@@ -55,6 +68,20 @@ impl Default for MsgKind {
     fn default() -> Self { MsgKind::Text }
 }
 
+// ─── SubAgent detail data ─────────────────────────────────
+
+#[derive(Clone)]
+pub(crate) struct SubAgentDetail {
+    pub thinking: String,
+    pub text: String,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum SubAgentStreamKind {
+    Thinking,
+    Text,
+}
+
 // ─── State ─────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -64,12 +91,10 @@ pub(crate) struct MsgLine {
     pub collapsed: bool,
     pub cached_lines: Option<Vec<Line<'static>>>,
     pub cached_collapsed: bool,
+    pub sub_detail: Option<SubAgentDetail>,
 }
 
 impl MsgLine {
-    fn new(text: String, kind: MsgKind, collapsed: bool) -> Self {
-        MsgLine { text, kind, collapsed, cached_lines: None, cached_collapsed: collapsed }
-    }
     fn cache_valid(&self) -> bool {
         self.cached_lines.is_some() && self.cached_collapsed == self.collapsed
     }
@@ -77,7 +102,7 @@ impl MsgLine {
 
 impl Default for MsgLine {
     fn default() -> Self {
-        MsgLine { text: String::new(), kind: MsgKind::Text, collapsed: false, cached_lines: None, cached_collapsed: false }
+        MsgLine { text: String::new(), kind: MsgKind::Text, collapsed: false, cached_lines: None, cached_collapsed: false, sub_detail: None }
     }
 }
 
@@ -104,6 +129,22 @@ pub(crate) struct TuiState {
     pub cached_width: u16,
     pub cached_all: Option<Vec<Line<'static>>>,
     pub quit: bool,
+    pub view: View,
+}
+
+// ─── View navigation ─────────────────────────────────────
+
+#[derive(Clone, Debug)]
+pub(crate) enum View {
+    Main,
+    SubAgentDetail {
+        line_idx: usize,
+        scroll: u16,
+    },
+}
+
+impl Default for View {
+    fn default() -> Self { View::Main }
 }
 
 impl Default for TuiState {
@@ -130,6 +171,7 @@ impl Default for TuiState {
             cached_width: 0,
             cached_all: None,
             quit: false,
+            view: View::Main,
         }
     }
 }
@@ -157,6 +199,7 @@ impl TuiState {
                 collapsed: self.stream_kind == MsgKind::StreamThinking,
                 cached_lines: None,
                 cached_collapsed: self.stream_kind == MsgKind::StreamThinking,
+                sub_detail: None,
             });
         }
         self.auto_scroll = true;
@@ -199,14 +242,25 @@ impl TuiState {
                     collapsed: false,
                     cached_lines: None,
                     cached_collapsed: false,
+                    sub_detail: None,
                 });
             }
             TuiSignal::Info(n) => {
                 self.finalize_stream();
-                self.lines.push(MsgLine { text: n.clone(), kind: MsgKind::Info, collapsed: false, cached_lines: None, cached_collapsed: false });
+                self.lines.push(MsgLine { text: n.clone(), kind: MsgKind::Info, collapsed: false, cached_lines: None, cached_collapsed: false, sub_detail: None });
             }
-            TuiSignal::ToolResult(_c) => {
+            TuiSignal::ToolResult(c) => {
                 self.finalize_stream();
+                if !c.is_empty() {
+                    self.lines.push(MsgLine {
+                        text: c.clone(),
+                        kind: MsgKind::ToolResult,
+                        collapsed: false,
+                        cached_lines: None,
+                        cached_collapsed: false,
+                        sub_detail: None,
+                    });
+                }
             }
             TuiSignal::Error(m) => {
                 self.finalize_stream();
@@ -216,29 +270,79 @@ impl TuiState {
                     collapsed: false,
                     cached_lines: None,
                     cached_collapsed: false,
+                    sub_detail: None,
                 });
             }
             TuiSignal::TitleUpdate(m, s) => { self.model = m.clone(); self.stats = s.clone(); }
             TuiSignal::SubAgentStatus(l) => {
-                self.lines.push(MsgLine { text: l.clone(), kind: MsgKind::SubAgent, collapsed: false, cached_lines: None, cached_collapsed: false });
+                // "launched" 行创建带空 detail，使其可点击并支持实时流
+                let sub_detail = if l.contains("launched") {
+                    Some(SubAgentDetail { thinking: String::new(), text: String::new() })
+                } else {
+                    None
+                };
+                self.lines.push(MsgLine { text: l.clone(), kind: MsgKind::SubAgent, collapsed: false, cached_lines: None, cached_collapsed: false, sub_detail });
+            }
+            TuiSignal::SubAgentStream { session_id, kind, content } => {
+                // 追加到匹配 session_id 的 SubAgent 行的 detail 中
+                for line in self.lines.iter_mut().rev() {
+                    if line.kind == MsgKind::SubAgent && line.text.contains(session_id.as_str()) {
+                        if let Some(ref mut detail) = line.sub_detail {
+                            match kind {
+                                SubAgentStreamKind::Thinking => detail.thinking.push_str(&content),
+                                SubAgentStreamKind::Text => detail.text.push_str(&content),
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+            TuiSignal::SubAgentOutput { session_id, status, thinking, text, in_tokens, out_tokens } => {
+                self.finalize_stream();
+                let title = format!("[sub-agent {}] {} (in={}, out={})",
+                    session_id, status, in_tokens, out_tokens);
+                // 更新已有的 launched 行（而非创建新行）
+                let mut found = false;
+                for line in self.lines.iter_mut().rev() {
+                    if line.kind == MsgKind::SubAgent && line.text.contains(session_id.as_str()) {
+                        line.text = title.clone();
+                        if let Some(ref mut detail) = line.sub_detail {
+                            detail.thinking = thinking.clone();
+                            detail.text = text.clone();
+                        }
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    // 回退：launched 行未找到时新建
+                    self.lines.push(MsgLine {
+                        text: title,
+                        kind: MsgKind::SubAgent,
+                        collapsed: false,
+                        cached_lines: None,
+                        cached_collapsed: false,
+                        sub_detail: Some(SubAgentDetail { thinking: thinking.clone(), text: text.clone() }),
+                    });
+                }
             }
             TuiSignal::Shutdown => {}
         }
     }
 
     fn add_help(&mut self) {
-        self.lines.push(MsgLine { text: "Commands:".into(), kind: MsgKind::Info, collapsed: false, cached_lines: None, cached_collapsed: false });
-        self.lines.push(MsgLine { text: "  /flash          Switch to flash tier".into(), kind: MsgKind::Text, collapsed: false, cached_lines: None, cached_collapsed: false });
-        self.lines.push(MsgLine { text: "  /pro            Switch to pro tier".into(), kind: MsgKind::Text, collapsed: false, cached_lines: None, cached_collapsed: false });
-        self.lines.push(MsgLine { text: "  /compact        Force context compaction".into(), kind: MsgKind::Text, collapsed: false, cached_lines: None, cached_collapsed: false });
-        self.lines.push(MsgLine { text: "  /skills         List available skills".into(), kind: MsgKind::Text, collapsed: false, cached_lines: None, cached_collapsed: false });
-        self.lines.push(MsgLine { text: "  /exit  /quit    Exit TUI".into(), kind: MsgKind::Text, collapsed: false, cached_lines: None, cached_collapsed: false });
+        self.lines.push(MsgLine { text: "Commands:".into(), kind: MsgKind::Info, collapsed: false, cached_lines: None, cached_collapsed: false, sub_detail: None });
+        self.lines.push(MsgLine { text: "  /flash          Switch to flash tier".into(), kind: MsgKind::Text, collapsed: false, cached_lines: None, cached_collapsed: false, sub_detail: None });
+        self.lines.push(MsgLine { text: "  /pro            Switch to pro tier".into(), kind: MsgKind::Text, collapsed: false, cached_lines: None, cached_collapsed: false, sub_detail: None });
+        self.lines.push(MsgLine { text: "  /compact        Force context compaction".into(), kind: MsgKind::Text, collapsed: false, cached_lines: None, cached_collapsed: false, sub_detail: None });
+        self.lines.push(MsgLine { text: "  /skills         List available skills".into(), kind: MsgKind::Text, collapsed: false, cached_lines: None, cached_collapsed: false, sub_detail: None });
+        self.lines.push(MsgLine { text: "  /exit  /quit    Exit TUI".into(), kind: MsgKind::Text, collapsed: false, cached_lines: None, cached_collapsed: false, sub_detail: None });
     }
 
     fn show_skills(&mut self) {
-        self.lines.push(MsgLine { text: "=== Built-in Skills ===".into(), kind: MsgKind::Info, collapsed: false, cached_lines: None, cached_collapsed: false });
+        self.lines.push(MsgLine { text: "=== Built-in Skills ===".into(), kind: MsgKind::Info, collapsed: false, cached_lines: None, cached_collapsed: false, sub_detail: None });
         for skill in crate::assets::embedded_skills::all() {
-            self.lines.push(MsgLine { text: format!("  {} — {}", skill.name, skill.description), kind: MsgKind::Text, collapsed: false, cached_lines: None, cached_collapsed: false });
+            self.lines.push(MsgLine { text: format!("  {} — {}", skill.name, skill.description), kind: MsgKind::Text, collapsed: false, cached_lines: None, cached_collapsed: false, sub_detail: None });
         }
         self.lines.push(MsgLine {
             text: "Use --skill NAME or Skill(name) to load.".into(),
@@ -246,6 +350,7 @@ impl TuiState {
             collapsed: false,
             cached_lines: None,
             cached_collapsed: false,
+            sub_detail: None,
         });
     }
 }
@@ -260,7 +365,7 @@ fn style_for_kind(kind: MsgKind) -> Style {
         MsgKind::Error => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         MsgKind::Info => Style::default().fg(Color::Yellow),
         MsgKind::SubAgent => Style::default().fg(Color::Magenta),
-        MsgKind::ToolResult => Style::default(),
+        MsgKind::ToolResult => Style::default().fg(Color::Rgb(100, 100, 100)),
     }
 }
 
@@ -299,10 +404,10 @@ pub(crate) fn load_session(events_path: &Path) -> Vec<MsgLine> {
     let mut buf = String::new();
     let mut buf_kind: Option<MsgKind> = None;
 
-    let mut flush_buf = |lines: &mut Vec<MsgLine>, buf: &mut String, kind: &mut Option<MsgKind>| {
+    let flush_buf = |lines: &mut Vec<MsgLine>, buf: &mut String, kind: &mut Option<MsgKind>| {
         if !buf.is_empty() {
             let k = kind.take().unwrap_or(MsgKind::Text);
-            lines.push(MsgLine { text: std::mem::take(buf), kind: k, collapsed: k == MsgKind::StreamThinking, cached_lines: None, cached_collapsed: k == MsgKind::StreamThinking });
+            lines.push(MsgLine { text: std::mem::take(buf), kind: k, collapsed: k == MsgKind::StreamThinking, cached_lines: None, cached_collapsed: k == MsgKind::StreamThinking, sub_detail: None });
         }
     };
 
@@ -314,7 +419,7 @@ pub(crate) fn load_session(events_path: &Path) -> Vec<MsgLine> {
                 flush_buf(&mut lines, &mut buf, &mut buf_kind);
                 let preview = truncate_str(crate::session::store::first_line(c), 77);
                 if !preview.is_empty() {
-                    lines.push(MsgLine { text: format!("> {preview}"), kind: MsgKind::Info, collapsed: false, cached_lines: None, cached_collapsed: false });
+                    lines.push(MsgLine { text: format!("> {preview}"), kind: MsgKind::Info, collapsed: false, cached_lines: None, cached_collapsed: false, sub_detail: None });
                 }
             }
             "thinking" => {
@@ -338,7 +443,7 @@ pub(crate) fn load_session(events_path: &Path) -> Vec<MsgLine> {
                 let name = evt.get("name").and_then(serde_json::Value::as_str).unwrap_or("");
                 let summary = build_replay_tool_summary(name, evt);
                 let text = if summary.is_empty() { format!("[tool] {name}") } else { format!("[tool] {summary}") };
-                lines.push(MsgLine { text, kind: MsgKind::ToolCall, collapsed: false, cached_lines: None, cached_collapsed: false });
+                lines.push(MsgLine { text, kind: MsgKind::ToolCall, collapsed: false, cached_lines: None, cached_collapsed: false, sub_detail: None });
             }
             "tool_result" => {
                 flush_buf(&mut lines, &mut buf, &mut buf_kind);
@@ -346,7 +451,7 @@ pub(crate) fn load_session(events_path: &Path) -> Vec<MsgLine> {
             "error" => {
                 flush_buf(&mut lines, &mut buf, &mut buf_kind);
                 let msg = evt.get("message").and_then(serde_json::Value::as_str).unwrap_or("");
-                lines.push(MsgLine { text: format!("Error: {msg}"), kind: MsgKind::Error, collapsed: false, cached_lines: None, cached_collapsed: false });
+                lines.push(MsgLine { text: format!("Error: {msg}"), kind: MsgKind::Error, collapsed: false, cached_lines: None, cached_collapsed: false, sub_detail: None });
             }
             _ => {}
         }
@@ -386,11 +491,6 @@ fn tui_main_loop(
     let mut sig_rx = sig_rx;
 
     loop {
-        if state.dirty {
-            terminal.draw(|f| render(f, &mut state))?;
-            state.dirty = false;
-        }
-
         if drain_signals(&mut sig_rx, &mut state) {
             state.dirty = true;
         }
@@ -398,7 +498,19 @@ fn tui_main_loop(
             break;
         }
 
-        if crossterm::event::poll(Duration::from_millis(100)).unwrap_or(false) {
+        // render BEFORE event poll — ensures click_map is fresh
+        if state.dirty {
+            terminal.draw(|f| render(f, &mut state))?;
+            state.dirty = false;
+        }
+
+        // 流式时用更短的 poll 间隔提升实时性
+        let poll_timeout = if state.streaming {
+            Duration::from_millis(16)
+        } else {
+            Duration::from_millis(100)
+        };
+        if crossterm::event::poll(poll_timeout).unwrap_or(false) {
             let mut should_quit = false;
             loop {
                 match crossterm::event::read() {
@@ -451,6 +563,42 @@ fn handle_key(
     if key.kind == crossterm::event::KeyEventKind::Release {
         return false;
     }
+
+    // 详情视图专用按键
+    if matches!(state.view, View::SubAgentDetail { .. }) {
+        match (key.modifiers, key.code) {
+            (KeyModifiers::NONE, KeyCode::Esc) => {
+                state.view = View::Main;
+                return false;
+            }
+            (KeyModifiers::NONE, KeyCode::PageUp) => {
+                if let View::SubAgentDetail { scroll, .. } = &mut state.view {
+                    *scroll = scroll.saturating_sub(10);
+                }
+                return false;
+            }
+            (KeyModifiers::NONE, KeyCode::PageDown) => {
+                if let View::SubAgentDetail { scroll, .. } = &mut state.view {
+                    *scroll = scroll.saturating_add(10);
+                }
+                return false;
+            }
+            (KeyModifiers::NONE, KeyCode::Up) => {
+                if let View::SubAgentDetail { scroll, .. } = &mut state.view {
+                    *scroll = scroll.saturating_sub(1);
+                }
+                return false;
+            }
+            (KeyModifiers::NONE, KeyCode::Down) => {
+                if let View::SubAgentDetail { scroll, .. } = &mut state.view {
+                    *scroll = scroll.saturating_add(1);
+                }
+                return false;
+            }
+            _ => { return false; }  // 忽略详情视图中的其他按键
+        }
+    }
+
     match (key.modifiers, key.code) {
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => { state.quit = true; return true; }
         (KeyModifiers::CONTROL, KeyCode::Char('t')) => { state.show_borders = !state.show_borders; }
@@ -547,7 +695,7 @@ fn handle_enter(
     if input.is_empty() { return false; }
     state.input_history.push(input.clone());
     state.history_idx = None;
-    state.lines.push(MsgLine { text: format!("> {input}"), kind: MsgKind::Info, collapsed: false, cached_lines: None, cached_collapsed: false });
+    state.lines.push(MsgLine { text: format!("> {input}"), kind: MsgKind::Info, collapsed: false, cached_lines: None, cached_collapsed: false, sub_detail: None });
     if input.starts_with('/') {
         match input.as_str() {
             "/flash" => { let _ = orch_tx.send(OrchCmd::SetModel("flash".into())); state.model = "flash".into(); }
@@ -581,8 +729,20 @@ fn handle_event(
         Event::Key(key) => return handle_key(key, state, orch_tx),
         Event::Mouse(mouse) => {
             match mouse.kind {
-                MouseEventKind::ScrollUp => scroll_by(state, -(SCROLL_STEP as i16)),
-                MouseEventKind::ScrollDown => scroll_by(state, SCROLL_STEP as i16),
+                MouseEventKind::ScrollUp => {
+                    if let View::SubAgentDetail { scroll, .. } = &mut state.view {
+                        *scroll = scroll.saturating_sub(3);
+                    } else {
+                        scroll_by(state, -(SCROLL_STEP as i16));
+                    }
+                }
+                MouseEventKind::ScrollDown => {
+                    if let View::SubAgentDetail { scroll, .. } = &mut state.view {
+                        *scroll = scroll.saturating_add(3);
+                    } else {
+                        scroll_by(state, SCROLL_STEP as i16);
+                    }
+                }
                 MouseEventKind::Down(_) => {
                     if state.click_map.is_empty() { return false; }
                     let abs_row = mouse.row.saturating_sub(state.content_y).saturating_sub(1) + state.effective_scroll;
@@ -603,6 +763,12 @@ fn handle_event(
                         if let Some(msg) = state.lines.get_mut(idx) {
                             if matches!(msg.kind, MsgKind::StreamThinking) {
                                 msg.collapsed = !msg.collapsed;
+                            } else if msg.kind == MsgKind::SubAgent && msg.sub_detail.is_some() {
+                                // 进入子代理详情视图（按索引引用，自动反映实时更新）
+                                state.view = View::SubAgentDetail {
+                                    line_idx: idx,
+                                    scroll: 0,
+                                };
                             }
                         }
                     }
@@ -622,25 +788,127 @@ fn render(f: &mut Frame, state: &mut TuiState) {
     let area = f.area();
     if area.height < 5 || area.width < 20 { return; }
 
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(1),
-            Constraint::Length(3),
-            Constraint::Length(1),
-        ])
-        .split(area);
+    let view = state.view.clone();
+    match &view {
+        View::Main => {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Min(1),
+                    Constraint::Length(3),
+                    Constraint::Length(1),
+                ])
+                .split(area);
 
-    state.content_y = chunks[0].y;
-    render_content(f, chunks[0], state);
-    render_input(f, chunks[1], state);
+            state.content_y = chunks[0].y;
+            render_content(f, chunks[0], state);
+            render_input(f, chunks[1], state);
 
-    let cursor_x = (chunks[1].x + 3 + unicode_width::UnicodeWidthStr::width(&state.input_buf[..state.input_cursor]) as u16)
-        .min(chunks[1].right().saturating_sub(2));
-    let cursor_y = chunks[1].y + 1;
-    f.set_cursor_position((cursor_x, cursor_y));
+            let cursor_x = (chunks[1].x + 3 + unicode_width::UnicodeWidthStr::width(&state.input_buf[..state.input_cursor]) as u16)
+                .min(chunks[1].right().saturating_sub(2));
+            let cursor_y = chunks[1].y + 1;
+            f.set_cursor_position((cursor_x, cursor_y));
 
-    render_status(f, chunks[2], state);
+            render_status(f, chunks[2], state);
+        }
+        View::SubAgentDetail { line_idx, scroll } => {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Min(1),
+                    Constraint::Length(1),
+                ])
+                .split(area);
+            render_detail_content(f, chunks[0], *line_idx, *scroll, state.show_borders, state);
+            render_detail_bar(f, chunks[1]);
+        }
+    }
+}
+
+fn render_detail_content(
+    f: &mut Frame,
+    area: Rect,
+    line_idx: usize,
+    scroll: u16,
+    show_borders: bool,
+    state: &TuiState,
+) {
+    let (title, thinking, text) = match state.lines.get(line_idx) {
+        Some(line) if line.kind == MsgKind::SubAgent => {
+            let detail = line.sub_detail.as_ref();
+            let thinking = detail.map(|d| d.thinking.as_str()).unwrap_or("");
+            let text = detail.map(|d| d.text.as_str()).unwrap_or("");
+            (line.text.as_str(), thinking, text)
+        }
+        _ => return,
+    };
+
+    let mut all_lines: Vec<Line<'static>> = Vec::new();
+
+    // Title
+    all_lines.push(Line::from(Span::styled(
+        title.to_string(),
+        Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+    )));
+    all_lines.push(Line::from(""));
+
+    // Thinking section
+    if !thinking.is_empty() {
+        all_lines.push(Line::from(Span::styled(
+            "── Thinking ──",
+            Style::default().fg(Color::Rgb(139, 139, 139)),
+        )));
+        for raw in thinking.split('\n') {
+            all_lines.push(Line::from(Span::styled(
+                raw.to_string(),
+                Style::default().fg(Color::Rgb(139, 139, 139)),
+            )));
+        }
+        all_lines.push(Line::from(""));
+    }
+
+    // Text section
+    if !text.is_empty() {
+        all_lines.push(Line::from(Span::styled(
+            "── Text ──",
+            Style::default().fg(Color::White),
+        )));
+        render_md_with_tables(&mut all_lines, text);
+    }
+
+    if all_lines.is_empty() {
+        all_lines.push(Line::from(Span::styled(
+            "(no output)",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    let viewport = area.height.saturating_sub(2) as usize;
+    let max_scroll = all_lines.len().saturating_sub(viewport) as u16;
+    let effective_scroll = scroll.min(max_scroll);
+
+    let visible: Vec<Line<'static>> = all_lines
+        .iter()
+        .skip(effective_scroll as usize)
+        .take(viewport)
+        .cloned()
+        .collect();
+
+    let borders = if show_borders { Borders::ALL } else { Borders::NONE };
+    let block = Block::default()
+        .borders(borders)
+        .border_style(Style::default().fg(Color::DarkGray));
+
+    let paragraph = Paragraph::new(Text::from(visible)).block(block);
+    f.render_widget(paragraph, area);
+}
+
+fn render_detail_bar(f: &mut Frame, area: Rect) {
+    let text = Span::styled(
+        " Esc: Back │ ↑↓ PgUp/PgDn: Scroll ",
+        Style::default().fg(Color::Yellow),
+    );
+    f.render_widget(Paragraph::new(Line::from(text)), area);
 }
 
 fn render_content(f: &mut Frame, area: Rect, state: &mut TuiState) {
@@ -648,7 +916,7 @@ fn render_content(f: &mut Frame, area: Rect, state: &mut TuiState) {
     let width_changed = state.cached_width != inner_w;
     state.cached_width = inner_w;
 
-    let mut need_rebuild = width_changed || state.cached_all.is_none() || state.streaming;
+    let mut need_rebuild = width_changed || state.cached_all.is_none();
     let collapsible = |k: MsgKind| matches!(k, MsgKind::StreamThinking);
 
     for msg in state.lines.iter_mut() {
@@ -680,6 +948,7 @@ fn render_content(f: &mut Frame, area: Rect, state: &mut TuiState) {
     }
 
     if need_rebuild {
+        // 重建历史消息缓存（不包含 stream_line）
         let mut all_lines: Vec<Line<'static>> = Vec::new();
         state.click_map.clear();
         let mut current_row = 0u16;
@@ -690,17 +959,20 @@ fn render_content(f: &mut Frame, area: Rect, state: &mut TuiState) {
             current_row += phys;
             all_lines.extend(cached.clone());
         }
-        if state.streaming && !state.stream_line.is_empty() {
-            let mut seg: Vec<Line<'static>> = Vec::new();
-            push_msg(&mut seg, &state.stream_line, state.stream_kind);
-            all_lines.extend(wrap_lines_word(&seg, inner_w));
-        }
         state.cached_all = Some(all_lines);
     }
 
-    let all_wrapped = state.cached_all.as_ref().unwrap();
+    // 每帧从缓存 + 当前 stream_line 构建完整显示列表
+    // stream_line 不进入 cached_all，避免流式逐字符触发全量重建
+    let mut display_lines = state.cached_all.as_ref().cloned().unwrap_or_default();
+    if state.streaming && !state.stream_line.is_empty() {
+        let mut seg: Vec<Line<'static>> = Vec::new();
+        push_msg(&mut seg, &state.stream_line, state.stream_kind);
+        display_lines.extend(wrap_lines_word(&seg, inner_w));
+    }
+
     let viewport = area.height.saturating_sub(2) as usize;
-    let max_scroll = all_wrapped.len().saturating_sub(viewport) as u16;
+    let max_scroll = display_lines.len().saturating_sub(viewport) as u16;
     state.max_scroll = max_scroll;
 
     let scroll = if state.auto_scroll {
@@ -727,7 +999,7 @@ fn render_content(f: &mut Frame, area: Rect, state: &mut TuiState) {
         block = block.title_bottom(Line::from(title_parts));
     }
 
-    let visible: Vec<Line<'static>> = all_wrapped
+    let visible: Vec<Line<'static>> = display_lines
         .iter()
         .skip(scroll as usize)
         .take(viewport)
@@ -811,30 +1083,7 @@ fn push_msg(lines: &mut Vec<Line<'static>>, text: &str, kind: MsgKind) {
     }
     match kind {
         MsgKind::Text | MsgKind::StreamText => {
-            if text.contains("|---") || text.contains("| --") {
-                let mut md_buf = String::new();
-                for raw in text.split('\n') {
-                    let trimmed = raw.trim();
-                    let is_table = trimmed.starts_with('|') || trimmed.contains("---");
-                    if is_table {
-                        if !md_buf.is_empty() {
-                            push_md(lines, &md_buf);
-                            md_buf.clear();
-                        }
-                        lines.push(Line::from(Span::raw(raw.to_string())));
-                    } else {
-                        if !md_buf.is_empty() {
-                            md_buf.push('\n');
-                        }
-                        md_buf.push_str(raw);
-                    }
-                }
-                if !md_buf.is_empty() {
-                    push_md(lines, &md_buf);
-                }
-            } else {
-                push_md(lines, text);
-            }
+            render_md_with_tables(lines, text);
         }
         _ => {
             let base = style_for_kind(kind);
@@ -842,6 +1091,36 @@ fn push_msg(lines: &mut Vec<Line<'static>>, text: &str, kind: MsgKind) {
                 lines.push(Line::from(Span::styled(raw.to_string(), base)));
             }
         }
+    }
+}
+
+/// Render markdown with manual table handling: extract table rows and render them raw
+/// (bypass tui_markdown which doesn't support tables well).
+fn render_md_with_tables(lines: &mut Vec<Line<'static>>, text: &str) {
+    if text.contains("|---") || text.contains("| --") {
+        let mut md_buf = String::new();
+        for raw in text.split('\n') {
+            let trimmed = raw.trim();
+            let is_table = trimmed.starts_with('|') || trimmed.contains("---");
+            if is_table {
+                if !md_buf.is_empty() {
+                    push_md(lines, &md_buf);
+                    md_buf.clear();
+                }
+                // 表行追加空行，防止 tui_markdown 将相邻内容误解析为表格
+                lines.push(Line::from(Span::raw(format!("{raw}\n"))));
+            } else {
+                if !md_buf.is_empty() {
+                    md_buf.push('\n');
+                }
+                md_buf.push_str(raw);
+            }
+        }
+        if !md_buf.is_empty() {
+            push_md(lines, &md_buf);
+        }
+    } else {
+        push_md(lines, text);
     }
 }
 
@@ -888,18 +1167,7 @@ fn render_status(f: &mut Frame, area: Rect, state: &TuiState) {
 }
 
 fn build_replay_tool_summary(name: &str, evt: &serde_json::Value) -> String {
-    use std::collections::BTreeMap;
-    let input = evt.get("input").cloned().unwrap_or(serde_json::Value::Null);
-    let mut fields = BTreeMap::new();
-    if let Some(obj) = input.as_object() {
-        for (k, v) in obj {
-            match v {
-                serde_json::Value::String(s) => { fields.insert(k.clone(), s.clone()); }
-                _ => { fields.insert(k.clone(), v.to_string()); }
-            }
-        }
-    }
-    crate::session::store::build_tool_call_summary(name, &fields)
+    crate::session::store::build_tool_summary_from_json(name, evt)
 }
 
 // ─── TuiDisplay (agent side) ───────────────────────────────
@@ -932,17 +1200,19 @@ impl Display for TuiDisplay {
         };
         let _ = self.tx.send(TuiSignal::SubAgentStatus(l));
     }
+    fn render_sub_agent_output(&self, sid: &str, st: &str, thinking: &str, text: &str, it: u64, ot: u64) {
+        let _ = self.tx.send(TuiSignal::SubAgentOutput {
+            session_id: sid.into(),
+            status: st.into(),
+            thinking: thinking.into(),
+            text: text.into(),
+            in_tokens: it,
+            out_tokens: ot,
+        });
+    }
     fn render_prompt(&self) {}
     fn render_clear_line(&self) {}
 }
 
 // ─── Utilities ─────────────────────────────────────────────
 
-fn fmt_k(n: u64) -> String {
-    if n < 1000 { return n.to_string(); }
-    if n >= 1_000_000 {
-        format!("{}.{:02}M", n / 1_000_000, (n % 1_000_000) / 10_000)
-    } else {
-        format!("{}.{}K", n / 1000, (n % 1000) / 100)
-    }
-}

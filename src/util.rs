@@ -12,3 +12,20 @@ pub(crate) fn truncate_str(s: &str, n: usize) -> String {
     }
     format!("{}...", &s[..end])
 }
+
+/// Format a token count for display.
+/// Examples: 0 → "0", 500 → "500", 1234 → "1.2K", 1234567 → "1.23M"
+pub(crate) fn fmt_k(n: u64) -> String {
+    if n < 1000 {
+        return n.to_string();
+    }
+    if n >= 1_000_000 {
+        let m = n / 1_000_000;
+        let rest = n % 1_000_000;
+        format!("{}.{:02}M", m, rest / 10_000)
+    } else {
+        let k = n / 1000;
+        let rem = n % 1000;
+        format!("{}.{}K", k, rem / 100)
+    }
+}

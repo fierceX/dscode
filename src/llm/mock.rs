@@ -28,7 +28,7 @@ impl LlmClient for MockLlmClient {
     async fn stream(
         &self,
         _ctx: &AgentSharedContext,
-        _messages_json: Vec<serde_json::Value>,
+        _messages_json: &[serde_json::Value],
         _tools_json: &[serde_json::Value],
         _system_prompt: &str,
     ) -> Result<Box<dyn futures::Stream<Item = Result<Event>> + Unpin + Send>> {

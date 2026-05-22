@@ -6,7 +6,7 @@ use dscode::ui::Display;
 use dscode::ui::replay::replay_last_turns;
 use dscode::cancel::CancellationToken;
 use dscode::context::AgentSharedContext;
-use dscode::agent::sub_pool::SubAgentPool;
+use dscode::context::ToolConfig;
 use dscode::agent::orchestrator::{new_orchestrator, OrchCmd};
 use anyhow::Result;
 use std::io::IsTerminal;
@@ -115,6 +115,11 @@ async fn run(args: Vec<String>) -> Result<()> {
         Arc::new(TerminalDisplay::new(is_interactive, is_stream_json))
     };
 
+    // TUI mode: store mpsc sender for sub-agent streaming
+    let sub_stream_tx: Option<Arc<dyn std::any::Any + Send + Sync>> = tui_tx.as_ref().map(|(tx, ..)| {
+        Arc::new(tx.clone()) as Arc<dyn std::any::Any + Send + Sync>
+    });
+
     let ctx = Arc::new(AgentSharedContext {
         config: cfg.clone(),
         cwd: cwd.clone(),
@@ -125,9 +130,8 @@ async fn run(args: Vec<String>) -> Result<()> {
         compaction,
         cancel: cancel.clone(),
         display: display.clone(),
-        tool_timeout_secs: cfg.tool_timeout_secs,
-        tool_result_max_bytes: cfg.tool_result_max_bytes,
-        file_write_max_bytes: cfg.file_write_max_bytes,
+        sub_stream_tx,
+        tool_config: ToolConfig::from_config(&cfg),
         events_path: spaths.events.clone(),
         summary_path: spaths.summary.clone(),
         plan_path: spaths.plan.clone(),
@@ -135,18 +139,7 @@ async fn run(args: Vec<String>) -> Result<()> {
         immutable_prefix: Mutex::new(None),
     });
 
-    let (sub_result_tx, mut sub_result_rx) = mpsc::unbounded_channel();
-    let sub_pool = Arc::new(SubAgentPool::new(8, sub_result_tx));
-
-    let (orchestrator, cmd_tx) = new_orchestrator(ctx.clone(), sub_pool.clone());
-
-    // Bridge sub_agent results → orchestrator commands
-    let cmd_tx_clone = cmd_tx.clone();
-    tokio::spawn(async move {
-        while let Some(report) = sub_result_rx.recv().await {
-            let _ = cmd_tx_clone.send(OrchCmd::SubAgentResult(report));
-        }
-    });
+    let (orchestrator, cmd_tx) = new_orchestrator(ctx.clone());
 
     let orch_display = display.clone();
     let orch_handle = tokio::spawn(async move {
@@ -175,18 +168,12 @@ async fn run(args: Vec<String>) -> Result<()> {
         let (done_tx, done_rx) = oneshot::channel();
         cmd_tx.send(OrchCmd::UserInput { input: cfg.prompt.clone(), done: done_tx })?;
         let _ = done_rx.await;
-        while sub_pool.active_count() > 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
     } else {
         let mut input = String::new();
         tokio::io::AsyncReadExt::read_to_string(&mut tokio::io::stdin(), &mut input).await?;
         let (done_tx, done_rx) = oneshot::channel();
         cmd_tx.send(OrchCmd::UserInput { input, done: done_tx })?;
         let _ = done_rx.await;
-        while sub_pool.active_count() > 0 {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
     }
 
     cancel.cancel();

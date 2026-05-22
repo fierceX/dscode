@@ -160,7 +160,7 @@ impl super::runner::ToolExec for BashTool {
         #[derive(serde::Deserialize)]
         struct Args { command: String, #[serde(default)] timeout: Option<u64> }
         let args: Args = serde_json::from_value(input.clone())?;
-        execute(&args.command, args.timeout, ctx.tool_timeout_secs)
+        execute(&args.command, args.timeout, ctx.tool_config.tool_timeout_secs)
             .map(|(s, code)| (s, true, String::new(), code))
     }
 }
