@@ -353,6 +353,9 @@ impl TuiState {
         self.lines.push(MsgLine { text: "  /pro            Switch to pro tier".into(), kind: MsgKind::Text, collapsed: false, cached_lines: None, cached_collapsed: false, sub_detail: None });
         self.lines.push(MsgLine { text: "  /compact        Force context compaction".into(), kind: MsgKind::Text, collapsed: false, cached_lines: None, cached_collapsed: false, sub_detail: None });
         self.lines.push(MsgLine { text: "  /skills         List available skills".into(), kind: MsgKind::Text, collapsed: false, cached_lines: None, cached_collapsed: false, sub_detail: None });
+        self.lines.push(MsgLine { text: "  Ctrl+C          Interrupt current task".into(), kind: MsgKind::Text, collapsed: false, cached_lines: None, cached_collapsed: false, sub_detail: None });
+        self.lines.push(MsgLine { text: "  Ctrl+C again    Exit TUI".into(), kind: MsgKind::Text, collapsed: false, cached_lines: None, cached_collapsed: false, sub_detail: None });
+        self.lines.push(MsgLine { text: "  Esc             Exit TUI".into(), kind: MsgKind::Text, collapsed: false, cached_lines: None, cached_collapsed: false, sub_detail: None });
         self.lines.push(MsgLine { text: "  /exit  /quit    Exit TUI".into(), kind: MsgKind::Text, collapsed: false, cached_lines: None, cached_collapsed: false, sub_detail: None });
     }
 
@@ -629,10 +632,11 @@ fn handle_key(
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
             if let Some(ref interrupt) = state.interrupt {
                 interrupt.store(true, Ordering::SeqCst);
+                return false; // 中断当前任务，不退出
             } else {
                 state.quit = true;
+                return true;
             }
-            return true;
         }
         (KeyModifiers::CONTROL, KeyCode::Char('t')) => { state.show_borders = !state.show_borders; }
         (KeyModifiers::NONE, KeyCode::Esc) => { state.quit = true; return true; }

@@ -314,6 +314,8 @@ async fn run_interactive(
                 println!("  /compact      Force context compaction");
                 println!("  /skills       List available skills");
                 println!("  /help         Show this help");
+                println!("  Ctrl+C        Interrupt current task");
+                println!("  Ctrl+C again  Exit REPL");
                 println!("  exit / quit   Exit REPL");
                 continue;
             }
@@ -380,6 +382,7 @@ fn simple_stdin_loop(cmd_tx: &mpsc::UnboundedSender<OrchCmd>, cancel: &Cancellat
         if line.starts_with('/') {
             if line == "/help" {
                 println!("Commands: /flash, /pro, /compact, /skills, /help");
+                println!("Ctrl+C = interrupt, Ctrl+C again = exit");
             } else if line == "/skills" {
                 list_skills();
             } else if line == "/compact" {
