@@ -11,6 +11,7 @@ use dscode::agent::orchestrator::{new_orchestrator, OrchCmd};
 use anyhow::Result;
 use std::io::IsTerminal;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 
@@ -137,6 +138,8 @@ async fn run(args: Vec<String>) -> Result<()> {
         plan_path: spaths.plan.clone(),
         plan_draft_path: spaths.plan_draft.clone(),
         immutable_prefix: Mutex::new(None),
+        is_sub_agent: false,
+        interrupt: Arc::new(AtomicBool::new(false)),
     });
 
     let (orchestrator, cmd_tx) = new_orchestrator(ctx.clone());
@@ -154,7 +157,7 @@ async fn run(args: Vec<String>) -> Result<()> {
 
     if cfg.tui_mode {
         if let Some((_, signal_rx)) = tui_tx {
-            if let Err(e) = dscode::tui::run_tui(signal_rx, cmd_tx.clone(), &spaths.events) {
+            if let Err(e) = dscode::tui::run_tui(signal_rx, cmd_tx.clone(), &spaths.events, Some(ctx.interrupt.clone())) {
                 eprintln!("TUI error: {e}");
             }
         }
@@ -163,7 +166,7 @@ async fn run(args: Vec<String>) -> Result<()> {
         if !new_session {
             replay_last_turns(&spaths.events);
         }
-        run_interactive(cmd_tx, cancel.clone(), &home).await?;
+        run_interactive(cmd_tx, cancel.clone(), ctx.interrupt.clone(), &home).await?;
     } else if !cfg.prompt.is_empty() {
         let (done_tx, done_rx) = oneshot::channel();
         cmd_tx.send(OrchCmd::UserInput { input: cfg.prompt.clone(), done: done_tx })?;
@@ -269,6 +272,7 @@ fn extract_frontmatter_field_for_list(content: &str, field: &str) -> Option<Stri
 async fn run_interactive(
     cmd_tx: mpsc::UnboundedSender<OrchCmd>,
     cancel: CancellationToken,
+    interrupt: Arc<AtomicBool>,
     home: &PathBuf,
 ) -> Result<()> {
     let cancel_clone = cancel.clone();
@@ -295,8 +299,8 @@ async fn run_interactive(
                 Ok(s) => s.trim_end().to_string(),
                 Err(rustyline::error::ReadlineError::Eof) => break,
                 Err(rustyline::error::ReadlineError::Interrupted) => {
-                    cancel_clone.cancel();
-                    break;
+                    interrupt.store(true, Ordering::SeqCst);
+                    continue;
                 }
                 Err(_) => break,
             };
@@ -341,11 +345,21 @@ async fn run_interactive(
             }
             let _ = rl.add_history_entry(&line);
             let _ = rl.save_history(&history_file);
-            let (done_tx, done_rx) = oneshot::channel();
+            let (done_tx, done_rx) = tokio::sync::oneshot::channel();
             if cmd_tx.send(OrchCmd::UserInput { input: line, done: done_tx }).is_err() {
                 break;
             }
-            let _ = done_rx.blocking_recv();
+            // 轮询等待完成，同时检查中断标志
+            let mut done_rx = done_rx;
+            loop {
+                if interrupt.load(Ordering::SeqCst) { break; }
+                match done_rx.try_recv() {
+                    Ok(()) | Err(tokio::sync::oneshot::error::TryRecvError::Closed) => break,
+                    Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                }
+            }
         }
         let _ = rl.save_history(&history_file);
     })

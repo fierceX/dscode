@@ -8,6 +8,7 @@ use crate::tools::runner::ToolRunner;
 use crate::util::truncate_str;
 use anyhow::Result;
 use futures::StreamExt;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 /// 存储 LLM 流式响应阶段（Phase 1）的输出。
@@ -314,6 +315,12 @@ impl TurnExecutor {
 
             if result.spawns_sub_agent
                 && let Some(prompt) = result.sub_agent_prompt.take() {
+                    if self.ctx.is_sub_agent {
+                        // 禁止子代理递归调用 SubAgent
+                        self.ctx.display.render_info("Sub-agent recursion blocked: sub-agent cannot spawn sub-agents.");
+                        processed_results.push(result);
+                        continue;
+                    }
                     let session_id = format!("sub_{}", crate::session::paths::chrono_session_id());
                     let fork = result.sub_agent_fork;
 
@@ -375,7 +382,7 @@ impl TurnExecutor {
         drop(sub_result_tx);
         let mut sub_completed = 0usize;
         while sub_completed < sub_expected {
-            if self.ctx.cancel.is_cancelled() {
+            if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.load(Ordering::SeqCst) {
                 self.ctx.display.render_info("Sub-agent collection cancelled.");
                 break;
             }
@@ -561,7 +568,7 @@ impl TurnExecutor {
             let StreamOutput { text, thinking, mut calls, stop, usage } =
                 self.stream_llm_response(&messages, &system_prompt, &tools_json).await?;
 
-            if self.ctx.cancel.is_cancelled() {
+            if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.load(Ordering::SeqCst) {
                 self.ctx.display.render_stop();
                 return Ok((TurnDecision::Interrupted, effects));
             }

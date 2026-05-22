@@ -13,7 +13,9 @@ use ratatui::{
 };
 use std::fmt::{Debug, Display as FmtDisplay, Formatter};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::time::Duration;
 
 // ─── Signals ───────────────────────────────────────────────
@@ -131,6 +133,8 @@ pub(crate) struct TuiState {
     pub quit: bool,
     /// 系统忙（等待 API / 工具执行），非 idle
     pub busy: bool,
+    /// 中断当前任务（由 Ctrl+C 触发），None 表示无中断能力
+    pub interrupt: Option<Arc<AtomicBool>>,
     pub view: View,
 }
 
@@ -174,6 +178,7 @@ impl Default for TuiState {
             cached_all: None,
             quit: false,
             busy: false,
+            interrupt: None,
             view: View::Main,
         }
     }
@@ -478,6 +483,7 @@ pub fn run_tui(
     sig_rx: mpsc::Receiver<TuiSignal>,
     orch_tx: tokio::sync::mpsc::UnboundedSender<OrchCmd>,
     events_path: &Path,
+    interrupt: Option<Arc<AtomicBool>>,
 ) -> anyhow::Result<()> {
     let mut terminal = ratatui::init();
     crossterm::execute!(std::io::stdout(),
@@ -495,7 +501,7 @@ pub fn run_tui(
         }
     }
     let _guard = RestoreGuard;
-    tui_main_loop(&mut terminal, sig_rx, orch_tx, events_path)
+    tui_main_loop(&mut terminal, sig_rx, orch_tx, events_path, interrupt)
 }
 
 fn tui_main_loop(
@@ -503,9 +509,11 @@ fn tui_main_loop(
     sig_rx: mpsc::Receiver<TuiSignal>,
     orch_tx: tokio::sync::mpsc::UnboundedSender<OrchCmd>,
     events_path: &Path,
+    interrupt: Option<Arc<AtomicBool>>,
 ) -> anyhow::Result<()> {
     let mut state = TuiState::default();
     state.lines = load_session(events_path);
+    state.interrupt = interrupt;
     let mut sig_rx = sig_rx;
 
     loop {
@@ -618,7 +626,14 @@ fn handle_key(
     }
 
     match (key.modifiers, key.code) {
-        (KeyModifiers::CONTROL, KeyCode::Char('c')) => { state.quit = true; return true; }
+        (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
+            if let Some(ref interrupt) = state.interrupt {
+                interrupt.store(true, Ordering::SeqCst);
+            } else {
+                state.quit = true;
+            }
+            return true;
+        }
         (KeyModifiers::CONTROL, KeyCode::Char('t')) => { state.show_borders = !state.show_borders; }
         (KeyModifiers::NONE, KeyCode::Esc) => { state.quit = true; return true; }
         (KeyModifiers::NONE, KeyCode::Char(c)) => {

@@ -4,6 +4,7 @@ use crate::context::AgentSharedContext;
 use crate::llm::client::{AsyncLlClient, LlmClient};
 use crate::errors;
 use anyhow::Result;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
@@ -96,6 +97,7 @@ impl OrchActor {
 
     async fn handle_user_input(&mut self, input: String) {
         self.belief.reset();
+        self.ctx.interrupt.store(false, Ordering::SeqCst);
         self.refresh_title().await;
         let prepared = self.prepare_turn().await;
         let (model, _api_url, mut executor) = match prepared {

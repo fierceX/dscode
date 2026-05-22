@@ -145,6 +145,8 @@ impl SubAgentExecutor {
             plan_path: paths.plan.clone(),
             plan_draft_path: paths.plan_draft.clone(),
             immutable_prefix: Mutex::new(None),
+            is_sub_agent: true,
+            interrupt: parent_ctx.interrupt.clone(),
         });
 
         Ok(Self {

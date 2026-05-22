@@ -8,6 +8,7 @@ use crate::ui::Display;
 use serde_json::Value;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 /// Tool-level configuration extracted from Config, embedded in AgentSharedContext.
@@ -70,6 +71,10 @@ pub struct AgentSharedContext {
     pub plan_path: PathBuf,
     pub plan_draft_path: PathBuf,
     pub immutable_prefix: Mutex<Option<ImmutablePrefix>>,
+    /// 是否为子代理上下文。为 true 时禁止递归调用 SubAgent。
+    pub is_sub_agent: bool,
+    /// 用于中断当前任务的原子标志。每轮开始时重置为 false。
+    pub interrupt: Arc<AtomicBool>,
 }
 
 impl AgentSharedContext {
