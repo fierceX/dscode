@@ -66,7 +66,7 @@ impl ModelTier {
 }
 
 /// TOML config file structure (optional, loaded from ~/.dscoderc or <project>/.dscoderc).
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct DscodeConfigFile {
     pub api_key: Option<String>,
     pub base_url: Option<String>,
@@ -78,6 +78,46 @@ pub struct DscodeConfigFile {
     pub sub_agent_timeout: Option<i32>,
     pub context_compact_pct: Option<u8>,
     pub log_events: Option<bool>,
+    /// `[sandbox]` section — when enabled, dscode re-execs itself inside a sandbox.
+    #[serde(default)]
+    pub sandbox: Option<SandboxConfigFile>,
+}
+
+/// The `[sandbox]` section in .dscoderc (all fields optional, inherits defaults).
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(default)]
+pub struct SandboxConfigFile {
+    pub enabled: Option<bool>,
+    pub backend: Option<String>,
+    pub read_dirs: Option<Vec<String>>,
+    pub write_dirs: Option<Vec<String>>,
+    pub allow_bash: Option<bool>,
+    pub bash_allow_commands: Option<Vec<String>>,
+    pub allow_python: Option<bool>,
+    pub allow_network: Option<bool>,
+    pub allow_sub_agent: Option<bool>,
+    pub max_memory_mb: Option<u64>,
+    pub max_pids: Option<u32>,
+    pub timeout_secs: Option<u64>,
+}
+
+impl Default for SandboxConfigFile {
+    fn default() -> Self {
+        Self {
+            enabled: None,
+            backend: None,
+            read_dirs: None,
+            write_dirs: None,
+            allow_bash: None,
+            bash_allow_commands: None,
+            allow_python: None,
+            allow_network: None,
+            allow_sub_agent: None,
+            max_memory_mb: None,
+            max_pids: None,
+            timeout_secs: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -105,6 +145,12 @@ pub struct Config {
     pub list_skills: bool,
     pub log_events: bool,
     pub(crate) cli_overrides: CliOverrides,
+    /// JSON-RPC mode: read request from stdin, emit events to stdout.
+    pub json_rpc: bool,
+    /// 沙箱配置（从 .dscoderc 加载）
+    pub sandbox: SandboxConfig,
+    /// 工具禁用开关（从 CLI 或 JSON-RPC 加载）
+    pub tool_disable: ToolDisableFlags,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -145,6 +191,9 @@ impl Default for Config {
             list_skills: false,
             log_events: true,
             cli_overrides: CliOverrides::default(),
+            json_rpc: false,
+            sandbox: SandboxConfig::default(),
+            tool_disable: ToolDisableFlags::default(),
         }
     }
 }
@@ -252,6 +301,23 @@ pub fn parse_args(args: Vec<String>) -> Result<Config> {
             "-h" | "--help" => {
                 return Err(anyhow!("__HELP__"));
             }
+            "--json-rpc" => {
+                cfg.json_rpc = true;
+                cfg.output_format = OutputFormat::StreamJson;
+                i += 1;
+            }
+            "--disable-bash" => {
+                cfg.tool_disable.disable_bash = true;
+                i += 1;
+            }
+            "--disable-sub-agent" => {
+                cfg.tool_disable.disable_sub_agent = true;
+                i += 1;
+            }
+            "--disable-web" => {
+                cfg.tool_disable.disable_web = true;
+                i += 1;
+            }
             _ => {
                 if arg.starts_with('-') {
                     bail!("unknown option: {arg}");
@@ -288,6 +354,9 @@ pub fn apply_config_file(cfg: &mut Config) {
     let project_cfg = read_config_file(&cwd.join(".dscoderc"));
 
     apply_config_sources(cfg, &defaults, user_cfg.as_ref(), project_cfg.as_ref());
+
+    // Apply sandbox config: project overrides user, user overrides default
+    apply_sandbox_config(cfg, user_cfg.as_ref(), project_cfg.as_ref());
 }
 
 fn apply_env_defaults(cfg: &mut Config, defaults: &Config) {
@@ -362,6 +431,65 @@ fn apply_config_sources(
     }
 }
 
+/// Apply sandbox config from TOML `[sandbox]` sections.
+/// Project-level overrides user-level; both override defaults.
+/// Only active when `sandbox.enabled = true` in the highest-priority config.
+fn apply_sandbox_config(
+    cfg: &mut Config,
+    user_cfg: Option<&DscodeConfigFile>,
+    project_cfg: Option<&DscodeConfigFile>,
+) {
+    for toml_cfg in [user_cfg, project_cfg].into_iter().flatten() {
+        if let Some(ref sb) = toml_cfg.sandbox {
+            if let Some(v) = sb.enabled {
+                cfg.sandbox.enabled = v;
+            }
+            if let Some(ref v) = sb.backend {
+                cfg.sandbox.backend = v.clone();
+            }
+            if let Some(ref v) = sb.read_dirs {
+                cfg.sandbox.read_dirs = v.clone();
+            }
+            if let Some(ref v) = sb.write_dirs {
+                cfg.sandbox.write_dirs = v.clone();
+            }
+            if let Some(v) = sb.allow_bash {
+                cfg.sandbox.allow_bash = v;
+            }
+            if let Some(ref v) = sb.bash_allow_commands {
+                cfg.sandbox.bash_allow_commands = v.clone();
+            }
+            if let Some(v) = sb.allow_python {
+                cfg.sandbox.allow_python = v;
+            }
+            if let Some(v) = sb.allow_network {
+                cfg.sandbox.allow_network = v;
+            }
+            if let Some(v) = sb.allow_sub_agent {
+                cfg.sandbox.allow_sub_agent = v;
+            }
+            if let Some(v) = sb.max_memory_mb {
+                cfg.sandbox.max_memory_mb = v;
+            }
+            if let Some(v) = sb.max_pids {
+                cfg.sandbox.max_pids = v;
+            }
+            if let Some(v) = sb.timeout_secs {
+                cfg.sandbox.timeout_secs = v;
+            }
+        }
+    }
+
+    // Also check DSCODE_LIMITS env var (JSON format) — highest priority after CLI
+    if let Ok(json) = std::env::var("DSCODE_LIMITS") {
+        if let Ok(sb) = serde_json::from_str::<SandboxConfig>(&json) {
+            if sb.enabled {
+                cfg.sandbox = sb;
+            }
+        }
+    }
+}
+
 pub fn apply_provider_defaults(cfg: &mut Config) -> Result<()> {
     // Env var overrides for size limits
     if let Ok(v) = std::env::var("TOOL_RESULT_MAX_BYTES")
@@ -431,6 +559,77 @@ pub fn parse_size_bytes(raw: &str) -> Result<usize> {
         (lower.as_str(), 1usize)
     };
     Ok(num.parse::<usize>()? * m)
+}
+
+// ── Sandbox configuration ──────────────────────────────────────────
+
+/// 沙箱限制配置 — 从 `.dscoderc` 的 `[sandbox]` 段或环境变量 `DSCODE_LIMITS` 加载。
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(default)]
+pub struct SandboxConfig {
+    /// 是否启用沙箱（自举重新执行）
+    pub enabled: bool,
+    /// 沙箱后端: "auto" | "nsjail" | "bwrap" | "sandbox-exec" | "off"
+    pub backend: String,
+    /// 允许读取的目录白名单（相对于 cwd 或绝对路径）
+    pub read_dirs: Vec<String>,
+    /// 允许写入的目录白名单
+    pub write_dirs: Vec<String>,
+    /// 允许 Bash 工具
+    pub allow_bash: bool,
+    /// 允许的 Bash 命令白名单（空 = 只用危险命令黑名单）
+    pub bash_allow_commands: Vec<String>,
+    /// 允许 Python 脚本执行
+    pub allow_python: bool,
+    /// 允许网络访问（含 LLM API 调用）
+    pub allow_network: bool,
+    /// 允许 SubAgent
+    pub allow_sub_agent: bool,
+    /// 最大内存（MB）
+    pub max_memory_mb: u64,
+    /// 最大进程数
+    pub max_pids: u32,
+    /// 超时（秒）
+    pub timeout_secs: u64,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            backend: "auto".into(),
+            read_dirs: Vec::new(),
+            write_dirs: Vec::new(),
+            allow_bash: true,
+            bash_allow_commands: Vec::new(),
+            allow_python: true,
+            allow_network: true,
+            allow_sub_agent: true,
+            max_memory_mb: 1024,
+            max_pids: 64,
+            timeout_secs: 600,
+        }
+    }
+}
+
+impl SandboxConfig {
+    /// 是否实际需要沙箱（enabled 且 backend 不为 "off"）
+    pub fn is_active(&self) -> bool {
+        self.enabled && self.backend != "off"
+    }
+}
+
+// ── Tool disable flags (from CLI / JSON-RPC) ─────────────────
+
+/// 工具级别的运行时禁用开关。
+/// 来源：CLI `--disable-bash` 等，或 JSON-RPC `options.disable_*`。
+/// 注意：与 SandboxConfig 中的 allow_* 是独立的层次 —
+/// SandboxConfig 决定沙箱策略，ToolDisableFlags 是运行时覆盖。
+#[derive(Debug, Clone, Default)]
+pub struct ToolDisableFlags {
+    pub disable_bash: bool,
+    pub disable_sub_agent: bool,
+    pub disable_web: bool,
 }
 
 #[cfg(test)]
@@ -524,16 +723,9 @@ tool_timeout = 120
     fn config_cli_overrides_project_config() {
         let defaults = Config::default();
         let project = DscodeConfigFile {
-            api_key: None,
-            base_url: None,
             model: Some("pro".into()),
-            max_tokens: None,
             max_turns: Some(99),
-            max_context: None,
-            tool_timeout: None,
-            sub_agent_timeout: None,
-            context_compact_pct: None,
-            log_events: None,
+            ..Default::default()
         };
         let mut cfg = Config {
             model: "flash".into(),
@@ -550,27 +742,15 @@ tool_timeout = 120
         let defaults = Config::default();
         let user = DscodeConfigFile {
             api_key: Some("user-key".into()),
-            base_url: None,
             model: Some("flash".into()),
-            max_tokens: None,
             max_turns: Some(10),
-            max_context: None,
-            tool_timeout: None,
-            sub_agent_timeout: None,
-            context_compact_pct: None,
-            log_events: None,
+            ..Default::default()
         };
         let project = DscodeConfigFile {
             api_key: Some("project-key".into()),
-            base_url: None,
             model: Some("pro".into()),
-            max_tokens: None,
             max_turns: Some(20),
-            max_context: None,
-            tool_timeout: None,
-            sub_agent_timeout: None,
-            context_compact_pct: None,
-            log_events: None,
+            ..Default::default()
         };
         let mut cfg = Config::default();
         apply_config_sources(&mut cfg, &defaults, Some(&user), Some(&project));
@@ -585,14 +765,7 @@ tool_timeout = 120
         let user = DscodeConfigFile {
             api_key: Some("user-key".into()),
             base_url: Some("https://user.example".into()),
-            model: None,
-            max_tokens: None,
-            max_turns: None,
-            max_context: None,
-            tool_timeout: None,
-            sub_agent_timeout: None,
-            context_compact_pct: None,
-            log_events: None,
+            ..Default::default()
         };
         let mut cfg = Config::default();
         apply_config_sources(&mut cfg, &defaults, Some(&user), None);
@@ -604,16 +777,8 @@ tool_timeout = 120
     fn config_file_sets_context_compact_pct() {
         let defaults = Config::default();
         let user = DscodeConfigFile {
-            api_key: None,
-            base_url: None,
-            model: None,
-            max_tokens: None,
-            max_turns: None,
-            max_context: None,
-            tool_timeout: None,
-            sub_agent_timeout: None,
             context_compact_pct: Some(72),
-            log_events: None,
+            ..Default::default()
         };
         let mut cfg = Config::default();
         apply_config_sources(&mut cfg, &defaults, Some(&user), None);
@@ -624,16 +789,8 @@ tool_timeout = 120
     fn config_file_log_events_overrides_env_default() {
         let defaults = Config::default();
         let project = DscodeConfigFile {
-            api_key: None,
-            base_url: None,
-            model: None,
-            max_tokens: None,
-            max_turns: None,
-            max_context: None,
-            tool_timeout: None,
-            sub_agent_timeout: None,
-            context_compact_pct: None,
             log_events: Some(true),
+            ..Default::default()
         };
         let mut cfg = Config::default();
         apply_log_events_env_value(&mut cfg, "0");
@@ -645,16 +802,9 @@ tool_timeout = 120
     fn config_explicit_cli_default_value_overrides_project_config() {
         let defaults = Config::default();
         let project = DscodeConfigFile {
-            api_key: None,
-            base_url: None,
-            model: None,
-            max_tokens: None,
             max_turns: Some(99),
-            max_context: None,
             tool_timeout: Some(120),
-            sub_agent_timeout: None,
-            context_compact_pct: None,
-            log_events: None,
+            ..Default::default()
         };
         let mut cfg = parse_args(vec![
             "--max-turns".into(),

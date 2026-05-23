@@ -149,6 +149,10 @@ prompt 为空且 stdin 是终端时自动进入交互模式。非终端 stdin �
 | `--tui` | — | TUI 全屏模式 |
 | `--print` | — | ndjson 结构化输出（`--output-format stream-json` 别名） |
 | `--output-format FMT` | `human` | 输出格式：`human` / `stream-json` |
+| `--json-rpc` | — | JSON-RPC 模式（stdin 读请求，stdout 输出事件流，隐式启用 stream-json） |
+| `--disable-bash` | `false` | 禁用 Bash 工具 |
+| `--disable-sub-agent` | `false` | 禁用 SubAgent 工具 |
+| `--disable-web` | `false` | 禁用 WebSearch / WebFetch 工具 |
 | `--api-key KEY` | env | 覆盖 API Key |
 | `--base-url URL` | 默认端点 | 覆盖 API 端点 |
 | `-v` / `--verbose` | `false` | 详细日志 |
@@ -177,6 +181,66 @@ log_events = true                         # 事件日志
 
 项目级 `.dscoderc` 覆盖用户级，CLI 参数覆盖所有文件设置。
 所有字段可选，未设置的字段使用默认值或环境变量。
+
+---
+
+## 沙箱配置
+
+沙箱通过 OS 原生工具（Linux nsjail/bubblewrap、macOS sandbox-exec）包裹 dscode 进程，
+在文件系统层面强制执行访问控制。
+
+### 配置方式
+
+`.dscoderc` 的 `[sandbox]` 段控制沙箱开关和规则：
+
+```toml
+[sandbox]
+enabled = true                          # 是否启用
+backend = "auto"                        # nsjail | bwrap | sandbox-exec | off (macOS 忽略)
+
+# 文件系统白名单（相对路径基于项目根目录）
+read_dirs = ["src", "tests", "docs"]    # 允许读取的目录（macOS 忽略）
+write_dirs = ["src"]                    # 允许写入的目录
+
+# 工具限制
+allow_bash = true
+bash_allow_commands = ["ls", "cat", "cargo", "python", "rg"]
+allow_python = true
+allow_network = true
+allow_sub_agent = true
+
+# 资源配额（仅 Linux nsjail cgroup）
+max_memory_mb = 1024
+max_pids = 64
+timeout_secs = 600
+```
+
+### 平台差异
+
+| 功能 | Linux (nsjail/bwrap) | macOS (sandbox-exec) |
+|------|---------------------|---------------------|
+| **写入限制** `write_dirs` | ✅ 内核强制 | ✅ 内核强制 |
+| **读取限制** `read_dirs` | ✅ 内核强制 | ❌ 不生效（sandbox 无法阻断 TUI 初始化的系统路径） |
+| **网络隔离** `allow_network` | ✅ namespace | ❌ 不生效 |
+| **资源限制** `max_memory_mb` | ✅ cgroup | ❌ 不生效 |
+| **后台自动启用** | ✅ | ✅（写入限制） |
+
+macOS 上的读取限制应该在应用层通过路径规范化解引用 + 白名单检查实现（计划后续版本添加）。
+
+### 启动机制
+
+dscode 启动时检测 `[sandbox] enabled = true`，自动通过 `exec()` 将自身重新装入沙箱：
+
+```
+dscode --tui
+  → 读取 .dscoderc
+  → exec("nsjail --bindmount_ro src /dscode --json-rpc")  // Linux
+  → exec("sandbox-exec -p '<profile>' dscode --tui")        // macOS (写入限制)
+  → 设置 DSCODE_SANDBOXED=1 防无限递归
+  → 原进程被替换，进程完全在沙箱中运行
+```
+
+沙箱工具不可用时打印警告并正常运行（不阻塞）。
 
 ---
 

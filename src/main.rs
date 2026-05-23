@@ -57,6 +57,41 @@ async fn run(args: Vec<String>) -> Result<()> {
     apply_config_file(&mut cfg);
     apply_provider_defaults(&mut cfg)?;
 
+    // ═══ JSON-RPC mode: early stdin parsing (before context creation) ═══
+    // We parse the request here so that tool_disable flags take effect
+    // when AgentSharedContext and ToolConfig are constructed.
+    let json_rpc_prompt: Option<String> = if cfg.json_rpc {
+        let mut input = String::new();
+        tokio::io::AsyncReadExt::read_to_string(&mut tokio::io::stdin(), &mut input).await?;
+        let req: serde_json::Value = serde_json::from_str(&input)
+            .unwrap_or_else(|_| serde_json::json!({"prompt": input}));
+        // Apply optional tool disable flags
+        if let Some(opts) = req.get("options") {
+            if opts.get("disable_bash").and_then(|v| v.as_bool()).unwrap_or(false) {
+                cfg.tool_disable.disable_bash = true;
+            }
+            if opts.get("disable_sub_agent").and_then(|v| v.as_bool()).unwrap_or(false) {
+                cfg.tool_disable.disable_sub_agent = true;
+            }
+            if opts.get("disable_web").and_then(|v| v.as_bool()).unwrap_or(false) {
+                cfg.tool_disable.disable_web = true;
+            }
+        }
+        Some(req.get("prompt").and_then(|v| v.as_str()).unwrap_or(&input).to_string())
+    } else {
+        None
+    };
+
+    // ═══ Self-sandboxing: re-exec into nsjail/bwrap/sandbox-exec ═══
+    // If successful, the process is replaced and we never reach the next line.
+    // If it fails, we log a warning and continue without sandbox.
+    if cfg.sandbox.is_active() {
+        let current_exe = std::env::current_exe().unwrap_or_default();
+        let args: Vec<String> = std::env::args().collect();
+        // ⚠ Blocking call — ok here because we haven't entered the async runtime yet
+        dscode::sandbox::reexec_in_sandbox(&cfg.sandbox, &current_exe, &args);
+    }
+
     let mut sid = cfg.session_id.clone();
     if sid.is_empty() && cfg.continue_session {
         sid = paths::continue_session(&home, &cwd)
@@ -158,7 +193,17 @@ async fn run(args: Vec<String>) -> Result<()> {
         ctx.log_event(serde_json::json!({"type":"session_start","session_id":sid}));
     }
 
-    if cfg.tui_mode {
+    if cfg.json_rpc {
+        // JSON-RPC: prompt was already parsed above; just execute and emit turn-end
+        let (done_tx, done_rx) = oneshot::channel();
+        cmd_tx.send(OrchCmd::UserInput {
+            input: json_rpc_prompt.unwrap_or_default(),
+            done: done_tx,
+        })?;
+        let _ = done_rx.await;
+        // End marker so caller knows processing is complete
+        println!(r#"{{"type":"turn_end","status":"ok"}}"#);
+    } else if cfg.tui_mode {
         if let Some((_, signal_rx)) = tui_tx
             && let Err(e) = dscode::tui::run_tui(
                 signal_rx,
@@ -552,6 +597,10 @@ fn print_usage() {
     println!("  -v, --verbose           Verbose mode");
     println!("  -i, --interactive       Interactive mode (REPL)");
     println!("  --tui                   TUI mode (alternate screen with status bar)");
+    println!("  --json-rpc              JSON-RPC mode (read request from stdin, emit events to stdout)");
+    println!("  --disable-bash          Disable Bash tool");
+    println!("  --disable-sub-agent     Disable SubAgent tool");
+    println!("  --disable-web           Disable WebSearch/WebFetch tools");
     println!("  -h, --help              Show this help");
     println!();
     println!("Environment:");

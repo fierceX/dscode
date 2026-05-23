@@ -19,6 +19,7 @@ pub mod repair;
 pub mod tools;
 
 pub mod agent;
+pub mod sandbox;
 pub mod tui;
 pub mod ui;
 pub mod util;

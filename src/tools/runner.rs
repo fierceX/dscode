@@ -357,8 +357,13 @@ impl ToolExec for SubAgentTool {
     fn execute(
         &self,
         input: &serde_json::Value,
-        _ctx: &ToolContext,
+        ctx: &ToolContext,
     ) -> anyhow::Result<ToolOutcome> {
+        if ctx.tool_config.tool_disable.disable_sub_agent {
+            return Ok(ToolOutcome::text(
+                "Error: SubAgent is disabled by configuration.".into(),
+            ));
+        }
         #[derive(serde::Deserialize)]
         struct Args {
             prompt: String,

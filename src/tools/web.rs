@@ -60,8 +60,13 @@ impl super::runner::ToolExec for WebSearchTool {
     fn execute(
         &self,
         input: &serde_json::Value,
-        _ctx: &crate::context::ToolContext,
+        ctx: &crate::context::ToolContext,
     ) -> anyhow::Result<super::runner::ToolOutcome> {
+        if ctx.tool_config.tool_disable.disable_web {
+            return Ok(super::runner::ToolOutcome::text(
+                "Error: WebSearch is disabled by configuration.".into(),
+            ));
+        }
         #[derive(serde::Deserialize)]
         struct Args {
             query: String,
@@ -81,8 +86,13 @@ impl super::runner::ToolExec for WebFetchTool {
     fn execute(
         &self,
         input: &serde_json::Value,
-        _ctx: &crate::context::ToolContext,
+        ctx: &crate::context::ToolContext,
     ) -> anyhow::Result<super::runner::ToolOutcome> {
+        if ctx.tool_config.tool_disable.disable_web {
+            return Ok(super::runner::ToolOutcome::text(
+                "Error: WebFetch is disabled by configuration.".into(),
+            ));
+        }
         #[derive(serde::Deserialize)]
         struct Args {
             url: String,

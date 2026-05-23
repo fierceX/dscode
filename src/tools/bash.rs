@@ -139,6 +139,11 @@ impl super::runner::ToolExec for BashTool {
         input: &serde_json::Value,
         ctx: &crate::context::ToolContext,
     ) -> anyhow::Result<super::runner::ToolOutcome> {
+        if ctx.tool_config.tool_disable.disable_bash {
+            return Ok(super::runner::ToolOutcome::text(
+                "Error: Bash tool is disabled by configuration.".into(),
+            ));
+        }
         #[derive(serde::Deserialize)]
         struct Args {
             command: String,

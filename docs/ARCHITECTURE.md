@@ -99,6 +99,7 @@ main.rs
 | `util.rs` | 通用工具函数（truncate_str 等） |
 | `errors.rs` | ErrorCategory 分类（Network/Auth/RateLimit/Parse/Tool/Internal） |
 | `protocol.rs` | Event enum 定义 |
+| `sandbox/` | 沙箱自举模块：平台分发（Linux nsjail/bwrap + macOS sandbox-exec）
 
 ### Agent 核心
 
@@ -276,3 +277,5 @@ CLI 参数 > 项目 .dscoderc > 用户 ~/.dscoderc > 环境变量 > 代码默认
 | `CONTEXT_COMPACT_PCT` | 压缩触发百分比（默认 85） |
 | `LOG_EVENTS` | 事件日志开关 |
 | `DSCODE_HOME` | 数据目录（默认 `~/.dscode`） |
+| `DSCODE_SANDBOXED` | 内部标记，防止沙箱自举无限递归 |
+| `DSCODE_LIMITS` | JSON 格式的 `SandboxConfig` 覆盖（最高优先级） |

@@ -18,7 +18,9 @@
 - **Session 持久化** — JSONL 格式，`--continue` 无缝恢复
 - **子代理（SubAgent）** — 隔离或 fork 上下文，并发执行
 - **技能系统** — 按需加载 skill 文件，不污染后续 prompt
-- **机器协议** — `--print` 输出 ndjson 事件流
+- **机器协议** — `--print` 输出 ndjson 事件流；`--json-rpc` 行协议供外部程序调用
+- **沙箱防护** — Linux nsjail/bubblewrap（完整文件系统隔离）、macOS sandbox-exec（写入隔离）
+- **运行时约束** — `--disable-bash` / `--disable-sub-agent` / `--disable-web` 按场景禁用工具
 
 ---
 

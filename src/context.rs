@@ -1,5 +1,5 @@
 use crate::cancel::CancellationToken;
-use crate::config::{Config, OutputFormat};
+use crate::config::{Config, OutputFormat, ToolDisableFlags};
 use crate::session::compaction::CompactionEngine;
 use crate::session::prefix::ImmutablePrefix;
 use crate::session::stats::StatsTracker;
@@ -18,6 +18,8 @@ pub struct ToolConfig {
     pub sub_agent_timeout_secs: i32,
     pub tool_result_max_bytes: usize,
     pub file_write_max_bytes: usize,
+    /// 工具禁用开关（运行时覆盖）
+    pub tool_disable: ToolDisableFlags,
 }
 
 impl ToolConfig {
@@ -27,6 +29,7 @@ impl ToolConfig {
             sub_agent_timeout_secs: cfg.sub_agent_timeout_secs,
             tool_result_max_bytes: cfg.tool_result_max_bytes,
             file_write_max_bytes: cfg.file_write_max_bytes,
+            tool_disable: cfg.tool_disable.clone(),
         }
     }
 }

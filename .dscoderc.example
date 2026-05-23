@@ -2,14 +2,18 @@
 # Place in ~/.dscoderc (user-level) or <project>/.dscoderc (project-level)
 # Priority: CLI args > project .dscoderc > user ~/.dscoderc > defaults
 
-# API key (also via DEEPSEEK_API_KEY or OPENAI_API_KEY env)
+# ── API ────────────────────────────────────────────────────
+
+# API key (also via DEEPSEEK_API_KEY env)
 # api_key = "sk-xxx"
 
-# API base URL (also via DEEPSEEK_BASE_URL or OPENAI_BASE_URL env)
+# API base URL (also via DEEPSEEK_BASE_URL env)
 # base_url = "https://api.deepseek.com/v1"
 
-# Default model
-# model = "deepseek-v4-flash"
+# ── Model ──────────────────────────────────────────────────
+
+# Model tier: "flash" or "pro"
+# model = "flash"
 
 # Max output tokens per response
 # max_tokens = 81920
@@ -17,23 +21,18 @@
 # Max agent turns per session
 # max_turns = 40
 
-# Max context token limit (supports K/M suffix)
+# Max context token limit (supports K/M/G suffix)
 # max_context = "1M"
+
+# ── Timeouts ───────────────────────────────────────────────
 
 # Tool execution timeout in seconds
 # tool_timeout = 600
 
-# Auto-model upgrade (flash → pro on repeated failures)
-# auto_model = false
+# Sub-agent execution timeout in seconds
+# sub_agent_timeout = 300
 
-# Target model for auto-upgrade
-# secondary_model = "deepseek-v4-pro"
-
-# Auto-upgrade threshold (default: 4)
-# auto_upgrade_threshold = 4
-
-# Enable NEEDS_PRO self-report upgrade
-# auto_self_report = false
+# ── Behavior ───────────────────────────────────────────────
 
 # Context compaction trigger percentage (default: 85)
 # context_compact_pct = 85
@@ -41,17 +40,31 @@
 # Enable event logging (default: true)
 # log_events = true
 
-# --- Advanced: Control System Features (新增) ---
+# ── Sandbox ────────────────────────────────────────────────
+# When enabled, dscode automatically re-executes itself inside
+# nsjail (Linux) / sandbox-exec (macOS) / bubblewrap (fallback).
+#
+# Platform capabilities: see docs/USAGE.md 沙箱配置 > 平台差异
+#
+#   Linux: read + write restrictions, network isolation, resource limits
+#   macOS: write restrictions only (reads handled at app-level)
+#
+# [sandbox]
+# enabled = false
+# backend = "auto"      # "auto" | "nsjail" | "bwrap" | "sandbox-exec" | "off"
 
-# Auto-model upgrade (flash → pro on repeated failures)
-# Uses P(stall) = 1 - 0.5^k Bayesian stall detection
-# auto_model = false
+# File-system whitelist (relative paths resolve against project root)
+# read_dirs = ["src", "tests", "docs"]     # macOS: 激活沙箱但读取限制不生效
+# write_dirs = ["src"]
 
-# Target model for auto-upgrade
-# secondary_model = "deepseek-v4-pro"
+# Tool restrictions
+# allow_bash = true
+# bash_allow_commands = ["ls", "cat", "cargo", "python", "rg", "diff"]
+# allow_python = true
+# allow_network = true    # false = total network isolation (Linux only)
+# allow_sub_agent = true
 
-# Auto-upgrade threshold — deprecated, no longer used
-# auto_upgrade_threshold = 4
-
-# Enable NEEDS_PRO self-report upgrade
-# auto_self_report = false
+# Resource limits (Linux nsjail cgroup only)
+# max_memory_mb = 1024
+# max_pids = 64
+# timeout_secs = 600
