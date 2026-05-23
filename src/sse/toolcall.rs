@@ -76,3 +76,87 @@ fn todo_fields(obj: &Value) -> Result<(String, String)> {
     }
     Ok((lines.join("\n"), format!("{completed}/{total}")))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_tool_call_empty_input_defaults_to_object() {
+        let event = build_tool_call_event("Read", "call_1", " ").unwrap();
+        assert_eq!(event.name, "Read");
+        assert_eq!(event.id, "call_1");
+        assert!(event.fields.is_empty());
+        assert!(event.order.is_empty());
+        assert_eq!(event.input_json, serde_json::json!({}));
+    }
+
+    #[test]
+    fn build_tool_call_records_field_order_and_scalar_strings() {
+        let event = build_tool_call_event(
+            "Bash",
+            "call_2",
+            r#"{"command":"echo hi","timeout":3,"safe":true,"env":null}"#,
+        )
+        .unwrap();
+        assert_eq!(event.order, ["command", "env", "safe", "timeout"]);
+        assert_eq!(event.fields["command"], "echo hi");
+        assert_eq!(event.fields["timeout"], "3");
+        assert_eq!(event.fields["safe"], "true");
+        assert_eq!(event.fields["env"], "null");
+    }
+
+    #[test]
+    fn build_tool_call_rejects_non_object_input() {
+        let err = build_tool_call_event("Read", "call_3", r#"[]"#)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("tool input must be object"), "{err}");
+    }
+
+    #[test]
+    fn todowrite_builds_checklist_summary() {
+        let event = build_tool_call_event(
+            "TodoWrite",
+            "call_todo",
+            r#"{"todos":[{"content":"done","status":"completed"},{"content":"doing","status":"in_progress"},{"content":"later","status":"pending"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(event.order, ["checklist", "summary"]);
+        assert_eq!(event.fields["summary"], "1/3");
+        assert_eq!(
+            event.fields["checklist"],
+            "- [x] done\n- [ ] doing\n- [ ] later"
+        );
+    }
+
+    #[test]
+    fn todowrite_rejects_missing_content_invalid_status_and_multiple_active() {
+        let empty = build_tool_call_event(
+            "TodoWrite",
+            "call_empty",
+            r#"{"todos":[{"content":"","status":"pending"}]}"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(empty.contains("content is required"), "{empty}");
+
+        let invalid = build_tool_call_event(
+            "TodoWrite",
+            "call_invalid",
+            r#"{"todos":[{"content":"x","status":"blocked"}]}"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(invalid.contains("invalid todo status"), "{invalid}");
+
+        let multiple = build_tool_call_event(
+            "TodoWrite",
+            "call_many",
+            r#"{"todos":[{"content":"a","status":"in_progress"},{"content":"b","status":"in_progress"}]}"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(multiple.contains("at most one in_progress"), "{multiple}");
+    }
+}

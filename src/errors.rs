@@ -29,32 +29,54 @@ pub struct ErrorInfo {
 
 impl ErrorInfo {
     pub fn new(category: ErrorCategory, severity: ErrorSeverity, recoverable: bool) -> Self {
-        Self { category, severity, recoverable }
+        Self {
+            category,
+            severity,
+            recoverable,
+        }
     }
 }
 
 impl fmt::Display for ErrorInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}/{:?}/recoverable={}", self.category, self.severity, self.recoverable)
+        write!(
+            f,
+            "{:?}/{:?}/recoverable={}",
+            self.category, self.severity, self.recoverable
+        )
     }
 }
 
 pub fn classify_error_from_message(msg: &str) -> ErrorInfo {
     let lower = msg.to_lowercase();
 
-    if lower.contains("safety policy") || lower.contains("tool execution failed") || lower.contains("command blocked") {
+    if lower.contains("safety policy")
+        || lower.contains("tool execution failed")
+        || lower.contains("command blocked")
+    {
         return ErrorInfo::new(ErrorCategory::Tool, ErrorSeverity::Warning, true);
     }
-    if lower.contains("tool not found") || lower.contains("unknown tool") || lower.contains("no tool") {
+    if lower.contains("tool not found")
+        || lower.contains("unknown tool")
+        || lower.contains("no tool")
+    {
         return ErrorInfo::new(ErrorCategory::Parse, ErrorSeverity::Error, false);
     }
     if lower.contains("parse error") || lower.contains("json") || lower.contains("deserialize") {
         return ErrorInfo::new(ErrorCategory::Parse, ErrorSeverity::Error, false);
     }
-    if lower.contains("stream") && (lower.contains("end of file") || lower.contains("connection") || lower.contains("timeout")) {
+    if lower.contains("stream")
+        && (lower.contains("end of file")
+            || lower.contains("connection")
+            || lower.contains("timeout"))
+    {
         return ErrorInfo::new(ErrorCategory::Network, ErrorSeverity::Warning, true);
     }
-    if lower.contains("unauthorized") || lower.contains("forbidden") || lower.contains("auth") || lower.contains("api key") {
+    if lower.contains("unauthorized")
+        || lower.contains("forbidden")
+        || lower.contains("auth")
+        || lower.contains("api key")
+    {
         return ErrorInfo::new(ErrorCategory::Auth, ErrorSeverity::Error, false);
     }
     if lower.contains("rate limit") || lower.contains("too many") {

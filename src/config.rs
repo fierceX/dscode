@@ -73,7 +73,7 @@ pub struct DscodeConfigFile {
     pub model: Option<String>,
     pub max_tokens: Option<i32>,
     pub max_turns: Option<i32>,
-    pub max_context: Option<String>,   // supports K/M suffix
+    pub max_context: Option<String>, // supports K/M suffix
     pub tool_timeout: Option<i32>,
     pub sub_agent_timeout: Option<i32>,
     pub context_compact_pct: Option<u8>,
@@ -96,6 +96,7 @@ pub struct Config {
     pub prompt: String,
     pub max_turns: i32,
     pub max_context_tokens: usize,
+    pub context_compact_pct: u8,
     pub skills: Vec<String>,
     pub interactive: bool,
     pub session_id: String,
@@ -103,6 +104,19 @@ pub struct Config {
     pub list_sessions: bool,
     pub list_skills: bool,
     pub log_events: bool,
+    pub(crate) cli_overrides: CliOverrides,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CliOverrides {
+    pub model: bool,
+    pub max_tokens: bool,
+    pub tool_timeout_secs: bool,
+    pub sub_agent_timeout_secs: bool,
+    pub api_key: bool,
+    pub base_url: bool,
+    pub max_turns: bool,
+    pub max_context_tokens: bool,
 }
 
 impl Default for Config {
@@ -122,6 +136,7 @@ impl Default for Config {
             prompt: String::new(),
             max_turns: 40,
             max_context_tokens: 1_000_000,
+            context_compact_pct: 85,
             skills: Vec::new(),
             interactive: false,
             session_id: String::new(),
@@ -129,6 +144,7 @@ impl Default for Config {
             list_sessions: false,
             list_skills: false,
             log_events: true,
+            cli_overrides: CliOverrides::default(),
         }
     }
 }
@@ -142,20 +158,24 @@ pub fn parse_args(args: Vec<String>) -> Result<Config> {
         match arg.as_str() {
             "-m" | "--model" => {
                 let val = require_value(&args, i)?;
-                ModelTier::parse(&val)?;  // validate
+                ModelTier::parse(&val)?; // validate
                 cfg.model = val;
+                cfg.cli_overrides.model = true;
                 i += 2;
             }
             "--max-tokens" => {
                 cfg.max_tokens = parse_size_bytes(&require_value(&args, i)?)? as i32;
+                cfg.cli_overrides.max_tokens = true;
                 i += 2;
             }
             "--tool-timeout" => {
                 cfg.tool_timeout_secs = require_value(&args, i)?.parse()?;
+                cfg.cli_overrides.tool_timeout_secs = true;
                 i += 2;
             }
             "--sub-agent-timeout" => {
                 cfg.sub_agent_timeout_secs = require_value(&args, i)?.parse()?;
+                cfg.cli_overrides.sub_agent_timeout_secs = true;
                 i += 2;
             }
             "--skill" => {
@@ -164,20 +184,24 @@ pub fn parse_args(args: Vec<String>) -> Result<Config> {
             }
             "--max-turns" => {
                 cfg.max_turns = require_value(&args, i)?.parse()?;
+                cfg.cli_overrides.max_turns = true;
                 i += 2;
             }
             "--max-context" => {
                 let val = require_value(&args, i)?;
                 cfg.max_context_tokens = parse_size_bytes(&val)
                     .map_err(|_| anyhow!("Invalid --max-context: {}", val))?;
+                cfg.cli_overrides.max_context_tokens = true;
                 i += 2;
             }
             "--api-key" => {
                 cfg.api_key = require_value(&args, i)?;
+                cfg.cli_overrides.api_key = true;
                 i += 2;
             }
             "--base-url" => {
                 cfg.base_url = require_value(&args, i)?;
+                cfg.cli_overrides.base_url = true;
                 i += 2;
             }
             "--output-format" => {
@@ -249,8 +273,10 @@ fn require_value(args: &[String], i: usize) -> Result<String> {
 }
 
 pub fn apply_config_file(cfg: &mut Config) {
-    // Priority: project .dscoderc > user ~/.dscoderc
-    // Each field only fills if cfg equivalent is empty/still default
+    // Priority: CLI > project .dscoderc > user ~/.dscoderc > env > default.
+    // CLI is inferred by comparing the already-parsed config to defaults.
+    let defaults = Config::default();
+    apply_env_defaults(cfg, &defaults);
     let cwd = std::env::current_dir().unwrap_or_default();
     let home = std::path::PathBuf::from(
         std::env::var("DSCODE_HOME")
@@ -258,73 +284,103 @@ pub fn apply_config_file(cfg: &mut Config) {
             .unwrap_or_else(|_| String::from(".")),
     );
 
-    let paths = [
-        home.join(".dscoderc"),             // user-level
-        cwd.join(".dscoderc"),              // project-level
-    ];
+    let user_cfg = read_config_file(&home.join(".dscoderc"));
+    let project_cfg = read_config_file(&cwd.join(".dscoderc"));
 
-    for path in &paths {
-        let Ok(data) = std::fs::read_to_string(path) else { continue };
-        let Ok(toml_cfg): Result<DscodeConfigFile, _> = toml::from_str(&data) else { continue };
-        // Apply only if cfg field is still at default/empty
-        if cfg.model.is_empty() && toml_cfg.model.is_some() {
-            cfg.model = toml_cfg.model.unwrap();
+    apply_config_sources(cfg, &defaults, user_cfg.as_ref(), project_cfg.as_ref());
+}
+
+fn apply_env_defaults(cfg: &mut Config, defaults: &Config) {
+    if cfg.log_events == defaults.log_events
+        && let Ok(v) = std::env::var("LOG_EVENTS")
+    {
+        apply_log_events_env_value(cfg, v.as_str());
+    }
+}
+
+fn apply_log_events_env_value(cfg: &mut Config, value: &str) {
+    cfg.log_events = value != "0" && value != "false" && value != "no";
+}
+
+fn read_config_file(path: &std::path::Path) -> Option<DscodeConfigFile> {
+    let data = std::fs::read_to_string(path).ok()?;
+    toml::from_str(&data).ok()
+}
+
+fn apply_config_sources(
+    cfg: &mut Config,
+    defaults: &Config,
+    user_cfg: Option<&DscodeConfigFile>,
+    project_cfg: Option<&DscodeConfigFile>,
+) {
+    let cli_model = cfg.cli_overrides.model || cfg.model != defaults.model;
+    let cli_api_key = cfg.cli_overrides.api_key || cfg.api_key != defaults.api_key;
+    let cli_base_url = cfg.cli_overrides.base_url || cfg.base_url != defaults.base_url;
+    let cli_max_tokens = cfg.cli_overrides.max_tokens || cfg.max_tokens != defaults.max_tokens;
+    let cli_max_turns = cfg.cli_overrides.max_turns || cfg.max_turns != defaults.max_turns;
+    let cli_max_context = cfg.cli_overrides.max_context_tokens
+        || cfg.max_context_tokens != defaults.max_context_tokens;
+    let cli_tool_timeout =
+        cfg.cli_overrides.tool_timeout_secs || cfg.tool_timeout_secs != defaults.tool_timeout_secs;
+    let cli_sub_agent_timeout = cfg.cli_overrides.sub_agent_timeout_secs
+        || cfg.sub_agent_timeout_secs != defaults.sub_agent_timeout_secs;
+
+    for toml_cfg in [user_cfg, project_cfg].into_iter().flatten() {
+        if !cli_model && let Some(model) = &toml_cfg.model {
+            cfg.model = model.clone();
         }
-        if cfg.api_key.is_empty() && toml_cfg.api_key.is_some() {
-            cfg.api_key = toml_cfg.api_key.unwrap();
+        if !cli_api_key && let Some(api_key) = &toml_cfg.api_key {
+            cfg.api_key = api_key.clone();
         }
-        if cfg.base_url.is_empty() && toml_cfg.base_url.is_some() {
-            cfg.base_url = toml_cfg.base_url.unwrap();
+        if !cli_base_url && let Some(base_url) = &toml_cfg.base_url {
+            cfg.base_url = base_url.clone();
         }
-        if cfg.max_tokens == 81920 && toml_cfg.max_tokens.is_some() {
-            cfg.max_tokens = toml_cfg.max_tokens.unwrap();
+        if !cli_max_tokens && let Some(max_tokens) = toml_cfg.max_tokens {
+            cfg.max_tokens = max_tokens;
         }
-        if cfg.max_turns == 40 && toml_cfg.max_turns.is_some() {
-            cfg.max_turns = toml_cfg.max_turns.unwrap();
+        if !cli_max_turns && let Some(max_turns) = toml_cfg.max_turns {
+            cfg.max_turns = max_turns;
         }
-        if cfg.max_context_tokens == 1_000_000 && toml_cfg.max_context.is_some() {
-            if let Ok(v) = parse_size_bytes(&toml_cfg.max_context.unwrap()) {
-                cfg.max_context_tokens = v;
-            }
+        if !cli_max_context
+            && let Some(max_context) = &toml_cfg.max_context
+            && let Ok(v) = parse_size_bytes(max_context)
+        {
+            cfg.max_context_tokens = v;
         }
-        if cfg.tool_timeout_secs == 600 && toml_cfg.tool_timeout.is_some() {
-            cfg.tool_timeout_secs = toml_cfg.tool_timeout.unwrap();
+        if !cli_tool_timeout && let Some(tool_timeout) = toml_cfg.tool_timeout {
+            cfg.tool_timeout_secs = tool_timeout;
         }
-        if cfg.sub_agent_timeout_secs == 300 && toml_cfg.sub_agent_timeout.is_some() {
-            cfg.sub_agent_timeout_secs = toml_cfg.sub_agent_timeout.unwrap();
+        if !cli_sub_agent_timeout && let Some(sub_agent_timeout) = toml_cfg.sub_agent_timeout {
+            cfg.sub_agent_timeout_secs = sub_agent_timeout;
         }
-        if toml_cfg.context_compact_pct.is_some() {
-            unsafe { std::env::set_var("CONTEXT_COMPACT_PCT", &toml_cfg.context_compact_pct.unwrap().to_string()); }
+        if let Some(context_compact_pct) = toml_cfg.context_compact_pct {
+            cfg.context_compact_pct = context_compact_pct;
         }
-        if toml_cfg.log_events.is_some() {
-            cfg.log_events = toml_cfg.log_events.unwrap();
+        if let Some(log_events) = toml_cfg.log_events {
+            cfg.log_events = log_events;
         }
     }
 }
 
-    pub fn apply_provider_defaults(cfg: &mut Config) -> Result<()> {
+pub fn apply_provider_defaults(cfg: &mut Config) -> Result<()> {
     // Env var overrides for size limits
     if let Ok(v) = std::env::var("TOOL_RESULT_MAX_BYTES")
-        && let Ok(n) = v.parse::<usize>() {
-            cfg.tool_result_max_bytes = n;
-        }
-    if let Ok(v) = std::env::var("FILE_WRITE_MAX_BYTES")
-        && let Ok(n) = v.parse::<usize>() {
-            cfg.file_write_max_bytes = n;
-        }
-    if let Ok(v) = std::env::var("LOG_EVENTS") {
-        cfg.log_events = v != "0" && v != "false" && v != "no";
+        && let Ok(n) = v.parse::<usize>()
+    {
+        cfg.tool_result_max_bytes = n;
     }
-
-    // API key: DEEPSEEK_API_KEY > CLI flag
+    if let Ok(v) = std::env::var("FILE_WRITE_MAX_BYTES")
+        && let Ok(n) = v.parse::<usize>()
+    {
+        cfg.file_write_max_bytes = n;
+    }
+    // API key: CLI/config > DEEPSEEK_API_KEY
     if cfg.api_key.is_empty() {
-        cfg.api_key = std::env::var("DEEPSEEK_API_KEY")
-            .unwrap_or_default();
+        cfg.api_key = std::env::var("DEEPSEEK_API_KEY").unwrap_or_default();
     }
     // Base URL: DEEPSEEK_BASE_URL > CLI flag > default
     if cfg.base_url.is_empty() {
-        cfg.base_url = std::env::var("DEEPSEEK_BASE_URL")
-            .unwrap_or_default();
+        cfg.base_url = std::env::var("DEEPSEEK_BASE_URL").unwrap_or_default();
     }
     // Default model tier
     if cfg.model.is_empty() {
@@ -438,8 +494,6 @@ mod tests {
     fn parse_args_unknown_flag_error() {
         assert!(parse_args(vec!["--unknown".into()]).is_err());
     }
-}
-
 
     #[test]
     fn parse_config_file_overrides_model() {
@@ -466,3 +520,151 @@ tool_timeout = 120
         assert!(parsed.api_key.is_none());
     }
 
+    #[test]
+    fn config_cli_overrides_project_config() {
+        let defaults = Config::default();
+        let project = DscodeConfigFile {
+            api_key: None,
+            base_url: None,
+            model: Some("pro".into()),
+            max_tokens: None,
+            max_turns: Some(99),
+            max_context: None,
+            tool_timeout: None,
+            sub_agent_timeout: None,
+            context_compact_pct: None,
+            log_events: None,
+        };
+        let mut cfg = Config {
+            model: "flash".into(),
+            max_turns: 12,
+            ..Default::default()
+        };
+        apply_config_sources(&mut cfg, &defaults, None, Some(&project));
+        assert_eq!(cfg.model, "flash");
+        assert_eq!(cfg.max_turns, 12);
+    }
+
+    #[test]
+    fn config_project_overrides_user_config() {
+        let defaults = Config::default();
+        let user = DscodeConfigFile {
+            api_key: Some("user-key".into()),
+            base_url: None,
+            model: Some("flash".into()),
+            max_tokens: None,
+            max_turns: Some(10),
+            max_context: None,
+            tool_timeout: None,
+            sub_agent_timeout: None,
+            context_compact_pct: None,
+            log_events: None,
+        };
+        let project = DscodeConfigFile {
+            api_key: Some("project-key".into()),
+            base_url: None,
+            model: Some("pro".into()),
+            max_tokens: None,
+            max_turns: Some(20),
+            max_context: None,
+            tool_timeout: None,
+            sub_agent_timeout: None,
+            context_compact_pct: None,
+            log_events: None,
+        };
+        let mut cfg = Config::default();
+        apply_config_sources(&mut cfg, &defaults, Some(&user), Some(&project));
+        assert_eq!(cfg.api_key, "project-key");
+        assert_eq!(cfg.model, "pro");
+        assert_eq!(cfg.max_turns, 20);
+    }
+
+    #[test]
+    fn config_user_overrides_default() {
+        let defaults = Config::default();
+        let user = DscodeConfigFile {
+            api_key: Some("user-key".into()),
+            base_url: Some("https://user.example".into()),
+            model: None,
+            max_tokens: None,
+            max_turns: None,
+            max_context: None,
+            tool_timeout: None,
+            sub_agent_timeout: None,
+            context_compact_pct: None,
+            log_events: None,
+        };
+        let mut cfg = Config::default();
+        apply_config_sources(&mut cfg, &defaults, Some(&user), None);
+        assert_eq!(cfg.api_key, "user-key");
+        assert_eq!(cfg.base_url, "https://user.example");
+    }
+
+    #[test]
+    fn config_file_sets_context_compact_pct() {
+        let defaults = Config::default();
+        let user = DscodeConfigFile {
+            api_key: None,
+            base_url: None,
+            model: None,
+            max_tokens: None,
+            max_turns: None,
+            max_context: None,
+            tool_timeout: None,
+            sub_agent_timeout: None,
+            context_compact_pct: Some(72),
+            log_events: None,
+        };
+        let mut cfg = Config::default();
+        apply_config_sources(&mut cfg, &defaults, Some(&user), None);
+        assert_eq!(cfg.context_compact_pct, 72);
+    }
+
+    #[test]
+    fn config_file_log_events_overrides_env_default() {
+        let defaults = Config::default();
+        let project = DscodeConfigFile {
+            api_key: None,
+            base_url: None,
+            model: None,
+            max_tokens: None,
+            max_turns: None,
+            max_context: None,
+            tool_timeout: None,
+            sub_agent_timeout: None,
+            context_compact_pct: None,
+            log_events: Some(true),
+        };
+        let mut cfg = Config::default();
+        apply_log_events_env_value(&mut cfg, "0");
+        apply_config_sources(&mut cfg, &defaults, None, Some(&project));
+        assert!(cfg.log_events);
+    }
+
+    #[test]
+    fn config_explicit_cli_default_value_overrides_project_config() {
+        let defaults = Config::default();
+        let project = DscodeConfigFile {
+            api_key: None,
+            base_url: None,
+            model: None,
+            max_tokens: None,
+            max_turns: Some(99),
+            max_context: None,
+            tool_timeout: Some(120),
+            sub_agent_timeout: None,
+            context_compact_pct: None,
+            log_events: None,
+        };
+        let mut cfg = parse_args(vec![
+            "--max-turns".into(),
+            "40".into(),
+            "--tool-timeout".into(),
+            "600".into(),
+        ])
+        .unwrap();
+        apply_config_sources(&mut cfg, &defaults, None, Some(&project));
+        assert_eq!(cfg.max_turns, 40);
+        assert_eq!(cfg.tool_timeout_secs, 600);
+    }
+}

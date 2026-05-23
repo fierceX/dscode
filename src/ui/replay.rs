@@ -39,7 +39,11 @@ pub fn replay_last_turns(events_path: &Path) {
     }
 
     let keep = turn_starts.len().saturating_sub(10);
-    let start_idx = if keep < turn_starts.len() { turn_starts[keep] } else { 0 };
+    let start_idx = if keep < turn_starts.len() {
+        turn_starts[keep]
+    } else {
+        0
+    };
     let had_turns = turn_starts.len().saturating_sub(keep) > 0;
 
     let mut stdout = std::io::stdout();
@@ -66,7 +70,9 @@ pub fn replay_last_turns(events_path: &Path) {
                 let content = evt.get("content").and_then(Value::as_str).unwrap_or("");
                 let _ = write!(stdout, "\x1b[90m{content}\x1b[0m");
                 let _ = stdout.flush();
-                if let Some(c) = content.chars().last() { last_char = c; }
+                if let Some(c) = content.chars().last() {
+                    last_char = c;
+                }
                 prev_was_thinking = true;
             }
             "text" => {
@@ -77,7 +83,9 @@ pub fn replay_last_turns(events_path: &Path) {
                 let content = evt.get("content").and_then(Value::as_str).unwrap_or("");
                 let _ = write!(stdout, "{content}");
                 let _ = stdout.flush();
-                if let Some(c) = content.chars().last() { last_char = c; }
+                if let Some(c) = content.chars().last() {
+                    last_char = c;
+                }
                 prev_was_thinking = false;
             }
             "tool_call" => {
@@ -150,5 +158,4 @@ fn build_replay_tool_summary(name: &str, evt: &Value) -> String {
 
 fn build_legacy_tool_summary(name: &str, tc: &Value) -> String {
     crate::session::store::build_tool_summary_from_json(name, tc)
-
 }

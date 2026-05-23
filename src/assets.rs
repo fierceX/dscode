@@ -24,24 +24,35 @@ mod tests {
         assert!(!all.is_empty(), "should have at least one embedded skill");
         for skill in &all {
             assert!(!skill.name.is_empty(), "skill name must not be empty");
-            assert!(!skill.description.is_empty(), "skill description must not be empty");
+            assert!(
+                !skill.description.is_empty(),
+                "skill description must not be empty"
+            );
             assert!(!skill.content.is_empty(), "skill content must not be empty");
         }
     }
 
     #[test]
     fn embedded_debugging_skill_has_phases() {
-        let skill = embedded_skills::find("debugging")
-            .expect("debugging skill should be embedded");
-        assert!(skill.content.contains("Phase 1"), "debugging skill should have Phase 1");
-        assert!(skill.content.contains("Iron Law"), "debugging skill should have Iron Law");
+        let skill = embedded_skills::find("debugging").expect("debugging skill should be embedded");
+        assert!(
+            skill.content.contains("Phase 1"),
+            "debugging skill should have Phase 1"
+        );
+        assert!(
+            skill.content.contains("Iron Law"),
+            "debugging skill should have Iron Law"
+        );
     }
 
     #[test]
     fn embedded_verification_skill_has_gate() {
-        let skill = embedded_skills::find("verification")
-            .expect("verification skill should be embedded");
-        assert!(skill.content.contains("IDENTIFY"), "verification skill should have IDENTIFY step");
+        let skill =
+            embedded_skills::find("verification").expect("verification skill should be embedded");
+        assert!(
+            skill.content.contains("IDENTIFY"),
+            "verification skill should have IDENTIFY step"
+        );
     }
 
     #[test]
@@ -51,17 +62,28 @@ mod tests {
 
     #[test]
     fn embedded_tdd_skill_has_cycle() {
-        let skill = embedded_skills::find("tdd")
-            .expect("tdd skill should be embedded");
-        assert!(skill.content.contains("RED"), "tdd skill should mention RED phase");
-        assert!(skill.content.contains("GREEN"), "tdd skill should mention GREEN phase");
+        let skill = embedded_skills::find("tdd").expect("tdd skill should be embedded");
+        assert!(
+            skill.content.contains("RED"),
+            "tdd skill should mention RED phase"
+        );
+        assert!(
+            skill.content.contains("GREEN"),
+            "tdd skill should mention GREEN phase"
+        );
     }
 
     #[test]
     fn embedded_pre_code_check_has_checklist() {
         let skill = embedded_skills::find("pre-code-check")
             .expect("pre-code-check skill should be embedded");
-        assert!(skill.description.contains("blind edits"), "description should match");
-        assert!(skill.content.contains("Grep"), "content should reference Grep");
+        assert!(
+            skill.description.contains("blind edits"),
+            "description should match"
+        );
+        assert!(
+            skill.content.contains("Grep"),
+            "content should reference Grep"
+        );
     }
 }

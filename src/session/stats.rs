@@ -2,8 +2,8 @@ use crate::protocol::UsageEvent;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::RwLock;
 
 /// Accumulated session statistics: token usage, cost, turn counts.
@@ -89,9 +89,12 @@ impl StatsTracker {
         // Per-tier cost accumulation
         let input_cost = (u.input_tokens as f64) * tier.price_input_per_m() / 1_000_000.0;
         let output_cost = (u.output_tokens as f64) * tier.price_output_per_m() / 1_000_000.0;
-        let cache_read_cost = (u.cache_read_input_tokens as f64) * tier.price_cache_read_per_m() / 1_000_000.0;
-        let cache_creation_cost = (u.cache_creation_input_tokens as f64) * tier.price_input_per_m() / 1_000_000.0;
-        let delta_micros = ((input_cost + output_cost + cache_read_cost + cache_creation_cost) * 1_000_000.0) as u64;
+        let cache_read_cost =
+            (u.cache_read_input_tokens as f64) * tier.price_cache_read_per_m() / 1_000_000.0;
+        let cache_creation_cost =
+            (u.cache_creation_input_tokens as f64) * tier.price_input_per_m() / 1_000_000.0;
+        let delta_micros = ((input_cost + output_cost + cache_read_cost + cache_creation_cost)
+            * 1_000_000.0) as u64;
 
         match tier {
             crate::config::ModelTier::Flash => s.flash_cost_micros += delta_micros,
@@ -113,7 +116,14 @@ impl StatsTracker {
         self.dirty.store(true, Ordering::Release);
     }
 
-    pub async fn record_sub_agent(&self, request_count: u64, in_tokens: u64, out_tokens: u64, cache_read: u64, cache_creation: u64) {
+    pub async fn record_sub_agent(
+        &self,
+        request_count: u64,
+        in_tokens: u64,
+        out_tokens: u64,
+        cache_read: u64,
+        cache_creation: u64,
+    ) {
         let mut s = self.stats.write().await;
         s.sub_agent_request_count += 1;
         s.agent_request_count += request_count;
@@ -135,6 +145,12 @@ impl StatsTracker {
     pub async fn snapshot(&self) -> Stats {
         self.stats.read().await.clone()
     }
+}
+
+fn chrono_now_rfc3339() -> String {
+    let now = time::OffsetDateTime::now_utc();
+    let fmt = time::format_description::well_known::Rfc3339;
+    now.format(&fmt).unwrap_or_else(|_| String::new())
 }
 
 #[cfg(test)]
@@ -167,8 +183,26 @@ mod tests {
     #[tokio::test]
     async fn record_usage_accumulates_tokens() {
         let (t, _) = temp_tracker().await;
-        t.record_usage_with_tier(&UsageEvent { input_tokens: 100, output_tokens: 50, cache_read_input_tokens: 30, cache_creation_input_tokens: 10 }, crate::config::ModelTier::Flash).await;
-        t.record_usage_with_tier(&UsageEvent { input_tokens: 200, output_tokens: 80, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, crate::config::ModelTier::Pro).await;
+        t.record_usage_with_tier(
+            &UsageEvent {
+                input_tokens: 100,
+                output_tokens: 50,
+                cache_read_input_tokens: 30,
+                cache_creation_input_tokens: 10,
+            },
+            crate::config::ModelTier::Flash,
+        )
+        .await;
+        t.record_usage_with_tier(
+            &UsageEvent {
+                input_tokens: 200,
+                output_tokens: 80,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+            crate::config::ModelTier::Pro,
+        )
+        .await;
         let snap = t.snapshot().await;
         assert_eq!(snap.agent_request_count, 2);
         assert_eq!(snap.total_input_tokens, 300);
@@ -180,7 +214,13 @@ mod tests {
     #[tokio::test]
     async fn record_compact_increments_count() {
         let (t, _) = temp_tracker().await;
-        t.record_compact(&UsageEvent { input_tokens: 500, output_tokens: 20, cache_read_input_tokens: 400, cache_creation_input_tokens: 0 }).await;
+        t.record_compact(&UsageEvent {
+            input_tokens: 500,
+            output_tokens: 20,
+            cache_read_input_tokens: 400,
+            cache_creation_input_tokens: 0,
+        })
+        .await;
         let snap = t.snapshot().await;
         assert_eq!(snap.compact_request_count, 1);
         assert_eq!(snap.total_input_tokens, 500);
@@ -201,10 +241,18 @@ mod tests {
         let (t, path) = temp_tracker().await;
         t.flush().await.unwrap(); // reset dirty
         t.flush_if_dirty().await.unwrap(); // should be no-op
-        let mtime1 = tokio::fs::metadata(&path).await.unwrap().modified().unwrap();
+        let mtime1 = tokio::fs::metadata(&path)
+            .await
+            .unwrap()
+            .modified()
+            .unwrap();
         t.record_turn().await;
         t.flush_if_dirty().await.unwrap();
-        let mtime2 = tokio::fs::metadata(&path).await.unwrap().modified().unwrap();
+        let mtime2 = tokio::fs::metadata(&path)
+            .await
+            .unwrap()
+            .modified()
+            .unwrap();
         assert!(mtime2 > mtime1);
     }
 
@@ -225,8 +273,8 @@ mod tests {
             "last_updated": "2025-06-01T00:00:00Z"
             // flash_cost_micros and pro_cost_micros missing — old format
         });
-        let stats: Stats = serde_json::from_value(old_json)
-            .expect("old format should deserialize without error");
+        let stats: Stats =
+            serde_json::from_value(old_json).expect("old format should deserialize without error");
         assert_eq!(stats.current_turn_count, 5);
         assert_eq!(stats.agent_request_count, 12);
         assert_eq!(stats.total_input_tokens, 50000);
@@ -239,17 +287,10 @@ mod tests {
     /// Verifies that completely empty JSON object deserializes to all-defaults.
     #[test]
     fn empty_json_deserializes_to_defaults() {
-        let stats: Stats = serde_json::from_str("{}")
-            .expect("empty JSON should deserialize");
+        let stats: Stats = serde_json::from_str("{}").expect("empty JSON should deserialize");
         assert_eq!(stats.current_turn_count, 0);
         assert_eq!(stats.total_input_tokens, 0);
         assert_eq!(stats.flash_cost_micros, 0);
         assert_eq!(stats.pro_cost_micros, 0);
     }
-}
-
-fn chrono_now_rfc3339() -> String {
-    let now = time::OffsetDateTime::now_utc();
-    let fmt = time::format_description::well_known::Rfc3339;
-    now.format(&fmt).unwrap_or_else(|_| String::new())
 }

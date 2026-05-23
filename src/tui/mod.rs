@@ -5,22 +5,22 @@ use crate::ui::{Display, StatsSnapshot};
 use crate::util::{fmt_k, truncate_str};
 use crossterm::event::{Event, KeyCode, KeyModifiers, MouseEventKind};
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph},
-    Frame,
 };
 use std::fmt::{Debug, Display as FmtDisplay, Formatter};
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
 use std::time::Duration;
 
 // ─── Signals ───────────────────────────────────────────────
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum TuiSignal {
     Thinking(String),
     Text(String),
@@ -45,17 +45,15 @@ pub enum TuiSignal {
         in_tokens: u64,
         out_tokens: u64,
     },
+    #[default]
     Shutdown,
-}
-
-impl Default for TuiSignal {
-    fn default() -> Self { Self::Shutdown }
 }
 
 // ─── Message kinds for styling ─────────────────────────────
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub(crate) enum MsgKind {
+    #[default]
     Text,
     ToolCall,
     ToolResult,
@@ -64,10 +62,6 @@ pub(crate) enum MsgKind {
     SubAgent,
     StreamThinking,
     StreamText,
-}
-
-impl Default for MsgKind {
-    fn default() -> Self { MsgKind::Text }
 }
 
 // ─── SubAgent detail data ─────────────────────────────────
@@ -104,7 +98,14 @@ impl MsgLine {
 
 impl Default for MsgLine {
     fn default() -> Self {
-        MsgLine { text: String::new(), kind: MsgKind::Text, collapsed: false, cached_lines: None, cached_collapsed: false, sub_detail: None }
+        MsgLine {
+            text: String::new(),
+            kind: MsgKind::Text,
+            collapsed: false,
+            cached_lines: None,
+            cached_collapsed: false,
+            sub_detail: None,
+        }
     }
 }
 
@@ -140,17 +141,14 @@ pub(crate) struct TuiState {
 
 // ─── View navigation ─────────────────────────────────────
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub(crate) enum View {
+    #[default]
     Main,
     SubAgentDetail {
         line_idx: usize,
         scroll: u16,
     },
-}
-
-impl Default for View {
-    fn default() -> Self { View::Main }
 }
 
 impl Default for TuiState {
@@ -186,8 +184,13 @@ impl Default for TuiState {
 
 impl Debug for TuiState {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "TuiState[lines={}, stream={}, input={}]",
-            self.lines.len(), self.stream_line.len(), self.input_buf.len())
+        write!(
+            f,
+            "TuiState[lines={}, stream={}, input={}]",
+            self.lines.len(),
+            self.stream_line.len(),
+            self.input_buf.len()
+        )
     }
 }
 
@@ -250,7 +253,11 @@ impl TuiState {
             TuiSignal::ToolCall(name, summary) => {
                 self.finalize_stream();
                 self.busy = true; // 工具已发出，等待执行结果
-                let text = if summary.is_empty() { format!("[tool] {name}") } else { format!("[tool] {summary}") };
+                let text = if summary.is_empty() {
+                    format!("[tool] {name}")
+                } else {
+                    format!("[tool] {summary}")
+                };
                 self.lines.push(MsgLine {
                     text,
                     kind: MsgKind::ToolCall,
@@ -262,7 +269,14 @@ impl TuiState {
             }
             TuiSignal::Info(n) => {
                 self.finalize_stream();
-                self.lines.push(MsgLine { text: n.clone(), kind: MsgKind::Info, collapsed: false, cached_lines: None, cached_collapsed: false, sub_detail: None });
+                self.lines.push(MsgLine {
+                    text: n.clone(),
+                    kind: MsgKind::Info,
+                    collapsed: false,
+                    cached_lines: None,
+                    cached_collapsed: false,
+                    sub_detail: None,
+                });
             }
             TuiSignal::ToolResult(c) => {
                 self.finalize_stream();
@@ -289,35 +303,61 @@ impl TuiState {
                     sub_detail: None,
                 });
             }
-            TuiSignal::TitleUpdate(m, s) => { self.model = m.clone(); self.stats = s.clone(); }
+            TuiSignal::TitleUpdate(m, s) => {
+                self.model = m.clone();
+                self.stats = s.clone();
+            }
             TuiSignal::SubAgentStatus(l) => {
                 let launched = l.contains("launched");
                 let sub_detail = if launched {
-                    Some(SubAgentDetail { thinking: String::new(), text: String::new() })
+                    Some(SubAgentDetail {
+                        thinking: String::new(),
+                        text: String::new(),
+                    })
                 } else {
                     None
                 };
                 self.busy = launched; // launched → wait for sub-agent result
-                self.lines.push(MsgLine { text: l.clone(), kind: MsgKind::SubAgent, collapsed: false, cached_lines: None, cached_collapsed: false, sub_detail });
+                self.lines.push(MsgLine {
+                    text: l.clone(),
+                    kind: MsgKind::SubAgent,
+                    collapsed: false,
+                    cached_lines: None,
+                    cached_collapsed: false,
+                    sub_detail,
+                });
             }
-            TuiSignal::SubAgentStream { session_id, kind, content } => {
+            TuiSignal::SubAgentStream {
+                session_id,
+                kind,
+                content,
+            } => {
                 // 追加到匹配 session_id 的 SubAgent 行的 detail 中
                 for line in self.lines.iter_mut().rev() {
                     if line.kind == MsgKind::SubAgent && line.text.contains(session_id.as_str()) {
                         if let Some(ref mut detail) = line.sub_detail {
                             match kind {
-                                SubAgentStreamKind::Thinking => detail.thinking.push_str(&content),
-                                SubAgentStreamKind::Text => detail.text.push_str(&content),
+                                SubAgentStreamKind::Thinking => detail.thinking.push_str(content),
+                                SubAgentStreamKind::Text => detail.text.push_str(content),
                             }
                         }
                         break;
                     }
                 }
             }
-            TuiSignal::SubAgentOutput { session_id, status, thinking, text, in_tokens, out_tokens } => {
+            TuiSignal::SubAgentOutput {
+                session_id,
+                status,
+                thinking,
+                text,
+                in_tokens,
+                out_tokens,
+            } => {
                 self.finalize_stream();
-                let title = format!("[sub-agent {}] {} (in={}, out={})",
-                    session_id, status, in_tokens, out_tokens);
+                let title = format!(
+                    "[sub-agent {}] {} (in={}, out={})",
+                    session_id, status, in_tokens, out_tokens
+                );
                 // 更新已有的 launched 行（而非创建新行）
                 let mut found = false;
                 for line in self.lines.iter_mut().rev() {
@@ -339,7 +379,10 @@ impl TuiState {
                         collapsed: false,
                         cached_lines: None,
                         cached_collapsed: false,
-                        sub_detail: Some(SubAgentDetail { thinking: thinking.clone(), text: text.clone() }),
+                        sub_detail: Some(SubAgentDetail {
+                            thinking: thinking.clone(),
+                            text: text.clone(),
+                        }),
                     });
                 }
             }
@@ -348,21 +391,98 @@ impl TuiState {
     }
 
     fn add_help(&mut self) {
-        self.lines.push(MsgLine { text: "Commands:".into(), kind: MsgKind::Info, collapsed: false, cached_lines: None, cached_collapsed: false, sub_detail: None });
-        self.lines.push(MsgLine { text: "  /flash          Switch to flash tier".into(), kind: MsgKind::Text, collapsed: false, cached_lines: None, cached_collapsed: false, sub_detail: None });
-        self.lines.push(MsgLine { text: "  /pro            Switch to pro tier".into(), kind: MsgKind::Text, collapsed: false, cached_lines: None, cached_collapsed: false, sub_detail: None });
-        self.lines.push(MsgLine { text: "  /compact        Force context compaction".into(), kind: MsgKind::Text, collapsed: false, cached_lines: None, cached_collapsed: false, sub_detail: None });
-        self.lines.push(MsgLine { text: "  /skills         List available skills".into(), kind: MsgKind::Text, collapsed: false, cached_lines: None, cached_collapsed: false, sub_detail: None });
-        self.lines.push(MsgLine { text: "  Ctrl+C          Interrupt current task".into(), kind: MsgKind::Text, collapsed: false, cached_lines: None, cached_collapsed: false, sub_detail: None });
-        self.lines.push(MsgLine { text: "  Ctrl+C again    Exit TUI".into(), kind: MsgKind::Text, collapsed: false, cached_lines: None, cached_collapsed: false, sub_detail: None });
-        self.lines.push(MsgLine { text: "  Esc             Exit TUI".into(), kind: MsgKind::Text, collapsed: false, cached_lines: None, cached_collapsed: false, sub_detail: None });
-        self.lines.push(MsgLine { text: "  /exit  /quit    Exit TUI".into(), kind: MsgKind::Text, collapsed: false, cached_lines: None, cached_collapsed: false, sub_detail: None });
+        self.lines.push(MsgLine {
+            text: "Commands:".into(),
+            kind: MsgKind::Info,
+            collapsed: false,
+            cached_lines: None,
+            cached_collapsed: false,
+            sub_detail: None,
+        });
+        self.lines.push(MsgLine {
+            text: "  /flash          Switch to flash tier".into(),
+            kind: MsgKind::Text,
+            collapsed: false,
+            cached_lines: None,
+            cached_collapsed: false,
+            sub_detail: None,
+        });
+        self.lines.push(MsgLine {
+            text: "  /pro            Switch to pro tier".into(),
+            kind: MsgKind::Text,
+            collapsed: false,
+            cached_lines: None,
+            cached_collapsed: false,
+            sub_detail: None,
+        });
+        self.lines.push(MsgLine {
+            text: "  /compact        Force context compaction".into(),
+            kind: MsgKind::Text,
+            collapsed: false,
+            cached_lines: None,
+            cached_collapsed: false,
+            sub_detail: None,
+        });
+        self.lines.push(MsgLine {
+            text: "  /skills         List available skills".into(),
+            kind: MsgKind::Text,
+            collapsed: false,
+            cached_lines: None,
+            cached_collapsed: false,
+            sub_detail: None,
+        });
+        self.lines.push(MsgLine {
+            text: "  Ctrl+C          Interrupt current task".into(),
+            kind: MsgKind::Text,
+            collapsed: false,
+            cached_lines: None,
+            cached_collapsed: false,
+            sub_detail: None,
+        });
+        self.lines.push(MsgLine {
+            text: "  Ctrl+C again    Exit TUI".into(),
+            kind: MsgKind::Text,
+            collapsed: false,
+            cached_lines: None,
+            cached_collapsed: false,
+            sub_detail: None,
+        });
+        self.lines.push(MsgLine {
+            text: "  Esc             Exit TUI".into(),
+            kind: MsgKind::Text,
+            collapsed: false,
+            cached_lines: None,
+            cached_collapsed: false,
+            sub_detail: None,
+        });
+        self.lines.push(MsgLine {
+            text: "  /exit  /quit    Exit TUI".into(),
+            kind: MsgKind::Text,
+            collapsed: false,
+            cached_lines: None,
+            cached_collapsed: false,
+            sub_detail: None,
+        });
     }
 
     fn show_skills(&mut self) {
-        self.lines.push(MsgLine { text: "=== Built-in Skills ===".into(), kind: MsgKind::Info, collapsed: false, cached_lines: None, cached_collapsed: false, sub_detail: None });
+        self.lines.push(MsgLine {
+            text: "=== Built-in Skills ===".into(),
+            kind: MsgKind::Info,
+            collapsed: false,
+            cached_lines: None,
+            cached_collapsed: false,
+            sub_detail: None,
+        });
         for skill in crate::assets::embedded_skills::all() {
-            self.lines.push(MsgLine { text: format!("  {} — {}", skill.name, skill.description), kind: MsgKind::Text, collapsed: false, cached_lines: None, cached_collapsed: false, sub_detail: None });
+            self.lines.push(MsgLine {
+                text: format!("  {} — {}", skill.name, skill.description),
+                kind: MsgKind::Text,
+                collapsed: false,
+                cached_lines: None,
+                cached_collapsed: false,
+                sub_detail: None,
+            });
         }
         self.lines.push(MsgLine {
             text: "Use --skill NAME or Skill(name) to load.".into(),
@@ -381,7 +501,9 @@ fn style_for_kind(kind: MsgKind) -> Style {
     match kind {
         MsgKind::StreamThinking => Style::default().fg(Color::Rgb(139, 139, 139)),
         MsgKind::Text | MsgKind::StreamText => Style::default(),
-        MsgKind::ToolCall => Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        MsgKind::ToolCall => Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
         MsgKind::Error => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         MsgKind::Info => Style::default().fg(Color::Yellow),
         MsgKind::SubAgent => Style::default().fg(Color::Magenta),
@@ -410,7 +532,10 @@ pub(crate) fn load_session(events_path: &Path) -> Vec<MsgLine> {
     }
     let mut turn_starts: Vec<usize> = Vec::new();
     for (i, evt) in events.iter().enumerate() {
-        let t = evt.get("type").and_then(serde_json::Value::as_str).unwrap_or("");
+        let t = evt
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
         if t == "user_input" || t == "user_message" {
             turn_starts.push(i);
         }
@@ -419,7 +544,11 @@ pub(crate) fn load_session(events_path: &Path) -> Vec<MsgLine> {
         return lines;
     }
     let keep = turn_starts.len().saturating_sub(10);
-    let start_idx = if keep < turn_starts.len() { turn_starts[keep] } else { 0 };
+    let start_idx = if keep < turn_starts.len() {
+        turn_starts[keep]
+    } else {
+        0
+    };
 
     let mut buf = String::new();
     let mut buf_kind: Option<MsgKind> = None;
@@ -427,19 +556,39 @@ pub(crate) fn load_session(events_path: &Path) -> Vec<MsgLine> {
     let flush_buf = |lines: &mut Vec<MsgLine>, buf: &mut String, kind: &mut Option<MsgKind>| {
         if !buf.is_empty() {
             let k = kind.take().unwrap_or(MsgKind::Text);
-            lines.push(MsgLine { text: std::mem::take(buf), kind: k, collapsed: k == MsgKind::StreamThinking, cached_lines: None, cached_collapsed: k == MsgKind::StreamThinking, sub_detail: None });
+            lines.push(MsgLine {
+                text: std::mem::take(buf),
+                kind: k,
+                collapsed: k == MsgKind::StreamThinking,
+                cached_lines: None,
+                cached_collapsed: k == MsgKind::StreamThinking,
+                sub_detail: None,
+            });
         }
     };
 
     for evt in &events[start_idx..] {
-        let t = evt.get("type").and_then(serde_json::Value::as_str).unwrap_or("");
-        let c = evt.get("content").and_then(serde_json::Value::as_str).unwrap_or("");
+        let t = evt
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let c = evt
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
         match t {
             "user_input" | "user_message" => {
                 flush_buf(&mut lines, &mut buf, &mut buf_kind);
                 let preview = truncate_str(crate::session::store::first_line(c), 77);
                 if !preview.is_empty() {
-                    lines.push(MsgLine { text: format!("> {preview}"), kind: MsgKind::Info, collapsed: false, cached_lines: None, cached_collapsed: false, sub_detail: None });
+                    lines.push(MsgLine {
+                        text: format!("> {preview}"),
+                        kind: MsgKind::Info,
+                        collapsed: false,
+                        cached_lines: None,
+                        cached_collapsed: false,
+                        sub_detail: None,
+                    });
                 }
             }
             "thinking" => {
@@ -460,18 +609,42 @@ pub(crate) fn load_session(events_path: &Path) -> Vec<MsgLine> {
             }
             "tool_call" => {
                 flush_buf(&mut lines, &mut buf, &mut buf_kind);
-                let name = evt.get("name").and_then(serde_json::Value::as_str).unwrap_or("");
+                let name = evt
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
                 let summary = build_replay_tool_summary(name, evt);
-                let text = if summary.is_empty() { format!("[tool] {name}") } else { format!("[tool] {summary}") };
-                lines.push(MsgLine { text, kind: MsgKind::ToolCall, collapsed: false, cached_lines: None, cached_collapsed: false, sub_detail: None });
+                let text = if summary.is_empty() {
+                    format!("[tool] {name}")
+                } else {
+                    format!("[tool] {summary}")
+                };
+                lines.push(MsgLine {
+                    text,
+                    kind: MsgKind::ToolCall,
+                    collapsed: false,
+                    cached_lines: None,
+                    cached_collapsed: false,
+                    sub_detail: None,
+                });
             }
             "tool_result" => {
                 flush_buf(&mut lines, &mut buf, &mut buf_kind);
             }
             "error" => {
                 flush_buf(&mut lines, &mut buf, &mut buf_kind);
-                let msg = evt.get("message").and_then(serde_json::Value::as_str).unwrap_or("");
-                lines.push(MsgLine { text: format!("Error: {msg}"), kind: MsgKind::Error, collapsed: false, cached_lines: None, cached_collapsed: false, sub_detail: None });
+                let msg = evt
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                lines.push(MsgLine {
+                    text: format!("Error: {msg}"),
+                    kind: MsgKind::Error,
+                    collapsed: false,
+                    cached_lines: None,
+                    cached_collapsed: false,
+                    sub_detail: None,
+                });
             }
             _ => {}
         }
@@ -489,14 +662,16 @@ pub fn run_tui(
     interrupt: Option<Arc<AtomicBool>>,
 ) -> anyhow::Result<()> {
     let mut terminal = ratatui::init();
-    crossterm::execute!(std::io::stdout(),
+    crossterm::execute!(
+        std::io::stdout(),
         crossterm::event::EnableMouseCapture,
         crossterm::event::EnableBracketedPaste,
     )?;
     struct RestoreGuard;
     impl Drop for RestoreGuard {
         fn drop(&mut self) {
-            let _ = crossterm::execute!(std::io::stdout(),
+            let _ = crossterm::execute!(
+                std::io::stdout(),
                 crossterm::event::DisableBracketedPaste,
                 crossterm::event::DisableMouseCapture,
             );
@@ -514,9 +689,11 @@ fn tui_main_loop(
     events_path: &Path,
     interrupt: Option<Arc<AtomicBool>>,
 ) -> anyhow::Result<()> {
-    let mut state = TuiState::default();
-    state.lines = load_session(events_path);
-    state.interrupt = interrupt;
+    let mut state = TuiState {
+        lines: load_session(events_path),
+        interrupt,
+        ..Default::default()
+    };
     let mut sig_rx = sig_rx;
 
     loop {
@@ -541,17 +718,19 @@ fn tui_main_loop(
         };
         if crossterm::event::poll(poll_timeout).unwrap_or(false) {
             let mut should_quit = false;
-            loop {
-                match crossterm::event::read() {
-                    Ok(ev) => {
-                        if handle_event(ev, &mut state, &orch_tx) { should_quit = true; break; }
-                    }
-                    Err(_) => break,
+            while let Ok(ev) = crossterm::event::read() {
+                if handle_event(ev, &mut state, &orch_tx) {
+                    should_quit = true;
+                    break;
                 }
-                if !crossterm::event::poll(Duration::ZERO).unwrap_or(false) { break; }
+                if !crossterm::event::poll(Duration::ZERO).unwrap_or(false) {
+                    break;
+                }
             }
             state.dirty = true;
-            if should_quit { break; }
+            if should_quit {
+                break;
+            }
         }
     }
     Ok(())
@@ -575,7 +754,11 @@ fn drain_signals(rx: &mut mpsc::Receiver<TuiSignal>, state: &mut TuiState) -> bo
 const SCROLL_STEP: u16 = 3;
 
 fn scroll_by(state: &mut TuiState, delta: i16) {
-    let base = if state.auto_scroll { state.max_scroll } else { state.scroll };
+    let base = if state.auto_scroll {
+        state.max_scroll
+    } else {
+        state.scroll
+    };
     state.auto_scroll = false;
     if delta < 0 {
         state.scroll = base.saturating_sub(delta.unsigned_abs());
@@ -624,7 +807,9 @@ fn handle_key(
                 }
                 return false;
             }
-            _ => { return false; }  // 忽略详情视图中的其他按键
+            _ => {
+                return false;
+            } // 忽略详情视图中的其他按键
         }
     }
 
@@ -638,21 +823,36 @@ fn handle_key(
                 return true;
             }
         }
-        (KeyModifiers::CONTROL, KeyCode::Char('t')) => { state.show_borders = !state.show_borders; }
-        (KeyModifiers::NONE, KeyCode::Esc) => { state.quit = true; return true; }
+        (KeyModifiers::CONTROL, KeyCode::Char('t')) => {
+            state.show_borders = !state.show_borders;
+        }
+        (KeyModifiers::NONE, KeyCode::Esc) => {
+            state.quit = true;
+            return true;
+        }
         (KeyModifiers::NONE, KeyCode::Char(c)) => {
             if !c.is_control() {
                 state.input_buf.insert(state.input_cursor, c);
                 state.input_cursor += c.len_utf8();
             }
         }
-        (KeyModifiers::NONE, KeyCode::Left) => { cursor_left(state); }
-        (KeyModifiers::NONE, KeyCode::Right) => { cursor_right(state); }
-        (KeyModifiers::NONE, KeyCode::Enter) => { return handle_enter(state, orch_tx); }
+        (KeyModifiers::NONE, KeyCode::Left) => {
+            cursor_left(state);
+        }
+        (KeyModifiers::NONE, KeyCode::Right) => {
+            cursor_right(state);
+        }
+        (KeyModifiers::NONE, KeyCode::Enter) => {
+            return handle_enter(state, orch_tx);
+        }
         (KeyModifiers::NONE, KeyCode::Backspace) => cursor_backspace(state),
         (KeyModifiers::CONTROL, KeyCode::Char('w')) => cursor_delete_word(state),
-        (KeyModifiers::NONE, KeyCode::PageUp) => { scroll_by(state, -((SCROLL_STEP * 5) as i16)); }
-        (KeyModifiers::NONE, KeyCode::PageDown) => { scroll_by(state, (SCROLL_STEP * 5) as i16); }
+        (KeyModifiers::NONE, KeyCode::PageUp) => {
+            scroll_by(state, -((SCROLL_STEP * 5) as i16));
+        }
+        (KeyModifiers::NONE, KeyCode::PageDown) => {
+            scroll_by(state, (SCROLL_STEP * 5) as i16);
+        }
         (KeyModifiers::NONE, KeyCode::Up) => {
             if !state.input_history.is_empty() && state.input_buf.is_empty() {
                 let idx = match state.history_idx {
@@ -690,7 +890,9 @@ fn handle_key(
 fn cursor_left(state: &mut TuiState) {
     if state.input_cursor > 0 {
         let mut pos = state.input_cursor - 1;
-        while pos > 0 && !state.input_buf.is_char_boundary(pos) { pos -= 1; }
+        while pos > 0 && !state.input_buf.is_char_boundary(pos) {
+            pos -= 1;
+        }
         state.input_cursor = pos;
     }
 }
@@ -698,7 +900,9 @@ fn cursor_left(state: &mut TuiState) {
 fn cursor_right(state: &mut TuiState) {
     if state.input_cursor < state.input_buf.len() {
         let mut pos = state.input_cursor + 1;
-        while pos < state.input_buf.len() && !state.input_buf.is_char_boundary(pos) { pos += 1; }
+        while pos < state.input_buf.len() && !state.input_buf.is_char_boundary(pos) {
+            pos += 1;
+        }
         state.input_cursor = pos;
     }
 }
@@ -706,7 +910,9 @@ fn cursor_right(state: &mut TuiState) {
 fn cursor_backspace(state: &mut TuiState) {
     if state.input_cursor > 0 {
         let mut pos = state.input_cursor - 1;
-        while pos > 0 && !state.input_buf.is_char_boundary(pos) { pos -= 1; }
+        while pos > 0 && !state.input_buf.is_char_boundary(pos) {
+            pos -= 1;
+        }
         state.input_buf.remove(pos);
         state.input_cursor = pos;
     }
@@ -729,29 +935,57 @@ fn handle_enter(
 ) -> bool {
     let input = std::mem::take(&mut state.input_buf);
     state.input_cursor = 0;
-    if input.is_empty() { return false; }
+    if input.is_empty() {
+        return false;
+    }
     state.input_history.push(input.clone());
     state.history_idx = None;
-    state.lines.push(MsgLine { text: format!("> {input}"), kind: MsgKind::Info, collapsed: false, cached_lines: None, cached_collapsed: false, sub_detail: None });
+    state.lines.push(MsgLine {
+        text: format!("> {input}"),
+        kind: MsgKind::Info,
+        collapsed: false,
+        cached_lines: None,
+        cached_collapsed: false,
+        sub_detail: None,
+    });
     if input.starts_with('/') {
         match input.as_str() {
-            "/flash" => { let _ = orch_tx.send(OrchCmd::SetModel("flash".into())); state.model = "flash".into(); }
-            "/pro" => { let _ = orch_tx.send(OrchCmd::SetModel("pro".into())); state.model = "pro".into(); }
+            "/flash" => {
+                let _ = orch_tx.send(OrchCmd::SetModel("flash".into()));
+                state.model = "flash".into();
+            }
+            "/pro" => {
+                let _ = orch_tx.send(OrchCmd::SetModel("pro".into()));
+                state.model = "pro".into();
+            }
             "/compact" => {
                 let (done_tx, _) = tokio::sync::oneshot::channel();
                 let _ = orch_tx.send(OrchCmd::Compact { done: done_tx });
             }
-            "/help" => { state.add_help(); }
-            "/skills" => { state.show_skills(); }
-            "/exit" | "/quit" | "/q" => { state.quit = true; return true; }
+            "/help" => {
+                state.add_help();
+            }
+            "/skills" => {
+                state.show_skills();
+            }
+            "/exit" | "/quit" | "/q" => {
+                state.quit = true;
+                return true;
+            }
             _ => {
                 let (done_tx, _) = tokio::sync::oneshot::channel();
-                let _ = orch_tx.send(OrchCmd::UserInput { input, done: done_tx });
+                let _ = orch_tx.send(OrchCmd::UserInput {
+                    input,
+                    done: done_tx,
+                });
             }
         }
     } else {
         let (done_tx, _) = tokio::sync::oneshot::channel();
-        let _ = orch_tx.send(OrchCmd::UserInput { input, done: done_tx });
+        let _ = orch_tx.send(OrchCmd::UserInput {
+            input,
+            done: done_tx,
+        });
     }
     state.auto_scroll = true;
     false
@@ -781,32 +1015,33 @@ fn handle_event(
                     }
                 }
                 MouseEventKind::Down(_) => {
-                    if state.click_map.is_empty() { return false; }
-                    let abs_row = mouse.row.saturating_sub(state.content_y).saturating_sub(1) + state.effective_scroll;
+                    if state.click_map.is_empty() {
+                        return false;
+                    }
+                    let abs_row = mouse.row.saturating_sub(state.content_y).saturating_sub(1)
+                        + state.effective_scroll;
                     let mut best: Option<(usize, u16)> = None;
                     for (idx, start, end) in &state.click_map {
                         let dist = if abs_row < *start {
                             *start - abs_row
-                        } else if abs_row > *end {
-                            abs_row - *end
                         } else {
-                            0
+                            abs_row.saturating_sub(*end)
                         };
-                        if best.map_or(true, |(_, d)| dist < d) {
+                        if best.is_none_or(|(_, d)| dist < d) {
                             best = Some((*idx, dist));
                         }
                     }
-                    if let Some((idx, _)) = best {
-                        if let Some(msg) = state.lines.get_mut(idx) {
-                            if matches!(msg.kind, MsgKind::StreamThinking) {
-                                msg.collapsed = !msg.collapsed;
-                            } else if msg.kind == MsgKind::SubAgent && msg.sub_detail.is_some() {
-                                // 进入子代理详情视图（按索引引用，自动反映实时更新）
-                                state.view = View::SubAgentDetail {
-                                    line_idx: idx,
-                                    scroll: 0,
-                                };
-                            }
+                    if let Some((idx, _)) = best
+                        && let Some(msg) = state.lines.get_mut(idx)
+                    {
+                        if matches!(msg.kind, MsgKind::StreamThinking) {
+                            msg.collapsed = !msg.collapsed;
+                        } else if msg.kind == MsgKind::SubAgent && msg.sub_detail.is_some() {
+                            // 进入子代理详情视图（按索引引用，自动反映实时更新）
+                            state.view = View::SubAgentDetail {
+                                line_idx: idx,
+                                scroll: 0,
+                            };
                         }
                     }
                 }
@@ -816,7 +1051,8 @@ fn handle_event(
         Event::Resize(..) => {}
         Event::Paste(content) => {
             // 批量过滤并插入，避免单字符 insert() 的 O(n²)
-            let to_insert: String = content.chars()
+            let to_insert: String = content
+                .chars()
                 .filter(|&ch| !ch.is_control() || ch == '\n' || ch == '\t')
                 .collect();
             if !to_insert.is_empty() {
@@ -833,7 +1069,9 @@ fn handle_event(
 
 fn render(f: &mut Frame, state: &mut TuiState) {
     let area = f.area();
-    if area.height < 5 || area.width < 20 { return; }
+    if area.height < 5 || area.width < 20 {
+        return;
+    }
 
     let view = state.view.clone();
     match &view {
@@ -842,7 +1080,7 @@ fn render(f: &mut Frame, state: &mut TuiState) {
             let inner_w = area.width.saturating_sub(2).max(1) as usize;
             // 用 split_at_visual_width 直接计算实际行数，与渲染完全一致
             let vis_lines = split_at_visual_width(&state.input_buf, inner_w);
-            let content_lines = vis_lines.len().min(5).max(1);
+            let content_lines = vis_lines.len().clamp(1, 5);
             let input_height = content_lines + 2; // +2 for borders
 
             let chunks = Layout::default()
@@ -860,17 +1098,16 @@ fn render(f: &mut Frame, state: &mut TuiState) {
 
             // 光标位置：用 split_at_visual_width 切分光标前的文本，
             // 行 = 行数-1, 列 = 最后一行视觉宽度
-            let lines_before = split_at_visual_width(&state.input_buf[..state.input_cursor], inner_w);
+            let lines_before =
+                split_at_visual_width(&state.input_buf[..state.input_cursor], inner_w);
             let row = lines_before.len().saturating_sub(1);
             let col = if lines_before.is_empty() {
                 0
             } else {
                 unicode_width::UnicodeWidthStr::width(lines_before.last().unwrap().as_str())
             };
-            let cursor_x = (chunks[1].x + 1 + col as u16)
-                .min(chunks[1].right().saturating_sub(2));
-            let cursor_y = (chunks[1].y + 1 + row as u16)
-                .min(chunks[1].bottom().saturating_sub(2));
+            let cursor_x = (chunks[1].x + 1 + col as u16).min(chunks[1].right().saturating_sub(2));
+            let cursor_y = (chunks[1].y + 1 + row as u16).min(chunks[1].bottom().saturating_sub(2));
             f.set_cursor_position((cursor_x, cursor_y));
 
             render_status(f, chunks[2], state);
@@ -878,10 +1115,7 @@ fn render(f: &mut Frame, state: &mut TuiState) {
         View::SubAgentDetail { line_idx, scroll } => {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Min(1),
-                    Constraint::Length(1),
-                ])
+                .constraints([Constraint::Min(1), Constraint::Length(1)])
                 .split(area);
             render_detail_content(f, chunks[0], *line_idx, *scroll, state.show_borders, state);
             render_detail_bar(f, chunks[1]);
@@ -912,7 +1146,9 @@ fn render_detail_content(
     // Title
     all_lines.push(Line::from(Span::styled(
         title.to_string(),
-        Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(Color::Magenta)
+            .add_modifier(Modifier::BOLD),
     )));
     all_lines.push(Line::from(""));
 
@@ -958,7 +1194,11 @@ fn render_detail_content(
         .cloned()
         .collect();
 
-    let borders = if show_borders { Borders::ALL } else { Borders::NONE };
+    let borders = if show_borders {
+        Borders::ALL
+    } else {
+        Borders::NONE
+    };
     let block = Block::default()
         .borders(borders)
         .border_style(Style::default().fg(Color::DarkGray));
@@ -994,7 +1234,10 @@ fn render_content(f: &mut Frame, area: Rect, state: &mut TuiState) {
                 let mut cut = false;
                 for ch in first.chars() {
                     let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-                    if dw + cw > max_w { cut = true; break; }
+                    if dw + cw > max_w {
+                        cut = true;
+                        break;
+                    }
                     snippet.push(ch);
                     dw += cw;
                 }
@@ -1019,7 +1262,9 @@ fn render_content(f: &mut Frame, area: Rect, state: &mut TuiState) {
         for (idx, msg) in state.lines.iter().enumerate() {
             let cached = msg.cached_lines.as_ref().unwrap();
             let phys = cached.len() as u16;
-            state.click_map.push((idx, current_row, current_row + phys.saturating_sub(1)));
+            state
+                .click_map
+                .push((idx, current_row, current_row + phys.saturating_sub(1)));
             current_row += phys;
             all_lines.extend(cached.clone());
         }
@@ -1046,8 +1291,16 @@ fn render_content(f: &mut Frame, area: Rect, state: &mut TuiState) {
     };
     state.effective_scroll = scroll;
 
-    let border_color = if state.streaming { Color::Cyan } else { Color::DarkGray };
-    let borders = if state.show_borders { Borders::ALL } else { Borders::NONE };
+    let border_color = if state.streaming {
+        Color::Cyan
+    } else {
+        Color::DarkGray
+    };
+    let borders = if state.show_borders {
+        Borders::ALL
+    } else {
+        Borders::NONE
+    };
     let mut block = Block::default()
         .borders(borders)
         .border_style(Style::default().fg(border_color));
@@ -1070,8 +1323,7 @@ fn render_content(f: &mut Frame, area: Rect, state: &mut TuiState) {
         .cloned()
         .collect();
 
-    let paragraph = Paragraph::new(Text::from(visible))
-        .block(block);
+    let paragraph = Paragraph::new(Text::from(visible)).block(block);
 
     f.render_widget(paragraph, area);
 }
@@ -1180,7 +1432,9 @@ fn render_diff(lines: &mut Vec<Line<'static>>, text: &str) {
     let red = Style::default().fg(Color::Rgb(255, 100, 100));
     let green = Style::default().fg(Color::Rgb(100, 200, 100));
     let cyan = Style::default().fg(Color::Cyan);
-    let yellow = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+    let yellow = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
 
     for raw in text.split('\n') {
         let clean = strip_ansi(raw);
@@ -1288,7 +1542,11 @@ fn split_at_visual_width(s: &str, max_width: usize) -> Vec<String> {
 
 fn render_status(f: &mut Frame, area: Rect, state: &TuiState) {
     let s = &state.stats;
-    let b = if s.belief > 0.0 { format!(" B:{:.2}", s.belief) } else { String::new() };
+    let b = if s.belief > 0.0 {
+        format!(" B:{:.2}", s.belief)
+    } else {
+        String::new()
+    };
     let ti = s.total_input_tokens + s.total_cache_read_tokens;
     let work = if state.streaming {
         match state.stream_kind {
@@ -1306,9 +1564,11 @@ fn render_status(f: &mut Frame, area: Rect, state: &TuiState) {
         state.model,
         StatsSnapshot::fmt_num(s.current_turn_count),
         StatsSnapshot::fmt_num(s.agent_request_count),
-        fmt_k(ti), s.cache_pct(),
+        fmt_k(ti),
+        s.cache_pct(),
         fmt_k(s.total_output_tokens),
-        fmt_k(s.current_context_tokens), s.ctx_pct(),
+        fmt_k(s.current_context_tokens),
+        s.ctx_pct(),
         s.format_cost(),
         work,
     );
@@ -1327,18 +1587,36 @@ pub struct TuiDisplay {
 }
 
 impl TuiDisplay {
-    pub fn new(tx: mpsc::Sender<TuiSignal>) -> Self { Self { tx } }
+    pub fn new(tx: mpsc::Sender<TuiSignal>) -> Self {
+        Self { tx }
+    }
 }
 
 impl Display for TuiDisplay {
-    fn render_thinking(&self, c: &str) { let _ = self.tx.send(TuiSignal::Thinking(c.into())); }
-    fn render_text(&self, c: &str) { let _ = self.tx.send(TuiSignal::Text(c.into())); }
-    fn render_tool_call(&self, n: &str, s: &str) { let _ = self.tx.send(TuiSignal::ToolCall(n.into(), s.into())); }
-    fn render_tool_result(&self, _: &str, c: &str) { let _ = self.tx.send(TuiSignal::ToolResult(c.into())); }
-    fn render_stop(&self) { let _ = self.tx.send(TuiSignal::Stop); }
-    fn render_error(&self, m: &str) { let _ = self.tx.send(TuiSignal::Error(m.into())); }
-    fn render_retry(&self) { let _ = self.tx.send(TuiSignal::Retry); }
-    fn render_info(&self, m: &str) { let _ = self.tx.send(TuiSignal::Info(m.into())); }
+    fn render_thinking(&self, c: &str) {
+        let _ = self.tx.send(TuiSignal::Thinking(c.into()));
+    }
+    fn render_text(&self, c: &str) {
+        let _ = self.tx.send(TuiSignal::Text(c.into()));
+    }
+    fn render_tool_call(&self, n: &str, s: &str) {
+        let _ = self.tx.send(TuiSignal::ToolCall(n.into(), s.into()));
+    }
+    fn render_tool_result(&self, _: &str, c: &str) {
+        let _ = self.tx.send(TuiSignal::ToolResult(c.into()));
+    }
+    fn render_stop(&self) {
+        let _ = self.tx.send(TuiSignal::Stop);
+    }
+    fn render_error(&self, m: &str) {
+        let _ = self.tx.send(TuiSignal::Error(m.into()));
+    }
+    fn render_retry(&self) {
+        let _ = self.tx.send(TuiSignal::Retry);
+    }
+    fn render_info(&self, m: &str) {
+        let _ = self.tx.send(TuiSignal::Info(m.into()));
+    }
     fn render_title_update(&self, m: &str, s: &StatsSnapshot) {
         let _ = self.tx.send(TuiSignal::TitleUpdate(m.into(), s.clone()));
     }
@@ -1350,7 +1628,15 @@ impl Display for TuiDisplay {
         };
         let _ = self.tx.send(TuiSignal::SubAgentStatus(l));
     }
-    fn render_sub_agent_output(&self, sid: &str, st: &str, thinking: &str, text: &str, it: u64, ot: u64) {
+    fn render_sub_agent_output(
+        &self,
+        sid: &str,
+        st: &str,
+        thinking: &str,
+        text: &str,
+        it: u64,
+        ot: u64,
+    ) {
         let _ = self.tx.send(TuiSignal::SubAgentOutput {
             session_id: sid.into(),
             status: st.into(),
@@ -1365,4 +1651,3 @@ impl Display for TuiDisplay {
 }
 
 // ─── Utilities ─────────────────────────────────────────────
-

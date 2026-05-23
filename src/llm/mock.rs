@@ -1,5 +1,5 @@
-use crate::protocol::Event;
 use crate::context::AgentSharedContext;
+use crate::protocol::Event;
 use anyhow::Result;
 use std::sync::Mutex;
 
@@ -52,8 +52,12 @@ mod tests {
     #[tokio::test]
     async fn mock_stream_yields_events() {
         let events = vec![
-            Ok(Event::Text(TextEvent { content: "hello".into() })),
-            Ok(Event::Stop(StopEvent { reason: "end_turn".into() })),
+            Ok(Event::Text(TextEvent {
+                content: "hello".into(),
+            })),
+            Ok(Event::Stop(StopEvent {
+                reason: "end_turn".into(),
+            })),
         ];
         let client = MockLlmClient::new("m", vec![events]);
         assert_eq!(client.model(), "m");

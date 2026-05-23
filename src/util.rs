@@ -1,4 +1,4 @@
-/// Shared utility functions used across the codebase.
+//! Shared utility functions used across the codebase.
 
 /// Truncate a string to at most `n` bytes on a UTF-8 character boundary,
 /// appending "..." if truncation occurred.

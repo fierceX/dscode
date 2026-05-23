@@ -37,7 +37,11 @@ impl OpenAIParser {
 
     /// Process one raw SSE line (e.g. `data: {"id":"chatcmpl-...",...}`).
     /// Returns Ok(true) when stream is done ([DONE]).
-    pub fn process_line(&mut self, line: &str, emit: &mut dyn FnMut(Event) -> Result<()>) -> Result<bool> {
+    pub fn process_line(
+        &mut self,
+        line: &str,
+        emit: &mut dyn FnMut(Event) -> Result<()>,
+    ) -> Result<bool> {
         let l = line.trim_end_matches(['\n', '\r']);
 
         if l == "RETRY:" {
@@ -67,26 +71,54 @@ impl OpenAIParser {
         }
 
         let body: Value = serde_json::from_str(payload)?;
-        if let Some(msg) = body.get("error").and_then(|e| e.get("message")).and_then(Value::as_str) {
-            emit(Event::Error(ErrorEvent { message: msg.into() }))?;
+        if let Some(msg) = body
+            .get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(Value::as_str)
+        {
+            emit(Event::Error(ErrorEvent {
+                message: msg.into(),
+            }))?;
             return Ok(false);
         }
 
         let usage = body.get("usage").cloned().unwrap_or(Value::Null);
-        if let Some(v) = usage.get("completion_tokens").and_then(Value::as_i64) { self.output_tokens = v; }
+        if let Some(v) = usage.get("completion_tokens").and_then(Value::as_i64) {
+            self.output_tokens = v;
+        }
         // cached_tokens may be at top level or nested under prompt_tokens_details (OpenAI/DeepSeek format)
-        if let Some(v) = usage.get("cached_tokens")
-            .or_else(|| usage.get("prompt_tokens_details").and_then(|d| d.get("cached_tokens")))
-            .and_then(Value::as_i64) { self.cache_read_input_tokens = v; }
+        if let Some(v) = usage
+            .get("cached_tokens")
+            .or_else(|| {
+                usage
+                    .get("prompt_tokens_details")
+                    .and_then(|d| d.get("cached_tokens"))
+            })
+            .and_then(Value::as_i64)
+        {
+            self.cache_read_input_tokens = v;
+        }
         if let Some(v) = usage.get("prompt_tokens").and_then(Value::as_i64) {
-            self.input_tokens = if self.cache_read_input_tokens > 0 { v - self.cache_read_input_tokens } else { v };
+            self.input_tokens = if self.cache_read_input_tokens > 0 {
+                v - self.cache_read_input_tokens
+            } else {
+                v
+            };
         }
 
-        let choice = body.get("choices").and_then(Value::as_array)
-            .and_then(|arr| arr.first()).cloned().unwrap_or(Value::Null);
+        let choice = body
+            .get("choices")
+            .and_then(Value::as_array)
+            .and_then(|arr| arr.first())
+            .cloned()
+            .unwrap_or(Value::Null);
 
         if let Some(r) = choice.get("finish_reason").and_then(Value::as_str)
-            && !r.is_empty() && r != "null" { self.stop_reason = r.into(); }
+            && !r.is_empty()
+            && r != "null"
+        {
+            self.stop_reason = r.into();
+        }
 
         let delta = choice.get("delta").cloned().unwrap_or(Value::Null);
         if let Some(content) = delta.get("content").and_then(Value::as_str) {
@@ -101,20 +133,38 @@ impl OpenAIParser {
             }
         }
 
-        if let Some(reasoning) = delta.get("reasoning_content")
+        if let Some(reasoning) = delta
+            .get("reasoning_content")
             .or_else(|| delta.get("reasoning"))
             .and_then(Value::as_str)
-            && !reasoning.is_empty() {
-                emit(Event::Thinking(ThinkingEvent { content: reasoning.into() }))?;
-            }
+            && !reasoning.is_empty()
+        {
+            emit(Event::Thinking(ThinkingEvent {
+                content: reasoning.into(),
+            }))?;
+        }
 
         if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
             for tc in tool_calls {
                 let idx = tc.get("index").and_then(Value::as_i64).unwrap_or(0);
                 let entry = self.pending_calls.entry(idx).or_default();
-                if let Some(v) = tc.get("id").and_then(Value::as_str) { entry.id = v.into(); }
-                if let Some(v) = tc.get("function").and_then(|f| f.get("name")).and_then(Value::as_str) { entry.name = v.into(); }
-                if let Some(v) = tc.get("function").and_then(|f| f.get("arguments")).and_then(Value::as_str) { entry.arguments.push_str(v); }
+                if let Some(v) = tc.get("id").and_then(Value::as_str) {
+                    entry.id = v.into();
+                }
+                if let Some(v) = tc
+                    .get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(Value::as_str)
+                {
+                    entry.name = v.into();
+                }
+                if let Some(v) = tc
+                    .get("function")
+                    .and_then(|f| f.get("arguments"))
+                    .and_then(Value::as_str)
+                {
+                    entry.arguments.push_str(v);
+                }
             }
         }
 
@@ -138,7 +188,9 @@ impl OpenAIParser {
 
     fn emit_pending(&mut self, emit: &mut dyn FnMut(Event) -> Result<()>) -> Result<()> {
         for call in self.pending_calls.values_mut() {
-            if call.arguments.is_empty() { continue; }
+            if call.arguments.is_empty() {
+                continue;
+            }
             let evt = build_tool_call_event(&call.name, &call.id, &call.arguments)?;
             emit(Event::ToolCall(evt))?;
             call.arguments.clear();
@@ -167,8 +219,12 @@ pub fn parse<R: Read>(reader: R, mut emit: impl FnMut(Event) -> Result<()>) -> R
     loop {
         line.clear();
         let n = br.read_line(&mut line)?;
-        if n == 0 { break; }
-        if parser.process_line(&line, &mut emit)? { break; }
+        if n == 0 {
+            break;
+        }
+        if parser.process_line(&line, &mut emit)? {
+            break;
+        }
     }
     parser.flush(&mut emit)?;
     Ok(())
@@ -182,9 +238,19 @@ mod tests {
         let mut events = Vec::new();
         for &l in lines {
             let full = format!("{l}\n");
-            parser.process_line(&full, &mut |e| { events.push(e); Ok(()) }).unwrap();
+            parser
+                .process_line(&full, &mut |e| {
+                    events.push(e);
+                    Ok(())
+                })
+                .unwrap();
         }
-        parser.flush(&mut |e| { events.push(e); Ok(()) }).unwrap();
+        parser
+            .flush(&mut |e| {
+                events.push(e);
+                Ok(())
+            })
+            .unwrap();
         events
     }
 
@@ -198,10 +264,24 @@ mod tests {
             "data: [DONE]",
         ];
         let events = collect_lines(&mut p, &lines);
-        let texts: Vec<_> = events.iter().filter_map(|e| match e { Event::Text(t) => Some(t.content.as_str()), _ => None }).collect();
+        let texts: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Text(t) => Some(t.content.as_str()),
+                _ => None,
+            })
+            .collect();
         assert_eq!(texts, vec!["Hello", " World"]);
-        assert!(events.iter().any(|e| matches!(e, Event::Stop(s) if s.reason == "stop")));
-        assert!(events.iter().any(|e| matches!(e, Event::Usage(u) if u.input_tokens == 10 && u.output_tokens == 5)));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::Stop(s) if s.reason == "stop"))
+        );
+        assert!(
+            events.iter().any(
+                |e| matches!(e, Event::Usage(u) if u.input_tokens == 10 && u.output_tokens == 5)
+            )
+        );
     }
 
     #[test]
@@ -213,8 +293,16 @@ mod tests {
             "data: [DONE]",
         ];
         let events = collect_lines(&mut p, &lines);
-        assert!(events.iter().any(|e| matches!(e, Event::Thinking(t) if t.content == "Let me think...")));
-        assert!(events.iter().any(|e| matches!(e, Event::Text(t) if t.content == "OK")));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::Thinking(t) if t.content == "Let me think..."))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::Text(t) if t.content == "OK"))
+        );
     }
 
     #[test]
@@ -226,9 +314,19 @@ mod tests {
             "data: [DONE]",
         ];
         let events = collect_lines(&mut p, &lines);
-        let calls: Vec<_> = events.iter().filter_map(|e| match e { Event::ToolCall(c) => Some(c.name.clone()), _ => None }).collect();
+        let calls: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::ToolCall(c) => Some(c.name.clone()),
+                _ => None,
+            })
+            .collect();
         assert_eq!(calls, vec!["Read"]);
-        assert!(events.iter().any(|e| matches!(e, Event::Stop(s) if s.reason == "tool_calls")));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::Stop(s) if s.reason == "tool_calls"))
+        );
     }
 
     #[test]
@@ -239,7 +337,13 @@ mod tests {
             "data: [DONE]",
         ];
         let events = collect_lines(&mut p, &lines);
-        let usage = events.iter().find_map(|e| match e { Event::Usage(u) => Some(u), _ => None }).unwrap();
+        let usage = events
+            .iter()
+            .find_map(|e| match e {
+                Event::Usage(u) => Some(u),
+                _ => None,
+            })
+            .unwrap();
         assert_eq!(usage.input_tokens, 20); // 100 - 80
         assert_eq!(usage.cache_read_input_tokens, 80);
     }
@@ -253,7 +357,13 @@ mod tests {
             "data: [DONE]",
         ];
         let events = collect_lines(&mut p, &lines);
-        let texts: Vec<_> = events.iter().filter_map(|e| match e { Event::Text(t) => Some(t.content.clone()), _ => None }).collect();
+        let texts: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Text(t) => Some(t.content.clone()),
+                _ => None,
+            })
+            .collect();
         assert_eq!(texts[0], "Hello");
         assert_eq!(texts[1], " World");
     }
@@ -263,6 +373,10 @@ mod tests {
         let mut p = OpenAIParser::new();
         let lines = ["data: {\"error\":{\"message\":\"rate limit exceeded\"}}"];
         let events = collect_lines(&mut p, &lines);
-        assert!(events.iter().any(|e| matches!(e, Event::Error(err) if err.message.contains("rate limit"))));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::Error(err) if err.message.contains("rate limit")))
+        );
     }
 }

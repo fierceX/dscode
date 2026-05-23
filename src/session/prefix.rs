@@ -13,17 +13,18 @@ pub struct ImmutablePrefix {
 }
 
 impl ImmutablePrefix {
-    pub fn new(
-        system_prompt: String,
-        tools_json: Vec<Value>,
-    ) -> Self {
+    pub fn new(system_prompt: String, tools_json: Vec<Value>) -> Self {
         let mut hasher = DefaultHasher::new();
         system_prompt.hash(&mut hasher);
         let tools_str = serde_json::to_string(&tools_json).unwrap_or_default();
         tools_str.hash(&mut hasher);
         let fingerprint = format!("{:x}", hasher.finish());
 
-        Self { system_prompt, tools_json, fingerprint }
+        Self {
+            system_prompt,
+            tools_json,
+            fingerprint,
+        }
     }
 
     pub fn system_prompt(&self) -> &str {
@@ -59,23 +60,14 @@ mod tests {
 
     #[test]
     fn fingerprint_is_deterministic() {
-        let p1 = ImmutablePrefix::new(
-            "you are an agent".into(),
-            vec![json!({"name":"Bash"})],
-        );
-        let p2 = ImmutablePrefix::new(
-            "you are an agent".into(),
-            vec![json!({"name":"Bash"})],
-        );
+        let p1 = ImmutablePrefix::new("you are an agent".into(), vec![json!({"name":"Bash"})]);
+        let p2 = ImmutablePrefix::new("you are an agent".into(), vec![json!({"name":"Bash"})]);
         assert_eq!(p1.fingerprint(), p2.fingerprint());
     }
 
     #[test]
     fn fingerprint_changes_on_system_prompt_change() {
-        let p1 = ImmutablePrefix::new(
-            "you are an agent".into(),
-            vec![json!({"name":"Bash"})],
-        );
+        let p1 = ImmutablePrefix::new("you are an agent".into(), vec![json!({"name":"Bash"})]);
         let p2 = ImmutablePrefix::new(
             "you are a different agent".into(),
             vec![json!({"name":"Bash"})],
@@ -85,10 +77,7 @@ mod tests {
 
     #[test]
     fn fingerprint_changes_on_tools_change() {
-        let p1 = ImmutablePrefix::new(
-            "agent".into(),
-            vec![json!({"name":"Bash"})],
-        );
+        let p1 = ImmutablePrefix::new("agent".into(), vec![json!({"name":"Bash"})]);
         let p2 = ImmutablePrefix::new(
             "agent".into(),
             vec![json!({"name":"Bash"}), json!({"name":"Read"})],
@@ -98,11 +87,7 @@ mod tests {
 
     #[test]
     fn verify_fingerprint_succeeds() {
-        let p = ImmutablePrefix::new(
-            "agent".into(),
-            vec![json!({"name":"Bash"})],
-        );
+        let p = ImmutablePrefix::new("agent".into(), vec![json!({"name":"Bash"})]);
         assert!(p.verify_fingerprint());
     }
 }
-

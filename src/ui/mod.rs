@@ -14,7 +14,13 @@ pub trait Display: Send + Sync {
     fn render_retry(&self);
     fn render_info(&self, msg: &str);
     fn render_title_update(&self, model: &str, stats: &StatsSnapshot);
-    fn render_sub_agent_status(&self, session_id: &str, status: &str, in_tokens: u64, out_tokens: u64);
+    fn render_sub_agent_status(
+        &self,
+        session_id: &str,
+        status: &str,
+        in_tokens: u64,
+        out_tokens: u64,
+    );
     /// Sub-agent complete output (thinking + text), sent after execution.
     /// Implementations: TUI stores for click-to-view detail; REPL prints directly.
     fn render_sub_agent_output(
@@ -25,7 +31,8 @@ pub trait Display: Send + Sync {
         _text: &str,
         _in_tokens: u64,
         _out_tokens: u64,
-    ) {}
+    ) {
+    }
     fn render_prompt(&self);
     fn render_clear_line(&self);
 }
@@ -91,4 +98,26 @@ impl StatsSnapshot {
         }
         buf
     }
+}
+
+pub async fn render_title_snapshot(
+    ctx: &crate::context::AgentSharedContext,
+    model_label: &str,
+    belief: f64,
+) {
+    let stats = ctx.stats.snapshot().await;
+    let snapshot = StatsSnapshot {
+        current_turn_count: stats.current_turn_count,
+        agent_request_count: stats.agent_request_count,
+        total_input_tokens: stats.total_input_tokens,
+        total_output_tokens: stats.total_output_tokens,
+        current_context_tokens: stats.current_context_tokens,
+        max_context_tokens: ctx.config.max_context_tokens as u64,
+        total_cache_read_tokens: stats.total_cache_read_tokens,
+        total_cache_creation_tokens: stats.total_cache_creation_tokens,
+        flash_cost_micros: stats.flash_cost_micros,
+        pro_cost_micros: stats.pro_cost_micros,
+        belief,
+    };
+    ctx.display.render_title_update(model_label, &snapshot);
 }

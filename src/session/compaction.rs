@@ -1,9 +1,9 @@
 use crate::config::Config;
 use crate::llm::transport::build_openai_body;
 use crate::prompt;
-use crate::protocol::{Event, TextEvent, ErrorEvent, StopEvent, UsageEvent};
-use crate::session::store::ConversationStore;
+use crate::protocol::{ErrorEvent, Event, StopEvent, TextEvent, UsageEvent};
 use crate::session::stats::StatsTracker;
+use crate::session::store::ConversationStore;
 use anyhow::{Result, bail};
 use serde_json::{Value, json};
 use std::io::Write;
@@ -27,6 +27,7 @@ pub struct CompactionEngine {
 }
 
 impl CompactionEngine {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         store: Arc<ConversationStore>,
         summary_path: PathBuf,
@@ -40,11 +41,22 @@ impl CompactionEngine {
         stats: Arc<StatsTracker>,
         client: reqwest::Client,
     ) -> Self {
-        let compact_pct = std::env::var("CONTEXT_COMPACT_PCT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(85);
-        Self { store, summary_path, plan_path, plan_draft_path, cwd, home, skills, api_url, api_key: config.api_key.clone(), config: config.clone(), stats, client, compact_pct }
+        let compact_pct = config.context_compact_pct;
+        Self {
+            store,
+            summary_path,
+            plan_path,
+            plan_draft_path,
+            cwd,
+            home,
+            skills,
+            api_url,
+            api_key: config.api_key.clone(),
+            config: config.clone(),
+            stats,
+            client,
+            compact_pct,
+        }
     }
 
     /// Path to the summary file written after each compaction.
@@ -108,7 +120,8 @@ impl CompactionEngine {
             .iter()
             .map(|m| serde_json::to_string(m).unwrap_or_default().len() / 4)
             .sum();
-        let total_tokens: usize = all.iter()
+        let total_tokens: usize = all
+            .iter()
             .map(|m| serde_json::to_string(m).unwrap_or_default().len() / 4)
             .sum();
         let savings_ratio = if total_tokens > 0 {
@@ -117,17 +130,39 @@ impl CompactionEngine {
             0.0
         };
         if savings_ratio < 0.10 && !is_plan_trigger(trigger) {
-            return Ok((false, format!("savings too small: {:.1}%", savings_ratio * 100.0)));
+            return Ok((
+                false,
+                format!("savings too small: {:.1}%", savings_ratio * 100.0),
+            ));
         }
 
         let dropped_count = total_lines - k;
         let dropped_lines = &all[..dropped_count];
+        let kept_lines = &all[dropped_count..];
 
         let summary = self.run_summary_call(dropped_lines).await?;
+        self.validate_conversation_messages(kept_lines)?;
         tokio::fs::write(&self.summary_path, format!("{summary}\n")).await?;
         self.store.trim_keep_last(k).await?;
+        let remaining = self.store.lines().await?;
+        self.validate_conversation_messages(&remaining)?;
 
-        Ok((true, format!("compacted_at_trigger={trigger}_tier={tier:?}_kept={k}")))
+        Ok((
+            true,
+            format!("compacted_at_trigger={trigger}_tier={tier:?}_kept={k}"),
+        ))
+    }
+
+    fn validate_conversation_messages(&self, messages: &[Value]) -> Result<()> {
+        let system_prompt = "";
+        let _ = build_openai_body(
+            crate::config::resolve_model_name(&self.config.model),
+            messages,
+            &[],
+            system_prompt,
+            self.config.max_tokens,
+        )?;
+        Ok(())
     }
 
     async fn run_summary_call(&self, dropped_lines: &[Value]) -> Result<String> {
@@ -164,15 +199,21 @@ Start directly with \"Task focus:\" — no preamble, no markdown, no code fences
         .build_system_prompt()?;
 
         let body = build_openai_body(
-            &crate::config::resolve_model_name(&self.config.model), &messages, &[], &system_prompt,
+            crate::config::resolve_model_name(&self.config.model),
+            &messages,
+            &[],
+            &system_prompt,
             self.config.max_tokens,
         )?;
 
-        let resp = self.client.post(&self.api_url)
+        let resp = self
+            .client
+            .post(&self.api_url)
             .header("Content-Type", "application/json")
             .header("Authorization", format!("Bearer {}", self.api_key))
             .body(body)
-            .send().await?;
+            .send()
+            .await?;
 
         let resp_bytes = resp.bytes().await?;
         let mut out = String::new();
@@ -187,17 +228,20 @@ Start directly with \"Task focus:\" — no preamble, no markdown, no code fences
                     self.log_compact_event(&usage);
                     compact_usage = Some(usage);
                 }
-                Event::Error(ErrorEvent { message }) => { last_error = message; }
-                Event::Stop(StopEvent { reason }) => { stop_reason = reason; }
+                Event::Error(ErrorEvent { message }) => {
+                    last_error = message;
+                }
+                Event::Stop(StopEvent { reason }) => {
+                    stop_reason = reason;
+                }
                 _ => {}
             }
             Ok(())
         };
 
-        let reader: Box<dyn std::io::Read + Send> = Box::new(std::io::Cursor::new(resp_bytes.to_vec()));
-        crate::sse::openai::parse(reader, &mut |evt| {
-            parse_emit(evt)
-        })?;
+        let reader: Box<dyn std::io::Read + Send> =
+            Box::new(std::io::Cursor::new(resp_bytes.to_vec()));
+        crate::sse::openai::parse(reader, &mut |evt| parse_emit(evt))?;
 
         if let Some(usage) = compact_usage {
             self.stats.record_compact(&usage).await;
@@ -206,16 +250,28 @@ Start directly with \"Task focus:\" — no preamble, no markdown, no code fences
         if out.is_empty() {
             bail!(
                 "failed to generate context summary: empty text response (stop_reason={}, error={})",
-                if stop_reason.is_empty() { "none" } else { &stop_reason },
-                if last_error.is_empty() { "none" } else { &last_error }
+                if stop_reason.is_empty() {
+                    "none"
+                } else {
+                    &stop_reason
+                },
+                if last_error.is_empty() {
+                    "none"
+                } else {
+                    &last_error
+                }
             );
         }
-        Ok(strip_dsml_tags(&out))
+        Ok(strip_tool_labels(&strip_dsml_tags(&out)))
     }
 
     fn log_compact_event(&self, usage: &UsageEvent) {
         let events_path = self.summary_path.with_file_name("events.jsonl");
-        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&events_path) {
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&events_path)
+        {
             let evt = json!({
                 "type": "usage",
                 "input_tokens": usage.input_tokens,
@@ -272,10 +328,15 @@ impl CompactionTier {
             return CompactionTier::Conservative;
         }
         let ratio = (current_tokens * 100) / max_tokens;
-        if ratio >= 95 { CompactionTier::Emergency }
-        else if ratio >= 80 { CompactionTier::ForceSummary }
-        else if ratio >= 70 { CompactionTier::Aggressive }
-        else { CompactionTier::Conservative }
+        if ratio >= 95 {
+            CompactionTier::Emergency
+        } else if ratio >= 80 {
+            CompactionTier::ForceSummary
+        } else if ratio >= 70 {
+            CompactionTier::Aggressive
+        } else {
+            CompactionTier::Conservative
+        }
     }
 
     pub fn tail_budget_ratio(&self) -> f64 {
@@ -290,7 +351,9 @@ impl CompactionTier {
 
 /// 按 turn 对齐计算需要保留的行数
 pub fn compact_turn_keep(lines: &[Value], min_keep_ratio: f64) -> Option<usize> {
-    if lines.is_empty() { return None; }
+    if lines.is_empty() {
+        return None;
+    }
 
     let mut is_user = Vec::with_capacity(lines.len());
     let mut total_turns = 0usize;
@@ -298,7 +361,9 @@ pub fn compact_turn_keep(lines: &[Value], min_keep_ratio: f64) -> Option<usize> 
         let user = line.get("role").and_then(Value::as_str) == Some("user")
             && line.get("content").is_some_and(|c| c.is_string());
         is_user.push(user);
-        if user { total_turns += 1; }
+        if user {
+            total_turns += 1;
+        }
     }
 
     let target = {
@@ -309,15 +374,30 @@ pub fn compact_turn_keep(lines: &[Value], min_keep_ratio: f64) -> Option<usize> 
     let mut keep = 0usize;
     let mut found = 0usize;
     for i in (0..lines.len()).rev() {
-        if found >= target { break; }
+        if found >= target {
+            break;
+        }
         keep += 1;
-        if is_user[i] { found += 1; }
+        if is_user[i] {
+            found += 1;
+        }
     }
     if keep == 0 { None } else { Some(keep) }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::config::{Config, OutputFormat};
+    use crate::session::paths;
+    use crate::session::stats::StatsTracker;
+    use crate::session::store::ConversationStore;
+    use serde_json::json;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
     // Test should_compact logic inline (CompactionEngine requires async construction)
 
     #[test]
@@ -325,7 +405,9 @@ mod tests {
         let pct = 85u8;
         let max_ctx = 200_000usize;
         let test = |ctx: usize| -> bool {
-            if max_ctx == 0 { return false; }
+            if max_ctx == 0 {
+                return false;
+            }
             (ctx * 100) / max_ctx >= pct as usize
         };
         assert!(!test(100_000));
@@ -339,8 +421,12 @@ mod tests {
         let pct = 85u8;
         let max_ctx = 200_000usize;
         let should_compact = |trigger: &str, ctx: usize| -> bool {
-            if trigger == "plan_clear" || trigger == "plan_confirm" { return true; }
-            if max_ctx == 0 { return false; }
+            if trigger == "plan_clear" || trigger == "plan_confirm" {
+                return true;
+            }
+            if max_ctx == 0 {
+                return false;
+            }
             (ctx * 100) / max_ctx >= pct as usize
         };
         assert!(should_compact("plan_clear", 0));
@@ -354,8 +440,12 @@ mod tests {
         let pct = 85u8;
         let max_ctx = 0usize;
         let should_compact = |trigger: &str, ctx: usize| -> bool {
-            if trigger == "plan_clear" || trigger == "plan_confirm" { return true; }
-            if max_ctx == 0 { return false; }
+            if trigger == "plan_clear" || trigger == "plan_confirm" {
+                return true;
+            }
+            if max_ctx == 0 {
+                return false;
+            }
             (ctx * 100) / max_ctx >= pct as usize
         };
         assert!(!should_compact("auto", 100));
@@ -364,7 +454,9 @@ mod tests {
     #[test]
     fn compact_pct_configurable() {
         let test_pct = |pct: u8, ctx: usize, max_ctx: usize| -> bool {
-            if max_ctx == 0 { return false; }
+            if max_ctx == 0 {
+                return false;
+            }
             (ctx * 100) / max_ctx >= pct as usize
         };
         assert!(test_pct(50, 100, 200));
@@ -378,34 +470,315 @@ mod tests {
     #[test]
     fn compact_tier_from_ratio_emergency() {
         use super::CompactionTier;
-        assert_eq!(CompactionTier::from_ratio(95, 100), CompactionTier::Emergency);
-        assert_eq!(CompactionTier::from_ratio(100, 100), CompactionTier::Emergency);
+        assert_eq!(
+            CompactionTier::from_ratio(95, 100),
+            CompactionTier::Emergency
+        );
+        assert_eq!(
+            CompactionTier::from_ratio(100, 100),
+            CompactionTier::Emergency
+        );
     }
 
     #[test]
     fn compact_tier_from_ratio_force_summary() {
         use super::CompactionTier;
-        assert_eq!(CompactionTier::from_ratio(80, 100), CompactionTier::ForceSummary);
-        assert_eq!(CompactionTier::from_ratio(94, 100), CompactionTier::ForceSummary);
+        assert_eq!(
+            CompactionTier::from_ratio(80, 100),
+            CompactionTier::ForceSummary
+        );
+        assert_eq!(
+            CompactionTier::from_ratio(94, 100),
+            CompactionTier::ForceSummary
+        );
     }
 
     #[test]
     fn compact_tier_from_ratio_aggressive() {
         use super::CompactionTier;
-        assert_eq!(CompactionTier::from_ratio(70, 100), CompactionTier::Aggressive);
-        assert_eq!(CompactionTier::from_ratio(79, 100), CompactionTier::Aggressive);
+        assert_eq!(
+            CompactionTier::from_ratio(70, 100),
+            CompactionTier::Aggressive
+        );
+        assert_eq!(
+            CompactionTier::from_ratio(79, 100),
+            CompactionTier::Aggressive
+        );
     }
 
     #[test]
     fn compact_tier_from_ratio_conservative() {
         use super::CompactionTier;
-        assert_eq!(CompactionTier::from_ratio(0, 100), CompactionTier::Conservative);
-        assert_eq!(CompactionTier::from_ratio(69, 100), CompactionTier::Conservative);
+        assert_eq!(
+            CompactionTier::from_ratio(0, 100),
+            CompactionTier::Conservative
+        );
+        assert_eq!(
+            CompactionTier::from_ratio(69, 100),
+            CompactionTier::Conservative
+        );
     }
 
     #[test]
     fn compact_tier_zero_max_returns_conservative() {
         use super::CompactionTier;
-        assert_eq!(CompactionTier::from_ratio(100, 0), CompactionTier::Conservative);
+        assert_eq!(
+            CompactionTier::from_ratio(100, 0),
+            CompactionTier::Conservative
+        );
+    }
+
+    #[tokio::test]
+    async fn evaluate_and_compact_skips_below_threshold_without_network() -> anyhow::Result<()> {
+        let (home, cwd, store, stats, summary, plan, draft) =
+            temp_compaction_session("below-threshold").await?;
+        store.add_user("hello").await?;
+        store.add_assistant("world", "", &[]).await?;
+        let cfg = test_compaction_config("https://example.invalid/v1/chat/completions", 85);
+        let engine = CompactionEngine::new(
+            store.clone(),
+            summary,
+            plan,
+            draft,
+            cwd,
+            home,
+            Vec::new(),
+            crate::config::api_url(&cfg),
+            &cfg,
+            stats,
+            reqwest::Client::new(),
+        );
+
+        let (did_compact, reason) = engine.evaluate_and_compact("auto", 10).await?;
+        assert!(!did_compact);
+        assert_eq!(reason, "below threshold");
+        assert_eq!(store.lines().await?.len(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn evaluate_and_compact_skips_empty_manual_without_network() -> anyhow::Result<()> {
+        let (home, cwd, store, stats, summary, plan, draft) =
+            temp_compaction_session("empty-manual").await?;
+        let cfg = test_compaction_config("https://example.invalid/v1/chat/completions", 100);
+        let engine = CompactionEngine::new(
+            store,
+            summary,
+            plan,
+            draft,
+            cwd,
+            home,
+            Vec::new(),
+            crate::config::api_url(&cfg),
+            &cfg,
+            stats,
+            reqwest::Client::new(),
+        );
+
+        let (did_compact, reason) = engine.evaluate_and_compact("manual", 0).await?;
+        assert!(!did_compact);
+        assert_eq!(reason, "empty");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn evaluate_and_compact_skips_when_all_context_would_be_kept() -> anyhow::Result<()> {
+        let (home, cwd, store, stats, summary, plan, draft) =
+            temp_compaction_session("all-kept").await?;
+        store.add_user("only turn").await?;
+        store.add_assistant("small answer", "", &[]).await?;
+        let cfg = test_compaction_config("https://example.invalid/v1/chat/completions", 1);
+        let engine = CompactionEngine::new(
+            store.clone(),
+            summary,
+            plan,
+            draft,
+            cwd,
+            home,
+            Vec::new(),
+            crate::config::api_url(&cfg),
+            &cfg,
+            stats,
+            reqwest::Client::new(),
+        );
+
+        let (did_compact, reason) = engine.evaluate_and_compact("auto", 20_000).await?;
+        assert!(!did_compact);
+        assert_eq!(reason, "all kept");
+        assert_eq!(store.lines().await?.len(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_summary_strips_dsml_tags() -> anyhow::Result<()> {
+        let (home, cwd, store, stats, summary, plan, draft) =
+            temp_compaction_session("read-summary").await?;
+        let cfg = test_compaction_config("https://example.invalid/v1/chat/completions", 100);
+        let engine = CompactionEngine::new(
+            store,
+            summary.clone(),
+            plan,
+            draft,
+            cwd,
+            home,
+            Vec::new(),
+            crate::config::api_url(&cfg),
+            &cfg,
+            stats,
+            reqwest::Client::new(),
+        );
+        tokio::fs::write(&summary, "keep <ds_meta>drop</ds_meta> text\n").await?;
+
+        assert_eq!(
+            engine.read_summary().await.as_deref(),
+            Some("keep drop text")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires local loopback sockets"]
+    async fn evaluate_and_compact_writes_clean_summary_and_keeps_valid_conversation()
+    -> anyhow::Result<()> {
+        let (api_url, _server) = start_summary_server(
+            "Task focus: <ds_meta>drop</ds_meta>visible Read(secret.txt)\n\
+Latest request: keep working\n\
+Progress: compacted\n\
+Tool evidence: [tool] inspected files\n\
+Reflections: none",
+        )
+        .await?;
+        let (home, cwd, store, stats, summary, plan, draft) =
+            temp_compaction_session("e2e").await?;
+        for idx in 0..3 {
+            store.add_user(&format!("user {idx}")).await?;
+            store
+                .add_assistant(&format!("assistant {idx}"), "", &[])
+                .await?;
+        }
+        let cfg = Config {
+            model: "flash".into(),
+            api_key: "test-key".into(),
+            base_url: api_url.clone(),
+            max_context_tokens: 1_000_000,
+            context_compact_pct: 100,
+            output_format: OutputFormat::Human,
+            log_events: true,
+            ..Default::default()
+        };
+        let engine = CompactionEngine::new(
+            store.clone(),
+            summary.clone(),
+            plan,
+            draft,
+            cwd,
+            home,
+            Vec::new(),
+            api_url,
+            &cfg,
+            stats.clone(),
+            reqwest::Client::new(),
+        );
+
+        let (did_compact, reason) = engine.evaluate_and_compact("manual", 0).await?;
+        assert!(did_compact, "{reason}");
+        let summary_text = tokio::fs::read_to_string(summary).await?;
+        assert!(summary_text.contains("Task focus: dropvisible"));
+        assert!(!summary_text.contains("<ds_meta>"), "{summary_text}");
+        assert!(!summary_text.contains("Read(secret.txt)"), "{summary_text}");
+        assert!(!summary_text.contains("[tool]"), "{summary_text}");
+        let remaining = store.lines().await?;
+        assert_eq!(remaining.len(), 2);
+        crate::llm::transport::build_openai_body("deepseek-v4-flash", &remaining, &[], "", 1024)?;
+        assert_eq!(stats.snapshot().await.compact_request_count, 1);
+        Ok(())
+    }
+
+    async fn temp_compaction_session(
+        name: &str,
+    ) -> anyhow::Result<(
+        std::path::PathBuf,
+        std::path::PathBuf,
+        Arc<ConversationStore>,
+        Arc<StatsTracker>,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    )> {
+        static CNT: AtomicU64 = AtomicU64::new(0);
+        let n = CNT.fetch_add(1, Ordering::SeqCst);
+        let root = std::env::temp_dir().join(format!(
+            "dscode-compact-test-{}-{name}-{n}",
+            std::process::id()
+        ));
+        let home = root.join("home");
+        let cwd = root.join("workspace");
+        tokio::fs::create_dir_all(&home).await?;
+        tokio::fs::create_dir_all(&cwd).await?;
+        let spaths = paths::paths_for(&home, &cwd, "compact");
+        let store = Arc::new(ConversationStore::new(spaths.conversation.clone()));
+        store.ensure().await?;
+        let stats = StatsTracker::load(&spaths.stats).await?;
+        Ok((
+            home,
+            cwd,
+            store,
+            stats,
+            spaths.summary,
+            spaths.plan,
+            spaths.plan_draft,
+        ))
+    }
+
+    fn test_compaction_config(base_url: &str, context_compact_pct: u8) -> Config {
+        Config {
+            model: "flash".into(),
+            api_key: "test-key".into(),
+            base_url: base_url.into(),
+            max_context_tokens: 1_000_000,
+            context_compact_pct,
+            output_format: OutputFormat::Human,
+            log_events: true,
+            ..Default::default()
+        }
+    }
+
+    async fn start_summary_server(
+        summary_text: &str,
+    ) -> anyhow::Result<(String, tokio::task::JoinHandle<()>)> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let summary_text = summary_text.to_string();
+        let handle = tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 1024];
+            loop {
+                let Ok(n) = socket.read(&mut chunk).await else {
+                    return;
+                };
+                if n == 0 {
+                    return;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let body = format!(
+                "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+                json!({"choices":[{"delta":{"content":summary_text}}]}),
+                json!({"choices":[{"finish_reason":"stop","delta":{}}],"usage":{"prompt_tokens":10,"completion_tokens":5}})
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+        });
+        Ok((format!("http://{addr}/chat/completions"), handle))
     }
 }

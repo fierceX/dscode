@@ -58,18 +58,27 @@ mod tests {
     use serde_json::json;
 
     fn make_usage(input: i64, output: i64, cache_read: i64, cache_creation: i64) -> UsageEvent {
-        UsageEvent { input_tokens: input, output_tokens: output, cache_read_input_tokens: cache_read, cache_creation_input_tokens: cache_creation }
+        UsageEvent {
+            input_tokens: input,
+            output_tokens: output,
+            cache_read_input_tokens: cache_read,
+            cache_creation_input_tokens: cache_creation,
+        }
     }
 
     #[test]
     fn text_event_fields() {
-        let e = TextEvent { content: "hello".into() };
+        let e = TextEvent {
+            content: "hello".into(),
+        };
         assert_eq!(e.content, "hello");
     }
 
     #[test]
     fn thinking_event_fields() {
-        let e = ThinkingEvent { content: "thinking text".into() };
+        let e = ThinkingEvent {
+            content: "thinking text".into(),
+        };
         assert_eq!(e.content, "thinking text");
     }
 
@@ -83,13 +92,17 @@ mod tests {
 
     #[test]
     fn stop_event_reason_field() {
-        let e = StopEvent { reason: "end_turn".into() };
+        let e = StopEvent {
+            reason: "end_turn".into(),
+        };
         assert_eq!(e.reason, "end_turn");
     }
 
     #[test]
     fn error_event_message_field() {
-        let e = ErrorEvent { message: "rate limit".into() };
+        let e = ErrorEvent {
+            message: "rate limit".into(),
+        };
         assert_eq!(e.message, "rate limit");
     }
 
@@ -111,7 +124,12 @@ mod tests {
 
     #[test]
     fn usage_default_values_are_zero() {
-        let u = UsageEvent { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+        let u = UsageEvent {
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        };
         assert_eq!(u.input_tokens, 0);
         assert_eq!(u.cache_creation_input_tokens, 0);
     }

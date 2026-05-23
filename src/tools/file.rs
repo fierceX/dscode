@@ -1,19 +1,32 @@
 use anyhow::{Result, anyhow, bail};
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 pub fn read(path: &str, offset: Option<usize>, limit: Option<usize>) -> Result<String> {
-    if path.is_empty() { bail!("Error: no path provided"); }
+    if path.is_empty() {
+        bail!("Error: no path provided");
+    }
     let data = std::fs::read_to_string(path)
         .map_err(|_| anyhow!("Error: file not found or unreadable: {path}"))?;
-    if offset.is_none() && limit.is_none() { return Ok(data); }
+    if offset.is_none() && limit.is_none() {
+        return Ok(data);
+    }
 
     let mut lines: Vec<&str> = data.split('\n').collect();
-    if !lines.is_empty() && lines.last().map(|l| l.is_empty()).unwrap_or(false) { lines.pop(); }
+    if !lines.is_empty() && lines.last().map(|l| l.is_empty()).unwrap_or(false) {
+        lines.pop();
+    }
     let total_lines = lines.len();
 
     let start = match offset {
         Some(o) if o > 1 => {
-            if o > total_lines { bail!("Error: offset {} exceeds total lines {} in {}", o, total_lines, path); }
+            if o > total_lines {
+                bail!(
+                    "Error: offset {} exceeds total lines {} in {}",
+                    o,
+                    total_lines,
+                    path
+                );
+            }
             o - 1
         }
         _ => 0,
@@ -26,9 +39,15 @@ pub fn read(path: &str, offset: Option<usize>, limit: Option<usize>) -> Result<S
 }
 
 pub fn write(path: &str, content: &str, max_bytes: usize) -> Result<String> {
-    if path.is_empty() { bail!("Error: no path provided"); }
+    if path.is_empty() {
+        bail!("Error: no path provided");
+    }
     if content.len() > max_bytes {
-        bail!("Error: content too large for write_file ({} bytes > {} bytes)", content.len(), max_bytes);
+        bail!(
+            "Error: content too large for write_file ({} bytes > {} bytes)",
+            content.len(),
+            max_bytes
+        );
     }
     if let Some(dir) = Path::new(path).parent() {
         std::fs::create_dir_all(dir)?;
@@ -39,18 +58,30 @@ pub fn write(path: &str, content: &str, max_bytes: usize) -> Result<String> {
 }
 
 pub fn edit(path: &str, old_s: &str, new_s: &str, max_bytes: usize) -> Result<String> {
-    if path.is_empty() { bail!("Error: no path provided"); }
-    if old_s.is_empty() { bail!("Error: empty old_string"); }
-    let content = std::fs::read_to_string(path)
-        .map_err(|_| anyhow!("Error: file not found: {path}"))?;
+    if path.is_empty() {
+        bail!("Error: no path provided");
+    }
+    if old_s.is_empty() {
+        bail!("Error: empty old_string");
+    }
+    let content =
+        std::fs::read_to_string(path).map_err(|_| anyhow!("Error: file not found: {path}"))?;
     if content.len() > max_bytes {
-        bail!("Error: file too large for edit_file ({} bytes > {} bytes)", content.len(), max_bytes);
+        bail!(
+            "Error: file too large for edit_file ({} bytes > {} bytes)",
+            content.len(),
+            max_bytes
+        );
     }
     if !content.contains(old_s) {
-        bail!("Error: old_string not found in {path}. Hint: use Grep to locate the target lines, then Read the relevant portion (with offset/limit) to copy the exact text before retrying Edit.");
+        bail!(
+            "Error: old_string not found in {path}. Hint: use Grep to locate the target lines, then Read the relevant portion (with offset/limit) to copy the exact text before retrying Edit."
+        );
     }
     let updated = content.replacen(old_s, new_s, 1);
-    if updated.is_empty() { bail!("Error: edit produced empty result, reverted"); }
+    if updated.is_empty() {
+        bail!("Error: edit produced empty result, reverted");
+    }
     let diff = unified_diff_color(path, &content, &updated)?;
     std::fs::write(path, updated)?;
     if diff.is_empty() {
@@ -70,8 +101,16 @@ fn unified_diff_color(path: &str, old_content: &str, new_content: &str) -> Resul
     let label = path.trim_start_matches('/');
 
     let diff = std::process::Command::new("diff")
-        .args(["-u", "--color=always", "--label", &format!("a/{label}"), "--label", &format!("b/{label}"),
-               old_path.to_str().unwrap_or(""), new_path.to_str().unwrap_or("")])
+        .args([
+            "-u",
+            "--color=always",
+            "--label",
+            &format!("a/{label}"),
+            "--label",
+            &format!("b/{label}"),
+            old_path.to_str().unwrap_or(""),
+            new_path.to_str().unwrap_or(""),
+        ])
         .output();
     let _ = std::fs::remove_file(&old_path);
     let _ = std::fs::remove_file(&new_path);
@@ -80,20 +119,32 @@ fn unified_diff_color(path: &str, old_content: &str, new_content: &str) -> Resul
         Ok(output) => {
             if output.status.success() || output.status.code() == Some(1) {
                 let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                if stdout.contains("unsupported --color") || stdout.contains("unrecognized option '--color'") {
-                    let old2 = std::env::temp_dir().join(format!("edit-old2-{}", std::process::id()));
-                    let new2 = std::env::temp_dir().join(format!("edit-new2-{}", std::process::id()));
+                if stdout.contains("unsupported --color")
+                    || stdout.contains("unrecognized option '--color'")
+                {
+                    let old2 =
+                        std::env::temp_dir().join(format!("edit-old2-{}", std::process::id()));
+                    let new2 =
+                        std::env::temp_dir().join(format!("edit-new2-{}", std::process::id()));
                     std::fs::write(&old2, old_content)?;
                     std::fs::write(&new2, new_content)?;
                     let diff2 = std::process::Command::new("diff")
-                        .args(["-u", "--label", &format!("a/{label}"), "--label", &format!("b/{label}"),
-                               old2.to_str().unwrap_or(""), new2.to_str().unwrap_or("")])
+                        .args([
+                            "-u",
+                            "--label",
+                            &format!("a/{label}"),
+                            "--label",
+                            &format!("b/{label}"),
+                            old2.to_str().unwrap_or(""),
+                            new2.to_str().unwrap_or(""),
+                        ])
                         .output();
                     let _ = std::fs::remove_file(&old2);
                     let _ = std::fs::remove_file(&new2);
                     match diff2 {
-                        Ok(o) if o.status.success() || o.status.code() == Some(1) =>
-                            Ok(String::from_utf8_lossy(&o.stdout).to_string()),
+                        Ok(o) if o.status.success() || o.status.code() == Some(1) => {
+                            Ok(String::from_utf8_lossy(&o.stdout).to_string())
+                        }
                         _ => bail!("Error: diff failed"),
                     }
                 } else {
@@ -112,8 +163,12 @@ fn count_diff_lines(diff: &str) -> (usize, usize) {
     let mut removed = 0usize;
     for line in diff.lines() {
         let stripped = strip_ansi(line);
-        if stripped.starts_with('+') && !stripped.starts_with("+++") { added += 1; }
-        if stripped.starts_with('-') && !stripped.starts_with("---") { removed += 1; }
+        if stripped.starts_with('+') && !stripped.starts_with("+++") {
+            added += 1;
+        }
+        if stripped.starts_with('-') && !stripped.starts_with("---") {
+            removed += 1;
+        }
     }
     (added, removed)
 }
@@ -125,12 +180,169 @@ fn strip_ansi(s: &str) -> String {
     while i < bytes.len() {
         if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
             let mut j = i + 2;
-            while j < bytes.len() && ((bytes[j] >= 0x30 && bytes[j] <= 0x3f) || (bytes[j] >= 0x20 && bytes[j] <= 0x2f)) { j += 1; }
-            if j < bytes.len() && bytes[j] >= 0x40 && bytes[j] <= 0x7e { j += 1; }
+            while j < bytes.len()
+                && ((bytes[j] >= 0x30 && bytes[j] <= 0x3f)
+                    || (bytes[j] >= 0x20 && bytes[j] <= 0x2f))
+            {
+                j += 1;
+            }
+            if j < bytes.len() && bytes[j] >= 0x40 && bytes[j] <= 0x7e {
+                j += 1;
+            }
             i = j;
-        } else { out.push(bytes[i] as char); i += 1; }
+        } else {
+            out.push(bytes[i] as char);
+            i += 1;
+        }
     }
     out
+}
+
+pub struct ReadTool;
+pub struct WriteTool;
+pub struct EditTool;
+
+fn resolve_tool_path(cwd: &Path, raw: &str) -> Result<PathBuf> {
+    if raw.is_empty() {
+        bail!("Error: no path provided");
+    }
+    let path = Path::new(raw);
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+    Ok(normalize_lexically(&joined))
+}
+
+fn ensure_workspace_write(cwd: &Path, path: &Path) -> Result<()> {
+    let root = cwd
+        .canonicalize()
+        .unwrap_or_else(|_| normalize_lexically(cwd));
+    let target = if path.exists() {
+        path.canonicalize()
+            .unwrap_or_else(|_| normalize_lexically(path))
+    } else {
+        let parent = path.parent().unwrap_or(path);
+        let parent_real = parent
+            .canonicalize()
+            .unwrap_or_else(|_| normalize_lexically(parent));
+        let name = path.file_name().map(PathBuf::from).unwrap_or_default();
+        parent_real.join(name)
+    };
+    if !target.starts_with(&root) {
+        bail!(
+            "Error: write blocked by file safety policy (path outside workspace: {})",
+            target.display()
+        );
+    }
+    Ok(())
+}
+
+fn normalize_lexically(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::Normal(part) => out.push(part),
+            Component::RootDir | Component::Prefix(_) => out.push(component.as_os_str()),
+        }
+    }
+    out
+}
+
+impl super::runner::ToolExec for ReadTool {
+    fn name(&self) -> &'static str {
+        "Read"
+    }
+    fn execute(
+        &self,
+        input: &serde_json::Value,
+        ctx: &crate::context::ToolContext,
+    ) -> anyhow::Result<super::runner::ToolOutcome> {
+        #[derive(serde::Deserialize)]
+        struct Args {
+            path: String,
+            #[serde(default)]
+            offset: Option<usize>,
+            #[serde(default)]
+            limit: Option<usize>,
+        }
+        let args: Args = serde_json::from_value(input.clone())?;
+        let path = resolve_tool_path(&ctx.cwd, &args.path)?;
+        read(&path.display().to_string(), args.offset, args.limit)
+            .map(super::runner::ToolOutcome::text)
+    }
+}
+
+impl super::runner::ToolExec for WriteTool {
+    fn name(&self) -> &'static str {
+        "Write"
+    }
+    fn mutating(&self) -> bool {
+        true
+    }
+    fn execute(
+        &self,
+        input: &serde_json::Value,
+        ctx: &crate::context::ToolContext,
+    ) -> anyhow::Result<super::runner::ToolOutcome> {
+        #[derive(serde::Deserialize)]
+        struct Args {
+            path: String,
+            content: String,
+        }
+        let args: Args = serde_json::from_value(input.clone())?;
+        let path = resolve_tool_path(&ctx.cwd, &args.path)?;
+        ensure_workspace_write(&ctx.cwd, &path)?;
+        write(
+            &path.display().to_string(),
+            &args.content,
+            ctx.tool_config.file_write_max_bytes,
+        )
+        .map(super::runner::ToolOutcome::text)
+    }
+}
+
+impl super::runner::ToolExec for EditTool {
+    fn name(&self) -> &'static str {
+        "Edit"
+    }
+    fn mutating(&self) -> bool {
+        true
+    }
+    fn execute(
+        &self,
+        input: &serde_json::Value,
+        ctx: &crate::context::ToolContext,
+    ) -> anyhow::Result<super::runner::ToolOutcome> {
+        #[derive(serde::Deserialize)]
+        struct Args {
+            path: String,
+            old_string: String,
+            new_string: String,
+        }
+        let args: Args = serde_json::from_value(input.clone())?;
+        let path = resolve_tool_path(&ctx.cwd, &args.path)?;
+        ensure_workspace_write(&ctx.cwd, &path)?;
+        edit(
+            &path.display().to_string(),
+            &args.old_string,
+            &args.new_string,
+            ctx.tool_config.file_write_max_bytes,
+        )
+        .map(|s| super::runner::ToolOutcome {
+            conversation_content: s.clone(),
+            content: s,
+            is_bash: false,
+            exit_code: None,
+            success: true,
+            diagnostics: Vec::new(),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -210,39 +422,25 @@ mod tests {
         assert!(edit(&p, "", "new", 1000).is_err());
         fs::remove_file(&p).ok();
     }
-}
 
-pub struct ReadTool;
-pub struct WriteTool;
-pub struct EditTool;
-
-impl super::runner::ToolExec for ReadTool {
-    fn name(&self) -> &'static str { "Read" }
-    fn execute(&self, input: &serde_json::Value, _ctx: &crate::context::ToolContext) -> anyhow::Result<(String, bool, String, Option<i32>)> {
-        #[derive(serde::Deserialize)]
-        struct Args { path: String, #[serde(default)] offset: Option<usize>, #[serde(default)] limit: Option<usize> }
-        let args: Args = serde_json::from_value(input.clone())?;
-        read(&args.path, args.offset, args.limit).map(|s| (s, false, String::new(), None))
+    #[test]
+    fn workspace_write_allows_inside_cwd() {
+        let cwd = PathBuf::from("/tmp/workspace");
+        let path = resolve_tool_path(&cwd, "src/file.txt").unwrap();
+        assert!(ensure_workspace_write(&cwd, &path).is_ok());
     }
-}
 
-impl super::runner::ToolExec for WriteTool {
-    fn name(&self) -> &'static str { "Write" }
-    fn execute(&self, input: &serde_json::Value, ctx: &crate::context::ToolContext) -> anyhow::Result<(String, bool, String, Option<i32>)> {
-        #[derive(serde::Deserialize)]
-        struct Args { path: String, content: String }
-        let args: Args = serde_json::from_value(input.clone())?;
-        write(&args.path, &args.content, ctx.tool_config.file_write_max_bytes).map(|s| (s, false, String::new(), None))
+    #[test]
+    fn workspace_write_blocks_parent_escape() {
+        let cwd = PathBuf::from("/tmp/workspace");
+        let path = resolve_tool_path(&cwd, "../outside.txt").unwrap();
+        assert!(ensure_workspace_write(&cwd, &path).is_err());
     }
-}
 
-impl super::runner::ToolExec for EditTool {
-    fn name(&self) -> &'static str { "Edit" }
-    fn execute(&self, input: &serde_json::Value, ctx: &crate::context::ToolContext) -> anyhow::Result<(String, bool, String, Option<i32>)> {
-        #[derive(serde::Deserialize)]
-        struct Args { path: String, old_string: String, new_string: String }
-        let args: Args = serde_json::from_value(input.clone())?;
-        edit(&args.path, &args.old_string, &args.new_string, ctx.tool_config.file_write_max_bytes)
-            .map(|s| { let c = s.clone(); (s, false, c, None) })
+    #[test]
+    fn workspace_write_blocks_absolute_outside_cwd() {
+        let cwd = PathBuf::from("/tmp/workspace");
+        let path = resolve_tool_path(&cwd, "/tmp/outside.txt").unwrap();
+        assert!(ensure_workspace_write(&cwd, &path).is_err());
     }
 }

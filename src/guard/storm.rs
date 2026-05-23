@@ -13,7 +13,11 @@ pub struct StormBreaker {
 
 impl StormBreaker {
     pub fn new(max_window: usize, threshold: usize) -> Self {
-        Self { window: VecDeque::new(), max_window, threshold }
+        Self {
+            window: VecDeque::new(),
+            max_window,
+            threshold,
+        }
     }
 
     /// Clear the window — call at the start of a new user turn (fresh intent).
@@ -32,7 +36,11 @@ impl StormBreaker {
             self.window.pop_front();
         }
 
-        let count = self.window.iter().filter(|(n, a)| n == name && a == args).count();
+        let count = self
+            .window
+            .iter()
+            .filter(|(n, a)| n == name && a == args)
+            .count();
         if count >= self.threshold {
             StormDecision::Suppress(format!(
                 "Tool call suppressed: {} repeated {} times in window of {}. Rephrase or try different approach.",
@@ -51,8 +59,14 @@ mod tests {
     #[test]
     fn allows_if_below_threshold() {
         let mut sb = StormBreaker::new(6, 3);
-        assert!(matches!(sb.check("Read", r#"{"path":"/tmp/x"}"#, false), StormDecision::Allow));
-        assert!(matches!(sb.check("Read", r#"{"path":"/tmp/x"}"#, false), StormDecision::Allow));
+        assert!(matches!(
+            sb.check("Read", r#"{"path":"/tmp/x"}"#, false),
+            StormDecision::Allow
+        ));
+        assert!(matches!(
+            sb.check("Read", r#"{"path":"/tmp/x"}"#, false),
+            StormDecision::Allow
+        ));
     }
 
     #[test]

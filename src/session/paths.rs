@@ -126,9 +126,9 @@ mod tests {
         // Format: YYYYMMDD-HHmmss-XXXX
         let parts: Vec<_> = id.split('-').collect();
         assert_eq!(parts.len(), 3);
-        assert_eq!(parts[0].len(), 8);  // YYYYMMDD
-        assert_eq!(parts[1].len(), 6);  // HHmmss
-        assert_eq!(parts[2].len(), 4);  // XXXX
+        assert_eq!(parts[0].len(), 8); // YYYYMMDD
+        assert_eq!(parts[1].len(), 6); // HHmmss
+        assert_eq!(parts[2].len(), 4); // XXXX
     }
 
     #[test]

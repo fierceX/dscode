@@ -45,28 +45,40 @@ impl ConversationStore {
     }
 
     pub async fn add_user(&self, content: &str) -> Result<()> {
-        self.append_line(&json!({"role":"user","content":content})).await
+        self.append_line(&json!({"role":"user","content":content}))
+            .await
     }
 
-    pub async fn add_assistant(&self, text: &str, thinking: &str, calls: &[ToolCallEvent]) -> Result<()> {
+    pub async fn add_assistant(
+        &self,
+        text: &str,
+        thinking: &str,
+        calls: &[ToolCallEvent],
+    ) -> Result<()> {
         let mut content = Vec::new();
         content.push(json!({"type":"thinking","thinking":thinking}));
         content.push(json!({"type":"text","text":text}));
         for c in calls {
             content.push(json!({"type":"tool_use","id":c.id,"name":c.name,"input":c.input_json}));
         }
-        self.append_line(&json!({"role":"assistant","content":content})).await
+        self.append_line(&json!({"role":"assistant","content":content}))
+            .await
     }
 
     pub async fn add_tool_results(&self, results: &[ToolResult]) -> Result<()> {
         let content: Vec<Value> = results
             .iter()
             .map(|r| {
-                let conv = if r.conv_content.is_empty() { &r.content } else { &r.conv_content };
+                let conv = if r.conv_content.is_empty() {
+                    &r.content
+                } else {
+                    &r.conv_content
+                };
                 json!({"type":"tool_result","tool_use_id":r.tool_use_id,"content":conv})
             })
             .collect();
-        self.append_line(&json!({"role":"user","content":content})).await
+        self.append_line(&json!({"role":"user","content":content}))
+            .await
     }
 
     pub async fn lines(&self) -> Result<Vec<Value>> {
@@ -83,13 +95,50 @@ impl ConversationStore {
         Ok(lines)
     }
 
+    pub async fn lines_lossy(&self) -> Result<Vec<Value>> {
+        self.lines_lossy_with_warnings(|_| {}).await
+    }
+
+    pub async fn lines_lossy_with_warnings<F>(&self, mut warn: F) -> Result<Vec<Value>>
+    where
+        F: FnMut(String),
+    {
+        let data = tokio::fs::read_to_string(&self.path).await?;
+        let mut lines = Vec::new();
+        for (idx, line) in data.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            match serde_json::from_str(line) {
+                Ok(value) => lines.push(value),
+                Err(e) => warn(format!(
+                    "invalid JSONL in {} at line {} skipped by lossy read: {}",
+                    self.path.display(),
+                    idx + 1,
+                    e
+                )),
+            }
+        }
+        Ok(lines)
+    }
+
     async fn read_lines_from_disk(&self) -> Result<Vec<Value>> {
         let data = tokio::fs::read_to_string(&self.path).await?;
-        let lines: Vec<Value> = data
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .filter_map(|l| serde_json::from_str(l).ok())
-            .collect();
+        let mut lines = Vec::new();
+        for (idx, line) in data.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let value = serde_json::from_str(line).map_err(|e| {
+                anyhow::anyhow!(
+                    "invalid JSONL in {} at line {}: {}",
+                    self.path.display(),
+                    idx + 1,
+                    e
+                )
+            })?;
+            lines.push(value);
+        }
         Ok(lines)
     }
 
@@ -142,8 +191,12 @@ pub fn build_tool_summary_from_json(name: &str, evt: &serde_json::Value) -> Stri
     if let Some(obj) = input.as_object() {
         for (k, v) in obj {
             match v {
-                serde_json::Value::String(s) => { fields.insert(k.clone(), s.clone()); }
-                _ => { fields.insert(k.clone(), v.to_string()); }
+                serde_json::Value::String(s) => {
+                    fields.insert(k.clone(), s.clone());
+                }
+                _ => {
+                    fields.insert(k.clone(), v.to_string());
+                }
             }
         }
     }
@@ -159,7 +212,11 @@ pub fn build_tool_call_summary(
         "Read" | "Write" | "Edit" => label = fields.get("path").cloned().unwrap_or_default(),
         "Glob" | "Grep" => label = fields.get("pattern").cloned().unwrap_or_default(),
         "Bash" => {
-            label = fields.get("command").cloned().unwrap_or_default().replace('\n', " ");
+            label = fields
+                .get("command")
+                .cloned()
+                .unwrap_or_default()
+                .replace('\n', " ");
             if label.chars().count() > 80 {
                 let truncated: String = label.chars().take(77).collect();
                 label = format!("{truncated}...");
@@ -167,22 +224,31 @@ pub fn build_tool_call_summary(
         }
         "TodoWrite" => {
             if let Some(summary) = fields.get("summary").cloned()
-                && !summary.is_empty() { label = summary; }
+                && !summary.is_empty()
+            {
+                label = summary;
+            }
             if label.is_empty()
                 && let Some(todos) = fields.get("todos")
-                    && let Ok(arr) = serde_json::from_str::<Vec<Value>>(todos) {
-                        let total = arr.len();
-                        let completed = arr.iter().filter(|item| {
-                            item.get("status").and_then(Value::as_str) == Some("completed")
-                        }).count();
-                        label = format!("{completed}/{total}");
-                    }
+                && let Ok(arr) = serde_json::from_str::<Vec<Value>>(todos)
+            {
+                let total = arr.len();
+                let completed = arr
+                    .iter()
+                    .filter(|item| item.get("status").and_then(Value::as_str) == Some("completed"))
+                    .count();
+                label = format!("{completed}/{total}");
+            }
         }
         "Skill" => label = fields.get("name").cloned().unwrap_or_default(),
         "SubAgent" => label = fields.get("description").cloned().unwrap_or_default(),
         _ => {}
     }
-    if label.is_empty() { name.to_string() } else { format!("{name}({label})") }
+    if label.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name}({label})")
+    }
 }
 
 #[cfg(test)]
@@ -215,7 +281,10 @@ mod tests {
         let store = temp_store();
         store.ensure().await.unwrap();
         let calls = vec![];
-        store.add_assistant("response", "thinking...", &calls).await.unwrap();
+        store
+            .add_assistant("response", "thinking...", &calls)
+            .await
+            .unwrap();
         let lines = store.lines().await.unwrap();
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0]["role"], "assistant");
@@ -231,8 +300,11 @@ mod tests {
         let store = temp_store();
         store.ensure().await.unwrap();
         let results = vec![ToolResult {
-            tool_use_id: "id1".into(), tool_name: "Bash".into(),
-            tool_args: Default::default(), content: "output".into(), conv_content: "".into(),
+            tool_use_id: "id1".into(),
+            tool_name: "Bash".into(),
+            tool_args: Default::default(),
+            content: "output".into(),
+            conv_content: "".into(),
         }];
         store.add_tool_results(&results).await.unwrap();
         let lines = store.lines().await.unwrap();
@@ -264,6 +336,53 @@ mod tests {
         // cache should be updated, not None
         let lines = store.lines().await.unwrap();
         assert_eq!(lines.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn strict_lines_errors_on_bad_json_with_line_number() {
+        let store = temp_store();
+        store.ensure().await.unwrap();
+        tokio::fs::write(
+            store.path(),
+            "{\"role\":\"user\",\"content\":\"ok\"}\nnot-json\n",
+        )
+        .await
+        .unwrap();
+        let err = store.lines().await.unwrap_err().to_string();
+        assert!(err.contains("line 2"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn lossy_lines_skips_bad_json() {
+        let store = temp_store();
+        store.ensure().await.unwrap();
+        tokio::fs::write(
+            store.path(),
+            "{\"role\":\"user\",\"content\":\"ok\"}\nnot-json\n{\"role\":\"user\",\"content\":\"ok2\"}\n",
+        )
+        .await
+        .unwrap();
+        let lines = store.lines_lossy().await.unwrap();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0]["content"], "ok");
+        assert_eq!(lines[1]["content"], "ok2");
+    }
+
+    #[tokio::test]
+    async fn lossy_lines_reports_bad_json_warnings() {
+        let store = temp_store();
+        store.ensure().await.unwrap();
+        tokio::fs::write(store.path(), "{\"role\":\"user\"}\nnot-json\n")
+            .await
+            .unwrap();
+        let mut warnings = Vec::new();
+        let lines = store
+            .lines_lossy_with_warnings(|warning| warnings.push(warning))
+            .await
+            .unwrap();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("line 2"), "{}", warnings[0]);
     }
 
     #[test]

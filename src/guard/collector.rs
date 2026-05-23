@@ -8,6 +8,10 @@ pub enum SignalKind {
     ToolError,
     ToolFailed,
     EditLoop,
+    SafetyBlocked,
+    ArgumentError,
+    TestFailure,
+    CompileError,
 }
 
 #[derive(Debug, Clone)]
@@ -16,29 +20,105 @@ pub struct Signal {
     pub severity: f64,
     pub source: String,
     pub detail: String,
+    pub source_tool: String,
+    pub exit_code: Option<i32>,
+    pub matched_pattern: Option<String>,
+    pub message: String,
+}
+
+impl Signal {
+    fn new(
+        kind: SignalKind,
+        severity: f64,
+        source_tool: impl Into<String>,
+        exit_code: Option<i32>,
+        matched_pattern: Option<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        let source_tool = source_tool.into();
+        let message = message.into();
+        Self {
+            kind,
+            severity,
+            source: source_tool.clone(),
+            detail: message.clone(),
+            source_tool,
+            exit_code,
+            matched_pattern,
+            message,
+        }
+    }
 }
 
 struct CompiledPatterns {
-    patterns: Vec<(regex::Regex, f64, &'static str)>,
+    patterns: Vec<(regex::Regex, f64, &'static str, SignalKind)>,
 }
 
 fn compiled_patterns() -> &'static CompiledPatterns {
     static PATTERNS: OnceLock<CompiledPatterns> = OnceLock::new();
     PATTERNS.get_or_init(|| {
-        let raw: &[(&str, f64, &str)] = &[
-            (r"error\[E\d+\]:",                        0.9, "Rust compilation error"),
-            (r"error: aborting due to \d+ previous error", 0.9, "Rust compilation error"),
-            (r"FAILED [a-zA-Z0-9_/\\\.-]+::[a-zA-Z0-9_]+", 0.8, "Test failure"),
-            (r"FAILURES===",                           0.8, "Pytest failure"),
-            (r"Traceback \(most recent call last\):",  0.8, "Python exception"),
-            (r"Permission denied|EACCES",              0.5, "Permission denied"),
-            (r"command not found|No such file|does not exist", 0.5, "Not found"),
-            (r"Timed? ?out|timeout|killed",            0.3, "Timeout"),
+        let raw: &[(&str, f64, &str, SignalKind)] = &[
+            (
+                r"error\[E\d+\]:",
+                0.9,
+                "Rust compilation error",
+                SignalKind::CompileError,
+            ),
+            (
+                r"error: aborting due to \d+ previous error",
+                0.9,
+                "Rust compilation error",
+                SignalKind::CompileError,
+            ),
+            (
+                r"FAILED [a-zA-Z0-9_/\\\.-]+::[a-zA-Z0-9_]+",
+                0.8,
+                "Test failure",
+                SignalKind::TestFailure,
+            ),
+            (
+                r"FAILURES===",
+                0.8,
+                "Pytest failure",
+                SignalKind::TestFailure,
+            ),
+            (
+                r"Traceback \(most recent call last\):",
+                0.8,
+                "Python exception",
+                SignalKind::ToolError,
+            ),
+            (
+                r"Permission denied|EACCES",
+                0.5,
+                "Permission denied",
+                SignalKind::ToolError,
+            ),
+            (
+                r"command not found|No such file|does not exist",
+                0.5,
+                "Not found",
+                SignalKind::ToolError,
+            ),
+            (
+                r"Timed? ?out|timeout|killed",
+                0.3,
+                "Timeout",
+                SignalKind::ToolError,
+            ),
         ];
         CompiledPatterns {
-            patterns: raw.iter().map(|(pat, w, d)| {
-                (regex::Regex::new(pat).expect("invalid error pattern"), *w, *d)
-            }).collect(),
+            patterns: raw
+                .iter()
+                .map(|(pat, w, d, k)| {
+                    (
+                        regex::Regex::new(pat).expect("invalid error pattern"),
+                        *w,
+                        *d,
+                        k.clone(),
+                    )
+                })
+                .collect(),
         }
     })
 }
@@ -50,25 +130,45 @@ pub struct SignalCollector {
 
 impl SignalCollector {
     pub fn new() -> Self {
-        Self { call_history: VecDeque::with_capacity(8), seq_window: 6 }
+        Self {
+            call_history: VecDeque::with_capacity(8),
+            seq_window: 6,
+        }
     }
 
-    pub fn collect(&mut self, tool_name: &str, output: &str, exit_code: Option<i32>, full_content: &str) -> Vec<Signal> {
+    pub fn collect(
+        &mut self,
+        tool_name: &str,
+        output: &str,
+        exit_code: Option<i32>,
+        full_content: &str,
+    ) -> Vec<Signal> {
         let mut signals = Vec::new();
 
         if let Some(code) = exit_code {
             if code != 0 {
-                signals.push(Signal {
-                    kind: SignalKind::ToolFailed, severity: 1.0,
-                    source: tool_name.into(), detail: format!("process exited with code {}", code),
-                });
+                signals.push(Signal::new(
+                    SignalKind::ToolFailed,
+                    1.0,
+                    tool_name,
+                    Some(code),
+                    None,
+                    format!("process exited with code {}", code),
+                ));
             }
         } else if full_content.starts_with("Error:") {
-            signals.push(Signal {
-                kind: SignalKind::ToolFailed, severity: 1.0,
-                source: tool_name.into(),
-                detail: full_content.lines().next().unwrap_or("Error").to_string(),
-            });
+            let first_line = full_content.lines().next().unwrap_or("Error").to_string();
+            let kind = if full_content.contains("command blocked by bash safety policy") {
+                SignalKind::SafetyBlocked
+            } else if full_content.contains("no command provided")
+                || full_content.contains("no path provided")
+                || full_content.contains("invalid todo status")
+            {
+                SignalKind::ArgumentError
+            } else {
+                SignalKind::ToolFailed
+            };
+            signals.push(Signal::new(kind, 1.0, tool_name, None, None, first_line));
         }
 
         if let Some(s) = self.detect_error(tool_name, output) {
@@ -87,39 +187,71 @@ impl SignalCollector {
 
     fn detect_error(&self, tool_name: &str, output: &str) -> Option<Signal> {
         let cp = compiled_patterns();
-        for (re, weight, detail) in &cp.patterns {
+        for (re, weight, detail, kind) in &cp.patterns {
             if re.is_match(output) {
-                return Some(Signal {
-                    kind: SignalKind::ToolError, severity: *weight,
-                    source: tool_name.into(), detail: (*detail).into(),
-                });
+                return Some(Signal::new(
+                    kind.clone(),
+                    *weight,
+                    tool_name,
+                    None,
+                    Some(re.as_str().to_string()),
+                    (*detail).to_string(),
+                ));
             }
         }
         None
     }
 
     fn detect_edit_loop(&self, history: &VecDeque<String>) -> Option<Signal> {
-        if history.len() < self.seq_window { return None; }
+        if history.len() < self.seq_window {
+            return None;
+        }
         let edit_count = history.iter().filter(|n| *n == "Edit").count();
         let has_diff = history.iter().any(|n| *n == "Diff");
-        let has_read_op = history.iter().any(|n| matches!(n.as_str(), "Bash" | "Grep" | "Read" | "Glob"));
+        let has_read_op = history
+            .iter()
+            .any(|n| matches!(n.as_str(), "Bash" | "Grep" | "Read" | "Glob"));
 
         if edit_count > 4 {
-            let severity = if edit_count == 5 { 0.6 } else if edit_count == 6 { 0.8 } else { 0.9 };
-            return Some(Signal {
-                kind: SignalKind::EditLoop, severity,
-                source: "EditLoop".into(),
-                detail: format!("excessive edits: {} of {} calls are Edit", edit_count, self.seq_window),
-            });
+            let severity = if edit_count == 5 {
+                0.6
+            } else if edit_count == 6 {
+                0.8
+            } else {
+                0.9
+            };
+            return Some(Signal::new(
+                SignalKind::EditLoop,
+                severity,
+                "EditLoop",
+                None,
+                None,
+                format!(
+                    "excessive edits: {} of {} calls are Edit",
+                    edit_count, self.seq_window
+                ),
+            ));
         }
         if has_diff && !has_read_op && has_edit_diff_alternation(history) {
             let alt_count = count_edit_diff_alternations(history);
-            let severity = if alt_count >= 3 { 0.9 } else if alt_count == 2 { 0.7 } else { 0.4 };
-            return Some(Signal {
-                kind: SignalKind::EditLoop, severity,
-                source: "EditLoop".into(),
-                detail: format!("edit-diff loop ({} alternations) without read operations", alt_count),
-            });
+            let severity = if alt_count >= 3 {
+                0.9
+            } else if alt_count == 2 {
+                0.7
+            } else {
+                0.4
+            };
+            return Some(Signal::new(
+                SignalKind::EditLoop,
+                severity,
+                "EditLoop",
+                None,
+                None,
+                format!(
+                    "edit-diff loop ({} alternations) without read operations",
+                    alt_count
+                ),
+            ));
         }
         None
     }
@@ -143,7 +275,9 @@ fn count_edit_diff_alternations(history: &VecDeque<String>) -> usize {
 }
 
 impl Default for SignalCollector {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
@@ -154,7 +288,11 @@ mod tests {
     fn detects_rust_error() {
         let mut c = SignalCollector::new();
         let sigs = c.collect("Bash", "error[E0425]: cannot find value", None, "");
-        assert!(sigs.iter().any(|s| matches!(s.kind, SignalKind::ToolError)));
+        assert!(
+            sigs.iter()
+                .any(|s| matches!(s.kind, SignalKind::CompileError))
+        );
+        assert!(sigs.iter().any(|s| s.matched_pattern.is_some()));
     }
 
     #[test]
@@ -167,7 +305,9 @@ mod tests {
     #[test]
     fn detects_edit_loop_excessive_edits() {
         let mut c = SignalCollector::new();
-        for _ in 0..5 { c.call_history.push_back("Edit".into()); }
+        for _ in 0..5 {
+            c.call_history.push_back("Edit".into());
+        }
         c.call_history.push_back("Read".into());
         let sigs = c.collect("Edit", "ok", None, "");
         assert!(sigs.iter().any(|s| matches!(s.kind, SignalKind::EditLoop)));
@@ -177,20 +317,45 @@ mod tests {
     fn detects_tool_failed_via_exit_code() {
         let mut c = SignalCollector::new();
         let sigs = c.collect("Bash", "output", Some(1), "output");
-        assert!(sigs.iter().any(|s| matches!(s.kind, SignalKind::ToolFailed)));
+        assert!(
+            sigs.iter()
+                .any(|s| matches!(s.kind, SignalKind::ToolFailed))
+        );
     }
 
     #[test]
     fn detects_tool_failed_via_error_prefix() {
         let mut c = SignalCollector::new();
         let sigs = c.collect("Read", "", None, "Error: file not found");
-        assert!(sigs.iter().any(|s| matches!(s.kind, SignalKind::ToolFailed)));
+        assert!(
+            sigs.iter()
+                .any(|s| matches!(s.kind, SignalKind::ToolFailed))
+        );
+    }
+
+    #[test]
+    fn detects_safety_blocked() {
+        let mut c = SignalCollector::new();
+        let sigs = c.collect(
+            "Bash",
+            "",
+            None,
+            "Error: tool execution failed: Error: command blocked by bash safety policy (sudo)",
+        );
+        assert!(
+            sigs.iter()
+                .any(|s| matches!(s.kind, SignalKind::SafetyBlocked))
+        );
     }
 
     #[test]
     fn exit_code_zero_does_not_fail() {
         let mut c = SignalCollector::new();
         let sigs = c.collect("Bash", "ok", Some(0), "ok");
-        assert!(!sigs.iter().any(|s| matches!(s.kind, SignalKind::ToolFailed)));
+        assert!(
+            !sigs
+                .iter()
+                .any(|s| matches!(s.kind, SignalKind::ToolFailed))
+        );
     }
 }

@@ -2,12 +2,11 @@ use crate::safety;
 use anyhow::{Result, bail};
 use std::collections::VecDeque;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex, LazyLock};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
-static ADAPTIVE_HISTORY: LazyLock<Mutex<VecDeque<Duration>>> = LazyLock::new(|| {
-    Mutex::new(VecDeque::new())
-});
+static ADAPTIVE_HISTORY: LazyLock<Mutex<VecDeque<Duration>>> =
+    LazyLock::new(|| Mutex::new(VecDeque::new()));
 
 /// Compute adaptive timeout: median of last 10 executions × 3, min 5s, max 600s.
 pub fn adaptive_timeout(default_timeout: Duration) -> Duration {
@@ -19,7 +18,9 @@ pub fn adaptive_timeout(default_timeout: Duration) -> Duration {
     sorted.sort();
     let median = sorted[sorted.len() / 2];
     let timeout = median * 3;
-    timeout.max(Duration::from_secs(5)).min(Duration::from_secs(600))
+    timeout
+        .max(Duration::from_secs(5))
+        .min(Duration::from_secs(600))
 }
 
 fn record_execution_time(elapsed: Duration) {
@@ -28,7 +29,11 @@ fn record_execution_time(elapsed: Duration) {
     history.truncate(10);
 }
 
-pub fn execute(command: &str, timeout_secs: Option<u64>, default_timeout: i32) -> Result<(String, Option<i32>)> {
+pub fn execute(
+    command: &str,
+    timeout_secs: Option<u64>,
+    default_timeout: i32,
+) -> Result<(String, Option<i32>)> {
     if command.trim().is_empty() {
         bail!("Error: no command provided");
     }
@@ -38,7 +43,11 @@ pub fn execute(command: &str, timeout_secs: Option<u64>, default_timeout: i32) -
 
     let timeout = match timeout_secs {
         Some(t) if t > 0 => Duration::from_secs(t),
-        _ => adaptive_timeout(Duration::from_secs(if default_timeout > 0 { default_timeout as u64 } else { 600 })),
+        _ => adaptive_timeout(Duration::from_secs(if default_timeout > 0 {
+            default_timeout as u64
+        } else {
+            600
+        })),
     };
 
     let mut child = Command::new("bash")
@@ -89,16 +98,21 @@ pub fn execute(command: &str, timeout_secs: Option<u64>, default_timeout: i32) -
     let mut out = stdout_buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let stderr = stderr_buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
     if !stderr.is_empty() {
-        if !out.is_empty() { out.push('\n'); }
+        if !out.is_empty() {
+            out.push('\n');
+        }
         out.push_str(&stderr);
     }
     if timed_out {
-        out.push_str(&format!("\n[... truncated, command timed out after {} seconds ...]", timeout.as_secs()));
+        out.push_str(&format!(
+            "\n[... truncated, command timed out after {} seconds ...]",
+            timeout.as_secs()
+        ));
     }
-    if let Some(code) = exit_code {
-        if code != 0 {
-            out.push_str(&format!("\n\nProcess completed with exit code {}.", code));
-        }
+    if let Some(code) = exit_code
+        && code != 0
+    {
+        out.push_str(&format!("\n\nProcess completed with exit code {}.", code));
     }
     Ok((out, exit_code))
 }
@@ -107,7 +121,44 @@ fn stream_reader<R: std::io::Read>(mut pipe: R, buf: Arc<Mutex<String>>) {
     let mut data = Vec::new();
     let _ = pipe.read_to_end(&mut data);
     if let Ok(mut guard) = buf.lock() {
-        guard.push_str(&      String::from_utf8_lossy(&data));
+        guard.push_str(&String::from_utf8_lossy(&data));
+    }
+}
+
+pub struct BashTool;
+
+impl super::runner::ToolExec for BashTool {
+    fn name(&self) -> &'static str {
+        "Bash"
+    }
+    fn mutating(&self) -> bool {
+        true
+    }
+    fn execute(
+        &self,
+        input: &serde_json::Value,
+        ctx: &crate::context::ToolContext,
+    ) -> anyhow::Result<super::runner::ToolOutcome> {
+        #[derive(serde::Deserialize)]
+        struct Args {
+            command: String,
+            #[serde(default)]
+            timeout: Option<u64>,
+        }
+        let args: Args = serde_json::from_value(input.clone())?;
+        execute(
+            &args.command,
+            args.timeout,
+            ctx.tool_config.tool_timeout_secs,
+        )
+        .map(|(s, code)| super::runner::ToolOutcome {
+            content: s,
+            conversation_content: String::new(),
+            is_bash: true,
+            exit_code: code,
+            success: code.unwrap_or(0) == 0,
+            diagnostics: Vec::new(),
+        })
     }
 }
 
@@ -149,18 +200,5 @@ mod tests {
     fn adaptive_timeout_respects_default_when_no_history() {
         let t = adaptive_timeout(Duration::from_secs(10));
         assert_eq!(t, Duration::from_secs(10));
-    }
-}
-
-pub struct BashTool;
-
-impl super::runner::ToolExec for BashTool {
-    fn name(&self) -> &'static str { "Bash" }
-    fn execute(&self, input: &serde_json::Value, ctx: &crate::context::ToolContext) -> anyhow::Result<(String, bool, String, Option<i32>)> {
-        #[derive(serde::Deserialize)]
-        struct Args { command: String, #[serde(default)] timeout: Option<u64> }
-        let args: Args = serde_json::from_value(input.clone())?;
-        execute(&args.command, args.timeout, ctx.tool_config.tool_timeout_secs)
-            .map(|(s, code)| (s, true, String::new(), code))
     }
 }

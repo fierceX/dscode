@@ -1,11 +1,11 @@
-use crate::agent::turn::{TurnExecutor, TurnDecision, TurnEffect};
 use crate::agent::belief::BeliefTracker;
+use crate::agent::turn::{TurnDecision, TurnEffect, TurnExecutor};
 use crate::context::AgentSharedContext;
-use crate::llm::client::{AsyncLlClient, LlmClient};
 use crate::errors;
+use crate::llm::client::{AsyncLlClient, LlmClient};
 use anyhow::Result;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use tokio::sync::{mpsc, oneshot};
 
 /// OrchActor is the central orchestrator: receives user inputs,
@@ -15,24 +15,46 @@ pub struct OrchActor {
     cmd_rx: mpsc::UnboundedReceiver<OrchCmd>,
     belief: BeliefTracker,
     forced_model: Option<crate::config::ModelTier>,
+    #[cfg(test)]
+    llm_override: Option<Arc<dyn LlmClient>>,
 }
 
 /// Commands received by the orchestrator.
 pub enum OrchCmd {
-    UserInput { input: String, done: oneshot::Sender<()> },
+    UserInput {
+        input: String,
+        done: oneshot::Sender<()>,
+    },
     SetModel(String),
-    Compact { done: oneshot::Sender<()> },
+    Compact {
+        done: oneshot::Sender<()>,
+    },
 }
 
 impl OrchActor {
-    pub fn new(
-        ctx: Arc<AgentSharedContext>,
-        cmd_rx: mpsc::UnboundedReceiver<OrchCmd>,
-    ) -> Self {
+    pub fn new(ctx: Arc<AgentSharedContext>, cmd_rx: mpsc::UnboundedReceiver<OrchCmd>) -> Self {
         Self {
-            ctx, cmd_rx,
+            ctx,
+            cmd_rx,
             belief: BeliefTracker::new(16),
             forced_model: None,
+            #[cfg(test)]
+            llm_override: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_llm(
+        ctx: Arc<AgentSharedContext>,
+        cmd_rx: mpsc::UnboundedReceiver<OrchCmd>,
+        llm: Arc<dyn LlmClient>,
+    ) -> Self {
+        Self {
+            ctx,
+            cmd_rx,
+            belief: BeliefTracker::new(16),
+            forced_model: None,
+            llm_override: Some(llm),
         }
     }
 
@@ -103,14 +125,17 @@ impl OrchActor {
         let (model, _api_url, mut executor) = match prepared {
             Ok(v) => v,
             Err(e) => {
-                self.ctx.display.render_error(&format!("Failed to prepare turn: {e}"));
+                self.ctx
+                    .display
+                    .render_error(&format!("Failed to prepare turn: {e}"));
                 return;
             }
         };
 
         match executor.execute(&input, Some(&mut self.belief)).await {
             Ok((decision, effects)) => {
-                self.post_process_turn(decision, effects, &executor, &model).await;
+                self.post_process_turn(decision, effects, &executor, &model)
+                    .await;
             }
             Err(e) => {
                 self.handle_turn_error(e, &model).await;
@@ -130,7 +155,15 @@ impl OrchActor {
             "forced_model": self.forced_model.map(|t| t.label()),
         }));
 
-        let llm: Arc<dyn LlmClient> = Arc::new(AsyncLlClient::new(&model, self.ctx.api_key(), &api_url)?);
+        #[cfg(test)]
+        let llm: Arc<dyn LlmClient> = if let Some(llm) = &self.llm_override {
+            llm.clone()
+        } else {
+            Arc::new(AsyncLlClient::new(&model, self.ctx.api_key(), &api_url)?)
+        };
+        #[cfg(not(test))]
+        let llm: Arc<dyn LlmClient> =
+            Arc::new(AsyncLlClient::new(&model, self.ctx.api_key(), &api_url)?);
         let executor = TurnExecutor::new(self.ctx.clone(), llm);
         Ok((model, api_url, executor))
     }
@@ -156,9 +189,10 @@ impl OrchActor {
         self.log_turn_end(executor, &decision, model);
 
         if let TurnDecision::Failed(ref msg) = decision
-            && msg != "interrupted" {
-                self.ctx.display.render_error(msg);
-            }
+            && msg != "interrupted"
+        {
+            self.ctx.display.render_error(msg);
+        }
     }
 
     fn log_turn_end(&self, executor: &TurnExecutor, decision: &TurnDecision, model: &str) {
@@ -191,27 +225,15 @@ impl OrchActor {
         if info.severity == errors::ErrorSeverity::Fatal {
             self.ctx.display.render_error(&format!("Fatal error: {e}"));
         } else {
-            self.ctx.display.render_error(&format!("Turn execution error: {e}"));
+            self.ctx
+                .display
+                .render_error(&format!("Turn execution error: {e}"));
         }
     }
 
     async fn refresh_title(&self) {
-        let new_stats = self.ctx.stats.snapshot().await;
-        let snapshot = crate::ui::StatsSnapshot {
-            current_turn_count: new_stats.current_turn_count,
-            agent_request_count: new_stats.agent_request_count,
-            total_input_tokens: new_stats.total_input_tokens,
-            total_output_tokens: new_stats.total_output_tokens,
-            current_context_tokens: new_stats.current_context_tokens,
-            max_context_tokens: self.ctx.config.max_context_tokens as u64,
-            total_cache_read_tokens: new_stats.total_cache_read_tokens,
-            total_cache_creation_tokens: new_stats.total_cache_creation_tokens,
-            flash_cost_micros: new_stats.flash_cost_micros,
-            pro_cost_micros: new_stats.pro_cost_micros,
-            belief: self.belief.belief(),
-        };
         let model_label = crate::config::resolve_model_label(&self.ctx.config.model);
-        self.ctx.display.render_title_update(model_label, &snapshot);
+        crate::ui::render_title_snapshot(&self.ctx, model_label, self.belief.belief()).await;
     }
 
     async fn handle_model_command(&mut self, model: &str) {
@@ -224,10 +246,14 @@ impl OrchActor {
                 } else {
                     self.forced_model = Some(t);
                 }
-                self.ctx.display.render_info(&format!("Switched to {} model.", t.label()));
+                self.ctx
+                    .display
+                    .render_info(&format!("Switched to {} model.", t.label()));
             }
             Err(_) => {
-                self.ctx.display.render_error(&format!("Unknown model tier: {model}. Use /flash or /pro"));
+                self.ctx
+                    .display
+                    .render_error(&format!("Unknown model tier: {model}. Use /flash or /pro"));
             }
         }
     }

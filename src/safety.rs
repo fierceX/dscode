@@ -9,6 +9,24 @@ static RE_BLOCK_DEVICE_WRITE: Lazy<Regex> = Lazy::new(|| {
         .expect("regex")
 });
 
+pub enum SafetyDecision {
+    Allow,
+    Warn(&'static str),
+    Block(&'static str),
+}
+
+pub trait SafetyApprover {
+    fn approve(&self, decision: &SafetyDecision, context: &str) -> bool;
+}
+
+pub struct DefaultSafetyApprover;
+
+impl SafetyApprover for DefaultSafetyApprover {
+    fn approve(&self, decision: &SafetyDecision, _context: &str) -> bool {
+        matches!(decision, SafetyDecision::Allow | SafetyDecision::Warn(_))
+    }
+}
+
 pub fn deny_bash_command_reason(command: &str) -> Option<&'static str> {
     let trimmed = command.trim();
     if trimmed.is_empty() {

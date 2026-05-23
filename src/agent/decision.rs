@@ -75,7 +75,9 @@ impl DecisionEngine {
     }
 
     fn format_reminder(b: f64, errors: &[String]) -> String {
-        let error_section = if errors.is_empty() { String::new() } else {
+        let error_section = if errors.is_empty() {
+            String::new()
+        } else {
             format!("\nRecent:\n{}", format_errors(errors, 3))
         };
         format!(
@@ -85,7 +87,9 @@ impl DecisionEngine {
     }
 
     fn format_warning(b: f64, errors: &[String]) -> String {
-        let error_section = if errors.is_empty() { String::new() } else {
+        let error_section = if errors.is_empty() {
+            String::new()
+        } else {
             format!("\nRecent errors:\n{}", format_errors(errors, 5))
         };
         format!(
@@ -96,14 +100,19 @@ impl DecisionEngine {
 }
 
 fn format_errors(errors: &[String], n: usize) -> String {
-    errors.iter().rev().take(n)
+    errors
+        .iter()
+        .rev()
+        .take(n)
         .map(|e| format!("- {}", e))
         .collect::<Vec<_>>()
         .join("\n")
 }
 
 impl Default for DecisionEngine {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
@@ -134,7 +143,10 @@ mod tests {
     fn cooldown_suppresses_inject() {
         let mut de = DecisionEngine::new();
         // 第一次调用：注入，设置冷却
-        assert!(matches!(de.decide(0.4, &["err".into()]), Decision::Inject(_)));
+        assert!(matches!(
+            de.decide(0.4, &["err".into()]),
+            Decision::Inject(_)
+        ));
         // 第二次调用：冷却期内，应返回 None
         assert!(matches!(de.decide(0.4, &["err".into()]), Decision::None));
         assert_eq!(de.cooldown_remaining(), 2); // 3→递减→2
@@ -156,13 +168,19 @@ mod tests {
     fn cooldown_expires_after_enough_calls() {
         let mut de = DecisionEngine::new();
         // 注入，冷却设为 3
-        assert!(matches!(de.decide(0.4, &["err".into()]), Decision::Inject(_)));
+        assert!(matches!(
+            de.decide(0.4, &["err".into()]),
+            Decision::Inject(_)
+        ));
         // 冷却期内：3→2→1→0，共 3 次 None
         assert!(matches!(de.decide(0.4, &["err".into()]), Decision::None));
         assert!(matches!(de.decide(0.4, &["err".into()]), Decision::None));
         assert!(matches!(de.decide(0.4, &["err".into()]), Decision::None));
         // 冷却结束，可再次注入
-        assert!(matches!(de.decide(0.4, &["err".into()]), Decision::Inject(_)));
+        assert!(matches!(
+            de.decide(0.4, &["err".into()]),
+            Decision::Inject(_)
+        ));
         // 再次进入冷却
         assert!(de.cooldown_remaining() == DEFAULT_COOLDOWN_TURNS);
     }
@@ -170,7 +188,10 @@ mod tests {
     #[test]
     fn reset_clears_cooldown() {
         let mut de = DecisionEngine::new();
-        assert!(matches!(de.decide(0.4, &["err".into()]), Decision::Inject(_)));
+        assert!(matches!(
+            de.decide(0.4, &["err".into()]),
+            Decision::Inject(_)
+        ));
         assert!(de.cooldown_remaining() > 0);
         de.reset();
         assert_eq!(de.cooldown_remaining(), 0);

@@ -1,9 +1,9 @@
 use crate::cancel::CancellationToken;
 use crate::config::{Config, OutputFormat};
-use crate::session::store::ConversationStore;
-use crate::session::stats::StatsTracker;
 use crate::session::compaction::CompactionEngine;
 use crate::session::prefix::ImmutablePrefix;
+use crate::session::stats::StatsTracker;
+use crate::session::store::ConversationStore;
 use crate::ui::Display;
 use serde_json::Value;
 use std::io::Write;
@@ -78,27 +78,49 @@ pub struct AgentSharedContext {
 }
 
 impl AgentSharedContext {
-    pub fn model(&self) -> &str { crate::config::resolve_model_name(&self.config.model) }
-    pub fn max_turns(&self) -> i32 { self.config.max_turns }
-    pub fn max_tokens(&self) -> i32 { self.config.max_tokens }
-    pub fn api_key(&self) -> &str { &self.config.api_key }
-    pub fn verbose(&self) -> bool { self.config.verbose }
-    pub fn interactive(&self) -> bool { self.config.interactive }
+    pub fn model(&self) -> &str {
+        crate::config::resolve_model_name(&self.config.model)
+    }
+    pub fn max_turns(&self) -> i32 {
+        self.config.max_turns
+    }
+    pub fn max_tokens(&self) -> i32 {
+        self.config.max_tokens
+    }
+    pub fn api_key(&self) -> &str {
+        &self.config.api_key
+    }
+    pub fn verbose(&self) -> bool {
+        self.config.verbose
+    }
+    pub fn interactive(&self) -> bool {
+        self.config.interactive
+    }
 
     /// Append a JSON line to events.jsonl. In stream-json mode, also emit to stdout.
     pub fn log_event(&self, value: Value) {
-        if !self.config.log_events { return; }
+        if !self.config.log_events {
+            return;
+        }
         let line = match serde_json::to_string(&value) {
             Ok(s) => s,
             Err(_) => return,
         };
         if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true).append(true).open(&self.events_path)
+            .create(true)
+            .append(true)
+            .open(&self.events_path)
         {
             let _ = writeln!(file, "{line}");
         }
         if self.config.output_format == OutputFormat::StreamJson {
             let _ = writeln!(std::io::stdout(), "{line}");
+        }
+    }
+
+    pub fn log_typed_event(&self, event: crate::events::EventLog) {
+        if let Ok(value) = serde_json::to_value(event) {
+            self.log_event(value);
         }
     }
 }

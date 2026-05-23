@@ -58,8 +58,7 @@ impl Builder {
         ));
 
         // Belief awareness — help the model understand the belief tracking system
-        let belief_awareness =
-            "This agent has a belief tracking system that monitors tool execution quality.\n\
+        let belief_awareness = "This agent has a belief tracking system that monitors tool execution quality.\n\
              - Each tool call is evaluated for errors (compile failures, test failures, edit loops)\n\
              - A \"belief score\" (0.0–1.0) reflects recent tool execution reliability\n\
              - When belief drops below 0.70, a [System note] may be injected with recent errors\n\
@@ -274,7 +273,9 @@ impl Builder {
             if let Some(embedded) = crate::assets::embedded_skills::find(skill) {
                 let full = format!(
                     "Base directory: <built-in>\n\n{}",
-                    embedded.content.replace("${DSCODE_SKILL_DIR}", "<built-in>")
+                    embedded
+                        .content
+                        .replace("${DSCODE_SKILL_DIR}", "<built-in>")
                 );
                 sections.push(wrap_section("skill", &full, Some(embedded.name)));
                 continue;
@@ -428,13 +429,19 @@ mod tests {
     fn build_system_prompt_contains_agent_identity() {
         let prompt = test_builder().build_system_prompt().unwrap();
         assert!(prompt.contains("dscode"), "should contain project name");
-        assert!(prompt.contains("<agent-identity>"), "should have identity section");
+        assert!(
+            prompt.contains("<agent-identity>"),
+            "should have identity section"
+        );
     }
 
     #[test]
     fn build_system_prompt_contains_environment() {
         let prompt = test_builder().build_system_prompt().unwrap();
-        assert!(prompt.contains("<environment>"), "should have environment section");
+        assert!(
+            prompt.contains("<environment>"),
+            "should have environment section"
+        );
         assert!(prompt.contains("/tmp"), "should contain cwd");
     }
 
@@ -498,7 +505,8 @@ mod tests {
 
     #[test]
     fn extract_skill_summary_from_frontmatter() {
-        let content = "---\nname: test-skill\ndescription: \"Test skill description\"\n---\n\nSkill content";
+        let content =
+            "---\nname: test-skill\ndescription: \"Test skill description\"\n---\n\nSkill content";
         let summary = extract_skill_summary(content);
         assert_eq!(summary, "Test skill description");
     }

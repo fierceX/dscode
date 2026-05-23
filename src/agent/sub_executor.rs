@@ -1,5 +1,5 @@
+use crate::agent::turn::{TurnDecision, TurnExecutor};
 use crate::context::AgentSharedContext;
-use crate::agent::turn::{TurnExecutor, TurnDecision};
 use crate::llm::client::{AsyncLlClient, LlmClient};
 use crate::session::stats::Stats;
 use crate::session::store::ConversationStore;
@@ -34,8 +34,12 @@ impl CaptureDisplay {
             text: Mutex::new(String::new()),
         }
     }
-    fn take_thinking(&self) -> String { std::mem::take(&mut *self.thinking.lock().unwrap()) }
-    fn take_text(&self) -> String { std::mem::take(&mut *self.text.lock().unwrap()) }
+    fn take_thinking(&self) -> String {
+        std::mem::take(&mut *self.thinking.lock().unwrap())
+    }
+    fn take_text(&self) -> String {
+        std::mem::take(&mut *self.text.lock().unwrap())
+    }
 }
 
 impl Display for CaptureDisplay {
@@ -74,6 +78,8 @@ pub struct SubAgentExecutor {
     capture: Arc<CaptureDisplay>,
     parent_display: Arc<dyn Display>,
     session_id: String,
+    #[cfg(test)]
+    llm_override: Option<Arc<dyn LlmClient>>,
 }
 
 impl SubAgentExecutor {
@@ -82,22 +88,27 @@ impl SubAgentExecutor {
         session_id: String,
         fork: bool,
     ) -> Result<Self> {
-        let paths = crate::session::paths::paths_for(
-            &parent_ctx.home, &parent_ctx.cwd, &session_id,
-        );
+        let paths =
+            crate::session::paths::paths_for(&parent_ctx.home, &parent_ctx.cwd, &session_id);
         crate::session::paths::ensure_dir(&paths.session_dir).await?;
 
         // 共享初始化：创建文件、store、stats
-        let (child_store, child_stats) = crate::session::init::init_session_base(
-            &parent_ctx.home, &parent_ctx.cwd, &session_id,
-        ).await?;
+        let (child_store, child_stats) =
+            crate::session::init::init_session_base(&parent_ctx.home, &parent_ctx.cwd, &session_id)
+                .await?;
 
         if fork {
             // Copy parent conversation, summary, plan to child session (ignore errors)
             let parent_conv = parent_ctx.store.path();
-            if parent_conv.exists() { let _ = tokio::fs::copy(parent_conv, &paths.conversation).await; }
-            if parent_ctx.summary_path.exists() { let _ = tokio::fs::copy(&parent_ctx.summary_path, &paths.summary).await; }
-            if parent_ctx.plan_path.exists() { let _ = tokio::fs::copy(&parent_ctx.plan_path, &paths.plan).await; }
+            if parent_conv.exists() {
+                let _ = tokio::fs::copy(parent_conv, &paths.conversation).await;
+            }
+            if parent_ctx.summary_path.exists() {
+                let _ = tokio::fs::copy(&parent_ctx.summary_path, &paths.summary).await;
+            }
+            if parent_ctx.plan_path.exists() {
+                let _ = tokio::fs::copy(&parent_ctx.plan_path, &paths.plan).await;
+            }
         }
 
         let child_compaction = Arc::new(crate::session::compaction::CompactionEngine::new(
@@ -116,7 +127,8 @@ impl SubAgentExecutor {
 
         // 用 CaptureDisplay 拦截子代理输出，并实时转发到父 TUI
         let tui_tx = parent_ctx.sub_stream_tx.as_ref().and_then(|a| {
-            a.downcast_ref::<std::sync::mpsc::Sender<crate::tui::TuiSignal>>().cloned()
+            a.downcast_ref::<std::sync::mpsc::Sender<crate::tui::TuiSignal>>()
+                .cloned()
         });
         let capture = Arc::new(CaptureDisplay::new(
             tui_tx.unwrap_or_else(|| {
@@ -137,7 +149,7 @@ impl SubAgentExecutor {
             stats: child_stats,
             compaction: child_compaction,
             cancel: parent_ctx.cancel.child_token(),
-            display: capture.clone(),  // ← CaptureDisplay，阻断实时输出
+            display: capture.clone(), // ← CaptureDisplay，阻断实时输出
             sub_stream_tx: None,
             tool_config: parent_ctx.tool_config.clone(),
             events_path: paths.events.clone(),
@@ -155,7 +167,21 @@ impl SubAgentExecutor {
             capture,
             parent_display,
             session_id,
+            #[cfg(test)]
+            llm_override: None,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn new_with_llm(
+        parent_ctx: Arc<AgentSharedContext>,
+        session_id: String,
+        fork: bool,
+        llm: Arc<dyn LlmClient>,
+    ) -> Result<Self> {
+        let mut executor = Self::new(parent_ctx, session_id, fork).await?;
+        executor.llm_override = Some(llm);
+        Ok(executor)
     }
 
     /// Execute the sub-agent with the given prompt.
@@ -189,14 +215,22 @@ impl SubAgentExecutor {
         match result {
             Ok((thinking, text)) => SubAgentResult {
                 status: "ok".into(),
-                thinking: if thinking.is_empty() { captured_thinking } else { thinking },
+                thinking: if thinking.is_empty() {
+                    captured_thinking
+                } else {
+                    thinking
+                },
                 text: if text.is_empty() { captured_text } else { text },
                 usage: stats,
             },
             Err(e) => SubAgentResult {
                 status: "failed".into(),
                 thinking: captured_thinking,
-                text: if captured_text.is_empty() { format!("Sub-agent failed: {e}") } else { captured_text },
+                text: if captured_text.is_empty() {
+                    format!("Sub-agent failed: {e}")
+                } else {
+                    captured_text
+                },
                 usage: stats,
             },
         }
@@ -205,8 +239,21 @@ impl SubAgentExecutor {
     async fn run_impl(self, prompt: String) -> Result<(String, String)> {
         let model_name = crate::config::resolve_model_name(&self.child_ctx.config.model);
         let api_url = &self.child_ctx.api_url;
+        #[cfg(test)]
+        let llm: Arc<dyn LlmClient> = if let Some(llm) = self.llm_override.clone() {
+            llm
+        } else {
+            Arc::new(AsyncLlClient::new(
+                model_name,
+                &self.child_ctx.config.api_key,
+                api_url,
+            )?)
+        };
+        #[cfg(not(test))]
         let llm: Arc<dyn LlmClient> = Arc::new(AsyncLlClient::new(
-            model_name, &self.child_ctx.config.api_key, api_url,
+            model_name,
+            &self.child_ctx.config.api_key,
+            api_url,
         )?);
         // 子代理内部也可调用 SubAgent，用独立池（容量1，结果丢弃）
         let mut executor = TurnExecutor::new(self.child_ctx.clone(), llm);
@@ -225,15 +272,18 @@ impl SubAgentExecutor {
                                 match b.get("type").and_then(|t| t.as_str()).unwrap_or("") {
                                     "thinking" => {
                                         if result_thinking.is_empty()
-                                            && let Some(t) = b.get("thinking").and_then(|v| v.as_str()) {
-                                                result_thinking = t.to_string();
-                                            }
+                                            && let Some(t) =
+                                                b.get("thinking").and_then(|v| v.as_str())
+                                        {
+                                            result_thinking = t.to_string();
+                                        }
                                     }
                                     "text" => {
                                         if result_text.is_empty()
-                                            && let Some(t) = b.get("text").and_then(|v| v.as_str()) {
-                                                result_text = t.to_string();
-                                            }
+                                            && let Some(t) = b.get("text").and_then(|v| v.as_str())
+                                        {
+                                            result_text = t.to_string();
+                                        }
                                     }
                                     _ => {}
                                 }
@@ -244,12 +294,8 @@ impl SubAgentExecutor {
                 }
                 Ok((result_thinking, result_text))
             }
-            TurnDecision::Interrupted => {
-                Ok((String::new(), "Sub-agent interrupted.".into()))
-            }
-            TurnDecision::Failed(msg) => {
-                Err(anyhow::anyhow!(msg))
-            }
+            TurnDecision::Interrupted => Ok((String::new(), "Sub-agent interrupted.".into())),
+            TurnDecision::Failed(msg) => Err(anyhow::anyhow!(msg)),
         }
     }
 }

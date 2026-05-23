@@ -61,10 +61,10 @@ fn convert_messages_to_openai(messages: &[Value]) -> Result<Vec<Value>> {
 fn collect_tool_call_ids(msgs: &[Value]) -> Vec<String> {
     let mut ids = Vec::new();
     for msg in msgs {
-        if msg.get("role").and_then(Value::as_str) == Some("tool") {
-            if let Some(id) = msg.get("tool_call_id").and_then(Value::as_str) {
-                ids.push(id.to_string());
-            }
+        if msg.get("role").and_then(Value::as_str) == Some("tool")
+            && let Some(id) = msg.get("tool_call_id").and_then(Value::as_str)
+        {
+            ids.push(id.to_string());
         }
     }
     ids
@@ -106,10 +106,15 @@ fn convert_assistant_message(content: &Value) -> Result<Value> {
     let mut tool_calls = Vec::new();
     for block in blocks {
         match block.get("type").and_then(Value::as_str).unwrap_or("") {
-            "thinking" => reasoning.push_str(block.get("thinking").and_then(Value::as_str).unwrap_or("")),
+            "thinking" => {
+                reasoning.push_str(block.get("thinking").and_then(Value::as_str).unwrap_or(""))
+            }
             "text" => text.push_str(block.get("text").and_then(Value::as_str).unwrap_or("")),
             "tool_use" => {
-                let args = block.get("input").cloned().unwrap_or(Value::Object(Default::default()));
+                let args = block
+                    .get("input")
+                    .cloned()
+                    .unwrap_or(Value::Object(Default::default()));
                 tool_calls.push(json!({
                     "id": block.get("id").and_then(Value::as_str).unwrap_or(""),
                     "type": "function",
@@ -133,7 +138,9 @@ fn convert_tool_result_messages(content: &Value) -> Result<Vec<Value>> {
     let blocks = content.as_array().cloned().unwrap_or_default();
     let mut out = Vec::new();
     for b in blocks {
-        if b.get("type").and_then(Value::as_str) != Some("tool_result") { continue; }
+        if b.get("type").and_then(Value::as_str) != Some("tool_result") {
+            continue;
+        }
         out.push(json!({
             "role":"tool",
             "tool_call_id": b.get("tool_use_id").and_then(Value::as_str).unwrap_or(""),
@@ -215,7 +222,7 @@ mod tests {
     fn strip_orphaned_ignores_non_assistant_messages() {
         let mut msg = json!({"role": "user", "content": "hello"});
         let original = msg.clone();
-        strip_orphaned_tool_calls(&mut msg, &vec!["x".to_string()]);
+        strip_orphaned_tool_calls(&mut msg, &["x".to_string()]);
         assert_eq!(msg, original);
     }
 
@@ -251,7 +258,11 @@ mod tests {
         ];
         let converted = convert_messages_to_openai(&msgs).unwrap();
         // Should have tool-role message for call_1
-        assert!(converted.iter().any(|m| m["role"] == "tool" && m["tool_call_id"] == "call_1"));
+        assert!(
+            converted
+                .iter()
+                .any(|m| m["role"] == "tool" && m["tool_call_id"] == "call_1")
+        );
         // Assistant should still have tool_calls (call_1 is matched)
         let assistant = converted.iter().find(|m| m["role"] == "assistant").unwrap();
         assert!(assistant.get("tool_calls").is_some());

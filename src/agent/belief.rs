@@ -13,9 +13,13 @@ impl Observation {
         let mut total_failure = 0.0_f64;
         for s in signals {
             match s.kind {
-                SignalKind::ToolError | SignalKind::EditLoop | SignalKind::ToolFailed => {
-                    total_failure = total_failure.max(s.severity);
-                }
+                SignalKind::ToolError
+                | SignalKind::EditLoop
+                | SignalKind::ToolFailed
+                | SignalKind::SafetyBlocked
+                | SignalKind::ArgumentError
+                | SignalKind::TestFailure
+                | SignalKind::CompileError => total_failure = total_failure.max(s.severity),
             }
         }
         Observation {
@@ -48,11 +52,11 @@ impl BeliefTracker {
     pub fn observe(&mut self, signals: &[Signal]) {
         let obs = Observation::from_signals(signals);
 
-        if self.window.len() >= self.window_size {
-            if let Some(old) = self.window.pop_front() {
-                self.alpha_sum -= old.success_weight;
-                self.beta_sum -= old.failure_weight;
-            }
+        if self.window.len() >= self.window_size
+            && let Some(old) = self.window.pop_front()
+        {
+            self.alpha_sum -= old.success_weight;
+            self.beta_sum -= old.failure_weight;
         }
 
         self.alpha_sum += obs.success_weight;
@@ -60,8 +64,8 @@ impl BeliefTracker {
         self.window.push_back(obs);
 
         for s in signals {
-            if matches!(s.kind, SignalKind::ToolError | SignalKind::ToolFailed) {
-                self.recent_errors.push(s.detail.clone());
+            if !matches!(s.kind, SignalKind::EditLoop) {
+                self.recent_errors.push(s.message.clone());
             }
         }
     }
@@ -86,7 +90,16 @@ mod tests {
     use crate::guard::collector::SignalKind;
 
     fn sig(kind: SignalKind, severity: f64) -> Signal {
-        Signal { kind, severity, source: "test".into(), detail: "test".into() }
+        Signal {
+            kind,
+            severity,
+            source: "test".into(),
+            detail: "test".into(),
+            source_tool: "test".into(),
+            exit_code: None,
+            matched_pattern: None,
+            message: "test".into(),
+        }
     }
 
     #[test]
@@ -112,7 +125,10 @@ mod tests {
     #[test]
     fn max_prevents_double_counting() {
         let mut bt = BeliefTracker::new(4);
-        bt.observe(&[sig(SignalKind::ToolError, 0.9), sig(SignalKind::ToolError, 0.8)]);
+        bt.observe(&[
+            sig(SignalKind::ToolError, 0.9),
+            sig(SignalKind::ToolError, 0.8),
+        ]);
         assert!(bt.belief() < 0.75);
         // β should be 1 + 0.9 = 1.9, not 1 + 1.7 = 2.7
         assert!((bt.beta_sum - 1.9).abs() < 0.01);

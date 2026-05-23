@@ -41,7 +41,9 @@ impl TerminalDisplay {
     }
 
     fn write_out(&self, s: &str) {
-        if self.stream_json { return; }
+        if self.stream_json {
+            return;
+        }
         let normalized = normalize_display_text(s, self.interactive);
         let mut stdout = self.lock_stdout();
         let _ = write!(stdout, "{normalized}");
@@ -163,14 +165,23 @@ impl Display for TerminalDisplay {
         self.write_err(&msg);
     }
 
-    fn render_sub_agent_status(&self, session_id: &str, status: &str, in_tokens: u64, out_tokens: u64) {
+    fn render_sub_agent_status(
+        &self,
+        session_id: &str,
+        status: &str,
+        in_tokens: u64,
+        out_tokens: u64,
+    ) {
         if status == "ok" || status == "launched" || status == "running" {
             self.write_err(&format!(
                 "\x1b[35m[sub-agent {}] {} (in={}, out={})\x1b[0m\n",
                 session_id, status, in_tokens, out_tokens
             ));
         } else {
-            self.write_err(&format!("\x1b[31m[sub-agent {}] failed\x1b[0m\n", session_id));
+            self.write_err(&format!(
+                "\x1b[31m[sub-agent {}] failed\x1b[0m\n",
+                session_id
+            ));
         }
     }
 
@@ -190,12 +201,16 @@ impl Display for TerminalDisplay {
         if !thinking.is_empty() {
             self.write_out("── Thinking ──\n");
             self.write_out(thinking);
-            if !thinking.ends_with('\n') { self.write_out("\n"); }
+            if !thinking.ends_with('\n') {
+                self.write_out("\n");
+            }
         }
         if !text.is_empty() {
             self.write_out("── Text ──\n");
             self.write_out(text);
-            if !text.ends_with('\n') { self.write_out("\n"); }
+            if !text.ends_with('\n') {
+                self.write_out("\n");
+            }
         }
     }
 
@@ -210,5 +225,9 @@ impl Display for TerminalDisplay {
 
 fn normalize_display_text(s: &str, interactive: bool) -> String {
     let normalized = s.replace("\r\n", "\n").replace('\r', "\n");
-    if interactive { normalized.replace('\n', "\r\n") } else { normalized }
+    if interactive {
+        normalized.replace('\n', "\r\n")
+    } else {
+        normalized
+    }
 }

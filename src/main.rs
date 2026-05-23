@@ -1,16 +1,16 @@
-use dscode::config::{api_url, apply_provider_defaults, apply_config_file, parse_args};
-use dscode::session::paths;
-use dscode::session::compaction::CompactionEngine;
-use dscode::ui::engine::TerminalDisplay;
-use dscode::ui::Display;
-use dscode::ui::replay::replay_last_turns;
+use anyhow::Result;
+use dscode::agent::orchestrator::{OrchCmd, new_orchestrator};
 use dscode::cancel::CancellationToken;
+use dscode::config::{api_url, apply_config_file, apply_provider_defaults, parse_args};
 use dscode::context::AgentSharedContext;
 use dscode::context::ToolConfig;
-use dscode::agent::orchestrator::{new_orchestrator, OrchCmd};
-use anyhow::Result;
+use dscode::session::compaction::CompactionEngine;
+use dscode::session::paths;
+use dscode::ui::Display;
+use dscode::ui::engine::TerminalDisplay;
+use dscode::ui::replay::replay_last_turns;
 use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
@@ -59,7 +59,9 @@ async fn run(args: Vec<String>) -> Result<()> {
 
     let mut sid = cfg.session_id.clone();
     if sid.is_empty() && cfg.continue_session {
-        sid = paths::continue_session(&home, &cwd).await.unwrap_or_default();
+        sid = paths::continue_session(&home, &cwd)
+            .await
+            .unwrap_or_default();
     }
     if sid.is_empty() {
         sid = paths::chrono_session_id();
@@ -75,7 +77,8 @@ async fn run(args: Vec<String>) -> Result<()> {
     let api_url_str = api_url(&cfg);
 
     // Determine interactive mode early, before ctx creation
-    let is_interactive = cfg.interactive || (cfg.prompt.is_empty() && std::io::stdin().is_terminal());
+    let is_interactive =
+        cfg.interactive || (cfg.prompt.is_empty() && std::io::stdin().is_terminal());
     cfg.interactive = is_interactive;
 
     // Shared HTTP client for both LLM calls and compaction
@@ -117,9 +120,9 @@ async fn run(args: Vec<String>) -> Result<()> {
     };
 
     // TUI mode: store mpsc sender for sub-agent streaming
-    let sub_stream_tx: Option<Arc<dyn std::any::Any + Send + Sync>> = tui_tx.as_ref().map(|(tx, ..)| {
-        Arc::new(tx.clone()) as Arc<dyn std::any::Any + Send + Sync>
-    });
+    let sub_stream_tx: Option<Arc<dyn std::any::Any + Send + Sync>> = tui_tx
+        .as_ref()
+        .map(|(tx, ..)| Arc::new(tx.clone()) as Arc<dyn std::any::Any + Send + Sync>);
 
     let ctx = Arc::new(AgentSharedContext {
         config: cfg.clone(),
@@ -156,10 +159,15 @@ async fn run(args: Vec<String>) -> Result<()> {
     }
 
     if cfg.tui_mode {
-        if let Some((_, signal_rx)) = tui_tx {
-            if let Err(e) = dscode::tui::run_tui(signal_rx, cmd_tx.clone(), &spaths.events, Some(ctx.interrupt.clone())) {
-                eprintln!("TUI error: {e}");
-            }
+        if let Some((_, signal_rx)) = tui_tx
+            && let Err(e) = dscode::tui::run_tui(
+                signal_rx,
+                cmd_tx.clone(),
+                &spaths.events,
+                Some(ctx.interrupt.clone()),
+            )
+        {
+            eprintln!("TUI error: {e}");
         }
     } else if is_interactive {
         display.render_info("dscode interactive mode (type 'exit' or Ctrl+D to quit)");
@@ -169,13 +177,19 @@ async fn run(args: Vec<String>) -> Result<()> {
         run_interactive(cmd_tx, cancel.clone(), ctx.interrupt.clone(), &home).await?;
     } else if !cfg.prompt.is_empty() {
         let (done_tx, done_rx) = oneshot::channel();
-        cmd_tx.send(OrchCmd::UserInput { input: cfg.prompt.clone(), done: done_tx })?;
+        cmd_tx.send(OrchCmd::UserInput {
+            input: cfg.prompt.clone(),
+            done: done_tx,
+        })?;
         let _ = done_rx.await;
     } else {
         let mut input = String::new();
         tokio::io::AsyncReadExt::read_to_string(&mut tokio::io::stdin(), &mut input).await?;
         let (done_tx, done_rx) = oneshot::channel();
-        cmd_tx.send(OrchCmd::UserInput { input, done: done_tx })?;
+        cmd_tx.send(OrchCmd::UserInput {
+            input,
+            done: done_tx,
+        })?;
         let _ = done_rx.await;
     }
 
@@ -183,7 +197,10 @@ async fn run(args: Vec<String>) -> Result<()> {
     let _ = orch_handle.await;
 
     if !cfg.session_id.is_empty() {
-        eprintln!("\x1b[90mResume with: --session {}  or  --continue\x1b[0m", cfg.session_id);
+        eprintln!(
+            "\x1b[90mResume with: --session {}  or  --continue\x1b[0m",
+            cfg.session_id
+        );
     }
 
     Ok(())
@@ -203,14 +220,22 @@ fn list_skills() {
     );
     let bases = find_list_skill_dirs(&cwd, &home);
     for base in &bases {
-        if !base.is_dir() { continue; }
+        if !base.is_dir() {
+            continue;
+        }
         for entry in (std::fs::read_dir(base).into_iter().flatten()).flatten() {
             let path = entry.path();
-            if !path.is_dir() { continue; }
+            if !path.is_dir() {
+                continue;
+            }
             let name = path.file_name().unwrap().to_string_lossy().to_string();
-            if name.starts_with('.') || !seen_fs.insert(name.clone()) { continue; }
+            if name.starts_with('.') || !seen_fs.insert(name.clone()) {
+                continue;
+            }
             let skill_file = path.join("SKILL.md");
-            if !skill_file.exists() { continue; }
+            if !skill_file.exists() {
+                continue;
+            }
             let content = std::fs::read_to_string(&skill_file).unwrap_or_default();
             let desc = extract_frontmatter_field_for_list(&content, "description:")
                 .unwrap_or_else(|| String::from("(no description)"));
@@ -222,15 +247,24 @@ fn list_skills() {
     println!("BUILT-IN SKILLS");
     println!("{}", "-".repeat(60));
     for skill in &embedded {
-        let marker = if seen_fs.contains(skill.name) { "▶" } else { " " };
+        let marker = if seen_fs.contains(skill.name) {
+            "▶"
+        } else {
+            " "
+        };
         println!("{}  {}", marker, skill.name);
         println!("{}     {}", marker, skill.description);
         println!();
     }
 
     // Show filesystem-only skills
-    let fs_only: Vec<_> = fs_skills.iter()
-        .filter(|s| !embedded.iter().any(|e| s.starts_with(&format!("{}:", e.name))))
+    let fs_only: Vec<_> = fs_skills
+        .iter()
+        .filter(|s| {
+            !embedded
+                .iter()
+                .any(|e| s.starts_with(&format!("{}:", e.name)))
+        })
         .collect();
     if !fs_only.is_empty() {
         println!("FILESYSTEM SKILLS");
@@ -247,23 +281,35 @@ fn list_skills() {
 fn find_list_skill_dirs(cwd: &std::path::Path, home: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     let project = cwd.join(".claude/skills");
-    if project.is_dir() { out.push(project); }
+    if project.is_dir() {
+        out.push(project);
+    }
     let project_dev = cwd.join("skills");
-    if project_dev.is_dir() { out.push(project_dev); }
+    if project_dev.is_dir() {
+        out.push(project_dev);
+    }
     let global = home.join(".claude/skills");
-    if global.is_dir() { out.push(global); }
+    if global.is_dir() {
+        out.push(global);
+    }
     out
 }
 
 fn extract_frontmatter_field_for_list(content: &str, field: &str) -> Option<String> {
     let lines: Vec<&str> = content.lines().collect();
-    if lines.first()?.trim() != "---" { return None; }
+    if lines.first()?.trim() != "---" {
+        return None;
+    }
     for line in &lines[1..] {
         let trimmed = line.trim();
-        if trimmed == "---" { break; }
+        if trimmed == "---" {
+            break;
+        }
         if let Some(value) = trimmed.strip_prefix(field) {
             let val = value.trim().trim_matches('"').trim_matches('\'');
-            if !val.is_empty() { return Some(val.to_string()); }
+            if !val.is_empty() {
+                return Some(val.to_string());
+            }
         }
     }
     None
@@ -273,7 +319,7 @@ async fn run_interactive(
     cmd_tx: mpsc::UnboundedSender<OrchCmd>,
     cancel: CancellationToken,
     interrupt: Arc<AtomicBool>,
-    home: &PathBuf,
+    home: &Path,
 ) -> Result<()> {
     let cancel_clone = cancel.clone();
     let history_path = home.join(".dscode/history");
@@ -325,16 +371,15 @@ async fn run_interactive(
             }
             if line == "/compact" {
                 let (done_tx, done_rx) = oneshot::channel();
-                if cmd_tx.send(OrchCmd::Compact { done: done_tx }).is_err() { break; }
+                if cmd_tx.send(OrchCmd::Compact { done: done_tx }).is_err() {
+                    break;
+                }
                 let _ = done_rx.blocking_recv();
                 continue;
             }
             if line == "/flash" || line == "/pro" {
                 let model = line.trim_start_matches('/');
-                if cmd_tx
-                    .send(OrchCmd::SetModel(model.to_string()))
-                    .is_err()
-                {
+                if cmd_tx.send(OrchCmd::SetModel(model.to_string())).is_err() {
                     break;
                 }
                 continue;
@@ -348,13 +393,21 @@ async fn run_interactive(
             let _ = rl.add_history_entry(&line);
             let _ = rl.save_history(&history_file);
             let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-            if cmd_tx.send(OrchCmd::UserInput { input: line, done: done_tx }).is_err() {
+            if cmd_tx
+                .send(OrchCmd::UserInput {
+                    input: line,
+                    done: done_tx,
+                })
+                .is_err()
+            {
                 break;
             }
             // 轮询等待完成，同时检查中断标志
             let mut done_rx = done_rx;
             loop {
-                if interrupt.load(Ordering::SeqCst) { break; }
+                if interrupt.load(Ordering::SeqCst) {
+                    break;
+                }
                 match done_rx.try_recv() {
                     Ok(()) | Err(tokio::sync::oneshot::error::TryRecvError::Closed) => break,
                     Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
@@ -378,7 +431,9 @@ fn simple_stdin_loop(cmd_tx: &mpsc::UnboundedSender<OrchCmd>, cancel: &Cancellat
             Ok(l) => l.trim().to_string(),
             Err(_) => break,
         };
-        if line.is_empty() { continue; }
+        if line.is_empty() {
+            continue;
+        }
         if line.starts_with('/') {
             if line == "/help" {
                 println!("Commands: /flash, /pro, /compact, /skills, /help");
@@ -395,15 +450,27 @@ fn simple_stdin_loop(cmd_tx: &mpsc::UnboundedSender<OrchCmd>, cancel: &Cancellat
             }
             continue;
         }
-        if line == "exit" || line == "quit" { break; }
-        if cancel.is_cancelled() { break; }
+        if line == "exit" || line == "quit" {
+            break;
+        }
+        if cancel.is_cancelled() {
+            break;
+        }
         let (done_tx, done_rx) = oneshot::channel();
-        if cmd_tx.send(OrchCmd::UserInput { input: line, done: done_tx }).is_err() { break; }
+        if cmd_tx
+            .send(OrchCmd::UserInput {
+                input: line,
+                done: done_tx,
+            })
+            .is_err()
+        {
+            break;
+        }
         let _ = done_rx.blocking_recv();
     }
 }
 
-async fn list_sessions(home: &PathBuf, cwd: &PathBuf) -> Result<()> {
+async fn list_sessions(home: &Path, cwd: &Path) -> Result<()> {
     use std::time::UNIX_EPOCH;
     let dir = home.join(".dscode/projects").join(paths::project_key(cwd));
     if !dir.exists() {
@@ -418,32 +485,45 @@ async fn list_sessions(home: &PathBuf, cwd: &PathBuf) -> Result<()> {
     let mut rows: Vec<Row> = Vec::new();
     let mut entries = tokio::fs::read_dir(&dir).await?;
     while let Some(e) = entries.next_entry().await? {
-        if !e.path().is_dir() { continue; }
+        if !e.path().is_dir() {
+            continue;
+        }
         let name = e.file_name().to_string_lossy().to_string();
         let summary_path = e.path().join("summary.txt");
         let mut summary = String::new();
         if let Ok(data) = tokio::fs::read_to_string(&summary_path).await {
             for line in data.lines() {
                 let trimmed = line.trim();
-                if !trimmed.is_empty() { summary = trimmed.to_string(); break; }
+                if !trimmed.is_empty() {
+                    summary = trimmed.to_string();
+                    break;
+                }
             }
         }
-        rows.push(Row { name, ts: e.metadata().await?.modified().unwrap_or(UNIX_EPOCH), summary });
+        rows.push(Row {
+            name,
+            ts: e.metadata().await?.modified().unwrap_or(UNIX_EPOCH),
+            summary,
+        });
     }
-    if rows.is_empty() { println!("No sessions found."); return Ok(()); }
+    if rows.is_empty() {
+        println!("No sessions found.");
+        return Ok(());
+    }
     rows.sort_by(|a, b| b.ts.cmp(&a.ts));
     println!("{:<40} {:<16} PREVIEW", "NAME", "MODIFIED");
     for row in rows {
         let mut preview = row.summary;
-        if preview.len() > 60 { preview.truncate(57); preview.push_str("..."); }
-        let dt: Result<time::OffsetDateTime, _> = row.ts.try_into();
-        let formatted = match dt {
-            Ok(dt) => {
-                use time::macros::format_description;
-                static FMT: &[time::format_description::FormatItem<'_>] = format_description!("[year]-[month]-[day] [hour]:[minute]");
-                dt.format(FMT).unwrap_or_else(|_| format!("{:?}", row.ts))
-            }
-            Err(_) => format!("{:?}", row.ts),
+        if preview.len() > 60 {
+            preview.truncate(57);
+            preview.push_str("...");
+        }
+        let dt: time::OffsetDateTime = row.ts.into();
+        let formatted = {
+            use time::macros::format_description;
+            static FMT: &[time::format_description::FormatItem<'_>] =
+                format_description!("[year]-[month]-[day] [hour]:[minute]");
+            dt.format(FMT).unwrap_or_else(|_| format!("{:?}", row.ts))
         };
         println!("{:<40} {:<16} {}", row.name, formatted, preview);
     }
