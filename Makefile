@@ -1,4 +1,5 @@
-.PHONY: build check test clippy regression-mock regression-client regression-api regression-all coverage coverage-core coverage-with-ignored clean
+.PHONY: build check test clippy regression-mock regression-client regression-api regression-all coverage coverage-core coverage-with-ignored clean \
+        pip-build pip-wheel pip-install pip-publish pip-clean
 
 CORE_COVERAGE_IGNORE := (main\.rs|tui/|ui/|tools/(web|search|runner|bash|file)\.rs|llm/(client|transport)\.rs|sse/toolcall\.rs|session/compaction\.rs|config\.rs|prompt\.rs|assets\.rs|context\.rs|errors\.rs|events\.rs|session/(paths|init)\.rs|util\.rs|test_mock\.rs|regression\.rs|agent/(orchestrator|prefix|compactor|sub_coordinator|sub_executor)\.rs)
 
@@ -53,3 +54,22 @@ coverage-with-ignored:
 
 clean:
 	cargo clean
+
+# ── pip / wheel targets ──────────────────────────────────────────────
+
+pip-build:
+	python scripts/build_wheel.py
+	@echo "── Wheel(s) built ──"
+	ls -lh dist/
+
+pip-install: pip-build
+	python -m pip install --force-reinstall dist/*.whl
+
+pip-wheel:
+	DSCODE_SDK_SKIP_BUILD=1 python scripts/build_wheel.py
+
+pip-publish:
+	twine upload dist/*
+
+pip-clean:
+	rm -rf dscode_sdk/_binary dist *.egg-info build

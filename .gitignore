@@ -2,3 +2,11 @@
 dist/*
 .claude
 .deepseek/
+experiments/*
+experiments/
+
+# pip / wheel build artifacts
+dscode_sdk/_binary/
+*.egg-info/
+__pycache__/
+
