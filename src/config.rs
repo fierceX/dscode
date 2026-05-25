@@ -1,4 +1,5 @@
 use anyhow::{Result, anyhow, bail};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputFormat {
@@ -149,6 +150,8 @@ pub struct Config {
     pub json_rpc: bool,
     /// 沙箱配置（从 .dscoderc 加载）
     pub sandbox: SandboxConfig,
+    /// 自定义系统提示词文件（MISSION.md）
+    pub mission_file: Option<PathBuf>,
     /// 工具禁用开关（从 CLI 或 JSON-RPC 加载）
     pub tool_disable: ToolDisableFlags,
 }
@@ -193,6 +196,7 @@ impl Default for Config {
             cli_overrides: CliOverrides::default(),
             json_rpc: false,
             sandbox: SandboxConfig::default(),
+            mission_file: None,
             tool_disable: ToolDisableFlags::default(),
         }
     }
@@ -229,6 +233,10 @@ pub fn parse_args(args: Vec<String>) -> Result<Config> {
             }
             "--skill" => {
                 cfg.skills.push(require_value(&args, i)?);
+                i += 2;
+            }
+            "--mission" => {
+                cfg.mission_file = Some(require_value(&args, i)?.into());
                 i += 2;
             }
             "--max-turns" => {
@@ -316,6 +324,10 @@ pub fn parse_args(args: Vec<String>) -> Result<Config> {
             }
             "--disable-web" => {
                 cfg.tool_disable.disable_web = true;
+                i += 1;
+            }
+            "--disable-python" => {
+                cfg.tool_disable.disable_python = true;
                 i += 1;
             }
             _ => {
@@ -630,6 +642,7 @@ pub struct ToolDisableFlags {
     pub disable_bash: bool,
     pub disable_sub_agent: bool,
     pub disable_web: bool,
+    pub disable_python: bool,
 }
 
 #[cfg(test)]

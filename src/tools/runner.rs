@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use super::bash;
 use super::file;
+use super::python;
 use super::search;
 use super::web;
 use crate::context::ToolContext;
@@ -73,6 +74,7 @@ pub fn tool_registry() -> Vec<Box<dyn ToolExec>> {
         Box::new(PlanClearTool),
         Box::new(web::WebSearchTool),
         Box::new(web::WebFetchTool),
+        Box::new(python::PythonTool),
         Box::new(SubAgentTool),
     ]
 }

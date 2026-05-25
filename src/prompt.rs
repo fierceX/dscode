@@ -9,6 +9,7 @@ pub struct Builder {
     pub summary_file: PathBuf,
     pub plan_file: PathBuf,
     pub plan_draft_file: PathBuf,
+    pub mission_file: Option<PathBuf>,
 }
 
 impl Builder {
@@ -190,6 +191,34 @@ impl Builder {
             )
         };
         sections.push(wrap_section("output-language", &output_language, None));
+
+        // ═══ Mission override: load sections from MISSION.md ══════
+        if let Some(ref mission_path) = self.mission_file {
+            let mission_content = fs::read_to_string(mission_path)
+                .map_err(|e| anyhow::anyhow!("failed to read mission file {}: {e}", mission_path.display()))?;
+
+            // Collect all level-1 headings from the mission file
+            let mission_headings = extract_all_headings(&mission_content);
+
+            // Collect existing section tags for quick lookup
+            let existing_tags: Vec<String> = sections.iter()
+                .filter_map(|s| extract_tag_name(s))
+                .collect();
+
+            for heading in &mission_headings {
+                if let Some(new_content) = extract_section(&mission_content, heading) {
+                    let new_wrapped = wrap_section(heading, &new_content, None);
+                    if let Some(pos) = existing_tags.iter().position(|t| t == heading) {
+                        // Replace existing section
+                        sections[pos] = new_wrapped;
+                    } else {
+                        // Append new section
+                        sections.push(new_wrapped);
+                    }
+                }
+            }
+        }
+
         Ok(sections.join("\n"))
     }
 
@@ -322,6 +351,78 @@ fn escape_attr(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// Extract the tag name from a wrapped section string like ``<tag>...</tag>``.
+fn extract_tag_name(wrapped: &str) -> Option<String> {
+    let s = wrapped.trim();
+    if !s.starts_with('<') {
+        return None;
+    }
+    let closing = s.find('>')?;
+    let tag = &s[1..closing];
+    // Skip if it has attributes (name="...")
+    if tag.contains(' ') {
+        return None;
+    }
+    Some(tag.to_string())
+}
+
+/// Extract all level-1 headings (``# name``) from a MISSION.md file.
+fn extract_all_headings(content: &str) -> Vec<String> {
+    let mut headings = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        // Match lines starting with "# " but not "## "
+        if trimmed.starts_with("# ") && !trimmed.starts_with("## ") {
+            let name = trimmed.trim_start_matches("# ").trim().to_string();
+            if !name.is_empty() {
+                headings.push(name);
+            }
+        }
+    }
+    headings
+}
+
+/// Extract content under a markdown level-1 heading from a MISSION.md file.
+///
+/// Looks for ``# <heading>`` at the start of a line and returns everything
+/// between that heading and the next level-1 heading (or EOF).
+fn extract_section(content: &str, heading: &str) -> Option<String> {
+    let target = format!("# {}", heading);
+    let lines: Vec<&str> = content.lines().collect();
+    let mut start_idx = None;
+
+    for (i, line) in lines.iter().enumerate() {
+        if line.trim() == target.as_str() {
+            start_idx = Some(i + 1);
+            break;
+        }
+    }
+
+    let start = start_idx?;
+    let mut end = lines.len();
+    for (i, line) in lines[start..].iter().enumerate() {
+        if line.trim().starts_with("# ") && !line.trim().starts_with("## ") {
+            end = start + i;
+            break;
+        }
+    }
+
+    let section_lines: Vec<&str> = lines[start..end]
+        .iter()
+        .copied()
+        .skip_while(|l| l.trim().is_empty())
+        .collect();
+    if section_lines.is_empty() {
+        return None;
+    }
+    let result = section_lines.join("\n");
+    if result.trim().is_empty() {
+        None
+    } else {
+        Some(result)
+    }
+}
+
 fn read_optional_file(path: &Path) -> Result<Option<String>> {
     if !path.exists() {
         return Ok(None);
@@ -422,6 +523,7 @@ mod tests {
             summary_file: PathBuf::from("/tmp/summary.txt"),
             plan_file: PathBuf::from("/tmp/plan.md"),
             plan_draft_file: PathBuf::from("/tmp/plan.draft"),
+            mission_file: None,
         }
     }
 

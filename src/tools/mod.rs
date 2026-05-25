@@ -1,5 +1,6 @@
 pub mod bash;
 pub mod file;
+pub mod python;
 pub mod runner;
 pub mod search;
 pub mod web;

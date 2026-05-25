@@ -1,0 +1,225 @@
+use anyhow::{Result, bail};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+/// Patterns that are blocked in Python scripts for safety.
+const BLOCKED_PATTERNS: &[(&str, &str)] = &[
+    ("subprocess", "subprocess module is disabled for security"),
+    ("os.system", "os.system() is disabled for security"),
+    ("os.popen", "os.popen() is disabled for security"),
+    ("shutil", "shutil module is disabled for security"),
+    ("ctypes", "ctypes module is disabled for security"),
+    ("socket", "socket module is disabled for security"),
+    ("pty", "pty module is disabled for security"),
+    ("__import__", "__import__() is disabled for security"),
+    ("compile(", "compile() is disabled for security"),
+    ("exec(", "exec() is disabled for security"),
+    ("eval(", "eval() is disabled for security"),
+    ("open(__", "opening /dev/fd or similar is disabled"),
+];
+
+/// Execute a Python script and return (stdout, stderr, exit_code).
+pub fn execute_script(
+    script: &str,
+    timeout_secs: Option<u64>,
+) -> Result<(String, String, Option<i32>)> {
+    if script.trim().is_empty() {
+        bail!("Error: no Python script provided");
+    }
+
+    // Safety check: scan for blocked patterns
+    for (pattern, reason) in BLOCKED_PATTERNS {
+        if script.contains(pattern) {
+            bail!("Error: unsafe Python code detected ({reason})");
+        }
+    }
+
+    let timeout = Duration::from_secs(timeout_secs.unwrap_or(30).max(5).min(300));
+
+    let mut child = Command::new("python3")
+        .arg("-B") // don't write .pyc
+        .arg("-W") // warning control
+        .arg("ignore") // suppress warnings
+        .arg("-c")
+        .arg(script)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("Failed to start python3: {e}"))?;
+
+    // Read output with timeout
+    let start = Instant::now();
+    let mut timed_out = false;
+    let mut exit_code: Option<i32> = None;
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                exit_code = status.code();
+                break;
+            }
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    timed_out = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => bail!("Error: failed to wait for python3: {e}"),
+        }
+    }
+
+    // Collect output
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    if let Some(mut out) = child.stdout.take() {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let _ = out.read_to_end(&mut buf);
+        stdout = String::from_utf8_lossy(&buf).to_string();
+    }
+    if let Some(mut err) = child.stderr.take() {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let _ = err.read_to_end(&mut buf);
+        stderr = String::from_utf8_lossy(&buf).to_string();
+    }
+
+    if timed_out {
+        if !stdout.is_empty() {
+            stdout.push('\n');
+        }
+        stdout.push_str(&format!(
+            "[... truncated, Python script timed out after {} seconds ...]",
+            timeout.as_secs()
+        ));
+    }
+
+    Ok((stdout, stderr, exit_code))
+}
+
+pub struct PythonTool;
+
+impl super::runner::ToolExec for PythonTool {
+    fn name(&self) -> &'static str {
+        "Python"
+    }
+
+    fn storm_exempt(&self) -> bool {
+        true
+    }
+
+    fn execute(
+        &self,
+        input: &serde_json::Value,
+        ctx: &crate::context::ToolContext,
+    ) -> anyhow::Result<super::runner::ToolOutcome> {
+        if ctx.tool_config.tool_disable.disable_python {
+            return Ok(super::runner::ToolOutcome::text(
+                "Error: Python tool is disabled by configuration.".into(),
+            ));
+        }
+
+        #[derive(serde::Deserialize)]
+        struct Args {
+            script: Option<String>,
+            #[serde(default)]
+            script_file: Option<String>,
+            #[serde(default)]
+            timeout: Option<u64>,
+        }
+
+        let args: Args = serde_json::from_value(input.clone())?;
+
+        let script = match (args.script, args.script_file) {
+            (Some(s), None) => s,
+            (None, Some(path)) => {
+                let full_path = if std::path::Path::new(&path).is_absolute() {
+                    path
+                } else {
+                    format!("{}/{}", ctx.cwd.display(), path)
+                };
+                std::fs::read_to_string(&full_path)
+                    .map_err(|e| anyhow::anyhow!("Failed to read script file {full_path}: {e}"))?
+            }
+            (Some(_), Some(_)) => {
+                bail!("Error: provide either 'script' or 'script_file', not both");
+            }
+            (None, None) => {
+                bail!("Error: provide either 'script' or 'script_file'");
+            }
+        };
+
+        let (stdout, stderr, exit_code) = execute_script(&script, args.timeout)?;
+
+        let mut content = stdout;
+        if !stderr.is_empty() {
+            if !content.is_empty() {
+                content.push('\n');
+            }
+            content.push_str(&stderr);
+        }
+        if let Some(code) = exit_code
+            && code != 0
+        {
+            content.push_str(&format!("\n\nPython script exited with code {code}."));
+        }
+
+        Ok(super::runner::ToolOutcome {
+            content,
+            conversation_content: String::new(),
+            is_bash: false,
+            exit_code,
+            success: exit_code.unwrap_or(0) == 0,
+            diagnostics: Vec::new(),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_script_errors() {
+        assert!(execute_script("", None).is_err());
+        assert!(execute_script("   ", None).is_err());
+    }
+
+    #[test]
+    fn simple_print_works() {
+        let (stdout, stderr, code) = execute_script("print('hello')", None).unwrap();
+        assert!(stdout.contains("hello"));
+        assert_eq!(stderr, "");
+        assert_eq!(code, Some(0));
+    }
+
+    #[test]
+    fn blocked_patterns_rejected() {
+        assert!(execute_script("import subprocess", None).is_err());
+        assert!(execute_script("os.system('rm')", None).is_err());
+        assert!(execute_script("import shutil", None).is_err());
+        assert!(execute_script("eval('1+1')", None).is_err());
+    }
+
+    #[test]
+    fn timeout_kills_long_script() {
+        let (stdout, _, _) = execute_script("import time; time.sleep(10)", Some(1)).unwrap();
+        assert!(stdout.contains("timed out"));
+    }
+
+    #[test]
+    fn json_processing_works() {
+        let script = r#"
+import json
+data = {"concrete": "C45", "volume": 1500}
+print(json.dumps(data, indent=2))
+"#;
+        let (stdout, _, code) = execute_script(script, None).unwrap();
+        assert!(stdout.contains("C45"));
+        assert!(stdout.contains("1500"));
+        assert_eq!(code, Some(0));
+    }
+}

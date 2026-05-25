@@ -76,6 +76,9 @@ async fn run(args: Vec<String>) -> Result<()> {
             if opts.get("disable_web").and_then(|v| v.as_bool()).unwrap_or(false) {
                 cfg.tool_disable.disable_web = true;
             }
+            if opts.get("disable_python").and_then(|v| v.as_bool()).unwrap_or(false) {
+                cfg.tool_disable.disable_python = true;
+            }
         }
         Some(req.get("prompt").and_then(|v| v.as_str()).unwrap_or(&input).to_string())
     } else {
@@ -584,6 +587,7 @@ fn print_usage() {
     println!("  --tool-timeout N        Tool execution timeout in seconds (default: 600)");
     println!("  --sub-agent-timeout N   Sub-agent execution timeout in seconds (default: 300)");
     println!("  --skill NAME            Load skill from .claude/skills/NAME/SKILL.md");
+    println!("  --mission PATH          Load custom system prompt from MISSION.md file");
     println!("  --max-turns N           Max agent turns (default: 40)");
     println!("  --max-context N         Max stored context tokens (default: 1M)");
     println!("  --api-key KEY           API key (default from env)");
@@ -599,6 +603,7 @@ fn print_usage() {
     println!("  --tui                   TUI mode (alternate screen with status bar)");
     println!("  --json-rpc              JSON-RPC mode (read request from stdin, emit events to stdout)");
     println!("  --disable-bash          Disable Bash tool");
+    println!("  --disable-python        Disable Python tool");
     println!("  --disable-sub-agent     Disable SubAgent tool");
     println!("  --disable-web           Disable WebSearch/WebFetch tools");
     println!("  -h, --help              Show this help");

@@ -440,6 +440,16 @@ impl TurnExecutor {
             // Phase 1b: 从 thinking/text 回收漏报的工具调用
             calls = self.scavenge_calls(&thinking, &text, calls);
 
+            // 过滤掉被禁用的工具（scavenge 可能回收了已禁用的工具）
+            let disable = &self.ctx.config.tool_disable;
+            calls.retain(|c| match c.name.as_str() {
+                "Bash" => !disable.disable_bash,
+                "Python" => !disable.disable_python,
+                "WebSearch" | "WebFetch" => !disable.disable_web,
+                "SubAgent" => !disable.disable_sub_agent,
+                _ => true,
+            });
+
             // Phase 2: 持久化 assistant 消息 + 用量
             self.persist_assistant(&text, &thinking, &calls, &usage)
                 .await?;
