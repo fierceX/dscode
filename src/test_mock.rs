@@ -225,8 +225,13 @@ fn decision_warn_belief_is_inject() {
         _ => panic!("expected Inject"),
     };
     assert!(
-        msg.contains("Some tool executions"),
-        "reminder should mention 'Some tool executions', got: {}",
+        msg.contains("SIGNAL_RECOVERY mode"),
+        "reminder should enter SIGNAL_RECOVERY mode, got: {}",
+        msg
+    );
+    assert!(
+        !msg.contains("Then make at most one minimal edit"),
+        "v5 reminder should not include minimal-edit text, got: {}",
         msg
     );
 }
@@ -240,8 +245,12 @@ fn decision_low_belief_is_inject_warning() {
         _ => panic!("expected Inject for warning"),
     };
     assert!(
-        msg.contains("Multiple failures"),
-        "warning should mention 'Multiple failures'"
+        msg.contains("repeated tool failure"),
+        "warning should mention repeated tool failure"
+    );
+    assert!(
+        msg.contains("Your next tool call must be Read, Grep, Glob, or Bash"),
+        "warning should constrain the next tool call"
     );
     assert!(
         msg.contains("Rust error"),

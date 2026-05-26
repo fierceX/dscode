@@ -32,6 +32,8 @@ pub struct TurnExecutor {
     tool_call_count: u32,
     /// 决策引擎（含冷却逻辑，由引擎内部管理）。
     decision_engine: crate::agent::decision::DecisionEngine,
+    /// Set after a signal injection. The next tool batch must observe before mutating.
+    signal_recovery_guard: bool,
 }
 
 /// Represents the outcome of a turn that needs to be actioned.
@@ -66,6 +68,7 @@ impl TurnExecutor {
             sub_agents: crate::agent::sub_coordinator::SubAgentCoordinator::new(ctx.clone()),
             tool_call_count: 0,
             decision_engine: crate::agent::decision::DecisionEngine::new(),
+            signal_recovery_guard: false,
         }
     }
 
@@ -247,7 +250,14 @@ impl TurnExecutor {
         effects: &mut Vec<TurnEffect>,
     ) -> Result<()> {
         self.tool_call_count += calls.len() as u32;
-        let results = self.tools.execute_all(calls).await?;
+        let (calls_to_execute, mut guarded_results) = self.apply_signal_recovery_guard(calls);
+        let mut results = if calls_to_execute.is_empty() {
+            Vec::new()
+        } else {
+            self.tools.execute_all(calls_to_execute).await?
+        };
+        guarded_results.append(&mut results);
+        let results = guarded_results;
 
         let mut prepared_results = Vec::new();
         for mut result in results {
@@ -299,6 +309,38 @@ impl TurnExecutor {
         Ok(())
     }
 
+    fn apply_signal_recovery_guard(
+        &mut self,
+        calls: Vec<ToolCallEvent>,
+    ) -> (Vec<ToolCallEvent>, Vec<crate::tools::runner::ToolRunResult>) {
+        if !self.signal_recovery_guard || calls.is_empty() {
+            return (calls, Vec::new());
+        }
+
+        self.signal_recovery_guard = false;
+        let mut iter = calls.into_iter();
+        let Some(first) = iter.next() else {
+            return (Vec::new(), Vec::new());
+        };
+
+        if is_recovery_blocked_tool(&first.name) {
+            self.ctx.log_event(serde_json::json!({
+                "type": "signal_recovery_guard",
+                "action": "blocked_first_mutation",
+                "tool": first.name.clone(),
+                "tool_use_id": first.id.clone(),
+                "reason": "SIGNAL_RECOVERY requires inspection before the first file mutation",
+            }));
+            let remaining: Vec<ToolCallEvent> = iter.collect();
+            return (remaining, vec![blocked_by_signal_recovery(first)]);
+        }
+
+        let mut allowed = Vec::new();
+        allowed.push(first);
+        allowed.extend(iter);
+        (allowed, Vec::new())
+    }
+
     /// Phase 4: 根据 stop reason 决策本轮是否结束。
     /// 返回 `Some(TurnDecision)` 表示需要从 execute() 返回，`None` 表示继续循环。
     async fn decide_next(
@@ -319,6 +361,9 @@ impl TurnExecutor {
         match stop {
             "tool_use" | "tool_calls" => {
                 // DecisionEngine 决策是否注入（含内部冷却逻辑）
+                if !crate::agent::signal_mode::SignalMode::from_env().enabled() {
+                    return Ok(None);
+                }
                 if let Some(ref bt) = belief {
                     let b = bt.belief();
                     match self.decision_engine.decide(b, &bt.recent_errors) {
@@ -342,6 +387,7 @@ impl TurnExecutor {
                                 b, recent
                             ));
                             self.ctx.store.add_user(&msg).await?;
+                            self.signal_recovery_guard = true;
                         }
                         crate::agent::decision::Decision::Abort => {
                             self.ctx.display.render_error(&format!(
@@ -384,6 +430,7 @@ impl TurnExecutor {
         self.compactor.reset();
         self.signal_processor.reset();
         self.decision_engine.reset();
+        self.signal_recovery_guard = false;
 
         self.ctx.store.add_user(user_input).await?;
         self.ctx.stats.record_turn().await;
@@ -469,5 +516,25 @@ impl TurnExecutor {
         }
 
         Ok((TurnDecision::Stop, effects))
+    }
+}
+
+fn is_recovery_blocked_tool(name: &str) -> bool {
+    matches!(name, "Edit" | "Write")
+}
+
+fn blocked_by_signal_recovery(call: ToolCallEvent) -> crate::tools::runner::ToolRunResult {
+    crate::tools::runner::ToolRunResult {
+        tool_use_id: call.id,
+        tool_name: "SignalRecoveryGuard".to_string(),
+        tool_args: call.fields,
+        content: "SIGNAL_RECOVERY guard: the requested Edit/Write was not executed. Inspect current state first with Read, Grep, Glob, or a focused Bash command before mutating.".to_string(),
+        conv_content: String::new(),
+        spawns_sub_agent: false,
+        sub_agent_prompt: None,
+        sub_agent_description: None,
+        sub_agent_fork: false,
+        exit_code: None,
+        signals: Vec::new(),
     }
 }

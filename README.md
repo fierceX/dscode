@@ -12,7 +12,7 @@
 
 - **DeepSeek 原生优化** — 针对 DeepSeek V4 系列设计，最大化 prefix-cache 命中率
 - **两种终端模式** — REPL（`-i`，rustyline 行编辑）和 TUI（`--tui`，ratatui 全屏界面）
-- **信号驱动的信念系统** — 自动检测工具执行错误，低信念时注入修正提示，冷却防重复
+- **信号驱动的信念系统** — 自动检测工具执行错误，低信念时注入修正提示并约束恢复首步；可用 `DSCODE_SIGNAL_MODE=off` 关闭
 - **自适应上下文压缩** — 三级压缩，自动摘要，保持上下文在窗口内
 - **维修流水线** — Scavenge → Truncation → Storm Breaker，三段自动修复
 - **Session 持久化** — JSONL 格式，`--continue` 无缝恢复
@@ -71,6 +71,7 @@ session = AgentSession(SandboxConfig(
     read_dirs=["src"],
     write_dirs=["src"],
     mission_file="./my-task.mission.md",
+    signal_mode="full",
 ))
 result = session.run("处理文档")
 ```

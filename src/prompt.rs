@@ -58,18 +58,27 @@ impl Builder {
             None,
         ));
 
-        // Belief awareness — help the model understand the belief tracking system
-        let belief_awareness = "This agent has a belief tracking system that monitors tool execution quality.\n\
-             - Each tool call is evaluated for errors (compile failures, test failures, edit loops)\n\
-             - A \"belief score\" (0.0–1.0) reflects recent tool execution reliability\n\
-             - When belief drops below 0.70, a [System note] may be injected with recent errors\n\
-             - When belief drops below 0.30, the task may be aborted\n\n\
-             When you see [System note: ...] injected after your tool results:\n\
-             1. Stop and review what went wrong\n\
-             2. Use Read/Grep/Bash to verify state before making changes\n\
-             3. Make smaller, more deliberate edits\n\
-             4. Verify each fix before moving on";
-        sections.push(wrap_section("belief-awareness", belief_awareness, None));
+        if crate::agent::signal_mode::SignalMode::from_env().enabled() {
+            // Belief awareness — static protocol for runtime signal injection.
+            let belief_awareness = "This agent has a belief tracking system that monitors tool execution quality.\n\
+                 - Each tool call is evaluated for errors (compile failures, test failures, edit loops)\n\
+                 - A \"belief score\" (0.0–1.0) reflects recent tool execution reliability\n\
+                 - When belief drops below 0.70, a [System note] may be appended as a user message\n\
+                 - When belief drops below 0.30, the task may be aborted\n\n\
+                 SIGNAL_RECOVERY mode:\n\
+                 - A user message that begins with [System note: is a runtime control signal, not a new user request and not ordinary conversation.\n\
+                 - Treat it as higher priority than your current repair momentum. It means recent tool outcomes show your current approach is unreliable.\n\
+                 - Enter SIGNAL_RECOVERY mode immediately after any [System note: ...] message.\n\n\
+                 While in SIGNAL_RECOVERY mode, your next assistant turn MUST obey these constraints:\n\
+                 1. The FIRST tool call after the signal MUST be one of: Read, Grep, Glob, or Bash\n\
+                 2. The FIRST tool call after the signal MUST NOT be Edit or Write, even if you think you already know the fix\n\
+                 - Calling Edit or Write as the next tool action after [System note: ...] is a violation\n\
+                 - Treating the signal as stale because an earlier Read already happened is a violation; each new signal restarts the first-tool rule\n\n\
+                 Repeated signals:\n\
+                 - The FIRST tool after each repeated signal must again be Read, Grep, Glob, or Bash\n\
+                 - Do not treat repeated signals as noise";
+            sections.push(wrap_section("belief-awareness", belief_awareness, None));
+        }
 
         // Stop triggers — red-flag patterns that force a pause
         sections.push(wrap_section(
@@ -527,6 +536,40 @@ mod tests {
         }
     }
 
+    struct EnvGuard {
+        key: &'static str,
+        old: Option<String>,
+    }
+
+    fn signal_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .expect("signal env lock poisoned")
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let old = std::env::var(key).ok();
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, old }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                if let Some(value) = &self.old {
+                    std::env::set_var(self.key, value);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+
     #[test]
     fn build_system_prompt_contains_agent_identity() {
         let prompt = test_builder().build_system_prompt().unwrap();
@@ -549,6 +592,8 @@ mod tests {
 
     #[test]
     fn build_system_prompt_has_all_sections() {
+        let _lock = signal_env_lock();
+        let _guard = EnvGuard::set("DSCODE_SIGNAL_MODE", "full");
         let prompt = test_builder().build_system_prompt().unwrap();
         let sections = vec![
             "<agent-identity>",
@@ -582,6 +627,31 @@ mod tests {
         let prompt = test_builder().build_system_prompt().unwrap();
         assert!(prompt.contains("stop-triggers"));
         assert!(prompt.contains("3 consecutive tool calls"));
+    }
+
+    #[test]
+    fn build_system_prompt_includes_signal_recovery_protocol() {
+        let _lock = signal_env_lock();
+        let _guard = EnvGuard::set("DSCODE_SIGNAL_MODE", "full");
+        let prompt = test_builder().build_system_prompt().unwrap();
+        assert!(prompt.contains("SIGNAL_RECOVERY mode"));
+        assert!(prompt.contains("The FIRST tool call after the signal MUST be one of"));
+        assert!(prompt.contains(
+            "Calling Edit or Write as the next tool action after [System note: ...] is a violation"
+        ));
+        assert!(prompt.contains("each new signal restarts the first-tool rule"));
+        assert!(!prompt.contains("Make at most one minimal corrective edit"));
+        assert!(!prompt.contains("Verify with the narrowest failing command first"));
+    }
+
+    #[test]
+    fn build_system_prompt_omits_signal_protocol_when_disabled() {
+        let _lock = signal_env_lock();
+        let _guard = EnvGuard::set("DSCODE_SIGNAL_MODE", "off");
+        let prompt = test_builder().build_system_prompt().unwrap();
+        assert!(!prompt.contains("<belief-awareness>"));
+        assert!(!prompt.contains("SIGNAL_RECOVERY mode"));
+        assert!(!prompt.contains("belief score"));
     }
 
     #[test]

@@ -4,6 +4,7 @@ pub mod decision;
 pub mod orchestrator;
 pub mod plan_actions;
 pub mod prefix;
+pub mod signal_mode;
 pub mod sub_coordinator;
 pub mod sub_executor;
 pub mod tool_signals;

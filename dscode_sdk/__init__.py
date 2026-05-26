@@ -144,6 +144,11 @@ class SandboxConfig:
         DeepSeek API base URL.  Also read from ``DEEPSEEK_BASE_URL``.
     model:
         Model name override (e.g. ``"deepseek-chat"``).
+    signal_mode:
+        Signal system mode override: ``"full"`` enables belief tracking,
+        injection, and recovery guards; ``"off"`` disables signal prompt and
+        runtime signal intervention.  ``None`` inherits ``DSCODE_SIGNAL_MODE``;
+        if unset, dscode defaults to ``"full"``.
     cwd:
         Working directory for the agent (default: current working directory).
     """
@@ -181,6 +186,9 @@ class SandboxConfig:
     api_key: str = ""
     api_url: str = ""
     model: str = ""
+
+    # Signal system
+    signal_mode: Optional[str] = None
 
     # Working directory
     cwd: Optional[str] = None
@@ -328,6 +336,11 @@ class AgentSession:
         """Build environment variables for the agent process."""
         env = os.environ.copy()
         env["DSCODE_HOME"] = self._home or _default_home()
+        if self._config.signal_mode is not None:
+            signal_mode = self._config.signal_mode.strip().lower()
+            if signal_mode not in ("full", "off"):
+                raise ValueError("signal_mode must be 'full' or 'off'")
+            env["DSCODE_SIGNAL_MODE"] = signal_mode
         if self._config.api_key:
             env["DEEPSEEK_API_KEY"] = self._config.api_key
         if self._config.api_url:

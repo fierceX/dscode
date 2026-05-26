@@ -6,7 +6,7 @@ dscode 是一个 Rust 实现的轻量 AI coding agent，专为 DeepSeek 优化�
 
 核心能力：
 - LLM 流式请求 → 工具执行 → 决策的内循环
-- 信号驱动的信念系统（自动错误检测 + 注入修正）
+- 信号驱动的信念系统（自动错误检测 + 注入修正 + 恢复首步守卫，可用 `DSCODE_SIGNAL_MODE=off` 关闭）
 - 上下文自适应压缩（三级 Tier，最大化 prefix-cache 命中率）
 - 维修流水线（Scavenge 回收 → Truncation 修复 → Storm Breaker 抑制）
 - Session 持久化（JSONL，天然追加友好）
@@ -99,6 +99,7 @@ TurnExecutor (agent/turn.rs)
 │ guard/collector.rs     │  信号采集（ToolFailed/Error/EditLoop）
 │ agent/belief.rs        │  信念度计算（拉普拉斯平滑）
 │ agent/decision.rs      │  决策（注入/中止，含冷却）
+│ agent/signal_mode.rs   │  信号系统开关
 └────────────────────────┘
          │
 ┌─────── 持久化层 ───────┐
@@ -148,7 +149,7 @@ OrchActor.handle_user_input()
 │                                                      │
 │  6. 决策（DecisionEngine）                           │
 │     ├── B ≥ 0.70 → 继续                              │
-│     ├── B < 0.70 → 注入 System note + 激活冷却       │
+│     ├── B < 0.70 → 注入 System note + 激活冷却 + 恢复首步守卫 │
 │     ├── B < 0.30 → Abort（中止本轮）                 │
 │     └── stop == "tool_use" → 继续循环                │
 └──────────────────────────────────────────────────────┘
@@ -175,9 +176,11 @@ BeliefTracker.observe()
        ▼
 DecisionEngine.decide()
        ├── B ≥ 0.70 → None
-       ├── B < 0.70 → Inject（冷却 3 轮后恢复）
+       ├── B < 0.70 → Inject（冷却 3 轮后恢复）+ 恢复首步守卫
        └── B < 0.30 → Abort
 ```
+
+设置 `DSCODE_SIGNAL_MODE=off` 时，不生成 `<belief-awareness>` 系统提示词段，也不执行信号采集、信念更新、注入、中止和恢复守卫。
 
 详见 [`docs/设计哲学-信号系统.md`](docs/设计哲学-信号系统.md)。
 
@@ -205,6 +208,7 @@ DecisionEngine.decide()
 | `agent/turn.rs` | 单轮执行器：LLM 流 → 持久化 → 工具执行 → 决策，含 tool_use 内循环 |
 | `agent/belief.rs` | BeliefTracker：信号合并 → 拉普拉斯平滑 → B ∈ [0,1] |
 | `agent/decision.rs` | DecisionEngine：阈值判断 + 注入内容格式化 + 冷却计数器管理 |
+| `agent/signal_mode.rs` | SignalMode：读取 `DSCODE_SIGNAL_MODE`，控制信号系统开关 |
 | `agent/sub_pool.rs` | 子代理并发池（tokio::sync::Semaphore 限流） |
 | `agent/sub_executor.rs` | 子代理独立 session 创建、fork 模式、结果收集 |
 
@@ -259,7 +263,7 @@ DecisionEngine.decide()
 |------|------|
 | `repair/scavenge.rs` | DSML/XML/JSON/bracket 五种格式的工具调用回收 + JSON 截断修复 |
 | `protocol.rs` | Event enum（Text/Thinking/ToolCall/Usage/Stop/Error/Retry/SelfReport） |
-| `prompt.rs` | System prompt 按序构建器（11+ 个 `<section>` 段，含 belief-awareness） |
+| `prompt.rs` | System prompt 按序构建器（11+ 个 `<section>` 段，信号开启时含 belief-awareness） |
 | `errors.rs` | ErrorCategory 分类（Network/Auth/RateLimit/Parse/Tool/Internal） |
 
 ---

@@ -78,10 +78,13 @@ impl DecisionEngine {
         let error_section = if errors.is_empty() {
             String::new()
         } else {
-            format!("\nRecent:\n{}", format_errors(errors, 3))
+            format!(
+                "\nRecent reliability signals:\n{}",
+                format_errors(errors, 3)
+            )
         };
         format!(
-            "[System note: Some tool executions showed issues (belief {:.2}).{}]",
+            "[System note: belief {:.2} is below the recovery threshold. Enter SIGNAL_RECOVERY mode as defined in the system instructions. Your next tool call must be Read, Grep, Glob, or Bash; do not start with Edit or Write.{}]",
             b, error_section,
         )
     }
@@ -90,10 +93,13 @@ impl DecisionEngine {
         let error_section = if errors.is_empty() {
             String::new()
         } else {
-            format!("\nRecent errors:\n{}", format_errors(errors, 5))
+            format!(
+                "\nRecent reliability signals:\n{}",
+                format_errors(errors, 5)
+            )
         };
         format!(
-            "[System note: Multiple failures detected (belief {:.2}). Adjust approach.{}]",
+            "[System note: belief {:.2} indicates repeated tool failure. Enter SIGNAL_RECOVERY mode as defined in the system instructions before any further repair momentum. Your next tool call must be Read, Grep, Glob, or Bash; do not start with Edit or Write.{}]",
             b, error_section,
         )
     }
@@ -130,6 +136,20 @@ mod tests {
         let mut de = DecisionEngine::new();
         let d = de.decide(0.4, &["Rust error".into()]);
         assert!(matches!(d, Decision::Inject(_)));
+    }
+
+    #[test]
+    fn injected_message_triggers_signal_recovery_mode() {
+        let mut de = DecisionEngine::new();
+        let d = de.decide(0.4, &["Rust error".into()]);
+        let Decision::Inject(msg) = d else {
+            panic!("expected inject");
+        };
+        assert!(msg.starts_with("[System note:"));
+        assert!(msg.contains("SIGNAL_RECOVERY mode"));
+        assert!(msg.contains("Your next tool call must be Read, Grep, Glob, or Bash"));
+        assert!(msg.contains("Recent reliability signals"));
+        assert!(!msg.contains("Then make at most one minimal edit"));
     }
 
     #[test]

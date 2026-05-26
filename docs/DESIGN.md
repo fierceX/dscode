@@ -376,24 +376,26 @@ Phase 3: 工具执行 → 信号 → BeliefTracker.observe()
 Phase 4: stop = "tool_use"
   ├─ DecisionEngine.decide(belief, errors)
   │   ├─ 引擎内部检查冷却 → 跳过注入
-  │   ├─ Inject → store.add_user(...)  + 引擎内部激活冷却
+  │   ├─ Inject → store.add_user(...) + 激活冷却 + 恢复首步守卫
   │   └─ Abort  → 返回 Failed，中断本轮（绕过冷却）
   └─ continue → 下一轮 LLM: messages = store.lines()（包含注入消息）
 ```
 
 不在系统 prompt 中注入（保护前缀缓存），也不追加到用户输入末尾。而是作为一条独立的 User 消息（含 `[System note: ...]`）写入对话存储，LLM 在下一轮调用时自然看到。
 
-**注入内容包含具体错误信息**：LLM 收到的不再是泛泛的 "something went wrong"，而是：
+**注入内容包含具体可靠性信号**：LLM 收到的不再是泛泛的 "something went wrong"，而是进入 `SIGNAL_RECOVERY` 的短控制消息和最近信号：
 
 ```
-[System note: Multiple failures detected (belief 0.37). Adjust approach.
-Recent errors:
+[System note: belief 0.37 indicates repeated tool failure. Enter SIGNAL_RECOVERY mode as defined in the system instructions before any further repair momentum. Your next tool call must be Read, Grep, Glob, or Bash; do not start with Edit or Write.
+Recent reliability signals:
 - Bash(cargo build): process exited with code 1
 - Bash(cargo build): Rust compilation error (error[E0308])
 - Grep(pattern="xxx"): No such file]
 ```
 
-**信念度感知**：系统提示词中包含 `<belief-awareness>` 区块，提前告知模型存在信念度机制和注入触发条件。模型在被注入时能理解上下文，按指引先读后写、逐步验证，而不是继续盲目操作。区块位于 `verification-gate` 之后、`stop-triggers` 之前，纯英文。
+**信念度感知**：默认情况下系统提示词包含 `<belief-awareness>` 区块，提前告知模型存在信念度机制、注入触发条件和 `SIGNAL_RECOVERY` 协议。模型在被注入时能理解上下文，按指引先读后写，而不是继续盲目操作。区块位于 `verification-gate` 之后、`stop-triggers` 之前，纯英文。设置 `DSCODE_SIGNAL_MODE=off` 时，该区块不会出现在系统提示词中，信号采集、注入、Abort 和恢复守卫也不会运行。
+
+**恢复首步守卫**：注入后，下一轮首个工具调用如果是 `Edit` 或 `Write`，`TurnExecutor` 会拒绝执行并返回 `SignalRecoveryGuard` 结果，要求先使用 `Read`、`Grep`、`Glob` 或聚焦的 `Bash` 检查当前状态。该守卫只约束注入后的第一步，避免模型忽略信号后继续盲改。
 
 ### 错误分类
 
@@ -633,6 +635,7 @@ pub fn apply_provider_defaults(cfg: &mut Config) -> Result<()> {
 | API | `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL` | 认证和端点 |
 | 大小 | `TOOL_RESULT_MAX_BYTES`, `FILE_WRITE_MAX_BYTES` | 输出限制 |
 | 压缩 | `CONTEXT_COMPACT_PCT` | 触发百分比 |
+| 信号 | `DSCODE_SIGNAL_MODE` | `full` 启用信号系统，`off` 关闭信号提示词和运行时干预 |
 | 升级 | `AUTO_MODEL`, `AUTO_UPGRADE_THRESHOLD`, `SECONDARY_MODEL` | 模型升级 |
 | 资源 | `THINKING_BUDGET` | 思考 token 预算 |
 | 调试 | `LOG_EVENTS`, `DSCODE_HOME` | 日志和路径 |

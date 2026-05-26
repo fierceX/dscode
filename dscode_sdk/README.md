@@ -19,6 +19,7 @@ config = SandboxConfig(
     api_key="sk-...",                            # 或设置 DEEPSEEK_API_KEY 环境变量
     read_dirs=["/path/to/project/src"],           # agent 可读取的目录
     write_dirs=["/path/to/project/src"],          # agent 可写入的目录
+    signal_mode="full",                           # 可选："full" 启用信号系统，"off" 关闭
 )
 
 session = AgentSession(config)
@@ -104,6 +105,7 @@ print(result["text"])
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `verbose` | `False` | 启用详细日志输出 |
+| `signal_mode` | `None`（实际默认 `full`） | 信号系统模式覆盖：`"full"` 启用信念跟踪、注入和恢复守卫；`"off"` 关闭信号提示词和运行时信号干预；`None` 继承 `DSCODE_SIGNAL_MODE` |
 
 ### 沙箱后端
 

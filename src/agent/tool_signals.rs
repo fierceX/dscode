@@ -38,6 +38,11 @@ impl ToolSignalProcessor {
         ctx: &Arc<AgentSharedContext>,
         model_label: &str,
     ) {
+        if !crate::agent::signal_mode::SignalMode::from_env().enabled() {
+            result.signals.clear();
+            return;
+        }
+
         let new_signals = self.collector.collect(
             &result.tool_name,
             &result.content,

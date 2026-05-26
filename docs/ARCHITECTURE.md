@@ -64,6 +64,7 @@ main.rs
 │ guard/storm.rs      重复调用抑制        │
 │ agent/belief.rs     信念度计算          │
 │ agent/decision.rs   决策引擎            │
+│ agent/signal_mode.rs 信号开关           │
 │ safety.rs           命令安全过滤        │
 └─────────────────────────────────────────┘
          │
@@ -109,6 +110,7 @@ main.rs
 | `agent/turn.rs` | 单轮执行器：LLM 流 → 工具 → 决策，内循环（tool_use 循环） |
 | `agent/belief.rs` | BeliefTracker：信号合并、拉普拉斯平滑、滑动窗口 |
 | `agent/decision.rs` | DecisionEngine：阈值判断、注入格式化、冷却计数器管理 |
+| `agent/signal_mode.rs` | SignalMode：读取 `DSCODE_SIGNAL_MODE`，控制信号系统开关 |
 | `agent/sub_pool.rs` | 子代理并发池（Semaphore 限流） |
 | `agent/sub_executor.rs` | 子代理独立上下文创建、fork 模式、结果收集 |
 
@@ -197,11 +199,11 @@ TurnExecutor::execute(belief)
   │   ├── ToolRunner::execute_all()
   │   │   ├── StormBreaker 检查
   │   │   ├── Truncation 修复
-  │   │   └── 每工具调用: signal → belief
+  │   │   └── 每工具调用: signal → belief（DSCODE_SIGNAL_MODE=off 时跳过）
   │   ├── store.add_tool_results()
   │   └── DecisionEngine.decide()
   │       ├── B ≥ 0.70 → continue
-  │       ├── B < 0.70 → Inject + 冷却
+  │       ├── B < 0.70 → Inject + 冷却 + 下一步恢复守卫
   │       ├── B < 0.30 → Abort
   │       └── stop == "tool_use" → 继续循环
   │
@@ -276,6 +278,7 @@ CLI 参数 > 项目 .dscoderc > 用户 ~/.dscoderc > 环境变量 > 代码默认
 | `FILE_WRITE_MAX_BYTES` | 文件写入上限（默认 1048576） |
 | `CONTEXT_COMPACT_PCT` | 压缩触发百分比（默认 85） |
 | `LOG_EVENTS` | 事件日志开关 |
+| `DSCODE_SIGNAL_MODE` | 信号系统模式：`full` / `off`（默认 `full`） |
 | `DSCODE_HOME` | 数据目录（默认 `~/.dscode`） |
 | `DSCODE_SANDBOXED` | 内部标记，防止沙箱自举无限递归 |
 | `DSCODE_LIMITS` | JSON 格式的 `SandboxConfig` 覆盖（最高优先级） |

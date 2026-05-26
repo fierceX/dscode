@@ -257,6 +257,7 @@ dscode --tui
 | `TOOL_RESULT_MAX_BYTES` | `100000` | 单条工具结果截断上限 |
 | `FILE_WRITE_MAX_BYTES` | `1048576` | Write/Edit 工具写入上限 |
 | `LOG_EVENTS` | `true` | 设为 `0`/`false`/`no` 关闭 events.jsonl 记录 |
+| `DSCODE_SIGNAL_MODE` | `full` | 信号系统模式：`full` 启用信念跟踪、注入和恢复守卫；`off` 关闭信号提示词和运行时信号干预 |
 | `DSCODE_HOME` | `$HOME` | session 存储目录覆盖 |
 
 ---
@@ -505,12 +506,17 @@ SandboxConfig(mission_file="./my-task.mission.md")
 
 # 字符串方式
 SandboxConfig(mission_content="# agent-identity\n...")
+
+# 关闭信号系统
+SandboxConfig(signal_mode="off")
 ```
+
+`signal_mode=None` 时继承进程环境中的 `DSCODE_SIGNAL_MODE`；如果环境变量也未设置，dscode 默认使用 `full`。
 
 ### 注意事项
 
 - MISSION.md 替换的是 prompt 文本，不影响工具定义。禁用工具仍需 `--disable-bash` 等参数。
-- 未在 MISSION.md 中定义的段（如 `verification-gate`、`belief-awareness` 等）保持默认内容。
+- 未在 MISSION.md 中定义的段保持默认内容；当 `DSCODE_SIGNAL_MODE=off` 时，默认 prompt 不包含 `belief-awareness` 信号协议段。
 - 建议将 MISSION.md 置于项目目录下，纳入版本管理。
 
 ---

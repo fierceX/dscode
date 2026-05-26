@@ -636,4 +636,5 @@ fn print_usage() {
     println!("  DEEPSEEK_API_KEY        DeepSeek API key");
     println!("  DEEPSEEK_BASE_URL       DeepSeek base URL (default: https://api.deepseek.com/v1)");
     println!("  LOG_EVENTS              Enable event logging (default: true, 0/false/no disables)");
+    println!("  DSCODE_SIGNAL_MODE      Signal system mode: off | full (default: full)");
 }
