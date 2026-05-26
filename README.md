@@ -18,6 +18,8 @@
 - **Session 持久化** — JSONL 格式，`--continue` 无缝恢复
 - **子代理（SubAgent）** — 隔离或 fork 上下文，并发执行
 - **技能系统** — 按需加载 skill 文件，不污染后续 prompt
+- **自定义提示词** — `--mission` 加载 MISSION.md 文件，替换默认系统提示词，自由定义 agent 目标和行为
+- **Python SDK** — `dscode-sdk` pip 包，内置二进制，支持沙箱控制和全参数配置
 - **机器协议** — `--print` 输出 ndjson 事件流；`--json-rpc` 行协议供外部程序调用
 - **沙箱防护** — Linux nsjail/bubblewrap（完整文件系统隔离）、macOS sandbox-exec（写入隔离）
 - **运行时约束** — `--disable-bash` / `--disable-sub-agent` / `--disable-web` 按场景禁用工具
@@ -45,7 +47,35 @@ make build
 
 # 继续上次会话
 ./target/release/dscode -m flash --continue -i
+
+# 使用自定义系统提示词
+./target/release/dscode --mission ./my-task.mission.md -i
+
 ```
+
+---
+
+## Python SDK
+
+通过 pip 安装使用：
+
+```bash
+pip install dscode-sdk
+```
+
+```python
+from dscode_sdk import AgentSession, SandboxConfig
+
+session = AgentSession(SandboxConfig(
+    api_key="sk-...",
+    read_dirs=["src"],
+    write_dirs=["src"],
+    mission_file="./my-task.mission.md",
+))
+result = session.run("处理文档")
+```
+
+详见 [dscode_sdk/README.md](dscode_sdk/README.md)。
 
 ---
 

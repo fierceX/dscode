@@ -104,6 +104,14 @@ class SandboxConfig:
     dscode_home:
         Session storage directory.  Defaults to ``~/.dscode/``.
         Also read from the ``DSCODE_HOME`` environment variable.
+    mission_file:
+        Path to a MISSION.md file.  When set, replaces the default system
+        prompt sections with those defined in the file.  Each ``# heading``
+        in the file maps to a prompt section.
+    mission_content:
+        Inline MISSION.md content (alternative to ``mission_file``).  When set,
+        the content is written to a temp file and passed to dscode automatically.
+        Provide either ``mission_file`` or ``mission_content``, not both.
     read_dirs:
         Directories the agent is allowed to read from.
         Relative paths are resolved against the current working directory.
@@ -142,6 +150,8 @@ class SandboxConfig:
 
     # Paths
     dscode_home: Optional[str] = None
+    mission_file: Optional[str] = None
+    mission_content: Optional[str] = None
 
     # File-system
     read_dirs: list[str] = field(default_factory=list)
@@ -158,6 +168,11 @@ class SandboxConfig:
     max_memory_mb: int = 1024
     max_pids: int = 64
     timeout_secs: int = 600
+    tool_timeout: int = 600
+    sub_agent_timeout: int = 300
+    max_tokens: int = 81920
+    max_turns: int = 40
+    verbose: bool = False
 
     # Backend
     sandbox_backend: str = "auto"
@@ -321,15 +336,27 @@ class AgentSession:
 
     def _build_request(self, prompt: str, extra_options: Optional[dict]) -> str:
         """Build the JSON-RPC request string."""
-        options: dict[str, bool | str] = {}
+        options: dict[str, bool | str | int] = {}
         if not self._config.allow_bash:
             options["disable_bash"] = True
         if not self._config.allow_sub_agent:
             options["disable_sub_agent"] = True
         if not self._config.allow_network:
             options["disable_web"] = True
+        if not self._config.allow_python:
+            options["disable_python"] = True
         if self._config.model:
             options["model"] = self._config.model
+        if self._config.max_tokens != 81920:
+            options["max_tokens"] = self._config.max_tokens
+        if self._config.max_turns != 40:
+            options["max_turns"] = self._config.max_turns
+        if self._config.tool_timeout != 600:
+            options["tool_timeout"] = self._config.tool_timeout
+        if self._config.sub_agent_timeout != 300:
+            options["sub_agent_timeout"] = self._config.sub_agent_timeout
+        if self._config.verbose:
+            options["verbose"] = True
         if extra_options:
             options.update(extra_options)
 
@@ -340,6 +367,27 @@ class AgentSession:
 
     def _build_sandbox_cmd(self) -> list[str]:
         """Build the full command line: sandbox wrapper + dscode binary."""
+        cmd = self._build_sandbox_cmd_inner()
+        self._append_mission_flag(cmd)
+        return cmd
+
+    def _append_mission_flag(self, cmd: list[str]) -> None:
+        """Append --mission <path> if configured."""
+        if self._config.mission_file:
+            cmd.extend(["--mission", self._config.mission_file])
+        elif self._config.mission_content:
+            path = self._write_mission_content()
+            cmd.extend(["--mission", path])
+
+    def _write_mission_content(self) -> str:
+        """Write mission_content to a temp file and return its path."""
+        path = os.path.join(self._home or _default_home(), "_mission.md")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(self._config.mission_content)
+        return path
+
+    def _build_sandbox_cmd_inner(self) -> list[str]:
 
         if sys.platform == "linux":
             return self._build_linux_cmd()

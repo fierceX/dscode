@@ -145,7 +145,7 @@ pub struct Config {
     pub list_sessions: bool,
     pub list_skills: bool,
     pub log_events: bool,
-    pub(crate) cli_overrides: CliOverrides,
+    pub cli_overrides: CliOverrides,
     /// JSON-RPC mode: read request from stdin, emit events to stdout.
     pub json_rpc: bool,
     /// 沙箱配置（从 .dscoderc 加载）
@@ -157,7 +157,7 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone, Default)]
-pub(crate) struct CliOverrides {
+pub struct CliOverrides {
     pub model: bool,
     pub max_tokens: bool,
     pub tool_timeout_secs: bool,

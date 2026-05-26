@@ -141,6 +141,7 @@ prompt 为空且 stdin 是终端时自动进入交互模式。非终端 stdin �
 | `--tool-timeout` | `600` | 工具执行超时（秒） |
 | `--sub-agent-timeout` | `300` | 子代理执行超时（秒） |
 | `--skill NAME` | — | 加载 skill（可重复使用） |
+| `--mission PATH` | — | 加载 MISSION.md 文件替换默认系统提示词 |
 | `--session [NAME]` | 自动生成 | 命名会话。提供名称可恢复 |
 | `--continue` | — | 恢复最近的 session |
 | `--list-sessions` | — | 列出所有 session |
@@ -151,6 +152,7 @@ prompt 为空且 stdin 是终端时自动进入交互模式。非终端 stdin �
 | `--output-format FMT` | `human` | 输出格式：`human` / `stream-json` |
 | `--json-rpc` | — | JSON-RPC 模式（stdin 读请求，stdout 输出事件流，隐式启用 stream-json） |
 | `--disable-bash` | `false` | 禁用 Bash 工具 |
+| `--disable-python` | `false` | 禁用 Python 工具 |
 | `--disable-sub-agent` | `false` | 禁用 SubAgent 工具 |
 | `--disable-web` | `false` | 禁用 WebSearch / WebFetch 工具 |
 | `--api-key KEY` | env | 覆盖 API Key |
@@ -406,6 +408,7 @@ dscode -m flash --max-context 1M -i                # 1M 上下文窗口
 | `Write` | 写文件 | `path`, `content` |
 | `Edit` | 精确替换 | `path`, `old_string`, `new_string` |
 | `Bash` | 执行命令 | `command`, `timeout` |
+| `Python` | 运行 Python 脚本（安全受限，禁用 subprocess/os.system/eval） | `script` / `script_file`, `timeout` |
 | `Glob` | 文件匹配 | `pattern`, `path` |
 | `Grep` | 内容搜索 | `pattern`, `path`, `glob`, `context` |
 | `TodoWrite` | 维护 checklist | `todos[{content, status}]` |
@@ -460,6 +463,55 @@ dscode --list-skills
 - `--skill NAME` 在 system prompt 的 `<selected-skills>` 段嵌入 SKILL.md 全文
 - `Skill` 工具在运行时按需加载，不修改后续轮次的 system prompt
 - 内置技能即使在离线环境也可用（编译时已嵌入）
+
+---
+
+## MISSION（自定义系统提示词）
+
+通过 `--mission PATH` 加载一个 MISSION.md 文件，替换默认系统提示词的对应段。
+
+### 机制
+
+MISSION.md 使用一级标题（`# heading-name`）映射到系统提示词的段名。加载后自动替换同名的默认段，未在文件中定义的段保持默认内容。
+
+```markdown
+# agent-identity
+你是文档处理助手，负责根据素材文件生成结构化文档。
+
+# rules
+- 严格遵循素材内容，不得额外杜撰
+- 输出格式必须符合要求
+
+# process-flow
+## Phase 1: 素材分析
+...
+```
+
+### 用法
+
+```bash
+# 加载自定义提示词
+dscode --mission ./my-task.mission.md -i
+
+# 结合技能使用
+dscode --mission ./my-task.mission.md --skill debugging -i
+```
+
+### Python SDK
+
+```python
+# 文件方式
+SandboxConfig(mission_file="./my-task.mission.md")
+
+# 字符串方式
+SandboxConfig(mission_content="# agent-identity\n...")
+```
+
+### 注意事项
+
+- MISSION.md 替换的是 prompt 文本，不影响工具定义。禁用工具仍需 `--disable-bash` 等参数。
+- 未在 MISSION.md 中定义的段（如 `verification-gate`、`belief-awareness` 等）保持默认内容。
+- 建议将 MISSION.md 置于项目目录下，纳入版本管理。
 
 ---
 

@@ -65,7 +65,7 @@ async fn run(args: Vec<String>) -> Result<()> {
         tokio::io::AsyncReadExt::read_to_string(&mut tokio::io::stdin(), &mut input).await?;
         let req: serde_json::Value = serde_json::from_str(&input)
             .unwrap_or_else(|_| serde_json::json!({"prompt": input}));
-        // Apply optional tool disable flags
+        // Apply optional tool disable flags and config overrides
         if let Some(opts) = req.get("options") {
             if opts.get("disable_bash").and_then(|v| v.as_bool()).unwrap_or(false) {
                 cfg.tool_disable.disable_bash = true;
@@ -78,6 +78,30 @@ async fn run(args: Vec<String>) -> Result<()> {
             }
             if opts.get("disable_python").and_then(|v| v.as_bool()).unwrap_or(false) {
                 cfg.tool_disable.disable_python = true;
+            }
+            // Config overrides from JSON-RPC
+            if let Some(v) = opts.get("model").and_then(|v| v.as_str()).map(|s| s.to_string()) {
+                cfg.model = v;
+                cfg.cli_overrides.model = true;
+            }
+            if let Some(v) = opts.get("max_tokens").and_then(|v| v.as_i64()).map(|i| i as i32) {
+                cfg.max_tokens = v;
+                cfg.cli_overrides.max_tokens = true;
+            }
+            if let Some(v) = opts.get("max_turns").and_then(|v| v.as_i64()).map(|i| i as i32) {
+                cfg.max_turns = v.max(1);
+                cfg.cli_overrides.max_turns = true;
+            }
+            if let Some(v) = opts.get("tool_timeout").and_then(|v| v.as_i64()).map(|i| i as i32) {
+                cfg.tool_timeout_secs = v.max(5);
+                cfg.cli_overrides.tool_timeout_secs = true;
+            }
+            if let Some(v) = opts.get("sub_agent_timeout").and_then(|v| v.as_i64()).map(|i| i as i32) {
+                cfg.sub_agent_timeout_secs = v.max(5);
+                cfg.cli_overrides.sub_agent_timeout_secs = true;
+            }
+            if let Some(v) = opts.get("verbose").and_then(|v| v.as_bool()) {
+                cfg.verbose = v;
             }
         }
         Some(req.get("prompt").and_then(|v| v.as_str()).unwrap_or(&input).to_string())
