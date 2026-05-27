@@ -55,12 +55,14 @@ impl AsyncLlClient {
             let mut byte_stream = resp.bytes_stream();
             let mut buf: Vec<u8> = Vec::new();
             let mut decode_errors = 0u32;
+            let mut clean_end = false;
 
             let mut parser = OpenAIParser::new();
             'outer: loop {
                 tokio::select! {
                     _ = cancel.cancelled() => {
                         tx.send(Ok(Event::Stop(crate::protocol::StopEvent { reason: "interrupted".into() }))).ok();
+                        clean_end = true;
                         break 'outer;
                     }
                     chunk = byte_stream.next() => {
@@ -74,11 +76,20 @@ impl AsyncLlClient {
                                     if l.is_empty() { continue; }
                                     let full = format!("{l}\n");
                                     match parser.process_line(&full, &mut |e| { tx.send(Ok(e)).ok(); Ok(()) }) {
-                                        Ok(true) => break 'outer,
+                                        Ok(true) => {
+                                            clean_end = true;
+                                            break 'outer;
+                                        }
                                         Err(e) => {
+                                            if is_fatal_parser_error(&e) {
+                                                tx.send(Err(e)).ok();
+                                                clean_end = true;
+                                                break 'outer;
+                                            }
                                             decode_errors += 1;
                                             if decode_errors > MAX_STREAM_ERRORS {
                                                 tx.send(Err(e)).ok();
+                                                clean_end = true;
                                                 break 'outer;
                                             }
                                         }
@@ -90,6 +101,7 @@ impl AsyncLlClient {
                                 decode_errors += 1;
                                 if decode_errors > MAX_STREAM_ERRORS {
                                     tx.send(Err(anyhow::anyhow!("stream: {e}"))).ok();
+                                    clean_end = true;
                                     break 'outer;
                                 }
                             }
@@ -97,6 +109,14 @@ impl AsyncLlClient {
                         }
                     }
                 }
+            }
+            if !clean_end
+                && let Err(e) = parser.finish_eof(&mut |e| {
+                    tx.send(Ok(e)).ok();
+                    Ok(())
+                })
+            {
+                tx.send(Err(e)).ok();
             }
             parser
                 .flush(&mut |e| {
@@ -161,6 +181,13 @@ impl AsyncLlClient {
                 .render_info(&format!("Retrying ({}/{})...", attempt, MAX_RETRIES));
         }
     }
+}
+
+fn is_fatal_parser_error(e: &anyhow::Error) -> bool {
+    let msg = e.to_string();
+    msg.contains("parse tool call")
+        || msg.contains("parse tool input")
+        || msg.contains("tool input must be object")
 }
 
 #[async_trait::async_trait]

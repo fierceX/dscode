@@ -28,6 +28,7 @@ pub struct OpenAIParser {
     pending_calls: BTreeMap<i64, PendingCall>,
     pending_usage: Option<UsageEvent>,
     pending_stop: Option<String>,
+    saw_done: bool,
 }
 
 impl OpenAIParser {
@@ -56,17 +57,8 @@ impl OpenAIParser {
 
         let payload = &l[6..];
         if payload == "[DONE]" {
-            self.emit_pending(emit)?;
-            if self.stop_reason.is_empty() {
-                self.stop_reason = "done".into();
-            }
-            self.pending_usage = Some(UsageEvent {
-                input_tokens: self.input_tokens,
-                output_tokens: self.output_tokens,
-                cache_read_input_tokens: self.cache_read_input_tokens,
-                cache_creation_input_tokens: 0,
-            });
-            self.pending_stop = Some(self.stop_reason.clone());
+            self.saw_done = true;
+            self.prepare_terminal_events(emit)?;
             return Ok(true);
         }
 
@@ -186,12 +178,53 @@ impl OpenAIParser {
         Ok(())
     }
 
+    /// Finalize a stream that reached transport EOF. Some compatible
+    /// providers close after a finish_reason frame without sending [DONE].
+    pub fn finish_eof(&mut self, emit: &mut dyn FnMut(Event) -> Result<()>) -> Result<()> {
+        if self.pending_stop.is_some() || self.saw_done {
+            return Ok(());
+        }
+        if self.stop_reason.is_empty() {
+            anyhow::bail!("stream ended before finish_reason");
+        }
+        self.prepare_terminal_events(emit)
+    }
+
+    fn prepare_terminal_events(&mut self, emit: &mut dyn FnMut(Event) -> Result<()>) -> Result<()> {
+        self.emit_pending(emit)?;
+        if self.stop_reason.is_empty() {
+            self.stop_reason = "done".into();
+        }
+        self.pending_usage = Some(UsageEvent {
+            input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
+            cache_read_input_tokens: self.cache_read_input_tokens,
+            cache_creation_input_tokens: 0,
+        });
+        self.pending_stop = Some(self.stop_reason.clone());
+        Ok(())
+    }
+
     fn emit_pending(&mut self, emit: &mut dyn FnMut(Event) -> Result<()>) -> Result<()> {
         for call in self.pending_calls.values_mut() {
             if call.arguments.is_empty() {
                 continue;
             }
-            let evt = build_tool_call_event(&call.name, &call.id, &call.arguments)?;
+            let evt = match build_tool_call_event(&call.name, &call.id, &call.arguments) {
+                Ok(evt) => evt,
+                Err(original) => {
+                    let repaired = crate::repair::repair_truncated_json(&call.arguments);
+                    if repaired.changed && !repaired.fallback {
+                        build_tool_call_event(&call.name, &call.id, &repaired.repaired)?
+                    } else {
+                        anyhow::bail!(
+                            "parse tool call {} input: {}",
+                            call.name,
+                            original
+                        );
+                    }
+                }
+            };
             emit(Event::ToolCall(evt))?;
             call.arguments.clear();
         }
@@ -207,6 +240,7 @@ impl OpenAIParser {
         self.pending_calls.clear();
         self.pending_usage = None;
         self.pending_stop = None;
+        self.saw_done = false;
     }
 }
 
@@ -226,6 +260,7 @@ pub fn parse<R: Read>(reader: R, mut emit: impl FnMut(Event) -> Result<()>) -> R
             break;
         }
     }
+    parser.finish_eof(&mut emit)?;
     parser.flush(&mut emit)?;
     Ok(())
 }
@@ -252,6 +287,26 @@ mod tests {
             })
             .unwrap();
         events
+    }
+
+    fn collect_lines_with_eof(parser: &mut OpenAIParser, lines: &[&str]) -> Result<Vec<Event>> {
+        let mut events = Vec::new();
+        for &l in lines {
+            let full = format!("{l}\n");
+            parser.process_line(&full, &mut |e| {
+                events.push(e);
+                Ok(())
+            })?;
+        }
+        parser.finish_eof(&mut |e| {
+            events.push(e);
+            Ok(())
+        })?;
+        parser.flush(&mut |e| {
+            events.push(e);
+            Ok(())
+        })?;
+        Ok(events)
     }
 
     #[test]
@@ -326,6 +381,48 @@ mod tests {
             events
                 .iter()
                 .any(|e| matches!(e, Event::Stop(s) if s.reason == "tool_calls"))
+        );
+    }
+
+    #[test]
+    fn finish_reason_without_done_flushes_stop_on_eof() {
+        let mut p = OpenAIParser::new();
+        let lines = [
+            "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"OK\"},\"finish_reason\":null}]}",
+            "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":1}}",
+        ];
+        let events = collect_lines_with_eof(&mut p, &lines).unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::Stop(s) if s.reason == "stop"))
+        );
+    }
+
+    #[test]
+    fn eof_without_finish_reason_is_error() {
+        let mut p = OpenAIParser::new();
+        let lines = [
+            "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}",
+        ];
+        let err = collect_lines_with_eof(&mut p, &lines)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("stream ended before finish_reason"), "{err}");
+    }
+
+    #[test]
+    fn truncated_tool_call_arguments_are_repaired_before_emit() {
+        let mut p = OpenAIParser::new();
+        let lines = [
+            "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"Read\",\"arguments\":\"{\\\"path\\\":\\\"/tmp/f.txt\\\"\"}}]},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}",
+            "data: [DONE]",
+        ];
+        let events = collect_lines(&mut p, &lines);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::ToolCall(c) if c.name == "Read" && c.fields["path"] == "/tmp/f.txt"))
         );
     }
 

@@ -90,3 +90,64 @@ impl PrefixManager {
             .unwrap_or_else(|e| e.into_inner()) = None;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::prefix::ImmutablePrefix;
+
+    #[tokio::test]
+    async fn ensure_reuses_valid_cached_prefix() -> anyhow::Result<()> {
+        let ctx = crate::regression::test_context_for_agent("prefix-cache-hit").await?;
+        let manager = PrefixManager::new(ctx.clone());
+        let (first_prompt, first_tools) = manager.ensure()?;
+        let cached_fingerprint = ctx
+            .immutable_prefix
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .fingerprint()
+            .to_string();
+
+        let (second_prompt, second_tools) = manager.ensure()?;
+
+        assert_eq!(first_prompt, second_prompt);
+        assert_eq!(first_tools, second_tools);
+        assert_eq!(
+            ctx.immutable_prefix
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .fingerprint(),
+            cached_fingerprint
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ensure_drops_corrupt_cached_prefix_and_rebuilds() -> anyhow::Result<()> {
+        let ctx = crate::regression::test_context_for_agent("prefix-cache-invalid").await?;
+        *ctx.immutable_prefix.lock().unwrap() = Some(ImmutablePrefix::new_with_fingerprint(
+            "stale".into(),
+            vec![serde_json::json!({"name":"Bash"})],
+            "bad-fingerprint".into(),
+        ));
+        let manager = PrefixManager::new(ctx.clone());
+
+        let (system_prompt, tools) = manager.ensure()?;
+
+        assert_ne!(system_prompt, "stale");
+        assert!(!tools.is_empty());
+        assert!(
+            ctx.immutable_prefix
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .verify_fingerprint()
+        );
+        Ok(())
+    }
+}

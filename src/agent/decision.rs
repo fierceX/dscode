@@ -142,14 +142,13 @@ mod tests {
     fn injected_message_triggers_signal_recovery_mode() {
         let mut de = DecisionEngine::new();
         let d = de.decide(0.4, &["Rust error".into()]);
-        let Decision::Inject(msg) = d else {
-            panic!("expected inject");
-        };
-        assert!(msg.starts_with("[System note:"));
-        assert!(msg.contains("SIGNAL_RECOVERY mode"));
-        assert!(msg.contains("Your next tool call must be Read, Grep, Glob, or Bash"));
-        assert!(msg.contains("Recent reliability signals"));
-        assert!(!msg.contains("Then make at most one minimal edit"));
+        assert!(matches!(d, Decision::Inject(_)));
+        if let Decision::Inject(msg) = d {
+            assert!(msg.starts_with("[System note:"));
+            assert!(msg.contains("SIGNAL_RECOVERY mode"));
+            assert!(msg.contains("Your next tool call must be Read, Grep, Glob, or Bash"));
+            assert!(msg.contains("Recent reliability signals"));
+            assert!(!msg.contains("Then make at most one minimal edit")); }
     }
 
     #[test]
@@ -220,5 +219,20 @@ mod tests {
     #[test]
     fn default_cooldown_turns_is_three() {
         assert_eq!(DEFAULT_COOLDOWN_TURNS, 3);
+    }
+
+    #[test]
+    fn warning_without_errors_omits_error_section() {
+        let mut de = DecisionEngine::new();
+        let d = de.decide(0.4, &[]);
+        assert!(matches!(d, Decision::Inject(_)));
+        if let Decision::Inject(msg) = d {
+            assert!(!msg.contains("Recent reliability signals")); }
+    }
+
+    #[test]
+    fn default_engine_starts_without_cooldown() {
+        let de = DecisionEngine::default();
+        assert_eq!(de.cooldown_remaining(), 0);
     }
 }

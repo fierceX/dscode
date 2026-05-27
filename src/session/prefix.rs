@@ -39,6 +39,19 @@ impl ImmutablePrefix {
         &self.fingerprint
     }
 
+    #[cfg(test)]
+    pub(crate) fn new_with_fingerprint(
+        system_prompt: String,
+        tools_json: Vec<Value>,
+        fingerprint: String,
+    ) -> Self {
+        Self {
+            system_prompt,
+            tools_json,
+            fingerprint,
+        }
+    }
+
     pub fn verify_fingerprint(&self) -> bool {
         let recomputed = Self::compute_fingerprint(&self.system_prompt, &self.tools_json);
         recomputed == self.fingerprint

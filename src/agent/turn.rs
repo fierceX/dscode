@@ -2,6 +2,7 @@ use crate::context::AgentSharedContext;
 use crate::llm::client::LlmClient;
 use crate::protocol::{Event, ToolCallEvent, UsageEvent};
 use crate::session::store::{ToolResult, build_tool_call_summary, first_line};
+use crate::sse::toolcall::build_tool_call_event;
 use crate::tools::runner::ToolRunner;
 use crate::util::truncate_str;
 use anyhow::Result;
@@ -123,6 +124,7 @@ impl TurnExecutor {
         let mut calls: Vec<ToolCallEvent> = Vec::new();
         let mut stop = String::new();
         let mut usage: Option<UsageEvent> = None;
+        let mut saw_stop = false;
 
         while let Some(result) = stream.next().await {
             let evt = result?;
@@ -154,6 +156,7 @@ impl TurnExecutor {
                     self.ctx
                         .log_event(serde_json::json!({"type":"stop","reason":s.reason}));
                     stop = s.reason;
+                    saw_stop = true;
                     break;
                 }
                 Event::Error(e) => {
@@ -168,12 +171,16 @@ impl TurnExecutor {
                     calls.clear();
                     stop.clear();
                     usage = None;
+                    saw_stop = false;
                     self.ctx.display.render_retry();
                 }
             }
         }
 
         drop(stream);
+        if !saw_stop {
+            anyhow::bail!("stream ended without stop event");
+        }
         Ok(StreamOutput {
             text,
             thinking,
@@ -189,9 +196,9 @@ impl TurnExecutor {
         thinking: &str,
         text: &str,
         mut calls: Vec<ToolCallEvent>,
-    ) -> Vec<ToolCallEvent> {
+    ) -> (Vec<ToolCallEvent>, bool) {
         if thinking.is_empty() && text.is_empty() {
-            return calls;
+            return (calls, false);
         }
         let (scavenged, notes) = crate::repair::scavenge_combined(
             if thinking.is_empty() {
@@ -202,25 +209,32 @@ impl TurnExecutor {
             if text.is_empty() { None } else { Some(text) },
             4,
         );
+        let mut recovered = false;
         for sc in &scavenged {
-            if !calls.iter().any(|c| c.name == sc.name) {
-                let cid = format!("scavenged_{}", calls.len());
-                let input_json: serde_json::Value =
-                    serde_json::from_str(&sc.arguments).unwrap_or_default();
-                calls.push(ToolCallEvent {
-                    name: sc.name.clone(),
-                    id: cid,
-                    input_json,
-                    fields: std::collections::BTreeMap::new(),
-                    order: Vec::new(),
-                });
+            let cid = format!("scavenged_{}", calls.len());
+            match build_tool_call_event(&sc.name, &cid, &sc.arguments) {
+                Ok(call) => {
+                    let duplicate = calls
+                        .iter()
+                        .any(|c| c.name == call.name && c.input_json == call.input_json);
+                    if !duplicate {
+                        calls.push(call);
+                        recovered = true;
+                    }
+                }
+                Err(e) => {
+                    self.ctx.log_event(serde_json::json!({
+                        "type":"scavenge",
+                        "note": format!("discarded invalid scavenged call {}: {e}", sc.name),
+                    }));
+                }
             }
         }
         for note in &notes {
             self.ctx
                 .log_event(serde_json::json!({"type":"scavenge","note":note}));
         }
-        calls
+        (calls, recovered)
     }
 
     /// Phase 2: 持久化 assistant 消息 + 用量统计。
@@ -319,9 +333,9 @@ impl TurnExecutor {
 
         self.signal_recovery_guard = false;
         let mut iter = calls.into_iter();
-        let Some(first) = iter.next() else {
-            return (Vec::new(), Vec::new());
-        };
+        let first = iter
+            .next()
+            .expect("signal recovery guard already checked calls is non-empty");
 
         if is_recovery_blocked_tool(&first.name) {
             self.ctx.log_event(serde_json::json!({
@@ -361,45 +375,12 @@ impl TurnExecutor {
         match stop {
             "tool_use" | "tool_calls" => {
                 // DecisionEngine 决策是否注入（含内部冷却逻辑）
-                if !crate::agent::signal_mode::SignalMode::from_env().enabled() {
-                    return Ok(None);
-                }
-                if let Some(ref bt) = belief {
-                    let b = bt.belief();
-                    match self.decision_engine.decide(b, &bt.recent_errors) {
-                        crate::agent::decision::Decision::Inject(msg) => {
-                            let recent = if bt.recent_errors.is_empty() {
-                                String::new()
-                            } else {
-                                format!(
-                                    ": recent issues: {}",
-                                    bt.recent_errors
-                                        .iter()
-                                        .rev()
-                                        .take(3)
-                                        .cloned()
-                                        .collect::<Vec<_>>()
-                                        .join("; ")
-                                )
-                            };
-                            self.ctx.display.render_info(&format!(
-                                "Injecting hint (belief {:.2}){}",
-                                b, recent
-                            ));
-                            self.ctx.store.add_user(&msg).await?;
-                            self.signal_recovery_guard = true;
-                        }
-                        crate::agent::decision::Decision::Abort => {
-                            self.ctx.display.render_error(&format!(
-                                "DecisionEngine: aborting (belief {:.2}).",
-                                b
-                            ));
-                            return Ok(Some(TurnDecision::Failed(
-                                "aborted by DecisionEngine".into(),
-                            )));
-                        }
-                        _ => {}
-                    }
+                let signal_enabled = crate::agent::signal_mode::SignalMode::from_env().enabled();
+                if let Some(decision) = self
+                    .decide_signal_recovery(signal_enabled, belief.as_deref())
+                    .await?
+                {
+                    return Ok(Some(decision));
                 }
                 Ok(None) // 继续循环
             }
@@ -416,6 +397,52 @@ impl TurnExecutor {
                 Ok(Some(TurnDecision::Stop))
             }
         }
+    }
+
+    async fn decide_signal_recovery(
+        &mut self,
+        signal_enabled: bool,
+        belief: Option<&crate::agent::belief::BeliefTracker>,
+    ) -> Result<Option<TurnDecision>> {
+        if !signal_enabled {
+            return Ok(None);
+        }
+        if let Some(bt) = belief {
+            let b = bt.belief();
+            match self.decision_engine.decide(b, &bt.recent_errors) {
+                crate::agent::decision::Decision::Inject(msg) => {
+                    let recent = if bt.recent_errors.is_empty() {
+                        String::new()
+                    } else {
+                        format!(
+                            ": recent issues: {}",
+                            bt.recent_errors
+                                .iter()
+                                .rev()
+                                .take(3)
+                                .cloned()
+                                .collect::<Vec<_>>()
+                                .join("; ")
+                        )
+                    };
+                    self.ctx
+                        .display
+                        .render_info(&format!("Injecting hint (belief {:.2}){}", b, recent));
+                    self.ctx.store.add_user(&msg).await?;
+                    self.signal_recovery_guard = true;
+                }
+                crate::agent::decision::Decision::Abort => {
+                    self.ctx
+                        .display
+                        .render_error(&format!("DecisionEngine: aborting (belief {:.2}).", b));
+                    return Ok(Some(TurnDecision::Failed(
+                        "aborted by DecisionEngine".into(),
+                    )));
+                }
+                _ => {}
+            }
+        }
+        Ok(None)
     }
 
     /// Execute a full turn: send user input, stream response, execute tools, decide next.
@@ -465,15 +492,14 @@ impl TurnExecutor {
                         &mut tools_json,
                     )
                     .await?;
-                }
-            }
+                } }
 
             // Phase 1: LLM 流式响应
             let StreamOutput {
                 text,
                 thinking,
                 mut calls,
-                stop,
+                mut stop,
                 usage,
             } = self
                 .stream_llm_response(&messages, &system_prompt, &tools_json)
@@ -485,17 +511,14 @@ impl TurnExecutor {
             }
 
             // Phase 1b: 从 thinking/text 回收漏报的工具调用
-            calls = self.scavenge_calls(&thinking, &text, calls);
-
-            // 过滤掉被禁用的工具（scavenge 可能回收了已禁用的工具）
-            let disable = &self.ctx.config.tool_disable;
-            calls.retain(|c| match c.name.as_str() {
-                "Bash" => !disable.disable_bash,
-                "Python" => !disable.disable_python,
-                "WebSearch" | "WebFetch" => !disable.disable_web,
-                "SubAgent" => !disable.disable_sub_agent,
-                _ => true,
-            });
+            let recovered_calls;
+            (calls, recovered_calls) = self.scavenge_calls(&thinking, &text, calls);
+            if recovered_calls
+                && !calls.is_empty()
+                && matches!(stop.as_str(), "end_turn" | "stop" | "done")
+            {
+                stop = "tool_use".into();
+            }
 
             // Phase 2: 持久化 assistant 消息 + 用量
             self.persist_assistant(&text, &thinking, &calls, &usage)
@@ -515,7 +538,10 @@ impl TurnExecutor {
             messages = self.ctx.store.lines().await?;
         }
 
-        Ok((TurnDecision::Stop, effects))
+        Ok((
+            TurnDecision::Failed("max_turns exhausted before end_turn".into()),
+            effects,
+        ))
     }
 }
 
@@ -536,5 +562,38 @@ fn blocked_by_signal_recovery(call: ToolCallEvent) -> crate::tools::runner::Tool
         sub_agent_fork: false,
         exit_code: None,
         signals: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::llm::mock::MockLlmClient;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn signal_recovery_decision_noops_when_signal_mode_disabled() {
+        let ctx = crate::regression::test_context_for_agent("turn-signal-disabled")
+            .await
+            .unwrap();
+        let llm = Arc::new(MockLlmClient::new("flash", vec![]));
+        let mut executor = TurnExecutor::new(ctx, llm);
+        let mut belief = crate::agent::belief::BeliefTracker::new(16);
+        belief.observe(&[crate::guard::collector::Signal {
+            kind: crate::guard::collector::SignalKind::ToolFailed,
+            severity: 1.0,
+            source: "Bash".into(),
+            detail: "failed".into(),
+            source_tool: "Bash".into(),
+            exit_code: Some(1),
+            matched_pattern: None,
+            message: "failed".into(),
+        }]);
+
+        let decision = executor
+            .decide_signal_recovery(false, Some(&belief))
+            .await
+            .unwrap();
+        assert!(decision.is_none());
     }
 }

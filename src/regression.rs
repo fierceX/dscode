@@ -7,6 +7,7 @@ use crate::agent::sub_executor::{SubAgentExecutor, SubAgentResult};
 use crate::agent::turn::{TurnDecision, TurnEffect, TurnExecutor};
 use crate::config::{Config, OutputFormat};
 use crate::context::{AgentSharedContext, ToolConfig, ToolContext};
+use crate::guard::collector::{Signal, SignalKind};
 use crate::llm::client::{AsyncLlClient, LlmClient};
 use crate::llm::mock::MockLlmClient;
 use crate::protocol::{
@@ -64,10 +65,30 @@ async fn harness(name: &str) -> anyhow::Result<TestHarness> {
     harness_with(name, false, 300).await
 }
 
+pub(crate) async fn test_context_for_agent(name: &str) -> anyhow::Result<Arc<AgentSharedContext>> {
+    Ok(harness(name).await?.ctx)
+}
+
+pub(crate) async fn test_context_for_agent_with_config(
+    name: &str,
+    configure: impl FnOnce(&mut Config),
+) -> anyhow::Result<Arc<AgentSharedContext>> {
+    Ok(harness_with_config(name, false, 300, configure).await?.ctx)
+}
+
 async fn harness_with(
     name: &str,
     is_sub_agent: bool,
     sub_agent_timeout_secs: i32,
+) -> anyhow::Result<TestHarness> {
+    harness_with_config(name, is_sub_agent, sub_agent_timeout_secs, |_| {}).await
+}
+
+async fn harness_with_config(
+    name: &str,
+    is_sub_agent: bool,
+    sub_agent_timeout_secs: i32,
+    configure: impl FnOnce(&mut Config),
 ) -> anyhow::Result<TestHarness> {
     static CNT: AtomicU64 = AtomicU64::new(0);
     let n = CNT.fetch_add(1, Ordering::SeqCst);
@@ -96,6 +117,7 @@ async fn harness_with(
         ..Default::default()
     };
     cfg.prompt.clear();
+    configure(&mut cfg);
 
     let compaction = Arc::new(CompactionEngine::new(
         store.clone(),
@@ -369,6 +391,476 @@ async fn turn_scavenges_text_tool_call_and_executes_it() -> anyhow::Result<()> {
     );
     let events = tokio::fs::read_to_string(&h.ctx.events_path).await?;
     assert!(events.contains(r#""type":"scavenge""#), "{events}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn turn_scavenged_tool_call_after_end_turn_continues_loop() -> anyhow::Result<()> {
+    let h = harness("turn-scavenge-end-turn").await?;
+    tokio::fs::write(h.cwd.join("scavenge-end.txt"), "found\n").await?;
+    let llm = Arc::new(MockLlmClient::new(
+        "flash",
+        vec![
+            vec![
+                Ok(Event::Text(TextEvent {
+                    content:
+                        r#"<tool_call>{"name":"Read","arguments":{"path":"scavenge-end.txt"}}</tool_call>"#
+                            .into(),
+                })),
+                Ok(Event::Stop(StopEvent {
+                    reason: "end_turn".into(),
+                })),
+            ],
+            vec![
+                Ok(Event::Text(TextEvent {
+                    content: "done".into(),
+                })),
+                Ok(Event::Stop(StopEvent {
+                    reason: "end_turn".into(),
+                })),
+            ],
+        ],
+    ));
+    let mut executor = TurnExecutor::new(h.ctx.clone(), llm);
+    let (decision, effects) = executor.execute("recover after end_turn", None).await?;
+
+    assert_eq!(decision, TurnDecision::Stop);
+    assert!(effects.is_empty());
+    assert_eq!(executor.tool_call_count(), 1);
+    let lines = h.ctx.store.lines().await?;
+    assert_eq!(lines.len(), 4);
+    assert_eq!(lines[2]["content"][0]["type"], "tool_result");
+    assert_eq!(lines[3]["content"][1]["text"], "done");
+    Ok(())
+}
+
+#[tokio::test]
+async fn turn_stream_without_stop_event_fails_without_assistant_message() -> anyhow::Result<()> {
+    let h = harness("turn-missing-stop").await?;
+    let llm = Arc::new(MockLlmClient::new(
+        "flash",
+        vec![vec![Ok(Event::Text(TextEvent {
+            content: "partial".into(),
+        }))]],
+    ));
+    let mut executor = TurnExecutor::new(h.ctx.clone(), llm);
+    let err = executor
+        .execute("missing stop", None)
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("stream ended without stop event"), "{err}");
+    let lines = h.ctx.store.lines().await?;
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["role"], "user");
+    Ok(())
+}
+
+#[tokio::test]
+async fn turn_max_turns_exhaustion_is_failed_not_stop() -> anyhow::Result<()> {
+    let h = harness_with_config("turn-max-turns", false, 300, |cfg| {
+        cfg.max_turns = 1;
+    })
+    .await?;
+    tokio::fs::write(h.cwd.join("fixture.txt"), "alpha\n").await?;
+    let llm = Arc::new(MockLlmClient::new(
+        "flash",
+        vec![vec![
+            Ok(Event::ToolCall(tool_call(
+                "Read",
+                "call_1",
+                json!({"path":"fixture.txt"}),
+            ))),
+            Ok(Event::Stop(StopEvent {
+                reason: "tool_calls".into(),
+            })),
+        ]],
+    ));
+    let mut executor = TurnExecutor::new(h.ctx.clone(), llm);
+    let (decision, effects) = executor.execute("read until exhausted", None).await?;
+
+    assert_eq!(
+        decision,
+        TurnDecision::Failed("max_turns exhausted before end_turn".into())
+    );
+    assert!(effects.is_empty());
+    assert_eq!(executor.tool_call_count(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn disabled_tool_call_persists_error_result_instead_of_being_dropped() -> anyhow::Result<()> {
+    let h = harness_with_config("disabled-tool-result", false, 300, |cfg| {
+        cfg.tool_disable.disable_bash = true;
+    })
+    .await?;
+    let llm = Arc::new(MockLlmClient::new(
+        "flash",
+        vec![
+            vec![
+                Ok(Event::ToolCall(tool_call(
+                    "Bash",
+                    "call_bash",
+                    json!({"command":"echo should-not-run"}),
+                ))),
+                Ok(Event::Stop(StopEvent {
+                    reason: "tool_calls".into(),
+                })),
+            ],
+            vec![
+                Ok(Event::Text(TextEvent {
+                    content: "done".into(),
+                })),
+                Ok(Event::Stop(StopEvent {
+                    reason: "end_turn".into(),
+                })),
+            ],
+        ],
+    ));
+    let mut executor = TurnExecutor::new(h.ctx.clone(), llm);
+    let (decision, effects) = executor.execute("try disabled bash", None).await?;
+
+    assert_eq!(decision, TurnDecision::Stop);
+    assert!(effects.is_empty());
+    let lines = h.ctx.store.lines().await?;
+    assert!(
+        lines[1]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|block| block["type"] == "tool_use" && block["name"] == "Bash")
+    );
+    assert!(
+        lines[2]["content"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("Bash tool is disabled"),
+        "{}",
+        lines[2]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn invalid_scavenged_tool_call_is_logged_and_ignored() -> anyhow::Result<()> {
+    let h = harness("invalid-scavenge").await?;
+    let llm = Arc::new(MockLlmClient::new(
+        "flash",
+        vec![vec![
+            Ok(Event::Text(TextEvent {
+                content: r#"<tool_call>{"name":"Read","arguments":[]}</tool_call>"#.into(),
+            })),
+            Ok(Event::Stop(StopEvent {
+                reason: "end_turn".into(),
+            })),
+        ]],
+    ));
+    let mut executor = TurnExecutor::new(h.ctx.clone(), llm);
+    let (decision, effects) = executor.execute("bad scavenged call", None).await?;
+
+    assert_eq!(decision, TurnDecision::Stop);
+    assert!(effects.is_empty());
+    assert_eq!(executor.tool_call_count(), 0);
+    let events = tokio::fs::read_to_string(&h.ctx.events_path).await?;
+    assert!(events.contains("discarded invalid scavenged call Read"), "{events}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn duplicate_scavenged_tool_call_is_deduplicated_against_official_call() -> anyhow::Result<()>
+{
+    let h = harness("duplicate-scavenge").await?;
+    tokio::fs::write(h.cwd.join("dup.txt"), "once\n").await?;
+    let llm = Arc::new(MockLlmClient::new(
+        "flash",
+        vec![
+            vec![
+                Ok(Event::ToolCall(tool_call(
+                    "Read",
+                    "call_read",
+                    json!({"path":"dup.txt"}),
+                ))),
+                Ok(Event::Text(TextEvent {
+                    content: r#"<tool_call>{"name":"Read","arguments":{"path":"dup.txt"}}</tool_call>"#
+                        .into(),
+                })),
+                Ok(Event::Stop(StopEvent {
+                    reason: "tool_calls".into(),
+                })),
+            ],
+            vec![Ok(Event::Stop(StopEvent {
+                reason: "end_turn".into(),
+            }))],
+        ],
+    ));
+    let mut executor = TurnExecutor::new(h.ctx.clone(), llm);
+    let (decision, effects) = executor.execute("dedupe scavenged", None).await?;
+    assert_eq!(decision, TurnDecision::Stop);
+    assert!(effects.is_empty());
+    assert_eq!(executor.tool_call_count(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn edit_tool_result_uses_full_edit_preview_branch() -> anyhow::Result<()> {
+    let h = harness("edit-preview").await?;
+    tokio::fs::write(h.cwd.join("edit.txt"), "old\n").await?;
+    let llm = Arc::new(MockLlmClient::new(
+        "flash",
+        vec![
+            vec![
+                Ok(Event::ToolCall(tool_call(
+                    "Edit",
+                    "call_edit",
+                    json!({"path":"edit.txt","old_string":"old","new_string":"new"}),
+                ))),
+                Ok(Event::Stop(StopEvent {
+                    reason: "tool_calls".into(),
+                })),
+            ],
+            vec![
+                Ok(Event::Text(TextEvent {
+                    content: "done".into(),
+                })),
+                Ok(Event::Stop(StopEvent {
+                    reason: "end_turn".into(),
+                })),
+            ],
+        ],
+    ));
+    let mut executor = TurnExecutor::new(h.ctx.clone(), llm);
+    let (decision, effects) = executor.execute("edit file", None).await?;
+
+    assert_eq!(decision, TurnDecision::Stop);
+    assert!(effects.is_empty());
+    assert_eq!(tokio::fs::read_to_string(h.cwd.join("edit.txt")).await?, "new\n");
+    Ok(())
+}
+
+#[tokio::test]
+async fn signal_recovery_guard_blocks_first_write() -> anyhow::Result<()> {
+    let h = harness("guard-blocks-write").await?;
+    let llm = Arc::new(MockLlmClient::new(
+        "flash",
+        vec![
+            vec![
+                Ok(Event::ToolCall(tool_call(
+                    "Bash",
+                    "call_fail",
+                    json!({"command":"false"}),
+                ))),
+                Ok(Event::Stop(StopEvent {
+                    reason: "tool_calls".into(),
+                })),
+            ],
+            vec![
+                Ok(Event::ToolCall(tool_call(
+                    "Write",
+                    "call_write",
+                    json!({"path":"blocked.txt","content":"nope"}),
+                ))),
+                Ok(Event::Stop(StopEvent {
+                    reason: "tool_calls".into(),
+                })),
+            ],
+            vec![
+                Ok(Event::Text(TextEvent {
+                    content: "done".into(),
+                })),
+                Ok(Event::Stop(StopEvent {
+                    reason: "end_turn".into(),
+                })),
+            ],
+        ],
+    ));
+    let mut executor = TurnExecutor::new(h.ctx.clone(), llm);
+    let mut belief = BeliefTracker::new(16);
+    let (decision, effects) = executor
+        .execute("fail then write", Some(&mut belief))
+        .await?;
+
+    assert_eq!(decision, TurnDecision::Stop);
+    assert!(effects.is_empty());
+    assert!(!h.cwd.join("blocked.txt").exists());
+    let lines = h.ctx.store.lines().await?;
+    assert!(
+        serde_json::to_string(&lines)?.contains("SIGNAL_RECOVERY guard"),
+        "{}",
+        serde_json::to_string_pretty(&lines)?
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn signal_recovery_guard_allows_first_read() -> anyhow::Result<()> {
+    let h = harness("guard-allows-read").await?;
+    tokio::fs::write(h.cwd.join("ok.txt"), "ok\n").await?;
+    let llm = Arc::new(MockLlmClient::new(
+        "flash",
+        vec![
+            vec![
+                Ok(Event::ToolCall(tool_call(
+                    "Bash",
+                    "call_fail",
+                    json!({"command":"false"}),
+                ))),
+                Ok(Event::Stop(StopEvent {
+                    reason: "tool_calls".into(),
+                })),
+            ],
+            vec![
+                Ok(Event::ToolCall(tool_call(
+                    "Read",
+                    "call_read",
+                    json!({"path":"ok.txt"}),
+                ))),
+                Ok(Event::Stop(StopEvent {
+                    reason: "tool_calls".into(),
+                })),
+            ],
+            vec![
+                Ok(Event::Text(TextEvent {
+                    content: "done".into(),
+                })),
+                Ok(Event::Stop(StopEvent {
+                    reason: "end_turn".into(),
+                })),
+            ],
+        ],
+    ));
+    let mut executor = TurnExecutor::new(h.ctx.clone(), llm);
+    let mut belief = BeliefTracker::new(16);
+    let (decision, effects) = executor
+        .execute("fail then read", Some(&mut belief))
+        .await?;
+
+    assert_eq!(decision, TurnDecision::Stop);
+    assert!(effects.is_empty());
+    let lines = h.ctx.store.lines().await?;
+    assert!(serde_json::to_string(&lines)?.contains("ok"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn stop_error_reasons_return_failed_and_unknown_reasons_stop() -> anyhow::Result<()> {
+    let h = harness("stop-reasons").await?;
+    let llm = Arc::new(MockLlmClient::new(
+        "flash",
+        vec![vec![Ok(Event::Stop(StopEvent {
+            reason: "max_tokens".into(),
+        }))]],
+    ));
+    let mut executor = TurnExecutor::new(h.ctx.clone(), llm);
+    let (decision, effects) = executor.execute("too long", None).await?;
+    assert_eq!(decision, TurnDecision::Failed("stop: max_tokens".into()));
+    assert!(effects.is_empty());
+
+    let h = harness("unknown-stop").await?;
+    let llm = Arc::new(MockLlmClient::new(
+        "flash",
+        vec![vec![Ok(Event::Stop(StopEvent {
+            reason: "content_filter".into(),
+        }))]],
+    ));
+    let mut executor = TurnExecutor::new(h.ctx.clone(), llm);
+    let (decision, effects) = executor.execute("unknown", None).await?;
+    assert_eq!(decision, TurnDecision::Stop);
+    assert!(effects.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn preflight_compaction_path_runs_when_estimated_context_is_high() -> anyhow::Result<()> {
+    let h = harness_with_config("preflight-compact-path", false, 300, |cfg| {
+        cfg.max_context_tokens = 1;
+        cfg.context_compact_pct = 100;
+    })
+    .await?;
+    let llm = Arc::new(MockLlmClient::new(
+        "flash",
+        vec![vec![Ok(Event::Stop(StopEvent {
+            reason: "end_turn".into(),
+        }))]],
+    ));
+    let mut executor = TurnExecutor::new(h.ctx.clone(), llm);
+    let (decision, effects) = executor.execute("large context estimate", None).await?;
+    assert_eq!(decision, TurnDecision::Stop);
+    assert!(effects.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn clean_tool_call_with_belief_takes_decision_none_path() -> anyhow::Result<()> {
+    let h = harness_with_config("decision-none-path", false, 300, |cfg| {
+        cfg.max_turns = 1;
+    })
+    .await?;
+    tokio::fs::write(h.cwd.join("clean.txt"), "clean\n").await?;
+    let llm = Arc::new(MockLlmClient::new(
+        "flash",
+        vec![vec![
+            Ok(Event::ToolCall(tool_call(
+                "Read",
+                "call_read",
+                json!({"path":"clean.txt"}),
+            ))),
+            Ok(Event::Stop(StopEvent {
+                reason: "tool_calls".into(),
+            })),
+        ]],
+    ));
+    let mut executor = TurnExecutor::new(h.ctx.clone(), llm);
+    let mut belief = BeliefTracker::new(16);
+    let (decision, effects) = executor.execute("read clean", Some(&mut belief)).await?;
+    assert_eq!(
+        decision,
+        TurnDecision::Failed("max_turns exhausted before end_turn".into())
+    );
+    assert!(effects.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn signal_injection_without_recent_errors_uses_empty_recent_suffix() -> anyhow::Result<()> {
+    let h = harness("inject-no-recent-errors").await?;
+    let llm = Arc::new(MockLlmClient::new(
+        "flash",
+        vec![
+            vec![Ok(Event::Stop(StopEvent {
+                reason: "tool_calls".into(),
+            }))],
+            vec![Ok(Event::Stop(StopEvent {
+                reason: "end_turn".into(),
+            }))],
+        ],
+    ));
+    let mut executor = TurnExecutor::new(h.ctx.clone(), llm);
+    let mut belief = BeliefTracker::new(16);
+    belief.observe(&[Signal {
+        kind: SignalKind::EditLoop,
+        severity: 0.9,
+        source: "EditLoop".into(),
+        detail: "loop".into(),
+        source_tool: "EditLoop".into(),
+        exit_code: None,
+        matched_pattern: None,
+        message: "loop".into(),
+    }]);
+    let (decision, effects) = executor.execute("recover without recent", Some(&mut belief)).await?;
+
+    assert_eq!(decision, TurnDecision::Stop);
+    assert!(effects.is_empty());
+    assert!(
+        h.display
+            .info
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|msg| msg.starts_with("Injecting hint") && !msg.contains("recent issues")),
+        "{:?}",
+        h.display.info.lock().unwrap()
+    );
     Ok(())
 }
 
