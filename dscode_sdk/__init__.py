@@ -251,6 +251,7 @@ class AgentSession:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 env=env,
+                cwd=self._config.cwd,
                 text=True,
             )
         except FileNotFoundError as e:
