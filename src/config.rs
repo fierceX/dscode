@@ -384,8 +384,30 @@ fn apply_log_events_env_value(cfg: &mut Config, value: &str) {
 }
 
 fn read_config_file(path: &std::path::Path) -> Option<DscodeConfigFile> {
-    let data = std::fs::read_to_string(path).ok()?;
-    toml::from_str(&data).ok()
+    let data = match std::fs::read_to_string(path) {
+        Ok(d) => d,
+        Err(e) => {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                eprintln!(
+                    "[dscode] Warning: failed to read config file {}: {}",
+                    path.display(),
+                    e
+                );
+            }
+            return None;
+        }
+    };
+    match toml::from_str(&data) {
+        Ok(cfg) => Some(cfg),
+        Err(e) => {
+            eprintln!(
+                "[dscode] Warning: failed to parse config file {}: {}",
+                path.display(),
+                e
+            );
+            None
+        }
+    }
 }
 
 fn apply_config_sources(

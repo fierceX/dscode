@@ -1,15 +1,13 @@
 """
 dscode SDK — Python wrapper for agent execution (optionally sandboxed).
 
-The ``dscode`` binary is bundled inside the pip package and discovered
-automatically.
+Sandboxing is handled entirely by the Rust ``dscode`` binary internally.
+The Python layer does NOT construct sandbox commands — it just launches
+``dscode --json-rpc`` and passes sandbox configuration via the
+``DSCODE_LIMITS`` environment variable.
 
-Sandboxing
-----------
-* **Linux**: nsjail / bubblewrap (auto-detected, strongly recommended).
-* **macOS**: sandbox-exec (built-in). Write restrictions only — reads
-  are enforced at the application level. Use ``read_dirs`` / ``write_dirs``
-  to control filesystem access.
+* **Linux**: nsjail / bubblewrap (auto-detected, Rust re-exec).
+* **macOS**: sandbox-exec (built-in, Rust re-exec).
 
 Usage::
 
@@ -30,20 +28,14 @@ from __future__ import annotations
 import importlib.resources as _resources
 import json
 import os
-import platform
 import shutil
 import subprocess
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
 
 # ── Exceptions ───────────────────────────────────────────────────────
-
-class SandboxError(RuntimeError):
-    """Raised when the sandbox tool is not available."""
-
 
 class AgentError(RuntimeError):
     """Raised when the agent process fails."""
@@ -135,9 +127,9 @@ class SandboxConfig:
         Hard timeout for the entire agent run.
     sandbox_backend:
         ``"auto"`` | ``"nsjail"`` | ``"bwrap"`` | ``"sandbox-exec"`` | ``"off"``.
-        Linux: ``"auto"`` tries nsjail → bubblewrap → no sandbox.
-        macOS: ``"auto"`` uses ``sandbox-exec``. Set to ``"off"`` to
-        disable sandboxing entirely.
+        Passed to the Rust binary via ``DSCODE_LIMITS`` — the Rust side
+        handles backend auto-detection and sandbox construction internally.
+        Set to ``"off"`` to disable sandboxing entirely (no re-exec).
     api_key:
         DeepSeek API key.  Also read from the ``DEEPSEEK_API_KEY`` env var.
     api_url:
@@ -255,9 +247,9 @@ class AgentSession:
                 text=True,
             )
         except FileNotFoundError as e:
-            raise SandboxError(
-                f"Sandbox tool not found ({e}). "
-                f"Install nsjail or bubblewrap (Linux), or use macOS built-in sandbox-exec."
+            raise RuntimeError(
+                f"dscode binary not found ({e}). "
+                f"Ensure dscode is installed and available."
             ) from e
 
         # Send the JSON-RPC request
@@ -346,7 +338,38 @@ class AgentSession:
             env["DEEPSEEK_API_KEY"] = self._config.api_key
         if self._config.api_url:
             env["DEEPSEEK_BASE_URL"] = self._config.api_url
+
+        # ── Pass sandbox config via DSCODE_LIMITS (Rust handles the rest) ──
+        sb = self._build_sandbox_limits()
+        if sb is not None:
+            env["DSCODE_LIMITS"] = json.dumps(sb)
+
         return env
+
+    def _build_sandbox_limits(self) -> Optional[dict]:
+        """Build the DSCODE_LIMITS JSON dict for Rust's SandboxConfig.
+
+        Returns None when sandbox is fully disabled (backend == "off").
+        """
+        cfg = self._config
+        if cfg.sandbox_backend == "off":
+            return None
+
+        limits: dict = {
+            "enabled": True,
+            "backend": cfg.sandbox_backend,
+            "read_dirs": cfg.read_dirs,
+            "write_dirs": cfg.write_dirs,
+            "allow_bash": cfg.allow_bash,
+            "bash_allow_commands": cfg.bash_allow_commands,
+            "allow_python": cfg.allow_python,
+            "allow_network": cfg.allow_network,
+            "allow_sub_agent": cfg.allow_sub_agent,
+            "max_memory_mb": cfg.max_memory_mb,
+            "max_pids": cfg.max_pids,
+            "timeout_secs": cfg.timeout_secs,
+        }
+        return limits
 
     def _build_request(self, prompt: str, extra_options: Optional[dict]) -> str:
         """Build the JSON-RPC request string."""
@@ -402,194 +425,8 @@ class AgentSession:
         return path
 
     def _build_sandbox_cmd_inner(self) -> list[str]:
-
-        if sys.platform == "linux":
-            return self._build_linux_cmd()
-        elif sys.platform == "darwin":
-            return self._build_macos_cmd()
-        else:
-            raise SandboxError(f"Unsupported platform: {sys.platform}")
-
-    # ── Linux: nsjail / bubblewrap ─────────────────────────────────
-
-    def _build_linux_cmd(self) -> list[str]:
-        cfg = self._config
-        backend = cfg.sandbox_backend
-
-        if backend in ("nsjail", "auto"):
-            if self._binary_exists("nsjail"):
-                return self._nsjail_cmd()
-            if backend == "nsjail":
-                raise SandboxError("nsjail not found in PATH")
-
-        if backend in ("bwrap", "auto"):
-            if self._binary_exists("bwrap"):
-                return self._bwrap_cmd()
-            if backend == "bwrap":
-                raise SandboxError("bwrap not found in PATH")
-
-        if backend == "off":
-            return self._direct_cmd()
-
-        # No sandbox available — fall through to direct mode
-        return self._direct_cmd()
-
-    def _nsjail_cmd(self) -> list[str]:
-        cfg = self._config
-        cwd = cfg.cwd or os.getcwd()
-
-        cmd = ["nsjail", "--mode", "execve"]
-
-        # Bind mounts
-        for d in cfg.read_dirs:
-            resolved = self._resolve_dir(d, cwd)
-            cmd += ["--bindmount_ro", f"{resolved}:{resolved}"]
-        for d in cfg.write_dirs:
-            resolved = self._resolve_dir(d, cwd)
-            cmd += ["--bindmount", f"{resolved}:{resolved}"]
-
-        # Working directory
-        work_dir = (
-            self._resolve_dir(cfg.write_dirs[0], cwd) if cfg.write_dirs
-            else self._resolve_dir(cfg.read_dirs[0], cwd) if cfg.read_dirs
-            else cwd
-        )
-        cmd += ["--cwd", work_dir]
-
-        # Resource limits
-        cmd += ["--cgroup_mem_max", str(cfg.max_memory_mb * 1024 * 1024)]
-        cmd += ["--cgroup_pids_max", str(cfg.max_pids)]
-        cmd += ["--time_limit", str(cfg.timeout_secs)]
-
-        # Security
-        cmd += ["--disable_proc"]
-        if not cfg.allow_network:
-            cmd += ["--iface_no_lo"]
-
-        # Add home as a write mount so sessions persist
-        if self._home:
-            cmd += ["--bindmount", f"{self._home}:{self._home}"]
-
-        # Target binary
-        cmd += ["--", self._binary, "--json-rpc"]
-        return cmd
-
-    def _bwrap_cmd(self) -> list[str]:
-        cfg = self._config
-        cwd = cfg.cwd or os.getcwd()
-
-        cmd = [
-            "bwrap",
-            "--dev", "/dev",
-            "--proc", "/proc",
-            "--tmpfs", "/tmp",
-        ]
-
-        # Bind mounts
-        for d in cfg.read_dirs:
-            resolved = self._resolve_dir(d, cwd)
-            cmd += ["--ro-bind", resolved, resolved]
-        for d in cfg.write_dirs:
-            resolved = self._resolve_dir(d, cwd)
-            cmd += ["--bind", resolved, resolved]
-
-        # Add home as a write mount
-        if self._home:
-            cmd += ["--bind", self._home, self._home]
-
-        # Namespace isolation
-        cmd += ["--unshare-pid", "--unshare-ipc", "--unshare-uts"]
-        if not cfg.allow_network:
-            cmd += ["--unshare-net"]
-
-        # Target binary
-        cmd += ["--", self._binary, "--json-rpc"]
-        return cmd
-
-    # ── macOS: sandbox-exec ────────────────────────────────────────
-
-    def _build_macos_cmd(self) -> list[str]:
-        """Build sandbox-exec command (default on macOS when enabled).
-
-        Strategy matches the Rust codebase:
-        1. ``(allow default)`` — everything starts normally
-        2. ``(deny file-write* (subpath "/"))`` — block all writes
-        3. ``(allow file-write* ...)`` — punch holes for write dirs
-        4. No blanket read deny — read restrictions at app level
-        """
-        cfg = self._config
-        if cfg.sandbox_backend == "off":
-            return self._direct_cmd()
-
-        sb_profile = self._build_sb_profile()
-        return ["sandbox-exec", "-p", sb_profile, self._binary, "--json-rpc"]
-
-    def _build_sb_profile(self) -> str:
-        """Build a sandbox-exec profile — write-restriction only.
-
-        Designed to match ``src/sandbox/platform_macos.rs`` in the Rust
-        codebase: allow everything by default, then deny all writes, then
-        punch holes for write-allowed directories.
-
-        Read restrictions are NOT applied here — they are enforced at
-        the application level (path checks in tool implementations).
-        """
-        cfg = self._config
-        cwd = cfg.cwd or os.getcwd()
-        real_home = Path.home()
-
-        lines = ["(version 1)"]
-
-        # ═══ Step 1: Allow default — let everything initialize ═══
-        lines.append("(allow default)")
-
-        # ═══ Step 2: Write restrictions ═════════════════════════════
-        write_dirs = list(cfg.write_dirs)
-
-        # Only install write rules if there are dirs to restrict to
-        if write_dirs or cfg.dscode_home:
-            # Deny all writes (deny overrides allow regardless of order)
-            lines.append('(deny file-write* (subpath "/"))')
-
-            # Punch holes for user-specified write dirs
-            for d in write_dirs:
-                resolved = self._resolve_dir(d, cwd)
-                lines.append(
-                    f'(allow file-write* (subpath "{resolved}"))'
-                )
-
-            # Always allow dscode session storage
-            home_dscode = os.path.join(str(real_home), ".dscode")
-            lines.append(
-                f'(allow file-write* (subpath "{home_dscode}"))'
-            )
-
-            # Always allow temp files (Edit tool diff, env files, etc.)
-            lines.append('(allow file-write* (subpath "/tmp"))')
-            lines.append('(allow file-write* (subpath "/private/tmp"))')
-
-        # ═══ No blanket read deny ═══════════════════════════════════
-        # Read restrictions are enforced by application-level path
-        # checks (tools/file.rs), not by sandbox-exec.
-
-        return "\n".join(lines)
-
-    # ── Helpers ────────────────────────────────────────────────────
-
-    def _direct_cmd(self) -> list[str]:
-        """No sandbox — run dscode directly."""
+        """Launch dscode directly — sandboxing is handled by Rust internally."""
         return [self._binary, "--json-rpc"]
-
-    @staticmethod
-    def _resolve_dir(path: str, cwd: str) -> str:
-        p = Path(path)
-        if p.is_absolute():
-            return str(p)
-        return str(Path(cwd) / p)
-
-    @staticmethod
-    def _binary_exists(name: str) -> bool:
-        return shutil.which(name) is not None
 
 
 # ── Convenience ──────────────────────────────────────────────────────

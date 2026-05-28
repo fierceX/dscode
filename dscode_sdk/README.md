@@ -111,10 +111,9 @@ print(result["text"])
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `sandbox_backend` | `"auto"` | 沙箱机制：`"auto"` / `"nsjail"` / `"bwrap"` / `"sandbox-exec"` / `"off"` |
+| `sandbox_backend` | `"auto"` | 传递给 Rust 内部 (`DSCODE_LIMITS`)：`"auto"` / `"nsjail"` / `"bwrap"` / `"sandbox-exec"` / `"off"` |
 
-- **macOS**：`"auto"` 使用 `sandbox-exec`（仅限制写入，读取不限制）。如需关闭沙箱，设 `sandbox_backend="off"`。
-- **Linux**：`"auto"` 依次尝试 `nsjail` → `bubblewrap` → 无沙箱。
+沙箱由 Rust ``dscode`` 二进制内部处理。Python SDK 不构造任何沙箱命令。
 
 ### API 配置
 
@@ -126,28 +125,12 @@ print(result["text"])
 
 ## 沙箱行为说明
 
-### macOS（sandbox-exec）
+沙箱由 Rust ``dscode`` 二进制内部通过 ``reexec_in_sandbox()`` 处理。
 
-采用 `(allow default)` + 写入限制策略：
+- **macOS**：使用 ``sandbox-exec``，写入限制 + 应用层读取限制。
+- **Linux**：自动检测 ``nsjail`` → ``bubblewrap``，文件系统隔离 + 命名空间隔离。
 
-```
-(version 1)
-(allow default)
-(deny file-write* (subpath "/"))
-(allow file-write* (subpath "/path/to/write_dirs"))
-(allow file-write* (subpath "/tmp"))
-(allow file-write* (subpath "/private/tmp"))
-(allow file-write* (subpath "~/.dscode"))
-```
-
-特点：
-- 所有读取操作不受限
-- 写入仅限 `write_dirs`、临时目录和会话目录
-- 进程执行、网络、系统设施默认放行
-
-### Linux（nsjail / bubblewrap）
-
-agent 运行在容器中，仅挂载 `read_dirs` 和 `write_dirs`。`allow_network=False` 时切断网络。
+详细策略见 Rust 代码 ``src/sandbox/``。
 
 ## 返回结果示例
 
@@ -177,16 +160,14 @@ agent 运行在容器中，仅挂载 `read_dirs` 和 `write_dirs`。`allow_netwo
 
 | 现象 | 原因 | 解决方法 |
 |------|------|---------|
-| `SandboxError: sandbox-exec not found` | macOS 缺少 sandbox-exec | 设 `sandbox_backend="off"` |
-| `exit_code: 71` | sandbox-exec OS 错误 | 设 `sandbox_backend="off"`，或检查沙箱配置 |
 | `exit_code: 1` | agent 运行出错（查看 stderr） | 确认 `api_key` 已正确设置 |
 | 返回 `text` 为空且无 `error` | API 密钥缺失 | 设置 `api_key` 或 `DEEPSEEK_API_KEY` 环境变量 |
 
 ## 支持平台
 
-| 平台 | 架构 | 沙箱 |
+| 平台 | 架构 | 沙箱（由 Rust 内部处理） |
 |------|------|------|
-| macOS | arm64（Apple Silicon） | sandbox-exec（仅限写） |
-| macOS | x86_64（Intel） | sandbox-exec（仅限写） |
+| macOS | arm64（Apple Silicon） | sandbox-exec |
+| macOS | x86_64（Intel） | sandbox-exec |
 | Linux | x86_64 | nsjail / bubblewrap |
 | Linux | aarch64 | nsjail / bubblewrap |

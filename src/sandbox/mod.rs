@@ -45,20 +45,21 @@ pub fn reexec_in_sandbox(config: &SandboxConfig, exe: &Path, args: &[String]) {
 
     let result = try_reexec(config, exe, args);
 
-    // If we get here, sandbox exec failed — log a warning and continue
+    // If we get here, sandbox exec failed — hard fail instead of silent fallback
     match result {
         Ok(()) => {
             // exec succeeded and replaced us, so this is unreachable.
             // But if it didn't replace us, it means exec failed silently.
-            eprintln!("[dscode] Warning: sandbox exec returned unexpectedly, running without sandbox");
+            eprintln!("[dscode] Fatal: sandbox exec returned unexpectedly");
         }
         Err(e) => {
             eprintln!(
-                "[dscode] Warning: sandbox unavailable ({}), running without sandbox",
+                "[dscode] Fatal: sandbox unavailable ({}), exiting",
                 e
             );
         }
     }
+    std::process::exit(1);
 }
 
 fn try_reexec(config: &SandboxConfig, exe: &Path, args: &[String]) -> Result<(), String> {

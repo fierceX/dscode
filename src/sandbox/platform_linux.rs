@@ -18,9 +18,22 @@ pub fn try_nsjail(
 
     let mut cmd: Vec<String> = vec!["nsjail".into(), "--mode".into(), "execve".into()];
 
-    // ── File-system bind mounts ──────────────────────────────
+    // ── Essential paths (binary + system libraries) ──────────
     let cwd = std::env::current_dir().unwrap_or_default();
 
+    if let Some(parent) = exe.parent() {
+        let parent_str = parent.display().to_string();
+        if !parent_str.is_empty() {
+            cmd.push("--bindmount_ro".into());
+            cmd.push(format!("{0}:{0}", parent_str));
+        }
+    }
+    for d in ["/usr", "/lib", "/lib64", "/etc", "/run"] {
+        cmd.push("--bindmount_ro".into());
+        cmd.push(format!("{0}:{0}", d));
+    }
+
+    // ── User-configured bind mounts ──────────────────────────
     for d in &config.read_dirs {
         let resolved = resolve_dir(d, &cwd);
         cmd.push("--bindmount_ro".into());
@@ -30,6 +43,26 @@ pub fn try_nsjail(
         let resolved = resolve_dir(d, &cwd);
         cmd.push("--bindmount".into());
         cmd.push(format!("{0}:{0}", resolved));
+    }
+
+    // ── HOME directory (read-only for config access) ─────────
+    if let Ok(ref home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            cmd.push("--bindmount_ro".into());
+            cmd.push(format!("{0}:{0}", home));
+        }
+    }
+
+    // ── DSCODE_HOME / default ~/.dscode (writable for session persistence) ──
+    let dscode_home = std::env::var("DSCODE_HOME").unwrap_or_else(|_| {
+        std::env::var("HOME")
+            .map(|h| format!("{}/.dscode", h))
+            .unwrap_or_else(|_| "/tmp/.dscode".to_string())
+    });
+    if !dscode_home.is_empty() && dscode_home != "/" {
+        let _ = std::fs::create_dir_all(&dscode_home);
+        cmd.push("--bindmount".into());
+        cmd.push(format!("{}:{}", dscode_home, dscode_home));
     }
 
     // Working directory: first write dir, then first read dir
@@ -91,7 +124,23 @@ pub fn try_bwrap(
     cmd.push("--tmpfs".into());
     cmd.push("/tmp".into());
 
-    // ── Bind mounts ──────────────────────────────────────────
+    // ── Essential paths (binary + system libraries) ──────────
+    // Without these the dynamically-linked binary won't even start.
+    if let Some(parent) = exe.parent() {
+        let parent_str = parent.display().to_string();
+        if !parent_str.is_empty() {
+            cmd.push("--ro-bind".into());
+            cmd.push(parent_str.clone());
+            cmd.push(parent_str);
+        }
+    }
+    for d in ["/usr", "/lib", "/lib64", "/etc", "/run"] {
+        cmd.push("--ro-bind".into());
+        cmd.push(d.to_string());
+        cmd.push(d.to_string());
+    }
+
+    // ── User-configured bind mounts ──────────────────────────
     for d in &config.read_dirs {
         let resolved = resolve_dir(d, &cwd);
         cmd.push("--ro-bind".into());
@@ -103,6 +152,28 @@ pub fn try_bwrap(
         cmd.push("--bind".into());
         cmd.push(resolved.clone());
         cmd.push(resolved);
+    }
+
+    // ── HOME directory (read-only for config access) ─────────
+    if let Ok(ref home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            cmd.push("--ro-bind".into());
+            cmd.push(home.to_string());
+            cmd.push(home.to_string());
+        }
+    }
+
+    // ── DSCODE_HOME / default ~/.dscode (writable for session persistence) ──
+    let dscode_home = std::env::var("DSCODE_HOME").unwrap_or_else(|_| {
+        std::env::var("HOME")
+            .map(|h| format!("{}/.dscode", h))
+            .unwrap_or_else(|_| "/tmp/.dscode".to_string())
+    });
+    if !dscode_home.is_empty() && dscode_home != "/" {
+        let _ = std::fs::create_dir_all(&dscode_home);
+        cmd.push("--bind".into());
+        cmd.push(dscode_home.clone());
+        cmd.push(dscode_home);
     }
 
     // ── Namespace isolation ──────────────────────────────────
