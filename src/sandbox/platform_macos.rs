@@ -64,6 +64,14 @@ fn build_sb_profile(config: &SandboxConfig, _exe: &Path, cwd: &Path) -> String {
             ));
         }
 
+        // Always allow system temp directory (TMPDIR for Edit's unified_diff_color)
+        let tmpdir = std::env::temp_dir();
+        let tmpdir_str = tmpdir.display().to_string();
+        lines.push(format!("(allow file-write* (subpath \"{tmpdir_str}\"))"));
+        // Also allow /tmp and /private/tmp (common temp locations)
+        lines.push("(allow file-write* (subpath \"/tmp\"))".into());
+        lines.push("(allow file-write* (subpath \"/private/tmp\"))".into());
+
         // Always allow dscode session storage
         lines.push(format!(
             "(allow file-write* (subpath \"{}/.dscode\"))",
@@ -73,10 +81,6 @@ fn build_sb_profile(config: &SandboxConfig, _exe: &Path, cwd: &Path) -> String {
             "(allow file-write* (subpath \"{}/.dscode\"))",
             cwd.display()
         ));
-
-        // Always allow temp files (Edit tool diff, etc.)
-        lines.push("(allow file-write* (subpath \"/tmp\"))".into());
-        lines.push("(allow file-write* (subpath \"/private/tmp\"))".into());
     }
 
     // ═══ Read restrictions are NOT done here ═════════════════════

@@ -38,23 +38,24 @@ def _build_rust_binary() -> None:
 def _copy_binary() -> None:
     """Copy the compiled binary into the Python package directory.
 
-    If the binary already exists at the destination (from a prior
-    ``scripts/build_wheel.py`` step), skip the copy to avoid redundant work.
+    Always copies if the source binary exists and is newer than the
+    destination, ensuring SDK always bundles the latest dscode binary.
     """
-    dst = BINARY_DST / "dscode"
-    if dst.exists():
-        print(f":: Binary already present at {dst}, skipping copy", flush=True)
-        return
-
-    BINARY_DST.mkdir(parents=True, exist_ok=True)
-
     src = BINARY_SRC
+    dst = BINARY_DST / "dscode"
+
     if not src.exists():
         # On Windows it would be dscode.exe, but we don't support Windows yet
         raise RuntimeError(
             f"Binary not found at {src}. Run 'cargo build --release' first."
         )
 
+    # Skip if destination is up-to-date
+    if dst.exists() and dst.stat().st_mtime >= src.stat().st_mtime:
+        print(f":: Binary at {dst} is up-to-date, skipping copy", flush=True)
+        return
+
+    BINARY_DST.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dst)
     # Ensure executable
     dst.chmod(0o755)

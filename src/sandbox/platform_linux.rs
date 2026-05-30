@@ -33,6 +33,17 @@ pub fn try_nsjail(
         cmd.push(format!("{0}:{0}", d));
     }
 
+    // ── Temp directory (tmpfs for Edit tool unified_diff_color, etc.) ──
+    cmd.push("--tmpfs".into());
+    cmd.push("/tmp".into());
+    // If TMPDIR is set and differs from /tmp, also mount it
+    if let Ok(tmpdir) = std::env::var("TMPDIR") {
+        if !tmpdir.is_empty() && tmpdir != "/tmp" {
+            cmd.push("--tmpfs".into());
+            cmd.push(tmpdir);
+        }
+    }
+
     // ── User-configured bind mounts ──────────────────────────
     for d in &config.read_dirs {
         let resolved = resolve_dir(d, &cwd);

@@ -104,6 +104,19 @@ async fn run(args: Vec<String>) -> Result<()> {
                 cfg.verbose = v;
             }
         }
+        // session_id at top level (or in options)
+        if let Some(v) = req.get("session_id").and_then(|v| v.as_str()) {
+            if !v.is_empty() {
+                cfg.session_id = v.to_string();
+            }
+        } else if let Some(v) = req.get("options")
+            .and_then(|o| o.get("session_id"))
+            .and_then(|v| v.as_str())
+        {
+            if !v.is_empty() {
+                cfg.session_id = v.to_string();
+            }
+        }
         Some(req.get("prompt").and_then(|v| v.as_str()).unwrap_or(&input).to_string())
     } else {
         None

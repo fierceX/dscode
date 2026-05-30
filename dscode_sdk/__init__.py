@@ -179,6 +179,9 @@ class SandboxConfig:
     api_url: str = ""
     model: str = ""
 
+    # Session
+    session_id: str = ""
+
     # Signal system
     signal_mode: Optional[str] = None
 
@@ -199,6 +202,7 @@ class AgentSession:
         self._config = config
         self._binary: str = _find_binary()
         self._home: Optional[str] = None
+        self._proc: Optional[subprocess.Popen] = None
 
     # ── Public API ────────────────────────────────────────────────
 
@@ -224,8 +228,27 @@ class AgentSession:
         return result
 
     def close(self) -> None:
-        """No-op (sessions now use a persistent home directory)."""
-        pass
+        """Terminate the agent process if still running.
+
+        Sends SIGTERM first, then SIGKILL after a short grace period.
+        Safe to call multiple times.
+        """
+        proc = self._proc
+        if proc is None:
+            return
+        if proc.poll() is not None:
+            # Process already exited
+            self._proc = None
+            return
+
+        # Try graceful termination first
+        proc.terminate()  # SIGTERM
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.kill()   # SIGKILL
+            proc.wait()
+        self._proc = None
 
     # ── Internals ──────────────────────────────────────────────────
 
@@ -252,68 +275,73 @@ class AgentSession:
                 f"Ensure dscode is installed and available."
             ) from e
 
-        # Send the JSON-RPC request
+        self._proc = proc
+
         try:
-            proc.stdin.write(request)
-            proc.stdin.close()
-        except BrokenPipeError:
-            stderr_text = proc.stderr.read()
-            raise AgentError(
-                f"Agent process exited early. exit_code={proc.returncode} "
-                f"stderr: {stderr_text}"
-            )
-
-        # Read the JSON event stream
-        text_parts: list[str] = []
-        thinking_parts: list[str] = []
-        tool_calls: list[dict] = []
-        error_message: Optional[str] = None
-
-        for line in proc.stdout:
-            line = line.strip()
-            if not line:
-                continue
+            # Send the JSON-RPC request
             try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
+                proc.stdin.write(request)
+                proc.stdin.close()
+            except BrokenPipeError:
+                stderr_text = proc.stderr.read()
+                raise AgentError(
+                    f"Agent process exited early. exit_code={proc.returncode} "
+                    f"stderr: {stderr_text}"
+                )
 
-            event_type = event.get("type", "")
-            if event_type == "text":
-                text_parts.append(event.get("content", ""))
-            elif event_type == "thinking":
-                thinking_parts.append(event.get("content", ""))
-            elif event_type == "tool_call":
-                tool_calls.append(event)
-            elif event_type == "turn_end":
-                break
-            elif event_type == "error":
-                error_message = event.get("message", "Unknown error")
+            # Read the JSON event stream
+            text_parts: list[str] = []
+            thinking_parts: list[str] = []
+            tool_calls: list[dict] = []
+            error_message: Optional[str] = None
 
-        # Wait for process to finish
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
+            for line in proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
 
-        # Read remaining stderr
-        stderr_text = ""
-        try:
-            remaining = proc.stderr.read()
-            if remaining:
-                stderr_text = remaining
-        except OSError:
-            pass
+                event_type = event.get("type", "")
+                if event_type == "text":
+                    text_parts.append(event.get("content", ""))
+                elif event_type == "thinking":
+                    thinking_parts.append(event.get("content", ""))
+                elif event_type == "tool_call":
+                    tool_calls.append(event)
+                elif event_type == "turn_end":
+                    break
+                elif event_type == "error":
+                    error_message = event.get("message", "Unknown error")
 
-        return {
-            "text": "".join(text_parts),
-            "thinking": "".join(thinking_parts),
-            "tool_calls": tool_calls,
-            "exit_code": proc.returncode,
-            "error": error_message,
-            "stderr": stderr_text,
-        }
+            # Wait for process to finish
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+
+            # Read remaining stderr
+            stderr_text = ""
+            try:
+                remaining = proc.stderr.read()
+                if remaining:
+                    stderr_text = remaining
+            except OSError:
+                pass
+
+            return {
+                "text": "".join(text_parts),
+                "thinking": "".join(thinking_parts),
+                "tool_calls": tool_calls,
+                "exit_code": proc.returncode,
+                "error": error_message,
+                "stderr": stderr_text,
+            }
+        finally:
+            self._proc = None
 
     def _prepare(self) -> None:
         """Ensure the home directory exists."""
@@ -398,6 +426,8 @@ class AgentSession:
             options.update(extra_options)
 
         req: dict[str, Any] = {"prompt": prompt}
+        if self._config.session_id:
+            req["session_id"] = self._config.session_id
         if options:
             req["options"] = options
         return json.dumps(req) + "\n"
@@ -408,21 +438,44 @@ class AgentSession:
         self._append_mission_flag(cmd)
         return cmd
 
-    def _append_mission_flag(self, cmd: list[str]) -> None:
-        """Append --mission <path> if configured."""
-        if self._config.mission_file:
-            cmd.extend(["--mission", self._config.mission_file])
-        elif self._config.mission_content:
-            path = self._write_mission_content()
-            cmd.extend(["--mission", path])
+    def _mission_home_path(self) -> str:
+        """Return the canonical mission file path inside DSCODE_HOME."""
+        return os.path.join(self._home or _default_home(), "_mission.md")
 
-    def _write_mission_content(self) -> str:
-        """Write mission_content to a temp file and return its path."""
-        path = os.path.join(self._home or _default_home(), "_mission.md")
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(self._config.mission_content)
-        return path
+    def _append_mission_flag(self, cmd: list[str]) -> None:
+        """Append --mission <path> if configured.
+
+        When sandbox is active, the mission file is always placed under
+        DSCODE_HOME (guaranteed accessible inside all sandbox backends)
+        so that ``--mission`` resolves correctly inside the sandbox.
+        """
+        cfg = self._config
+        if not cfg.mission_file and not cfg.mission_content:
+            return
+
+        sandbox_active = cfg.sandbox_backend.strip().lower() != "off"
+
+        if sandbox_active:
+            # Sandbox: copy/write to DSCODE_HOME for guaranteed accessibility
+            dest = self._mission_home_path()
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            if cfg.mission_file:
+                if os.path.abspath(cfg.mission_file) != os.path.abspath(dest):
+                    shutil.copy2(cfg.mission_file, dest)
+            elif cfg.mission_content:
+                with open(dest, "w", encoding="utf-8") as f:
+                    f.write(cfg.mission_content)
+            cmd.extend(["--mission", dest])
+        else:
+            # No sandbox: use original paths directly
+            if cfg.mission_file:
+                cmd.extend(["--mission", cfg.mission_file])
+            elif cfg.mission_content:
+                dest = self._mission_home_path()
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                with open(dest, "w", encoding="utf-8") as f:
+                    f.write(cfg.mission_content)
+                cmd.extend(["--mission", dest])
 
     def _build_sandbox_cmd_inner(self) -> list[str]:
         """Launch dscode directly — sandboxing is handled by Rust internally."""
