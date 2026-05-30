@@ -2,6 +2,7 @@ use crate::safety;
 use anyhow::{Result, bail};
 use std::collections::VecDeque;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -33,6 +34,15 @@ pub fn execute(
     command: &str,
     timeout_secs: Option<u64>,
     default_timeout: i32,
+) -> Result<(String, Option<i32>)> {
+    execute_with_interrupt(command, timeout_secs, default_timeout, None)
+}
+
+pub fn execute_with_interrupt(
+    command: &str,
+    timeout_secs: Option<u64>,
+    default_timeout: i32,
+    interrupt: Option<&AtomicBool>,
 ) -> Result<(String, Option<i32>)> {
     if command.trim().is_empty() {
         bail!("Error: no command provided");
@@ -71,6 +81,7 @@ pub fn execute(
 
     let start = Instant::now();
     let mut timed_out = false;
+    let mut interrupted = false;
     let mut exit_code: Option<i32> = None;
     loop {
         match child.try_wait() {
@@ -79,6 +90,13 @@ pub fn execute(
                 break;
             }
             Ok(None) => {
+                if interrupt.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    interrupted = true;
+                    exit_code = Some(130);
+                    break;
+                }
                 if start.elapsed() >= timeout {
                     let _ = child.kill();
                     let _ = child.wait();
@@ -108,6 +126,9 @@ pub fn execute(
             "\n[... truncated, command timed out after {} seconds ...]",
             timeout.as_secs()
         ));
+    }
+    if interrupted {
+        out.push_str("\n[... command interrupted ...]");
     }
     if let Some(code) = exit_code
         && code != 0
@@ -151,10 +172,21 @@ impl super::runner::ToolExec for BashTool {
             timeout: Option<u64>,
         }
         let args: Args = serde_json::from_value(input.clone())?;
-        execute(
-            &args.command,
-            args.timeout,
+        Self::execute_with_context(&args.command, args.timeout, ctx)
+    }
+}
+
+impl BashTool {
+    fn execute_with_context(
+        command: &str,
+        timeout: Option<u64>,
+        ctx: &crate::context::ToolContext,
+    ) -> anyhow::Result<super::runner::ToolOutcome> {
+        execute_with_interrupt(
+            command,
+            timeout,
             ctx.tool_config.tool_timeout_secs,
+            Some(ctx.interrupt.as_ref()),
         )
         .map(|(s, code)| super::runner::ToolOutcome {
             content: s,
@@ -192,6 +224,16 @@ mod tests {
     fn timeout_kills_long_command() {
         let (result, _) = execute("sleep 10; echo done", Some(1), 600).unwrap();
         assert!(result.contains("timed out"));
+        assert!(!result.contains("done"));
+    }
+
+    #[test]
+    fn interrupt_kills_long_command() {
+        let interrupt = AtomicBool::new(true);
+        let (result, code) =
+            execute_with_interrupt("sleep 10; echo done", Some(30), 600, Some(&interrupt)).unwrap();
+        assert_eq!(code, Some(130));
+        assert!(result.contains("interrupted"));
         assert!(!result.contains("done"));
     }
 

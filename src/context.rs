@@ -42,6 +42,7 @@ pub struct ToolContext {
     pub home: PathBuf,
     pub store: Arc<ConversationStore>,
     pub tool_config: ToolConfig,
+    pub interrupt: Arc<AtomicBool>,
 }
 
 impl From<&AgentSharedContext> for ToolContext {
@@ -51,6 +52,7 @@ impl From<&AgentSharedContext> for ToolContext {
             home: ctx.home.clone(),
             store: ctx.store.clone(),
             tool_config: ctx.tool_config.clone(),
+            interrupt: ctx.interrupt.clone(),
         }
     }
 }

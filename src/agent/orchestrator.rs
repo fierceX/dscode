@@ -102,6 +102,7 @@ impl OrchActor {
                                 self.ctx.display.render_error(&format!("Compact failed: {e}"));
                             }
                         }
+                        self.ctx.display.render_stop();
                         let _ = done.send(());
                     }
                     None => break,

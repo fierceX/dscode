@@ -1,5 +1,6 @@
 use anyhow::{Result, bail};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 /// Patterns that are blocked in Python scripts for safety.
@@ -22,6 +23,14 @@ const BLOCKED_PATTERNS: &[(&str, &str)] = &[
 pub fn execute_script(
     script: &str,
     timeout_secs: Option<u64>,
+) -> Result<(String, String, Option<i32>)> {
+    execute_script_with_interrupt(script, timeout_secs, None)
+}
+
+pub fn execute_script_with_interrupt(
+    script: &str,
+    timeout_secs: Option<u64>,
+    interrupt: Option<&AtomicBool>,
 ) -> Result<(String, String, Option<i32>)> {
     if script.trim().is_empty() {
         bail!("Error: no Python script provided");
@@ -50,6 +59,7 @@ pub fn execute_script(
     // Read output with timeout
     let start = Instant::now();
     let mut timed_out = false;
+    let mut interrupted = false;
     let mut exit_code: Option<i32> = None;
 
     loop {
@@ -59,6 +69,13 @@ pub fn execute_script(
                 break;
             }
             Ok(None) => {
+                if interrupt.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    interrupted = true;
+                    exit_code = Some(130);
+                    break;
+                }
                 if start.elapsed() >= timeout {
                     let _ = child.kill();
                     let _ = child.wait();
@@ -95,6 +112,12 @@ pub fn execute_script(
             "[... truncated, Python script timed out after {} seconds ...]",
             timeout.as_secs()
         ));
+    }
+    if interrupted {
+        if !stdout.is_empty() {
+            stdout.push('\n');
+        }
+        stdout.push_str("[... Python script interrupted ...]");
     }
 
     Ok((stdout, stderr, exit_code))
@@ -152,7 +175,8 @@ impl super::runner::ToolExec for PythonTool {
             }
         };
 
-        let (stdout, stderr, exit_code) = execute_script(&script, args.timeout)?;
+        let (stdout, stderr, exit_code) =
+            execute_script_with_interrupt(&script, args.timeout, Some(ctx.interrupt.as_ref()))?;
 
         let mut content = stdout;
         if !stderr.is_empty() {
@@ -208,6 +232,20 @@ mod tests {
     fn timeout_kills_long_script() {
         let (stdout, _, _) = execute_script("import time; time.sleep(10)", Some(1)).unwrap();
         assert!(stdout.contains("timed out"));
+    }
+
+    #[test]
+    fn interrupt_kills_long_script() {
+        let interrupt = AtomicBool::new(true);
+        let (stdout, _, code) = execute_script_with_interrupt(
+            "import time; time.sleep(10); print('done')",
+            Some(30),
+            Some(&interrupt),
+        )
+        .unwrap();
+        assert_eq!(code, Some(130));
+        assert!(stdout.contains("interrupted"));
+        assert!(!stdout.contains("done"));
     }
 
     #[test]

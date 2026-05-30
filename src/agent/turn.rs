@@ -126,7 +126,31 @@ impl TurnExecutor {
         let mut usage: Option<UsageEvent> = None;
         let mut saw_stop = false;
 
-        while let Some(result) = stream.next().await {
+        loop {
+            if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.load(Ordering::SeqCst) {
+                self.ctx
+                    .log_event(serde_json::json!({"type":"stop","reason":"interrupted"}));
+                stop = "interrupted".into();
+                saw_stop = true;
+                break;
+            }
+
+            let result = tokio::select! {
+                result = stream.next() => result,
+                _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {
+                    if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.load(Ordering::SeqCst) {
+                        self.ctx
+                            .log_event(serde_json::json!({"type":"stop","reason":"interrupted"}));
+                        stop = "interrupted".into();
+                        saw_stop = true;
+                        break;
+                    }
+                    continue;
+                }
+            };
+            let Some(result) = result else {
+                break;
+            };
             let evt = result?;
 
             match evt {
@@ -492,7 +516,8 @@ impl TurnExecutor {
                         &mut tools_json,
                     )
                     .await?;
-                } }
+                }
+            }
 
             // Phase 1: LLM 流式响应
             let StreamOutput {
