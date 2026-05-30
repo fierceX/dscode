@@ -1,6 +1,7 @@
 use anyhow::{Result, bail};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use std::sync::{Arc, Mutex};
 
 use super::bash;
@@ -59,8 +60,8 @@ pub trait ToolExec: Send + Sync {
     fn execute(&self, input: &serde_json::Value, ctx: &ToolContext) -> anyhow::Result<ToolOutcome>;
 }
 
-/// Built-in tool table.
-pub fn tool_registry() -> Vec<Box<dyn ToolExec>> {
+/// Built-in tool table, initialized once at first access.
+static TOOL_REGISTRY: LazyLock<Vec<Box<dyn ToolExec>>> = LazyLock::new(|| {
     vec![
         Box::new(file::ReadTool),
         Box::new(file::WriteTool),
@@ -77,6 +78,11 @@ pub fn tool_registry() -> Vec<Box<dyn ToolExec>> {
         Box::new(python::PythonTool),
         Box::new(SubAgentTool),
     ]
+});
+
+/// Return a reference to the global tool registry.
+pub fn tool_registry() -> &'static [Box<dyn ToolExec>] {
+    &TOOL_REGISTRY
 }
 
 // --- Runner ---
@@ -85,7 +91,7 @@ pub fn tool_registry() -> Vec<Box<dyn ToolExec>> {
 pub struct ToolRunner {
     ctx: Arc<ToolContext>,
     storm: Mutex<StormBreaker>,
-    tools: Vec<Box<dyn ToolExec>>,
+    tools: &'static [Box<dyn ToolExec>],
 }
 
 /// Result of executing a single tool call.
@@ -183,8 +189,8 @@ impl ToolRunner {
             // Pass tool name for lookup inside spawn_blocking
             let tool_name = call.name.clone();
             handles.push(tokio::task::spawn_blocking(move || {
-                let tool = tool_registry().into_iter().find(|t| t.name() == tool_name);
-                Self::execute_one_sync(&ctx, &call, tool.as_deref())
+                let tool = tool_registry().iter().find(|t| t.name() == tool_name);
+                Self::execute_one_sync(&ctx, &call, tool.map(|t| t.as_ref()))
             }));
         }
 
@@ -477,6 +483,15 @@ fn file_tool_result_summary_sync(kind: &str, display_path: &str, read_path: &str
     if display_path.is_empty() {
         return kind.to_string();
     }
+    // Use metadata to check file size without reading content.
+    let meta = match std::fs::metadata(read_path) {
+        Ok(m) => m,
+        Err(_) => return format!("{}({})", kind, display_path),
+    };
+    // For large files, show size only — avoids re-reading the entire file just for a summary.
+    if meta.len() > 1_048_576 {
+        return format!("{}({}) [{} bytes]", kind, display_path, meta.len());
+    }
     match std::fs::read(read_path) {
         Ok(data) => format!(
             "{}({}) [{} lines, {} bytes]",
@@ -669,7 +684,7 @@ mod tests {
                 "schema tool missing executor: {name}"
             );
         }
-        for tool in &registry {
+        for tool in registry {
             assert!(
                 schema_names.contains(tool.name()),
                 "registry tool missing schema: {}",

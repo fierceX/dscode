@@ -10,7 +10,7 @@ pub mod web;
 /// so a post-edit verify-read isn't flagged as a repeat.
 pub fn is_tool_mutating(name: &str) -> bool {
     runner::tool_registry()
-        .into_iter()
+        .iter()
         .any(|tool| tool.name() == name && tool.mutating())
 }
 
@@ -18,6 +18,6 @@ pub fn is_tool_mutating(name: &str) -> bool {
 /// State-inspection / external-data tools that shouldn't trip repeat-loop guards.
 pub fn is_storm_exempt(name: &str) -> bool {
     runner::tool_registry()
-        .into_iter()
+        .iter()
         .any(|tool| tool.name() == name && tool.storm_exempt())
 }

@@ -1,7 +1,7 @@
 use crate::safety;
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 use std::collections::VecDeque;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
@@ -60,7 +60,103 @@ pub fn execute_with_interrupt(
         })),
     };
 
-    let mut child = Command::new("bash")
+    let start = Instant::now();
+
+    // Use tokio async path if running inside a tokio runtime, otherwise sync fallback.
+    let (output_bytes, stderr_bytes, exit_code): (Vec<u8>, Vec<u8>, Option<i32>) =
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                let result = handle.block_on(async {
+                    let child = tokio::process::Command::new("bash")
+                        .arg("-lc")
+                        .arg(command)
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::piped())
+                        .kill_on_drop(true)
+                        .spawn()?;
+
+                    let output_fut = child.wait_with_output();
+                    tokio::pin!(output_fut);
+
+                    let mut interrupt_check = tokio::time::interval(Duration::from_millis(100));
+
+                    let output = tokio::time::timeout(timeout, async {
+                        loop {
+                            tokio::select! {
+                                result = &mut output_fut => {
+                                    return result.map_err(|e| anyhow!("process error: {e}"));
+                                }
+                                _ = interrupt_check.tick() => {
+                                    if let Some(flag) = interrupt
+                                        && flag.load(Ordering::SeqCst)
+                                    {
+                                        return Err(anyhow!("interrupted"));
+                                    }
+                                }
+                            }
+                        }
+                    })
+                    .await;
+
+                    match output {
+                        Ok(Ok(output)) => Ok((output.stdout, output.stderr, output.status.code())),
+                        Ok(Err(e)) => Err(e),
+                        Err(_) => Err(anyhow!("timed out")),
+                    }
+                });
+
+                match result {
+                    Ok(ok) => ok,
+                    Err(e) => {
+                        let msg = e.to_string();
+                        if msg == "timed out" {
+                            return Ok((
+                                format!(
+                                    "[... truncated, command timed out after {} seconds ...]",
+                                    timeout.as_secs()
+                                ),
+                                None,
+                            ));
+                        } else if msg == "interrupted" {
+                            return Ok(("[... command interrupted ...]".to_string(), Some(130)));
+                        } else {
+                            return Err(e);
+                        }
+                    }
+                }
+            }
+            Err(_) => {
+                let sync = execute_sync_fallback(command, timeout, interrupt)?;
+                (sync.stdout, sync.stderr, sync.code)
+            }
+        };
+
+    let elapsed = start.elapsed();
+    record_execution_time(elapsed);
+
+    let mut out = String::from_utf8_lossy(&output_bytes).to_string();
+    let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
+    if !stderr.is_empty() {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&stderr);
+    }
+    if let Some(code) = exit_code
+        && code != 0
+    {
+        out.push_str(&format!("\n\nProcess completed with exit code {}.", code));
+    }
+    Ok((out, exit_code))
+}
+
+/// Fallback synchronous execution when no tokio runtime is available (e.g. in tests).
+fn execute_sync_fallback(
+    command: &str,
+    timeout: Duration,
+    interrupt: Option<&AtomicBool>,
+) -> Result<SyncOutput> {
+    let mut child = std::process::Command::new("bash")
         .arg("-lc")
         .arg(command)
         .stdout(Stdio::piped())
@@ -79,9 +175,8 @@ pub fn execute_with_interrupt(
         std::thread::spawn(move || stream_reader(stderr, buf));
     }
 
-    let start = Instant::now();
+    let start_sync = Instant::now();
     let mut timed_out = false;
-    let mut interrupted = false;
     let mut exit_code: Option<i32> = None;
     loop {
         match child.try_wait() {
@@ -93,49 +188,53 @@ pub fn execute_with_interrupt(
                 if interrupt.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
                     let _ = child.kill();
                     let _ = child.wait();
-                    interrupted = true;
                     exit_code = Some(130);
                     break;
                 }
-                if start.elapsed() >= timeout {
+                if start_sync.elapsed() >= timeout {
                     let _ = child.kill();
                     let _ = child.wait();
                     timed_out = true;
                     break;
                 }
-                std::thread::sleep(Duration::from_millis(50));
+                std::thread::sleep(Duration::from_millis(10));
             }
             Err(e) => bail!("Error: failed to wait on child process: {e}"),
         }
     }
 
+    // Allow reader threads to drain pipes before we lock the buffers.
     std::thread::sleep(Duration::from_millis(30));
-    let elapsed = start.elapsed();
-    record_execution_time(elapsed);
 
     let mut out = stdout_buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    let stderr = stderr_buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    if !stderr.is_empty() {
+    let stderr_out = stderr_buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if !stderr_out.is_empty() {
         if !out.is_empty() {
             out.push('\n');
         }
-        out.push_str(&stderr);
+        out.push_str(&stderr_out);
     }
+
     if timed_out {
         out.push_str(&format!(
             "\n[... truncated, command timed out after {} seconds ...]",
             timeout.as_secs()
         ));
-    }
-    if interrupted {
+    } else if exit_code == Some(130) {
         out.push_str("\n[... command interrupted ...]");
     }
-    if let Some(code) = exit_code
-        && code != 0
-    {
-        out.push_str(&format!("\n\nProcess completed with exit code {}.", code));
-    }
-    Ok((out, exit_code))
+
+    Ok(SyncOutput {
+        stdout: out.into_bytes(),
+        stderr: Vec::new(),
+        code: exit_code,
+    })
+}
+
+struct SyncOutput {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    code: Option<i32>,
 }
 
 fn stream_reader<R: std::io::Read>(mut pipe: R, buf: Arc<Mutex<String>>) {

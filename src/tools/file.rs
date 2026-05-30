@@ -1,41 +1,118 @@
 use anyhow::{Result, anyhow, bail};
+use similar::{ChangeTag, TextDiff};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
+
+/// Threshold for switching to streaming read (bytes).
+const STREAM_READ_THRESHOLD: u64 = 1_048_576; // 1MB
 
 pub fn read(path: &str, offset: Option<usize>, limit: Option<usize>) -> Result<String> {
     if path.is_empty() {
         bail!("Error: no path provided");
     }
-    let data = std::fs::read_to_string(path)
+
+    // Fast path: small file or full read — use read_to_string directly.
+    let meta = std::fs::metadata(path)
         .map_err(|_| anyhow!("Error: file not found or unreadable: {path}"))?;
-    if offset.is_none() && limit.is_none() {
-        return Ok(data);
-    }
 
-    let mut lines: Vec<&str> = data.split('\n').collect();
-    if !lines.is_empty() && lines.last().map(|l| l.is_empty()).unwrap_or(false) {
-        lines.pop();
-    }
-    let total_lines = lines.len();
-
-    let start = match offset {
-        Some(o) if o > 1 => {
-            if o > total_lines {
-                bail!(
-                    "Error: offset {} exceeds total lines {} in {}",
-                    o,
-                    total_lines,
-                    path
-                );
-            }
-            o - 1
+    if meta.len() < STREAM_READ_THRESHOLD || (offset.is_none() && limit.is_none()) {
+        // Small file: existing fast path
+        let data = std::fs::read_to_string(path)
+            .map_err(|_| anyhow!("Error: file not found or unreadable: {path}"))?;
+        if offset.is_none() && limit.is_none() {
+            return Ok(data);
         }
-        _ => 0,
+        // Range on a small file: same logic as before
+        let mut lines: Vec<&str> = data.split('\n').collect();
+        if !lines.is_empty() && lines.last().map(|l| l.is_empty()).unwrap_or(false) {
+            lines.pop();
+        }
+        let total_lines = lines.len();
+        let start = match offset {
+            Some(o) if o > 1 => {
+                if o > total_lines {
+                    bail!(
+                        "Error: offset {} exceeds total lines {} in {}",
+                        o,
+                        total_lines,
+                        path
+                    );
+                }
+                o - 1
+            }
+            _ => 0,
+        };
+        let end = match limit {
+            Some(l) if l > 0 => (start + l).min(total_lines),
+            _ => total_lines,
+        };
+        return Ok(lines[start..end].join("\n"));
+    }
+
+    // Large file + range: stream — scan line boundaries, then read exact byte range.
+    let start_line = offset.unwrap_or(1);
+    let count = limit.unwrap_or(usize::MAX);
+
+    let mut reader = BufReader::new(std::fs::File::open(path)?);
+    // line_offsets[i] = byte offset where line (i+1) starts in the file.
+    let mut line_offsets: Vec<u64> = Vec::with_capacity(4096);
+
+    // Scan line boundaries up to what we need.
+    // target_line is the last line index we need (0-based, exclusive).
+    let target_idx = (start_line.saturating_sub(1) + count) as u64;
+    let mut line_idx = 0u64;
+    let mut buf = Vec::new();
+
+    loop {
+        let pos_before = reader.stream_position()?;
+        buf.clear();
+        let bytes_read = reader.read_until(b'\n', &mut buf)?;
+        if bytes_read == 0 {
+            break; // EOF
+        }
+        line_offsets.push(pos_before);
+        line_idx += 1;
+        if line_idx == target_idx.saturating_add(1) {
+            break; // we have all the offsets we need
+        }
+    }
+
+    // If file is smaller than requested offset, it's an error.
+    if start_line > 1 && line_offsets.len() < start_line - 1 {
+        bail!(
+            "Error: offset {} exceeds total lines {} in {}",
+            start_line,
+            line_offsets.len(),
+            path
+        );
+    }
+
+    let idx = (start_line.saturating_sub(1)) as usize;
+    let start_byte = *line_offsets.get(idx).unwrap_or(&0);
+
+    // End byte: either the start of the next line after the range, or EOF.
+    let end_idx = idx + count.min(line_offsets.len().saturating_sub(idx));
+    let end_byte = if end_idx < line_offsets.len() {
+        line_offsets[end_idx]
+    } else {
+        // Scan to end of file to find the exact byte position
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf)?;
+        reader.stream_position()?
     };
-    let end = match limit {
-        Some(l) if l > 0 => (start + l).min(total_lines),
-        _ => total_lines,
-    };
-    Ok(lines[start..end].join("\n"))
+
+    if start_byte >= end_byte {
+        return Ok(String::new());
+    }
+
+    // Seek and read the exact byte range.
+    let mut file = std::fs::File::open(path)?;
+    file.seek(SeekFrom::Start(start_byte))?;
+    let mut content = vec![0u8; (end_byte - start_byte) as usize];
+    file.read_exact(&mut content)?;
+
+    Ok(String::from_utf8(content)?)
 }
 
 pub fn write(path: &str, content: &str, max_bytes: usize) -> Result<String> {
@@ -82,120 +159,71 @@ pub fn edit(path: &str, old_s: &str, new_s: &str, max_bytes: usize) -> Result<St
     if updated.is_empty() {
         bail!("Error: edit produced empty result, reverted");
     }
-    let diff = unified_diff_color(path, &content, &updated)?;
+    let (diff, added, removed) = inline_diff(path, &content, &updated)?;
     std::fs::write(path, updated)?;
-    if diff.is_empty() {
-        Ok(format!("Edit({path}) [no changes]"))
-    } else {
-        let (added, removed) = count_diff_lines(&diff);
-        let summary = format!("Edit({path}) [+{added} -{removed} lines]");
-        Ok(format!("{summary}\n{diff}\n"))
-    }
+    let summary = format!("Edit({path}) [+{added} -{removed} lines]");
+    Ok(format!("{summary}\n{diff}\n"))
 }
 
-fn unified_diff_color(path: &str, old_content: &str, new_content: &str) -> Result<String> {
-    let old_path = std::env::temp_dir().join(format!("edit-old-{}", std::process::id()));
-    let new_path = std::env::temp_dir().join(format!("edit-new-{}", std::process::id()));
-    std::fs::write(&old_path, old_content)?;
-    std::fs::write(&new_path, new_content)?;
-    let label = path.trim_start_matches('/');
-
-    let diff = std::process::Command::new("diff")
-        .args([
-            "-u",
-            "--color=always",
-            "--label",
-            &format!("a/{label}"),
-            "--label",
-            &format!("b/{label}"),
-            old_path.to_str().unwrap_or(""),
-            new_path.to_str().unwrap_or(""),
-        ])
-        .output();
-    let _ = std::fs::remove_file(&old_path);
-    let _ = std::fs::remove_file(&new_path);
-
-    match diff {
-        Ok(output) => {
-            if output.status.success() || output.status.code() == Some(1) {
-                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                if stdout.contains("unsupported --color")
-                    || stdout.contains("unrecognized option '--color'")
-                {
-                    let old2 =
-                        std::env::temp_dir().join(format!("edit-old2-{}", std::process::id()));
-                    let new2 =
-                        std::env::temp_dir().join(format!("edit-new2-{}", std::process::id()));
-                    std::fs::write(&old2, old_content)?;
-                    std::fs::write(&new2, new_content)?;
-                    let diff2 = std::process::Command::new("diff")
-                        .args([
-                            "-u",
-                            "--label",
-                            &format!("a/{label}"),
-                            "--label",
-                            &format!("b/{label}"),
-                            old2.to_str().unwrap_or(""),
-                            new2.to_str().unwrap_or(""),
-                        ])
-                        .output();
-                    let _ = std::fs::remove_file(&old2);
-                    let _ = std::fs::remove_file(&new2);
-                    match diff2 {
-                        Ok(o) if o.status.success() || o.status.code() == Some(1) => {
-                            Ok(String::from_utf8_lossy(&o.stdout).to_string())
-                        }
-                        _ => bail!("Error: diff failed"),
-                    }
-                } else {
-                    Ok(stdout)
-                }
-            } else {
-                bail!("Error: diff failed")
-            }
-        }
-        Err(_) => bail!("Error: diff failed"),
+/// Generate a unified diff using the `similar` crate (pure Rust, no subprocess).
+fn inline_diff(path: &str, old: &str, new: &str) -> Result<(String, usize, usize)> {
+    if old == new {
+        return Ok((String::new(), 0, 0));
     }
-}
-
-fn count_diff_lines(diff: &str) -> (usize, usize) {
+    let diff = TextDiff::from_lines(old, new);
+    let mut output = String::new();
     let mut added = 0usize;
     let mut removed = 0usize;
-    for line in diff.lines() {
-        let stripped = strip_ansi(line);
-        if stripped.starts_with('+') && !stripped.starts_with("+++") {
-            added += 1;
-        }
-        if stripped.starts_with('-') && !stripped.starts_with("---") {
-            removed += 1;
-        }
-    }
-    (added, removed)
-}
 
-fn strip_ansi(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = String::with_capacity(s.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
-            let mut j = i + 2;
-            while j < bytes.len()
-                && ((bytes[j] >= 0x30 && bytes[j] <= 0x3f)
-                    || (bytes[j] >= 0x20 && bytes[j] <= 0x2f))
-            {
-                j += 1;
+    let label = path.trim_start_matches('/');
+    output.push_str(&format!("--- a/{label}\n"));
+    output.push_str(&format!("+++ b/{label}\n"));
+
+    for group in diff.grouped_ops(3).iter() {
+        if group.is_empty() {
+            continue;
+        }
+        if let Some(first) = group.first() {
+            let old_range: Range<usize> = first.old_range();
+            let mut total_old_len = 0usize;
+            let mut total_new_len = 0usize;
+            for op in group {
+                total_old_len += op.old_range().len();
+                total_new_len += op.new_range().len();
             }
-            if j < bytes.len() && bytes[j] >= 0x40 && bytes[j] <= 0x7e {
-                j += 1;
+            output.push_str(&format!(
+                "@@ -{},{} +{},{} @@\n",
+                old_range.start + 1,
+                total_old_len.max(1),
+                first.new_range().start + 1,
+                total_new_len.max(1)
+            ));
+        }
+        for op in group {
+            for change in diff.iter_changes(op) {
+                let (sign, ansi, reset) = match change.tag() {
+                    ChangeTag::Equal => (" ", "", ""),
+                    ChangeTag::Insert => {
+                        added += 1;
+                        ("+", "\x1b[32m", "\x1b[0m")
+                    }
+                    ChangeTag::Delete => {
+                        removed += 1;
+                        ("-", "\x1b[31m", "\x1b[0m")
+                    }
+                };
+                let val = change.value();
+                if val.ends_with('\n') {
+                    let trimmed = &val[..val.len() - 1];
+                    output.push_str(&format!("{ansi}{sign}{reset}{ansi}{trimmed}{reset}\n"));
+                } else {
+                    output.push_str(&format!("{ansi}{sign}{reset}{ansi}{val}{reset}\n"));
+                }
             }
-            i = j;
-        } else {
-            out.push(bytes[i] as char);
-            i += 1;
         }
     }
-    out
+
+    Ok((output, added, removed))
 }
 
 pub struct ReadTool;
