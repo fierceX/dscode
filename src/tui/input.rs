@@ -1,5 +1,6 @@
 use crate::agent::orchestrator::OrchCmd;
-use crate::tui::state::{MsgKind, MsgLine, TuiState, View, WorkState};
+use crate::tui::command::{SlashCommand, parse_slash_command};
+use crate::tui::state::{ClickAction, MsgKind, MsgLine, TuiState, View, WorkState};
 use crossterm::event::{Event, KeyCode, KeyModifiers, MouseEventKind};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -8,16 +9,18 @@ const SCROLL_STEP: usize = 3;
 const INTERRUPT_EXIT_WINDOW: Duration = Duration::from_secs(2);
 
 fn scroll_by(state: &mut TuiState, delta: isize) {
-    let base = if state.auto_scroll {
-        state.max_scroll
+    let base = if state.viewport.auto_scroll {
+        state.viewport.max_scroll
     } else {
-        state.scroll
+        state.viewport.scroll
     };
-    state.auto_scroll = false;
+    state.viewport.auto_scroll = false;
     if delta < 0 {
-        state.scroll = base.saturating_sub(delta.unsigned_abs());
+        state.viewport.scroll = base.saturating_sub(delta.unsigned_abs());
     } else {
-        state.scroll = base.saturating_add(delta as usize).min(state.max_scroll);
+        state.viewport.scroll = base
+            .saturating_add(delta as usize)
+            .min(state.viewport.max_scroll);
     }
 }
 
@@ -29,6 +32,7 @@ fn handle_key(
     if key.kind == crossterm::event::KeyEventKind::Release {
         return false;
     }
+    state.input.clamp_cursor();
 
     if key.modifiers.contains(KeyModifiers::CONTROL)
         && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'c'))
@@ -72,7 +76,7 @@ fn handle_key(
 
     match (key.modifiers, key.code) {
         (KeyModifiers::CONTROL, KeyCode::Char('t')) => {
-            state.show_borders = !state.show_borders;
+            state.viewport.show_borders = !state.viewport.show_borders;
         }
         (KeyModifiers::NONE, KeyCode::Esc) => {
             state.quit = true;
@@ -85,13 +89,20 @@ fn handle_key(
         }
         (KeyModifiers::SHIFT, KeyCode::Enter) => insert_char(state, '\n'),
         (KeyModifiers::CONTROL, KeyCode::Char('a')) | (KeyModifiers::NONE, KeyCode::Home) => {
-            state.input_cursor = 0;
+            state.input.cursor = 0;
         }
         (KeyModifiers::CONTROL, KeyCode::Char('e')) | (KeyModifiers::NONE, KeyCode::End) => {
-            state.input_cursor = state.input_buf.len();
+            state.input.cursor = state.input.buf.len();
         }
         (KeyModifiers::CONTROL, KeyCode::Char('u')) => cursor_delete_before(state),
         (KeyModifiers::CONTROL, KeyCode::Char('k')) => cursor_delete_after(state),
+        (KeyModifiers::CONTROL, KeyCode::Char('d')) => {
+            if state.input.buf.is_empty() {
+                state.quit = true;
+                return true;
+            }
+            cursor_delete_char_after(state);
+        }
         (KeyModifiers::ALT, KeyCode::Left) | (KeyModifiers::ALT, KeyCode::Char('b')) => {
             cursor_word_left(state);
         }
@@ -102,7 +113,9 @@ fn handle_key(
         (KeyModifiers::NONE, KeyCode::Right) => cursor_right(state),
         (KeyModifiers::NONE, KeyCode::Enter) => return handle_enter(state, orch_tx),
         (KeyModifiers::NONE, KeyCode::Backspace) => cursor_backspace(state),
-        (KeyModifiers::CONTROL, KeyCode::Char('w')) => cursor_delete_word(state),
+        (KeyModifiers::CONTROL, KeyCode::Char('w')) | (KeyModifiers::ALT, KeyCode::Backspace) => {
+            cursor_delete_word(state)
+        }
         (KeyModifiers::NONE, KeyCode::PageUp) => {
             scroll_by(state, -((SCROLL_STEP * 5) as isize));
         }
@@ -110,29 +123,34 @@ fn handle_key(
             scroll_by(state, (SCROLL_STEP * 5) as isize);
         }
         (KeyModifiers::NONE, KeyCode::Up) => {
-            if !state.input_history.is_empty() && state.input_buf.is_empty() {
-                let idx = match state.history_idx {
-                    None => state.input_history.len().saturating_sub(1),
+            if !state.input.history.is_empty()
+                && (state.input.buf.is_empty() || state.input.history_idx.is_some())
+            {
+                if state.input.history_idx.is_none() {
+                    state.input.draft_before_history = Some(state.input.buf.clone());
+                }
+                let idx = match state.input.history_idx {
+                    None => state.input.history.len().saturating_sub(1),
                     Some(i) => i.saturating_sub(1),
                 };
-                state.input_buf = state.input_history[idx].clone();
-                state.input_cursor = state.input_buf.len();
-                state.history_idx = Some(idx);
+                state.input.buf = state.input.history[idx].clone();
+                state.input.cursor = state.input.buf.len();
+                state.input.history_idx = Some(idx);
             } else {
                 scroll_by(state, -(SCROLL_STEP as isize));
             }
         }
         (KeyModifiers::NONE, KeyCode::Down) => {
-            if let Some(idx) = state.history_idx {
+            if let Some(idx) = state.input.history_idx {
                 let next = idx + 1;
-                if next >= state.input_history.len() {
-                    state.input_buf.clear();
-                    state.input_cursor = 0;
-                    state.history_idx = None;
+                if next >= state.input.history.len() {
+                    state.input.buf = state.input.draft_before_history.take().unwrap_or_default();
+                    state.input.cursor = state.input.buf.len();
+                    state.input.history_idx = None;
                 } else {
-                    state.input_buf = state.input_history[next].clone();
-                    state.input_cursor = state.input_buf.len();
-                    state.history_idx = Some(next);
+                    state.input.buf = state.input.history[next].clone();
+                    state.input.cursor = state.input.buf.len();
+                    state.input.history_idx = Some(next);
                 }
             } else {
                 scroll_by(state, SCROLL_STEP as isize);
@@ -157,12 +175,12 @@ pub(crate) fn handle_ctrl_c(state: &mut TuiState) -> bool {
         return true;
     }
 
-    if state.work_state.is_working() {
-        if let Some(ref interrupt) = state.interrupt {
-            interrupt.store(true, Ordering::SeqCst);
-            state.last_interrupt = Some(now);
-            return false;
-        }
+    if state.work_state.is_working()
+        && let Some(ref interrupt) = state.interrupt
+    {
+        interrupt.store(true, Ordering::SeqCst);
+        state.last_interrupt = Some(now);
+        return false;
     }
 
     state.quit = true;
@@ -170,98 +188,144 @@ pub(crate) fn handle_ctrl_c(state: &mut TuiState) -> bool {
 }
 
 fn insert_char(state: &mut TuiState, c: char) {
-    state.input_buf.insert(state.input_cursor, c);
-    state.input_cursor += c.len_utf8();
+    state.input.clamp_cursor();
+    state.input.buf.insert(state.input.cursor, c);
+    state.input.cursor += c.len_utf8();
 }
 
 fn cursor_left(state: &mut TuiState) {
-    if state.input_cursor > 0 {
-        let mut pos = state.input_cursor - 1;
-        while pos > 0 && !state.input_buf.is_char_boundary(pos) {
+    if state.input.cursor > 0 {
+        let mut pos = state.input.cursor - 1;
+        while pos > 0 && !state.input.buf.is_char_boundary(pos) {
             pos -= 1;
         }
-        state.input_cursor = pos;
+        state.input.cursor = pos;
     }
 }
 
 fn cursor_right(state: &mut TuiState) {
-    if state.input_cursor < state.input_buf.len() {
-        let mut pos = state.input_cursor + 1;
-        while pos < state.input_buf.len() && !state.input_buf.is_char_boundary(pos) {
+    if state.input.cursor < state.input.buf.len() {
+        let mut pos = state.input.cursor + 1;
+        while pos < state.input.buf.len() && !state.input.buf.is_char_boundary(pos) {
             pos += 1;
         }
-        state.input_cursor = pos;
+        state.input.cursor = pos;
     }
 }
 
 fn cursor_word_left(state: &mut TuiState) {
-    let mut pos = state.input_cursor;
+    state.input.clamp_cursor();
+    let mut pos = state.input.cursor;
     while pos > 0 {
-        pos = prev_char_boundary(&state.input_buf, pos);
-        let ch = state.input_buf[pos..].chars().next().unwrap();
+        pos = prev_char_boundary(&state.input.buf, pos);
+        let Some(ch) = char_at(&state.input.buf, pos) else {
+            break;
+        };
         if !ch.is_whitespace() {
             break;
         }
     }
     while pos > 0 {
-        let prev = prev_char_boundary(&state.input_buf, pos);
-        let ch = state.input_buf[prev..].chars().next().unwrap();
+        let prev = prev_char_boundary(&state.input.buf, pos);
+        let Some(ch) = char_at(&state.input.buf, prev) else {
+            break;
+        };
         if ch.is_whitespace() {
             break;
         }
         pos = prev;
     }
-    state.input_cursor = pos;
+    state.input.cursor = pos;
 }
 
 fn cursor_word_right(state: &mut TuiState) {
-    let mut pos = state.input_cursor;
-    while pos < state.input_buf.len() {
-        let ch = state.input_buf[pos..].chars().next().unwrap();
+    state.input.clamp_cursor();
+    let mut pos = state.input.cursor;
+    while pos < state.input.buf.len() {
+        let Some(ch) = char_at(&state.input.buf, pos) else {
+            break;
+        };
         if ch.is_whitespace() {
             break;
         }
         pos += ch.len_utf8();
     }
-    while pos < state.input_buf.len() {
-        let ch = state.input_buf[pos..].chars().next().unwrap();
+    while pos < state.input.buf.len() {
+        let Some(ch) = char_at(&state.input.buf, pos) else {
+            break;
+        };
         if !ch.is_whitespace() {
             break;
         }
         pos += ch.len_utf8();
     }
-    state.input_cursor = pos;
+    state.input.cursor = pos;
 }
 
 fn cursor_backspace(state: &mut TuiState) {
-    if state.input_cursor > 0 {
-        let mut pos = state.input_cursor - 1;
-        while pos > 0 && !state.input_buf.is_char_boundary(pos) {
+    state.input.clamp_cursor();
+    if state.input.cursor > 0 {
+        let mut pos = state.input.cursor - 1;
+        while pos > 0 && !state.input.buf.is_char_boundary(pos) {
             pos -= 1;
         }
-        state.input_buf.remove(pos);
-        state.input_cursor = pos;
+        state.input.buf.remove(pos);
+        state.input.cursor = pos;
     }
 }
 
 fn cursor_delete_before(state: &mut TuiState) {
-    state.input_buf.replace_range(..state.input_cursor, "");
-    state.input_cursor = 0;
+    state.input.clamp_cursor();
+    state.input.buf.replace_range(..state.input.cursor, "");
+    state.input.cursor = 0;
 }
 
 fn cursor_delete_after(state: &mut TuiState) {
-    state.input_buf.replace_range(state.input_cursor.., "");
+    state.input.clamp_cursor();
+    state.input.buf.replace_range(state.input.cursor.., "");
+}
+
+fn cursor_delete_char_after(state: &mut TuiState) {
+    state.input.clamp_cursor();
+    if state.input.cursor < state.input.buf.len() {
+        let next = next_char_boundary(&state.input.buf, state.input.cursor);
+        state.input.buf.replace_range(state.input.cursor..next, "");
+    }
 }
 
 fn cursor_delete_word(state: &mut TuiState) {
-    let prefix: String = state.input_buf[..state.input_cursor].to_string();
-    if let Some(pos) = prefix.trim_end().rfind(' ') {
-        state.input_buf.replace_range(pos..state.input_cursor, "");
-        state.input_cursor = pos;
-    } else {
-        state.input_buf.replace_range(..state.input_cursor, "");
-        state.input_cursor = 0;
+    state.input.clamp_cursor();
+    let end = state.input.cursor;
+    let mut start = end;
+
+    while start > 0 {
+        let prev = prev_char_boundary(&state.input.buf, start);
+        let Some(ch) = char_at(&state.input.buf, prev) else {
+            break;
+        };
+        if !ch.is_whitespace() {
+            break;
+        }
+        start = prev;
     }
+
+    while start > 0 {
+        let prev = prev_char_boundary(&state.input.buf, start);
+        let Some(ch) = char_at(&state.input.buf, prev) else {
+            break;
+        };
+        if ch.is_whitespace() {
+            break;
+        }
+        start = prev;
+    }
+
+    state.input.buf.replace_range(start..end, "");
+    state.input.cursor = start;
+}
+
+fn char_at(s: &str, pos: usize) -> Option<char> {
+    s.get(pos..)?.chars().next()
 }
 
 fn prev_char_boundary(s: &str, pos: usize) -> usize {
@@ -272,55 +336,65 @@ fn prev_char_boundary(s: &str, pos: usize) -> usize {
     prev
 }
 
+fn next_char_boundary(s: &str, pos: usize) -> usize {
+    let mut next = (pos + 1).min(s.len());
+    while next < s.len() && !s.is_char_boundary(next) {
+        next += 1;
+    }
+    next
+}
+
 fn handle_enter(
     state: &mut TuiState,
     orch_tx: &tokio::sync::mpsc::UnboundedSender<OrchCmd>,
 ) -> bool {
-    let input = std::mem::take(&mut state.input_buf);
-    state.input_cursor = 0;
+    state.input.clamp_cursor();
+    let input = std::mem::take(&mut state.input.buf);
+    state.input.cursor = 0;
     if input.is_empty() {
         return false;
     }
-    state.input_history.push(input.clone());
-    state.history_idx = None;
+    state.input.history.push(input.clone());
+    state.input.history_idx = None;
     state.push_line(MsgLine::new(format!("> {input}"), MsgKind::Info));
-    if input.starts_with('/') {
-        match input.as_str() {
-            "/flash" => {
+    match parse_slash_command(&input) {
+        Ok(Some(command)) => match command {
+            SlashCommand::Flash => {
                 let _ = orch_tx.send(OrchCmd::SetModel("flash".into()));
                 state.model = "flash".into();
             }
-            "/pro" => {
+            SlashCommand::Pro => {
                 let _ = orch_tx.send(OrchCmd::SetModel("pro".into()));
                 state.model = "pro".into();
             }
-            "/compact" => {
+            SlashCommand::Compact => {
                 let (done_tx, _) = tokio::sync::oneshot::channel();
                 let _ = orch_tx.send(OrchCmd::Compact { done: done_tx });
                 state.work_state = WorkState::Compacting;
             }
-            "/help" => state.add_help(),
-            "/skills" => state.show_skills(),
-            "/exit" | "/quit" | "/q" => {
+            SlashCommand::Help => state.add_help(),
+            SlashCommand::Skills => state.show_skills(),
+            SlashCommand::Quit => {
                 state.quit = true;
                 return true;
             }
-            _ => {
-                state.push_line(MsgLine::new(
-                    "Unknown command. Prefix with a space to send it as text.".into(),
-                    MsgKind::Info,
-                ));
-            }
+        },
+        Ok(None) => {
+            let (done_tx, _) = tokio::sync::oneshot::channel();
+            let _ = orch_tx.send(OrchCmd::UserInput {
+                input,
+                done: done_tx,
+            });
+            state.work_state = WorkState::WaitingModel;
         }
-    } else {
-        let (done_tx, _) = tokio::sync::oneshot::channel();
-        let _ = orch_tx.send(OrchCmd::UserInput {
-            input,
-            done: done_tx,
-        });
-        state.work_state = WorkState::WaitingModel;
+        Err(_) => {
+            state.push_line(MsgLine::new(
+                "Unknown command. Prefix with a space to send it as text.".into(),
+                MsgKind::Info,
+            ));
+        }
     }
-    state.auto_scroll = true;
+    state.viewport.auto_scroll = true;
     false
 }
 
@@ -347,46 +421,60 @@ pub(crate) fn handle_event(
                 }
             }
             MouseEventKind::Down(_) => {
-                if state.click_map.is_empty() {
+                if state.viewport.click_map.is_empty() {
                     return false;
                 }
-                let abs_row =
-                    usize::from(mouse.row.saturating_sub(state.content_y).saturating_sub(1))
-                        + state.effective_scroll;
-                let mut hit: Option<usize> = None;
-                for (idx, start, end) in &state.click_map {
-                    if (*start..=*end).contains(&abs_row) {
-                        hit = Some(*idx);
+                let Some(row) = content_row_for_mouse(state, mouse.row) else {
+                    return false;
+                };
+                let mut hit: Option<(usize, ClickAction)> = None;
+                for target in &state.viewport.click_map {
+                    if (target.start_row..=target.end_row).contains(&row) {
+                        hit = Some((target.line_idx, target.action.clone()));
                         break;
                     }
                 }
-                if let Some(idx) = hit
-                    && let Some(msg) = state.lines.get_mut(idx)
-                {
-                    if matches!(msg.kind, MsgKind::StreamThinking) {
-                        msg.collapsed = !msg.collapsed;
-                    } else if msg.kind == MsgKind::SubAgent && msg.sub_detail.is_some() {
+                match hit {
+                    Some((idx, ClickAction::ToggleCollapse)) => {
+                        if let Some(msg) = state.lines.get_mut(idx) {
+                            msg.toggle_collapsed();
+                            state.invalidate_all_cache();
+                        }
+                    }
+                    Some((_, ClickAction::OpenSubAgentDetail { session_id })) => {
                         state.view = View::SubAgentDetail {
-                            line_idx: idx,
+                            session_id,
                             scroll: 0,
                         };
                     }
+                    None => {}
                 }
             }
             _ => {}
         },
         Event::Resize(..) => {}
         Event::Paste(content) => {
+            state.input.clamp_cursor();
             let to_insert: String = content
                 .chars()
                 .filter(|&ch| !ch.is_control() || ch == '\n' || ch == '\t')
                 .collect();
             if !to_insert.is_empty() {
-                state.input_buf.insert_str(state.input_cursor, &to_insert);
-                state.input_cursor += to_insert.len();
+                state.input.buf.insert_str(state.input.cursor, &to_insert);
+                state.input.cursor += to_insert.len();
             }
         }
         _ => {}
     }
     false
+}
+
+fn content_row_for_mouse(state: &TuiState, mouse_row: u16) -> Option<usize> {
+    if state.viewport.show_borders {
+        (mouse_row > state.viewport.content_y)
+            .then(|| usize::from(mouse_row - state.viewport.content_y - 1))
+    } else {
+        (mouse_row >= state.viewport.content_y)
+            .then(|| usize::from(mouse_row - state.viewport.content_y))
+    }
 }

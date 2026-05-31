@@ -1,5 +1,6 @@
 //! TUI module for dscode using ratatui.
 
+mod command;
 mod display;
 mod input;
 mod markdown;
@@ -105,15 +106,53 @@ fn tui_main_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::command::{SlashCommand, parse_slash_command};
     use crate::tui::input::{handle_ctrl_c, handle_event};
-    use crate::tui::markdown::strip_ansi;
-    use crate::tui::render::{split_at_visual_width, visible_lines};
-    use crate::tui::state::{MsgKind, MsgLine, TuiState, WorkState};
+    use crate::tui::markdown::{
+        InlineNode, MdBlock, TableAlign, TableRows, normalize_markdown_input, parse_blocks,
+        push_msg, render_table, strip_ansi, wrap_lines_word,
+    };
+    use crate::tui::render::{
+        build_status_line, build_visible_click_map, collapsed_summary, content_viewport_height,
+        detail_lines_for_session, detail_viewport_height, split_at_visual_width, visible_lines,
+    };
+    use crate::tui::state::{
+        ClickAction, ClickTarget, CollapsePolicy, MsgKind, MsgLine, SubAgentDetail, TuiState, View,
+        WorkState,
+    };
+    use crate::ui::{Display, ToolResultDisplay};
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
-    use ratatui::text::Line;
+    use ratatui::{
+        Terminal,
+        backend::TestBackend,
+        style::{Color, Style},
+        text::{Line, Span},
+    };
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn tui_display_detail_uses_full_tool_result_content() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let display = TuiDisplay::new(tx);
+
+        display.render_tool_result_detail(&ToolResultDisplay {
+            tool_name: "Bash",
+            content_preview: "short preview\n",
+            content: "full output\nwith more detail",
+            tool_use_id: Some("toolu_1"),
+            exit_code: Some(0),
+        });
+
+        match rx.recv().unwrap() {
+            TuiSignal::ToolResult { tool_name, content } => {
+                assert_eq!(tool_name, "Bash");
+                assert_eq!(content, "full output\nwith more detail");
+            }
+            other => panic!("unexpected signal: {other:?}"),
+        }
+    }
 
     #[test]
     fn split_at_visual_width_respects_cjk_width() {
@@ -132,6 +171,21 @@ mod tests {
     #[test]
     fn strip_ansi_removes_basic_sgr_sequences() {
         assert_eq!(strip_ansi("\x1b[31mred\x1b[0m plain"), "red plain");
+    }
+
+    #[test]
+    fn strip_ansi_removes_common_non_sgr_sequences_without_swallowing_text() {
+        assert_eq!(strip_ansi("a\x1b[Kb\x1b[?25lc"), "abc");
+        assert_eq!(strip_ansi("x\x1b]0;title\x07y"), "xy");
+        assert_eq!(strip_ansi("x\x1b]8;;https://e.test\x1b\\link"), "xlink");
+    }
+
+    #[test]
+    fn markdown_normalize_cleans_control_sequences_and_line_endings() {
+        assert_eq!(
+            normalize_markdown_input("a\r\n\t\x1b[31mred\x1b[0m\x07\rb", false),
+            "a\n    red\nb"
+        );
     }
 
     #[test]
@@ -196,7 +250,7 @@ mod tests {
             out_tokens: 0,
         });
         state.lines[0].cached_lines = Some(vec![Line::from("stale")]);
-        state.cached_all = Some(vec![Line::from("stale")]);
+        state.cache.history_lines = Some(vec![Line::from("stale")]);
 
         state.apply(&TuiSignal::SubAgentOutput {
             session_id: "sub_1".into(),
@@ -209,7 +263,7 @@ mod tests {
 
         assert!(state.lines[0].text.contains("ok"));
         assert!(state.lines[0].cached_lines.is_none());
-        assert!(state.cached_all.is_none());
+        assert!(state.cache.history_lines.is_none());
         let detail = state.lines[0].sub_detail.as_ref().unwrap();
         assert_eq!(detail.thinking, "child thinking");
         assert_eq!(detail.text, "child text");
@@ -225,7 +279,7 @@ mod tests {
             out_tokens: 0,
         });
         state.lines[0].cached_lines = Some(vec![Line::from("stale")]);
-        state.cached_all = Some(vec![Line::from("stale")]);
+        state.cache.history_lines = Some(vec![Line::from("stale")]);
 
         state.apply(&TuiSignal::SubAgentStatus {
             session_id: "sub_1".into(),
@@ -235,10 +289,10 @@ mod tests {
         });
 
         assert_eq!(state.lines.len(), 1);
-        assert_eq!(state.active_sub_agent_sessions.len(), 1);
+        assert_eq!(state.sub_agents.active_sessions.len(), 1);
         assert!(state.lines[0].text.contains("running"));
         assert!(state.lines[0].cached_lines.is_none());
-        assert!(state.cached_all.is_none());
+        assert!(state.cache.history_lines.is_none());
     }
 
     #[test]
@@ -262,7 +316,7 @@ mod tests {
         state.apply(&output);
         state.apply(&output);
 
-        assert!(state.active_sub_agent_sessions.is_empty());
+        assert!(state.sub_agents.active_sessions.is_empty());
         assert_eq!(state.work_state, WorkState::WaitingModel);
         assert_eq!(state.lines.len(), 1);
     }
@@ -270,11 +324,9 @@ mod tests {
     #[test]
     fn unknown_slash_command_does_not_reach_orchestrator() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut state = TuiState {
-            input_buf: "/unknown".into(),
-            input_cursor: "/unknown".len(),
-            ..Default::default()
-        };
+        let mut state = TuiState::default();
+        state.input.buf = "/unknown".into();
+        state.input.cursor = "/unknown".len();
 
         let key = crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Enter,
@@ -301,6 +353,265 @@ mod tests {
         assert_eq!(render::clamp_input_scroll(8, 1, 5, 3), 1);
         assert_eq!(render::clamp_input_scroll(8, 4, 5, 2), 2);
         assert_eq!(render::clamp_input_scroll(3, 2, 5, 9), 0);
+    }
+
+    #[test]
+    fn borderless_viewports_use_full_area_height() {
+        assert_eq!(content_viewport_height(10, true), 8);
+        assert_eq!(content_viewport_height(10, false), 10);
+        assert_eq!(detail_viewport_height(1, true), 0);
+        assert_eq!(detail_viewport_height(1, false), 1);
+    }
+
+    #[test]
+    fn slash_command_parser_classifies_known_unknown_and_text() {
+        assert_eq!(
+            parse_slash_command("/flash").unwrap(),
+            Some(SlashCommand::Flash)
+        );
+        assert_eq!(parse_slash_command("/q").unwrap(), Some(SlashCommand::Quit));
+        assert_eq!(parse_slash_command(" /flash").unwrap(), None);
+        assert!(parse_slash_command("/unknown").is_err());
+    }
+
+    #[test]
+    fn wrap_lines_word_preserves_span_styles_across_wraps() {
+        let red = Style::default().fg(Color::Red);
+        let green = Style::default().fg(Color::Green);
+        let lines = vec![Line::from(vec![
+            Span::styled("abc", red),
+            Span::styled("def", green),
+        ])];
+
+        let wrapped = wrap_lines_word(&lines, 4);
+
+        assert_eq!(wrapped.len(), 2);
+        assert_eq!(wrapped[0].spans[0].style, red);
+        assert_eq!(wrapped[0].spans[1].style, green);
+        assert_eq!(wrapped[1].spans[0].style, green);
+        assert_eq!(line_text(&wrapped[0]), "abcd");
+        assert_eq!(line_text(&wrapped[1]), "ef");
+    }
+
+    #[test]
+    fn markdown_renderer_handles_heading_list_and_inline_code() {
+        let mut lines = Vec::new();
+
+        push_msg(&mut lines, "# Title\n- item `code`", MsgKind::Text);
+
+        assert_eq!(line_text(&lines[0]), "Title");
+        assert_eq!(line_text(&lines[1]), "- item code");
+        assert!(
+            lines[0].spans[0]
+                .style
+                .add_modifier
+                .contains(ratatui::style::Modifier::BOLD)
+        );
+        assert_eq!(lines[1].spans[0].style.fg, Some(Color::Yellow));
+        assert_eq!(lines[1].spans[3].content.as_ref(), "code");
+        assert_eq!(lines[1].spans[3].style.fg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn markdown_parser_builds_block_ir_for_core_blocks() {
+        let blocks =
+            parse_blocks("# Title\n\n> quote\n- item `code`\n```rust\nfn main() {}\n```\nplain");
+
+        assert!(matches!(
+            &blocks[0],
+            MdBlock::Heading {
+                level: 1,
+                content
+            } if content == &vec![InlineNode::Text("Title".into())]
+        ));
+        assert!(matches!(blocks[1], MdBlock::Blank));
+        assert!(matches!(
+            &blocks[2],
+            MdBlock::BlockQuote(content)
+                if content == &vec![InlineNode::Text("quote".into())]
+        ));
+        assert!(matches!(
+            &blocks[3],
+            MdBlock::ListItem { marker, content }
+                if marker == "-" && content == &vec![
+                    InlineNode::Text("item ".into()),
+                    InlineNode::Code("code".into())
+                ]
+        ));
+        assert!(matches!(
+            &blocks[4],
+            MdBlock::CodeBlock { lang, lines }
+                if lang.as_deref() == Some("rust") && lines == &vec!["fn main() {}".to_string()]
+        ));
+        assert!(matches!(
+            &blocks[5],
+            MdBlock::Paragraph(content)
+                if content == &vec![InlineNode::Text("plain".into())]
+        ));
+    }
+
+    #[test]
+    fn markdown_parser_keeps_unclosed_code_fence_as_code_block() {
+        let blocks = parse_blocks("```text\nopen\nstill open");
+
+        assert_eq!(blocks.len(), 1);
+        assert!(matches!(
+            &blocks[0],
+            MdBlock::CodeBlock { lang, lines }
+                if lang.as_deref() == Some("text")
+                    && lines == &vec!["open".to_string(), "still open".to_string()]
+        ));
+    }
+
+    #[test]
+    fn markdown_renderer_aligns_pipe_tables() {
+        let mut lines = Vec::new();
+
+        push_msg(
+            &mut lines,
+            "| Name | Count | Note |\n| :--- | ---: | :---: |\n| 中 | 2 | ok |\n| long-name | 10 | yes |",
+            MsgKind::Text,
+        );
+
+        assert_eq!(line_text(&lines[0]), "Name      │ Count │ Note");
+        assert_eq!(line_text(&lines[1]), "──────────┼───────┼─────");
+        assert_eq!(line_text(&lines[2]), "中        │     2 │  ok ");
+        assert_eq!(line_text(&lines[3]), "long-name │    10 │ yes ");
+        assert!(
+            lines[0].spans[0]
+                .style
+                .add_modifier
+                .contains(ratatui::style::Modifier::BOLD)
+        );
+    }
+
+    #[test]
+    fn markdown_renderer_keeps_escaped_pipe_inside_table_cell() {
+        let mut lines = Vec::new();
+
+        push_msg(
+            &mut lines,
+            "| Pattern | Meaning |\n| --- | --- |\n| `a\\|b` | escaped pipe |",
+            MsgKind::Text,
+        );
+
+        assert_eq!(line_text(&lines[0]), "Pattern │ Meaning     ");
+        assert_eq!(line_text(&lines[2]), "`a|b`   │ escaped pipe");
+    }
+
+    #[test]
+    fn markdown_table_renderer_falls_back_for_invalid_table_rows() {
+        let mut lines = Vec::new();
+        let table = TableRows {
+            header: vec!["A".into(), "B".into()],
+            alignments: vec![TableAlign::Left],
+            rows: vec![vec!["1".into(), "2".into()], vec!["too-short".into()]],
+        };
+
+        render_table(&mut lines, &table, Style::default());
+
+        assert_eq!(line_text(&lines[0]), "A | B");
+        assert_eq!(line_text(&lines[1]), "1 | 2");
+        assert_eq!(line_text(&lines[2]), "too-short");
+    }
+
+    #[test]
+    fn markdown_renderer_styles_strong_emphasis_and_links() {
+        let mut lines = Vec::new();
+
+        push_msg(
+            &mut lines,
+            "Use **bold** and *em* plus [docs](https://example.com)",
+            MsgKind::Text,
+        );
+
+        assert_eq!(
+            line_text(&lines[0]),
+            "Use bold and em plus docs (https://example.com)"
+        );
+        assert!(
+            lines[0].spans[1]
+                .style
+                .add_modifier
+                .contains(ratatui::style::Modifier::BOLD)
+        );
+        assert!(
+            lines[0].spans[3]
+                .style
+                .add_modifier
+                .contains(ratatui::style::Modifier::ITALIC)
+        );
+        assert_eq!(lines[0].spans[5].style.fg, Some(Color::Cyan));
+        assert!(
+            lines[0].spans[5]
+                .style
+                .add_modifier
+                .contains(ratatui::style::Modifier::UNDERLINED)
+        );
+        assert_eq!(lines[0].spans[6].style.fg, Some(Color::DarkGray));
+    }
+
+    #[test]
+    fn markdown_renderer_keeps_blockquote_inline_styles() {
+        let mut lines = Vec::new();
+
+        push_msg(
+            &mut lines,
+            "> quoted **bold** and [docs](https://example.com/a_(b))",
+            MsgKind::Text,
+        );
+
+        assert_eq!(
+            line_text(&lines[0]),
+            "| quoted bold and docs (https://example.com/a_(b))"
+        );
+        assert_eq!(lines[0].spans[0].style.fg, Some(Color::DarkGray));
+        assert!(
+            lines[0].spans[2]
+                .style
+                .add_modifier
+                .contains(ratatui::style::Modifier::BOLD)
+        );
+        assert_eq!(lines[0].spans[4].style.fg, Some(Color::Cyan));
+        assert!(
+            lines[0].spans[4]
+                .style
+                .add_modifier
+                .contains(ratatui::style::Modifier::UNDERLINED)
+        );
+    }
+
+    #[test]
+    fn colored_tool_diff_is_detected_after_normalization() {
+        let mut lines = Vec::new();
+
+        push_msg(
+            &mut lines,
+            "\x1b[31m--- a/file\x1b[0m\n\x1b[32m+++ b/file\x1b[0m\n@@ -1 +1 @@\n-old\n+new",
+            MsgKind::ToolResult,
+        );
+
+        assert_eq!(line_text(&lines[0]), "--- a/file");
+        assert_eq!(line_text(&lines[1]), "+++ b/file");
+        assert_eq!(lines[0].spans[0].style.fg, Some(Color::Yellow));
+        assert_eq!(lines[2].spans[0].style.fg, Some(Color::Cyan));
+        assert_eq!(lines[3].spans[0].style.fg, Some(Color::Rgb(255, 100, 100)));
+        assert_eq!(lines[4].spans[0].style.fg, Some(Color::Rgb(100, 200, 100)));
+    }
+
+    #[test]
+    fn malformed_table_separator_falls_back_to_plain_lines() {
+        let mut lines = Vec::new();
+
+        push_msg(
+            &mut lines,
+            "| A | B |\n| nope | --- |\nplain",
+            MsgKind::Text,
+        );
+
+        assert_eq!(line_text(&lines[0]), "| A | B |");
+        assert_eq!(line_text(&lines[1]), "| nope | --- |");
+        assert_eq!(line_text(&lines[2]), "plain");
     }
 
     #[test]
@@ -362,9 +673,14 @@ mod tests {
             .lines
             .push(MsgLine::new("thinking".into(), MsgKind::StreamThinking));
         state.lines[0].collapsed = true;
-        state.click_map = vec![(0, 5, 5)];
-        state.content_y = 0;
-        state.effective_scroll = 0;
+        state.viewport.click_map = vec![ClickTarget {
+            line_idx: 0,
+            start_row: 5,
+            end_row: 5,
+            action: ClickAction::ToggleCollapse,
+        }];
+        state.viewport.content_y = 0;
+        state.viewport.effective_scroll = 0;
 
         let ev = Event::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -378,21 +694,346 @@ mod tests {
     }
 
     #[test]
+    fn mouse_click_on_top_border_does_not_toggle_first_target() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = TuiState::default();
+        state
+            .lines
+            .push(MsgLine::new("thinking".into(), MsgKind::StreamThinking));
+        state.lines[0].collapsed = true;
+        state.viewport.click_map = vec![ClickTarget {
+            line_idx: 0,
+            start_row: 0,
+            end_row: 0,
+            action: ClickAction::ToggleCollapse,
+        }];
+        state.viewport.content_y = 0;
+        state.viewport.show_borders = true;
+
+        assert!(!handle_event(
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &mut state,
+            &tx,
+        ));
+        assert!(state.lines[0].collapsed);
+    }
+
+    #[test]
+    fn mouse_click_without_borders_uses_area_top_as_content_row() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = TuiState::default();
+        state
+            .lines
+            .push(MsgLine::new("thinking".into(), MsgKind::StreamThinking));
+        state.lines[0].collapsed = true;
+        state.viewport.click_map = vec![ClickTarget {
+            line_idx: 0,
+            start_row: 0,
+            end_row: 0,
+            action: ClickAction::ToggleCollapse,
+        }];
+        state.viewport.content_y = 0;
+        state.viewport.show_borders = false;
+
+        assert!(!handle_event(
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &mut state,
+            &tx,
+        ));
+        assert!(!state.lines[0].collapsed);
+    }
+
+    #[test]
+    fn long_tool_result_defaults_collapsed_and_can_be_clicked_open() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = TuiState::default();
+        let text = (0..25)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        state.lines.push(MsgLine::new(text, MsgKind::ToolResult));
+        state.lines[0].cached_lines = Some(vec![Line::from("stale")]);
+        state.cache.history_lines = Some(vec![Line::from("stale")]);
+        state.viewport.click_map = vec![ClickTarget {
+            line_idx: 0,
+            start_row: 0,
+            end_row: 0,
+            action: ClickAction::ToggleCollapse,
+        }];
+
+        assert!(state.lines[0].collapsed);
+        assert_eq!(
+            state.lines[0].collapse_policy,
+            CollapsePolicy::Auto {
+                threshold_lines: 20
+            }
+        );
+        assert!(!handle_event(
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 0,
+                row: 1,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &mut state,
+            &tx,
+        ));
+        assert!(!state.lines[0].collapsed);
+        assert!(state.lines[0].cached_lines.is_none());
+        assert!(state.cache.history_lines.is_none());
+    }
+
+    #[test]
+    fn short_tool_result_does_not_default_to_collapsed() {
+        let line = MsgLine::new("short\noutput".into(), MsgKind::ToolResult);
+
+        assert!(!line.collapsed);
+        assert_eq!(
+            line.collapse_policy,
+            CollapsePolicy::Auto {
+                threshold_lines: 20
+            }
+        );
+    }
+
+    #[test]
+    fn collapsed_summary_includes_tool_result_line_count() {
+        let text = (0..25)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let line = MsgLine::new_tool_result("Bash".into(), text);
+
+        let summary = collapsed_summary(&line, 80);
+
+        assert!(summary.contains("Bash: 25 lines"));
+        assert!(summary.contains("bytes"));
+        assert!(summary.contains("line 0"));
+    }
+
+    #[test]
+    fn collapsed_summary_marks_truncated_tool_result() {
+        let line = MsgLine::new_tool_result(
+            "Read".into(),
+            "first\n\n[... truncated: showing first/last portions of 10000 bytes ...]\nlast".into(),
+        );
+
+        let summary = collapsed_summary(&line, 120);
+
+        assert!(summary.contains("Read: 4 lines"));
+        assert!(summary.contains("truncated"));
+        assert!(summary.contains("first"));
+    }
+
+    #[test]
+    fn tool_result_signal_preserves_tool_name_for_summaries() {
+        let mut state = TuiState::default();
+
+        state.apply(&TuiSignal::ToolResult {
+            tool_name: "Edit".into(),
+            content: "changed file".into(),
+        });
+
+        assert_eq!(state.lines.len(), 1);
+        assert_eq!(state.lines[0].tool_name.as_deref(), Some("Edit"));
+        assert_eq!(state.lines[0].kind, MsgKind::ToolResult);
+    }
+
+    #[test]
+    fn long_wrapped_tool_result_auto_collapses_until_user_overrides() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = TuiState::default();
+        state
+            .lines
+            .push(MsgLine::new_tool_result("Bash".into(), "x".repeat(1000)));
+        assert!(!state.lines[0].collapsed);
+
+        let backend = TestBackend::new(40, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &mut state)).unwrap();
+
+        assert!(state.lines[0].collapsed);
+        assert!(!state.lines[0].collapse_overridden);
+        assert!(!state.viewport.click_map.is_empty());
+
+        assert!(!handle_event(
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 0,
+                row: state.viewport.content_y + 1,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &mut state,
+            &tx,
+        ));
+        assert!(!state.lines[0].collapsed);
+        assert!(state.lines[0].collapse_overridden);
+
+        terminal.draw(|f| render(f, &mut state)).unwrap();
+
+        assert!(!state.lines[0].collapsed);
+    }
+
+    #[test]
+    fn visible_click_map_keeps_only_viewport_relative_targets() {
+        let mut state = TuiState::default();
+        state
+            .lines
+            .push(MsgLine::new("hidden".into(), MsgKind::StreamThinking));
+        state
+            .lines
+            .push(MsgLine::new("visible".into(), MsgKind::StreamThinking));
+        state
+            .lines
+            .push(MsgLine::new("below".into(), MsgKind::StreamThinking));
+        state.lines[0].cached_lines = Some(vec![Line::from("h0"), Line::from("h1")]);
+        state.lines[1].cached_lines = Some(vec![Line::from("v0"), Line::from("v1")]);
+        state.lines[2].cached_lines = Some(vec![Line::from("b0")]);
+
+        let targets = build_visible_click_map(&state, 2, 2);
+
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].line_idx, 1);
+        assert_eq!(targets[0].start_row, 0);
+        assert_eq!(targets[0].end_row, 1);
+        assert_eq!(targets[0].action, ClickAction::ToggleCollapse);
+    }
+
+    #[test]
+    fn status_line_adapts_to_terminal_width() {
+        let mut state = TuiState {
+            work_state: WorkState::StreamingText,
+            ..Default::default()
+        };
+        state.stats.current_turn_count = 12;
+        state.stats.agent_request_count = 18;
+        state.stats.total_input_tokens = 14_000;
+        state.stats.total_cache_read_tokens = 2_000;
+        state.stats.total_output_tokens = 3_000;
+        state.stats.current_context_tokens = 58_000;
+        state.stats.max_context_tokens = 80_000;
+        state.stats.belief = 0.75;
+
+        let narrow = build_status_line(&state, 40);
+        let medium = build_status_line(&state, 80);
+        let wide = build_status_line(&state, 120);
+
+        assert!(unicode_width::UnicodeWidthStr::width(narrow.as_str()) <= 40);
+        assert!(unicode_width::UnicodeWidthStr::width(medium.as_str()) <= 80);
+        assert!(unicode_width::UnicodeWidthStr::width(wide.as_str()) <= 120);
+        assert!(!narrow.contains(" T:"));
+        assert!(medium.contains(" I:"));
+        assert!(wide.contains(" T:12"));
+        assert!(wide.contains(" R:18"));
+    }
+
+    #[test]
+    fn mouse_click_on_sub_agent_opens_detail_by_session_id() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = TuiState::default();
+        state.lines.push(
+            MsgLine::new("sub".into(), MsgKind::SubAgent).with_sub_detail(Some(SubAgentDetail {
+                thinking: String::new(),
+                text: String::new(),
+            })),
+        );
+        state.sub_agents.line_by_session.insert("sub_1".into(), 0);
+        state.viewport.click_map = vec![ClickTarget {
+            line_idx: 0,
+            start_row: 0,
+            end_row: 0,
+            action: ClickAction::OpenSubAgentDetail {
+                session_id: "sub_1".into(),
+            },
+        }];
+        state.viewport.content_y = 0;
+        state.viewport.effective_scroll = 0;
+
+        assert!(!handle_event(
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 0,
+                row: 1,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &mut state,
+            &tx,
+        ));
+
+        assert!(matches!(
+            state.view,
+            View::SubAgentDetail {
+                ref session_id,
+                scroll: 0
+            } if session_id == "sub_1"
+        ));
+    }
+
+    #[test]
+    fn sub_agent_detail_tracks_session_after_output_update() {
+        let mut state = TuiState::default();
+        state.apply(&TuiSignal::SubAgentStatus {
+            session_id: "sub_1".into(),
+            status: "launched".into(),
+            in_tokens: 0,
+            out_tokens: 0,
+        });
+        state.view = View::SubAgentDetail {
+            session_id: "sub_1".into(),
+            scroll: 0,
+        };
+
+        state.apply(&TuiSignal::SubAgentOutput {
+            session_id: "sub_1".into(),
+            status: "ok".into(),
+            thinking: "child thinking".into(),
+            text: "child text".into(),
+            in_tokens: 12,
+            out_tokens: 34,
+        });
+
+        assert!(matches!(
+            state.view,
+            View::SubAgentDetail {
+                ref session_id,
+                scroll: 0
+            } if session_id == "sub_1"
+        ));
+        let detail = detail_lines_for_session(&state, "sub_1");
+        let text: Vec<String> = detail.iter().map(line_text).collect();
+        assert!(text.iter().any(|line| line.contains("ok")));
+        assert!(text.iter().any(|line| line == "child thinking"));
+        assert!(text.iter().any(|line| line == "child text"));
+    }
+
+    #[test]
+    fn sub_agent_detail_missing_session_renders_fallback() {
+        let state = TuiState::default();
+
+        let detail = detail_lines_for_session(&state, "missing");
+
+        assert_eq!(detail.len(), 1);
+        assert!(line_text(&detail[0]).contains("missing"));
+    }
+
+    #[test]
     fn visible_lines_only_clones_requested_viewport_across_history_and_stream() {
         let history = vec![Line::from("h0"), Line::from("h1"), Line::from("h2")];
         let stream = vec![Line::from("s0"), Line::from("s1")];
 
         let lines = visible_lines(&history, &stream, 2, 3);
 
-        let text: Vec<String> = lines
-            .iter()
-            .map(|line| {
-                line.spans
-                    .iter()
-                    .map(|span| span.content.as_ref())
-                    .collect::<String>()
-            })
-            .collect();
+        let text: Vec<String> = lines.iter().map(line_text).collect();
         assert_eq!(text, vec!["h2", "s0", "s1"]);
     }
 
@@ -400,59 +1041,193 @@ mod tests {
     fn input_supports_readline_shortcuts_and_multiline_insert() {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut state = TuiState::default();
-        state.input_buf = "hello world".into();
-        state.input_cursor = state.input_buf.len();
+        state.input.buf = "hello world".into();
+        state.input.cursor = state.input.buf.len();
 
         assert!(!handle_event(
             Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL)),
             &mut state,
             &tx,
         ));
-        assert_eq!(state.input_cursor, 0);
+        assert_eq!(state.input.cursor, 0);
 
         assert!(!handle_event(
             Event::Key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL)),
             &mut state,
             &tx,
         ));
-        assert_eq!(state.input_cursor, state.input_buf.len());
+        assert_eq!(state.input.cursor, state.input.buf.len());
 
         assert!(!handle_event(
             Event::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT)),
             &mut state,
             &tx,
         ));
-        assert_eq!(state.input_cursor, "hello ".len());
+        assert_eq!(state.input.cursor, "hello ".len());
 
         assert!(!handle_event(
             Event::Key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL)),
             &mut state,
             &tx,
         ));
-        assert_eq!(state.input_buf, "hello ");
+        assert_eq!(state.input.buf, "hello ");
 
         assert!(!handle_event(
             Event::Key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL)),
             &mut state,
             &tx,
         ));
-        assert_eq!(state.input_buf, "");
-        assert_eq!(state.input_cursor, 0);
+        assert_eq!(state.input.buf, "");
+        assert_eq!(state.input.cursor, 0);
 
         assert!(!handle_event(
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)),
             &mut state,
             &tx,
         ));
-        assert_eq!(state.input_buf, "\n");
-        assert_eq!(state.input_cursor, 1);
+        assert_eq!(state.input.buf, "\n");
+        assert_eq!(state.input.cursor, 1);
 
         assert!(!handle_event(
             Event::Key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT)),
             &mut state,
             &tx,
         ));
-        assert_eq!(state.input_buf, "\nA");
-        assert_eq!(state.input_cursor, 2);
+        assert_eq!(state.input.buf, "\nA");
+        assert_eq!(state.input.cursor, 2);
+    }
+
+    #[test]
+    fn input_history_can_walk_multiple_entries_and_restore_draft() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = TuiState::default();
+        state.input.history = vec!["first".into(), "second".into()];
+
+        for (key, expected) in [
+            (KeyCode::Up, "second"),
+            (KeyCode::Up, "first"),
+            (KeyCode::Down, "second"),
+            (KeyCode::Down, ""),
+        ] {
+            assert!(!handle_event(
+                Event::Key(KeyEvent::new(key, KeyModifiers::NONE)),
+                &mut state,
+                &tx,
+            ));
+            assert_eq!(state.input.buf, expected);
+            assert_eq!(state.input.cursor, state.input.buf.len());
+        }
+    }
+
+    #[test]
+    fn input_ctrl_d_deletes_next_char_or_exits_when_empty() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = TuiState::default();
+        state.input.buf = "a中🙂b".into();
+        state.input.cursor = "a".len();
+
+        assert!(!handle_event(
+            Event::Key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL)),
+            &mut state,
+            &tx,
+        ));
+        assert_eq!(state.input.buf, "a🙂b");
+        assert_eq!(state.input.cursor, "a".len());
+
+        state.input.buf.clear();
+        state.input.cursor = 0;
+        assert!(handle_event(
+            Event::Key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL)),
+            &mut state,
+            &tx,
+        ));
+        assert!(state.quit);
+    }
+
+    #[test]
+    fn input_clamps_invalid_cursor_before_editing() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = TuiState::default();
+        state.input.buf = "a中b".into();
+        state.input.cursor = 2;
+
+        assert!(!handle_event(
+            Event::Key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE)),
+            &mut state,
+            &tx,
+        ));
+        assert_eq!(state.input.buf, "aX中b");
+        assert_eq!(state.input.cursor, "aX".len());
+
+        state.input.cursor = usize::MAX;
+        assert!(!handle_event(
+            Event::Key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL)),
+            &mut state,
+            &tx,
+        ));
+        assert_eq!(state.input.buf, "aX中b");
+        assert_eq!(state.input.cursor, state.input.buf.len());
+    }
+
+    #[test]
+    fn render_clamps_invalid_cursor_and_repairs_missing_cache() {
+        let mut state = TuiState::default();
+        state.input.buf = "a中b".into();
+        state.input.cursor = 2;
+        state
+            .lines
+            .push(MsgLine::new("first".into(), MsgKind::Text));
+        state
+            .lines
+            .push(MsgLine::new("second".into(), MsgKind::Text));
+        state.cache.width = 78;
+        state.cache.history_lines = Some(vec![Line::from("stale")]);
+        state.lines[0].cached_lines = Some(vec![Line::from("first")]);
+        state.lines[0].cached_collapsed = state.lines[0].collapsed;
+
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &mut state)).unwrap();
+
+        assert_eq!(state.input.cursor, "a".len());
+        assert!(state.lines[1].cached_lines.is_some());
+        assert!(
+            state
+                .cache
+                .history_lines
+                .as_ref()
+                .is_some_and(|lines| lines.len() >= 2)
+        );
+    }
+
+    #[test]
+    fn input_alt_backspace_deletes_previous_utf8_word() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = TuiState::default();
+        state.input.buf = "hello 世界".into();
+        state.input.cursor = state.input.buf.len();
+
+        assert!(!handle_event(
+            Event::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT)),
+            &mut state,
+            &tx,
+        ));
+        assert_eq!(state.input.buf, "hello ");
+        assert_eq!(state.input.cursor, "hello ".len());
+
+        assert!(!handle_event(
+            Event::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT)),
+            &mut state,
+            &tx,
+        ));
+        assert_eq!(state.input.buf, "");
+        assert_eq!(state.input.cursor, 0);
+    }
+
+    fn line_text(line: &Line<'static>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
     }
 }

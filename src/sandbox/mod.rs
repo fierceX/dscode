@@ -53,10 +53,7 @@ pub fn reexec_in_sandbox(config: &SandboxConfig, exe: &Path, args: &[String]) {
             eprintln!("[dscode] Fatal: sandbox exec returned unexpectedly");
         }
         Err(e) => {
-            eprintln!(
-                "[dscode] Fatal: sandbox unavailable ({}), exiting",
-                e
-            );
+            eprintln!("[dscode] Fatal: sandbox unavailable ({}), exiting", e);
         }
     }
     std::process::exit(1);

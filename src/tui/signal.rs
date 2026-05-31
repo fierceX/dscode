@@ -7,7 +7,10 @@ pub enum TuiSignal {
     Thinking(String),
     Text(String),
     ToolCall(String, String),
-    ToolResult(String),
+    ToolResult {
+        tool_name: String,
+        content: String,
+    },
     Error(String),
     Stop,
     Retry,
@@ -89,11 +92,11 @@ impl TuiState {
                 self.finalize_stream();
                 self.push_line(MsgLine::new(n.clone(), MsgKind::Info));
             }
-            TuiSignal::ToolResult(c) => {
+            TuiSignal::ToolResult { tool_name, content } => {
                 self.finalize_stream();
                 self.work_state = WorkState::WaitingModel;
-                if !c.is_empty() {
-                    self.push_line(MsgLine::new(c.clone(), MsgKind::ToolResult));
+                if !content.is_empty() {
+                    self.push_line(MsgLine::new_tool_result(tool_name.clone(), content.clone()));
                 }
             }
             TuiSignal::Error(m) => {
@@ -125,10 +128,10 @@ impl TuiState {
                     None
                 };
                 if launched {
-                    self.active_sub_agent_sessions.insert(session_id.clone());
+                    self.sub_agents.active_sessions.insert(session_id.clone());
                     self.work_state = WorkState::RunningSubAgent;
                 }
-                if let Some(idx) = self.sub_agent_lines.get(session_id).copied()
+                if let Some(idx) = self.sub_agents.line_by_session.get(session_id).copied()
                     && let Some(line) = self.lines.get_mut(idx)
                 {
                     line.text = title;
@@ -141,7 +144,9 @@ impl TuiState {
                     let idx = self.push_line(
                         MsgLine::new(title, MsgKind::SubAgent).with_sub_detail(sub_detail),
                     );
-                    self.sub_agent_lines.insert(session_id.clone(), idx);
+                    self.sub_agents
+                        .line_by_session
+                        .insert(session_id.clone(), idx);
                 }
             }
             TuiSignal::SubAgentStream {
@@ -150,7 +155,7 @@ impl TuiState {
                 content,
             } => {
                 let mut changed = false;
-                if let Some(idx) = self.sub_agent_lines.get(session_id).copied()
+                if let Some(idx) = self.sub_agents.line_by_session.get(session_id).copied()
                     && let Some(line) = self.lines.get_mut(idx)
                     && let Some(ref mut detail) = line.sub_detail
                 {
@@ -174,8 +179,8 @@ impl TuiState {
                 out_tokens,
             } => {
                 self.finalize_stream();
-                self.active_sub_agent_sessions.remove(session_id);
-                self.work_state = if self.active_sub_agent_sessions.is_empty() {
+                self.sub_agents.active_sessions.remove(session_id);
+                self.work_state = if self.sub_agents.active_sessions.is_empty() {
                     WorkState::WaitingModel
                 } else {
                     WorkState::RunningSubAgent
@@ -185,7 +190,7 @@ impl TuiState {
                     session_id, status, in_tokens, out_tokens
                 );
                 let mut found = false;
-                if let Some(idx) = self.sub_agent_lines.get(session_id).copied()
+                if let Some(idx) = self.sub_agents.line_by_session.get(session_id).copied()
                     && let Some(line) = self.lines.get_mut(idx)
                 {
                     line.text = title.clone();
@@ -207,7 +212,9 @@ impl TuiState {
                                 text: text.clone(),
                             }),
                         ));
-                    self.sub_agent_lines.insert(session_id.clone(), idx);
+                    self.sub_agents
+                        .line_by_session
+                        .insert(session_id.clone(), idx);
                 }
             }
             TuiSignal::Shutdown => {}

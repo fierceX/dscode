@@ -203,14 +203,19 @@ impl Builder {
 
         // ═══ Mission override: load sections from MISSION.md ══════
         if let Some(ref mission_path) = self.mission_file {
-            let mission_content = fs::read_to_string(mission_path)
-                .map_err(|e| anyhow::anyhow!("failed to read mission file {}: {e}", mission_path.display()))?;
+            let mission_content = fs::read_to_string(mission_path).map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to read mission file {}: {e}",
+                    mission_path.display()
+                )
+            })?;
 
             // Collect all level-1 headings from the mission file
             let mission_headings = extract_all_headings(&mission_content);
 
             // Collect existing section tags for quick lookup
-            let existing_tags: Vec<String> = sections.iter()
+            let existing_tags: Vec<String> = sections
+                .iter()
                 .filter_map(|s| extract_tag_name(s))
                 .collect();
 

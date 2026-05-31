@@ -1,5 +1,5 @@
 use crate::tui::signal::TuiSignal;
-use crate::ui::{Display, StatsSnapshot};
+use crate::ui::{Display, StatsSnapshot, ToolResultDisplay};
 use std::sync::mpsc;
 
 pub struct TuiDisplay {
@@ -25,8 +25,18 @@ impl Display for TuiDisplay {
         let _ = self.tx.send(TuiSignal::ToolCall(n.into(), s.into()));
     }
 
-    fn render_tool_result(&self, _: &str, c: &str) {
-        let _ = self.tx.send(TuiSignal::ToolResult(c.into()));
+    fn render_tool_result(&self, n: &str, c: &str) {
+        let _ = self.tx.send(TuiSignal::ToolResult {
+            tool_name: n.into(),
+            content: c.into(),
+        });
+    }
+
+    fn render_tool_result_detail(&self, result: &ToolResultDisplay<'_>) {
+        let _ = self.tx.send(TuiSignal::ToolResult {
+            tool_name: result.tool_name.into(),
+            content: result.content.into(),
+        });
     }
 
     fn render_stop(&self) {

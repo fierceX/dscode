@@ -148,7 +148,8 @@ mod tests {
             assert!(msg.contains("SIGNAL_RECOVERY mode"));
             assert!(msg.contains("Your next tool call must be Read, Grep, Glob, or Bash"));
             assert!(msg.contains("Recent reliability signals"));
-            assert!(!msg.contains("Then make at most one minimal edit")); }
+            assert!(!msg.contains("Then make at most one minimal edit"));
+        }
     }
 
     #[test]
@@ -227,7 +228,8 @@ mod tests {
         let d = de.decide(0.4, &[]);
         assert!(matches!(d, Decision::Inject(_)));
         if let Decision::Inject(msg) = d {
-            assert!(!msg.contains("Recent reliability signals")); }
+            assert!(!msg.contains("Recent reliability signals"));
+        }
     }
 
     #[test]

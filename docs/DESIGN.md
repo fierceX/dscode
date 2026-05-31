@@ -21,38 +21,45 @@ pub async fn execute(&mut self, user_input: &str)
 | `Interrupted` | 被取消令牌中断 | 退出 |
 | `Failed(String)` | 不可恢复的错误 | 报告错误 |
 
-**TurnEffect** 是副作用标记，供调用者（OrchActor）处理：
+**TurnEffect** 是 turn 内部工具副作用的完成标记，供调用者（OrchActor）补充 UI 提示：
 
 | 变体 | 触发条件 | 调用者处理 |
 |------|---------|-----------|
-| `SubAgentLaunched` | SubAgent 工具被调用 | 创建子代理任务 |
-| `PlanCleared` | PlanClear 工具被调用 | 清除计划文件 |
-| `PlanConfirmed` | PlanConfirm 工具被调用 | 锁定计划文件 |
-| `NeedsPro` | 流中检测到 `<<<NEEDS_PRO>>>` | 升级模型 |
+| `PlanCleared` | PlanClear 工具副作用已完成 | 显示计划已清空 |
+| `PlanConfirmed` | PlanConfirm 工具副作用已完成 | 显示计划已确认 |
+
+SubAgent 由 `SubAgentCoordinator` 在 turn 内部启动、收集和注入结果。
 
 ### 执行阶段
 
 每轮 LLM 调用按固定阶段顺序执行：
 
 ```
-阶段 0: 重置 StormBreaker 窗口 + compacted_this_turn 标记
-阶段 1: 自动压缩检查（compact_pct ≥ 85%）
-阶段 2: Preflight 预判（估算 >95% 则紧急压缩）
-阶段 3: LLM 流式请求（SSE 解析 → Event stream）
-阶段 4: Scavenge 回收（从 thinking/text 复原工具调用）
-阶段 5: 持久化（store.add_assistant）
-阶段 6: 工具执行（ToolRunner::execute_all）
-  ├── 每工具调用后:
-  │   ├── SignalCollector.collect(name, output)  ← 采集信号
-  │   └── BeliefTracker.observe(signals)         ← 更新信念
-阶段 7: 继续/停止决策
+步骤 0: 新用户输入初始化
+  ├── reset_storm()
+  ├── TurnCompactor::reset()
+  ├── ToolSignalProcessor::reset()
+  ├── DecisionEngine::reset()
+  └── signal_recovery_guard = false
+步骤 1: store.add_user() + ensure_prefix()
+步骤 2: 自动压缩检查 + Preflight 紧急压缩
+步骤 3: LLM 流式请求（SSE 解析 → Event stream）
+步骤 4: Scavenge 回收（从 thinking/text 复原工具调用）
+步骤 5: 持久化 assistant 消息和 usage
+步骤 6: 工具执行（ToolRunner::execute_all）
+  ├── ToolSignalProcessor 采集信号并更新 belief
+  ├── PlanActionHandler 处理 PlanConfirm / PlanClear
+  ├── SubAgentCoordinator 启动并收集子代理
+  ├── ConversationStore::add_tool_results()
+  └── Display::render_tool_result_detail()
+步骤 7: DecisionEngine 决策继续、注入、中止或停止
 ```
 
 各个阶段之间有严格的依赖关系：
-- 阶段 1 和 2 使用 `compacted_this_turn` 互锁，同轮最多压缩一次
-- 阶段 4 依赖阶段 3 收集的 thinking + text 内容
-- 阶段 6 依赖阶段 4 补充后的 calls 列表
-- 阶段 7 根据 stop_reason 决定是否循环
+- 步骤 2 使用 `TurnCompactor` 内部标记互锁，同一用户输入最多压缩一次
+- 步骤 4 依赖步骤 3 收集的 thinking + text 内容
+- 步骤 6 依赖步骤 4 补充后的 calls 列表
+- 步骤 7 根据 stop_reason 决定是否循环
 
 ### LLM 调用循环
 
@@ -74,7 +81,7 @@ while turn < max_turns {
 }
 ```
 
-`messages` 每轮末尾刷新（通过 `store.lines()`），确保下一轮 LLM 调用看到最新的工具结果。**如果某轮触发了上下文压缩，`messages` 也会同步刷新**（`turn.rs:96-97`）。
+`messages` 在 tool_use 路径末尾通过 `store.lines()` 刷新，确保下一轮 LLM 调用看到最新工具结果、信号注入消息、计划变更和子代理结果。
 
 ---
 
@@ -157,7 +164,7 @@ fn should_compact(&self, trigger: &str, context_tokens: usize) -> bool {
 }
 ```
 
-`compact_pct` 通过环境变量 `CONTEXT_COMPACT_PCT` 配置，默认 85%。
+`compact_pct` 通过 `.dscoderc` 的 `context_compact_pct` 配置，默认 85%。
 
 ### 三级 Tier
 
@@ -170,7 +177,7 @@ fn should_compact(&self, trigger: &str, context_tokens: usize) -> bool {
 | 80-95% | ForceSummary | 5% | — |
 | ≥95% | Emergency | 5% | 1-5 行 |
 
-注意：默认 compact_pct=85%，所以首次压缩落在 ForceSummary 区间（80-95%）。Conservative 和 Aggressive 仅在 `CONTEXT_COMPACT_PCT` 设为更低值时可达。
+注意：默认 compact_pct=85%，所以首次压缩落在 ForceSummary 区间（80-95%）。Conservative 和 Aggressive 仅在 `context_compact_pct` 设为更低值时可达。
 
 ### turn 对齐截断
 
@@ -216,7 +223,7 @@ Reflections:
 
 三段流水线位于工具执行之前，按序处理：
 
-### 阶段 1：Scavenge（回收）
+### 步骤 1：Scavenge（回收）
 
 `src/agent/turn.rs:228-253`
 
@@ -251,7 +258,7 @@ for sc in &scavenged {
 5. **OpenAI style** — `{"type":"function","function":{"name","arguments"}}`
 6. **R1 variant** — `{"tool_name":"Bash","tool_args":{...}}`
 
-### 阶段 2：Truncation（截断修复）
+### 步骤 2：Truncation（截断修复）
 
 `src/tools/runner.rs:82-96`
 
@@ -268,7 +275,7 @@ for sc in &scavenged {
 6. 验证：修复后 JSON.parse → 成功取修复版，失败退化为 {}
 ```
 
-### 阶段 3：StormBreaker（重复抑制）
+### 步骤 3：StormBreaker（重复抑制）
 
 `src/tools/runner.rs:53-75`
 
@@ -383,7 +390,7 @@ Phase 4: stop = "tool_use"
 
 不在系统 prompt 中注入（保护前缀缓存），也不追加到用户输入末尾。而是作为一条独立的 User 消息（含 `[System note: ...]`）写入对话存储，LLM 在下一轮调用时自然看到。
 
-**注入内容包含具体可靠性信号**：LLM 收到的不再是泛泛的 "something went wrong"，而是进入 `SIGNAL_RECOVERY` 的短控制消息和最近信号：
+**注入内容包含具体可靠性信号**：LLM 收到进入 `SIGNAL_RECOVERY` 的短控制消息和最近信号：
 
 ```
 [System note: belief 0.37 indicates repeated tool failure. Enter SIGNAL_RECOVERY mode as defined in the system instructions before any further repair momentum. Your next tool call must be Read, Grep, Glob, or Bash; do not start with Edit or Write.
@@ -412,7 +419,7 @@ pub enum ErrorCategory {
 }
 ```
 
-分类仅用于日志，不驱动任何决策（旧 `is_upgrade_signal`/`upgrade_weight` 已删除）。
+分类仅用于日志，不驱动任何决策。
 
 ### 信念度展示
 
@@ -427,23 +434,40 @@ pub enum ErrorCategory {
 
 ### 分发架构
 
-`ToolRunner` 持有工具执行的上下文和 StormBreaker 实例：
+`ToolRunner` 持有工具执行上下文、StormBreaker 和全局工具注册表：
 
 ```rust
 pub struct ToolRunner {
-    ctx: Arc<AgentSharedContext>,
+    ctx: Arc<ToolContext>,
     storm: Mutex<StormBreaker>,
+    tools: &'static [Box<dyn ToolExec>],
 }
 ```
 
-工具调用在 `execute_all()` 中批量处理，每个调用在一个独立 `spawn_blocking` 任务中执行。这允许同步工具（Read/Write/Bash 等）不阻塞异步 agent 循环。
+每个工具实现 `ToolExec`：
+
+```rust
+pub trait ToolExec: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn mutating(&self) -> bool { false }
+    fn storm_exempt(&self) -> bool { false }
+    fn internal(&self) -> bool { false }
+    fn spawns_sub_agent(&self) -> bool { false }
+    fn execute(&self, input: &Value, ctx: &ToolContext) -> Result<ToolOutcome>;
+}
+```
+
+内置工具通过 `TOOL_REGISTRY: LazyLock<Vec<Box<dyn ToolExec>>>` 注册。新增工具需要实现 `ToolExec`、加入 registry，并同步更新 `assets/tools.json`。
+
+工具调用在 `execute_all()` 中批量处理，每个调用在一个独立 `spawn_blocking` 任务中执行。这允许同步工具（Read/Write/Bash/Python 等）不阻塞 async agent 循环。
 
 ```rust
 pub async fn execute_all(&self, calls: Vec<ToolCallEvent>) -> Result<Vec<ToolRunResult>> {
     for call in calls {
         // Storm check
         // Truncation repair
-        handles.push(spawn_blocking(move || execute_one_sync(&ctx, &call)));
+        // ToolExec lookup
+        handles.push(spawn_blocking(move || execute_one_sync(&ctx, &call, tool)));
     }
     // 等待所有 handles
 }
@@ -451,14 +475,15 @@ pub async fn execute_all(&self, calls: Vec<ToolCallEvent>) -> Result<Vec<ToolRun
 
 ### 单工具执行
 
-`execute_one_sync()` 根据 `call.name` 分发到对应的处理函数。每个工具的参数通过 serde 反序列化从 `call.input_json` 提取：
+`execute_one_sync()` 根据 `call.name` 从 registry 找到对应 `ToolExec`。每个工具在自己的实现中通过 serde 从 `call.input_json` 反序列化参数：
 
 ```rust
-"Read" => {
-    #[derive(Deserialize)]
-    struct Args { path: String, offset: Option<usize>, limit: Option<usize> }
-    let args: Args = serde_json::from_value(call.input_json.clone())?;
-    file::read(&args.path, args.offset, args.limit)
+impl ToolExec for ReadTool {
+    fn name(&self) -> &'static str { "Read" }
+    fn execute(&self, input: &Value, ctx: &ToolContext) -> Result<ToolOutcome> {
+        let args: Args = serde_json::from_value(input.clone())?;
+        read_with_context(&args.path, args.offset, args.limit, ctx).map(ToolOutcome::text)
+    }
 }
 ```
 
@@ -467,9 +492,32 @@ pub async fn execute_all(&self, calls: Vec<ToolCallEvent>) -> Result<Vec<ToolRun
 ### 结果格式化
 
 工具结果统一经过 `format_tool_result()` 处理：
+
 - 超过 `tool_result_max_bytes`（默认 100KB）时截断，保留头尾
 - Bash 输出经过 `filter_bash_noise()` 处理（ANSI 转义剥离 + 重复行压缩）
 - Read/Write 结果加上行数/字节数统计前缀
+- Edit 默认将首行作为 `conv_content`，减少 conversation 噪声
+
+工具结果有两个通道：
+
+| 字段 | 用途 |
+|------|------|
+| `content` | UI 展示和默认 tool_result 内容，已过最大字节保护 |
+| `conv_content` | 非空时优先进入 LLM conversation，适合给模型更短的结果 |
+
+`TurnExecutor` 渲染工具结果时会构造 `ToolResultDisplay`：
+
+```rust
+ToolResultDisplay {
+    tool_name,
+    content_preview,
+    content,
+    tool_use_id,
+    exit_code,
+}
+```
+
+`content_preview` 用于简短展示，`content` 是工具层截断/过滤后的展示内容。LLM 读取的是 `ConversationStore` 写入的 tool result。
 
 ---
 
@@ -634,11 +682,12 @@ pub fn apply_provider_defaults(cfg: &mut Config) -> Result<()> {
 |------|------|------|
 | API | `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL` | 认证和端点 |
 | 大小 | `TOOL_RESULT_MAX_BYTES`, `FILE_WRITE_MAX_BYTES` | 输出限制 |
-| 压缩 | `CONTEXT_COMPACT_PCT` | 触发百分比 |
+| Web | `JINA_API_KEY` | WebSearch / WebFetch 认证 |
 | 信号 | `DSCODE_SIGNAL_MODE` | `full` 启用信号系统，`off` 关闭信号提示词和运行时干预 |
-| 升级 | `AUTO_MODEL`, `AUTO_UPGRADE_THRESHOLD`, `SECONDARY_MODEL` | 模型升级 |
-| 资源 | `THINKING_BUDGET` | 思考 token 预算 |
-| 调试 | `LOG_EVENTS`, `DSCODE_HOME` | 日志和路径 |
+| 沙箱 | `DSCODE_LIMITS` | JSON 格式 sandbox 限制配置 |
+| 调试 | `LOG_EVENTS`, `DSCODE_HOME` | 日志和 session 路径 |
+
+`context_compact_pct` 通过 `.dscoderc` 配置。
 
 ---
 
@@ -668,15 +717,16 @@ pub fn apply_provider_defaults(cfg: &mut Config) -> Result<()> {
 - `RwLock` — store cache（读多写少）
 - `Mutex` — StormBreaker 窗口（写多）、immutable_prefix 缓存
 - `AtomicBool` — dirty 标记
-- `AtomicUsize` — 子代理活跃计数
+- `AtomicBool` — 当前 turn interrupt 标志
+- `mpsc` — Orchestrator 命令、TUI signal、子代理结果收集
 
 ### 取消传播
 
-`CancellationToken` 从主进程传递到每个子代理和 SSE 流任务。取消时：
+`CancellationToken` 用于全局退出；`AgentSharedContext::interrupt` 用于当前 turn 中断。取消或中断时：
 1. 主循环退出
-2. 所有子代理收到取消信号
-3. SSE 流停止解析
-4. 持久化尚未写入的数据
+2. SSE stream 在 25ms 检查窗口内停止
+3. Bash / Python 工具检查 interrupt 并尝试杀掉子进程
+4. 子代理收集循环停止等待
 
 ---
 
@@ -688,6 +738,12 @@ pub fn apply_provider_defaults(cfg: &mut Config) -> Result<()> {
 <agent-identity>          ← 你是谁（中/英根据 locale）
 <environment>             ← 当前工作目录、shell、平台
 <rules>                   ← 行为规则
+<tool-selection>          ← 工具选择原则
+<safety>                  ← 安全边界
+<verification-gate>       ← 验证门控
+<belief-awareness>        ← 信号系统协议（DSCODE_SIGNAL_MODE=full 时）
+<stop-triggers>           ← 停止条件
+<output-discipline>       ← 输出纪律
 <using-your-tools>        ← 工具使用说明
 <sub-agent-guidance>      ← 子代理使用指引
 <todo-guidance>           ← Todo 操作指引

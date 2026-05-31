@@ -4,11 +4,26 @@ pub mod replay;
 /// Display abstracts terminal rendering. Two implementations:
 /// - TerminalDisplay (REPL) — synchronous writes to stdout/stderr
 /// - TuiDisplay (future) — event-driven TUI via mpsc channel
+pub struct ToolResultDisplay<'a> {
+    pub tool_name: &'a str,
+    pub content_preview: &'a str,
+    /// Full display content after tool-level truncation/noise filtering.
+    ///
+    /// This is not raw unbounded process output; `ToolRunner` has already applied
+    /// configured max-byte truncation before this reaches the UI layer.
+    pub content: &'a str,
+    pub tool_use_id: Option<&'a str>,
+    pub exit_code: Option<i32>,
+}
+
 pub trait Display: Send + Sync {
     fn render_thinking(&self, content: &str);
     fn render_text(&self, content: &str);
     fn render_tool_call(&self, name: &str, summary: &str);
     fn render_tool_result(&self, tool_name: &str, content_preview: &str);
+    fn render_tool_result_detail(&self, result: &ToolResultDisplay<'_>) {
+        self.render_tool_result(result.tool_name, result.content_preview);
+    }
     fn render_stop(&self);
     fn render_error(&self, message: &str);
     fn render_retry(&self);

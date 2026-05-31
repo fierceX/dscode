@@ -45,12 +45,7 @@ pub fn glob(pattern: &str, path: &str) -> Result<String> {
     Ok(results.join("\n"))
 }
 
-pub fn grep(
-    pattern: &str,
-    path: &str,
-    file_glob: &str,
-    context: Option<usize>,
-) -> Result<String> {
+pub fn grep(pattern: &str, path: &str, file_glob: &str, context: Option<usize>) -> Result<String> {
     if pattern.is_empty() {
         bail!("Error: no pattern provided");
     }
@@ -123,13 +118,16 @@ pub fn grep(
 
                 for ctx_i in start..end {
                     let marker = if ctx_i == i { '>' } else { ' ' };
-                    let line_str =
-                        format!("{}:{}:{} {}", file_path.display(), ctx_i + 1, marker, lines[ctx_i]);
+                    let line_str = format!(
+                        "{}:{}:{} {}",
+                        file_path.display(),
+                        ctx_i + 1,
+                        marker,
+                        lines[ctx_i]
+                    );
                     total_bytes += line_str.len() + 1;
                     if total_bytes > MAX_OUTPUT_BYTES {
-                        results.push(format!(
-                            "... truncated: output > {MAX_OUTPUT_BYTES} bytes"
-                        ));
+                        results.push(format!("... truncated: output > {MAX_OUTPUT_BYTES} bytes"));
                         truncated = true;
                         break;
                     }
@@ -139,9 +137,7 @@ pub fn grep(
                 let line_str = format!("{}:{}:{}", file_path.display(), i + 1, line);
                 total_bytes += line_str.len() + 1;
                 if total_bytes > MAX_OUTPUT_BYTES {
-                    results.push(format!(
-                        "... truncated: output > {MAX_OUTPUT_BYTES} bytes"
-                    ));
+                    results.push(format!("... truncated: output > {MAX_OUTPUT_BYTES} bytes"));
                     truncated = true;
                     break;
                 }
@@ -260,11 +256,7 @@ mod tests {
     fn grep_with_context() {
         let dir = std::env::temp_dir().join(format!("grep-ctx-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
-        fs::write(
-            dir.join("test.txt"),
-            "line1\nline2\nmatch\nline4\nline5\n",
-        )
-        .unwrap();
+        fs::write(dir.join("test.txt"), "line1\nline2\nmatch\nline4\nline5\n").unwrap();
 
         let result = grep("match", &dir.display().to_string(), "", Some(1)).unwrap();
         assert!(result.contains("match"));

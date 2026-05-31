@@ -58,10 +58,7 @@ fn build_sb_profile(config: &SandboxConfig, _exe: &Path, cwd: &Path) -> String {
         // Punch holes for user-specified write dirs
         for d in &config.write_dirs {
             let resolved = resolve_dir(d, cwd);
-            lines.push(format!(
-                "(allow file-write* (subpath \"{}\"))",
-                resolved
-            ));
+            lines.push(format!("(allow file-write* (subpath \"{}\"))", resolved));
         }
 
         // Always allow system temp directory (TMPDIR for Edit's unified_diff_color)

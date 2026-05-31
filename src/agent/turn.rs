@@ -4,6 +4,7 @@ use crate::protocol::{Event, ToolCallEvent, UsageEvent};
 use crate::session::store::{ToolResult, build_tool_call_summary, first_line};
 use crate::sse::toolcall::build_tool_call_event;
 use crate::tools::runner::ToolRunner;
+use crate::ui::ToolResultDisplay;
 use crate::util::truncate_str;
 use anyhow::Result;
 use futures::StreamExt;
@@ -342,7 +343,15 @@ impl TurnExecutor {
                 "name": r.tool_name,
                 "content": r.content,
             }));
-            self.ctx.display.render_tool_result(&r.tool_name, &preview);
+            self.ctx
+                .display
+                .render_tool_result_detail(&ToolResultDisplay {
+                    tool_name: &r.tool_name,
+                    content_preview: &preview,
+                    content: &r.content,
+                    tool_use_id: Some(&r.tool_use_id),
+                    exit_code: r.exit_code,
+                });
         }
         Ok(())
     }

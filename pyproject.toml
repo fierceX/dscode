@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dscode-sdk"
+version = "0.1.0"
+description = "Python SDK for dscode — sandboxed AI coding agent"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+keywords = ["ai", "coding-agent", "sandbox", "deepseek"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: POSIX :: Linux",
+]
+
+[project.urls]
+Homepage = "https://github.com/xialuyu/dscode"
+Source = "https://github.com/xialuyu/dscode"
+
+[tool.setuptools.packages.find]
+include = ["dscode_sdk", "dscode_sdk.*"]
+
+[tool.setuptools.package-data]
+"dscode_sdk" = ["_binary/*"]

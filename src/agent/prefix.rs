@@ -20,11 +20,10 @@ fn filter_disabled_tools(
     tools
         .into_iter()
         .filter(|tool| {
-            let name = tool
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            !TOOL_DISABLE_MAP.iter().any(|(n, check)| *n == name && check(flags))
+            let name = tool.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            !TOOL_DISABLE_MAP
+                .iter()
+                .any(|(n, check)| *n == name && check(flags))
         })
         .collect()
 }

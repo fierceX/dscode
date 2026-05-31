@@ -563,7 +563,10 @@ async fn invalid_scavenged_tool_call_is_logged_and_ignored() -> anyhow::Result<(
     assert!(effects.is_empty());
     assert_eq!(executor.tool_call_count(), 0);
     let events = tokio::fs::read_to_string(&h.ctx.events_path).await?;
-    assert!(events.contains("discarded invalid scavenged call Read"), "{events}");
+    assert!(
+        events.contains("discarded invalid scavenged call Read"),
+        "{events}"
+    );
     Ok(())
 }
 
@@ -582,8 +585,9 @@ async fn duplicate_scavenged_tool_call_is_deduplicated_against_official_call() -
                     json!({"path":"dup.txt"}),
                 ))),
                 Ok(Event::Text(TextEvent {
-                    content: r#"<tool_call>{"name":"Read","arguments":{"path":"dup.txt"}}</tool_call>"#
-                        .into(),
+                    content:
+                        r#"<tool_call>{"name":"Read","arguments":{"path":"dup.txt"}}</tool_call>"#
+                            .into(),
                 })),
                 Ok(Event::Stop(StopEvent {
                     reason: "tool_calls".into(),
@@ -634,7 +638,10 @@ async fn edit_tool_result_uses_full_edit_preview_branch() -> anyhow::Result<()> 
 
     assert_eq!(decision, TurnDecision::Stop);
     assert!(effects.is_empty());
-    assert_eq!(tokio::fs::read_to_string(h.cwd.join("edit.txt")).await?, "new\n");
+    assert_eq!(
+        tokio::fs::read_to_string(h.cwd.join("edit.txt")).await?,
+        "new\n"
+    );
     Ok(())
 }
 
@@ -847,7 +854,9 @@ async fn signal_injection_without_recent_errors_uses_empty_recent_suffix() -> an
         matched_pattern: None,
         message: "loop".into(),
     }]);
-    let (decision, effects) = executor.execute("recover without recent", Some(&mut belief)).await?;
+    let (decision, effects) = executor
+        .execute("recover without recent", Some(&mut belief))
+        .await?;
 
     assert_eq!(decision, TurnDecision::Stop);
     assert!(effects.is_empty());

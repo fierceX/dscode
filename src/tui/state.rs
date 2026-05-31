@@ -62,9 +62,47 @@ pub(crate) struct MsgLine {
     pub text: String,
     pub kind: MsgKind,
     pub collapsed: bool,
+    pub collapse_policy: CollapsePolicy,
+    pub collapse_overridden: bool,
+    pub tool_name: Option<String>,
     pub cached_lines: Option<Vec<Line<'static>>>,
     pub cached_collapsed: bool,
     pub sub_detail: Option<SubAgentDetail>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum CollapsePolicy {
+    Never,
+    Always,
+    Auto { threshold_lines: usize },
+}
+
+impl CollapsePolicy {
+    fn for_kind(kind: MsgKind) -> Self {
+        match kind {
+            MsgKind::StreamThinking => CollapsePolicy::Always,
+            MsgKind::ToolResult => CollapsePolicy::Auto {
+                threshold_lines: 20,
+            },
+            _ => CollapsePolicy::Never,
+        }
+    }
+
+    fn initial_collapsed(self, text: &str) -> bool {
+        match self {
+            CollapsePolicy::Never => false,
+            CollapsePolicy::Always => true,
+            CollapsePolicy::Auto { threshold_lines } => text.lines().count() > threshold_lines,
+        }
+    }
+
+    pub(crate) fn should_collapse_rendered(self, rendered_lines: usize) -> bool {
+        match self {
+            CollapsePolicy::Auto { threshold_lines } => rendered_lines > threshold_lines,
+            CollapsePolicy::Always => true,
+            CollapsePolicy::Never => false,
+        }
+    }
 }
 
 impl MsgLine {
@@ -73,20 +111,40 @@ impl MsgLine {
     }
 
     pub(crate) fn new(text: String, kind: MsgKind) -> Self {
-        let collapsed = kind == MsgKind::StreamThinking;
+        let collapse_policy = CollapsePolicy::for_kind(kind);
+        let collapsed = collapse_policy.initial_collapsed(&text);
         MsgLine {
             text,
             kind,
             collapsed,
+            collapse_policy,
+            collapse_overridden: false,
+            tool_name: None,
             cached_lines: None,
             cached_collapsed: collapsed,
             sub_detail: None,
         }
     }
 
+    pub(crate) fn new_tool_result(tool_name: String, text: String) -> Self {
+        let mut line = Self::new(text, MsgKind::ToolResult);
+        line.tool_name = Some(tool_name);
+        line
+    }
+
+    pub(crate) fn is_collapsible(&self) -> bool {
+        self.collapse_policy != CollapsePolicy::Never
+    }
+
     pub(crate) fn with_sub_detail(mut self, sub_detail: Option<SubAgentDetail>) -> Self {
         self.sub_detail = sub_detail;
         self
+    }
+
+    pub(crate) fn toggle_collapsed(&mut self) {
+        self.collapsed = !self.collapsed;
+        self.collapse_overridden = true;
+        self.invalidate_cache();
     }
 
     pub(crate) fn invalidate_cache(&mut self) {
@@ -100,10 +158,90 @@ impl Default for MsgLine {
             text: String::new(),
             kind: MsgKind::Text,
             collapsed: false,
+            collapse_policy: CollapsePolicy::Never,
+            collapse_overridden: false,
+            tool_name: None,
             cached_lines: None,
             cached_collapsed: false,
             sub_detail: None,
         }
+    }
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct InputState {
+    pub buf: String,
+    pub cursor: usize,
+    pub scroll_row: usize,
+    pub history: Vec<String>,
+    pub history_idx: Option<usize>,
+    pub draft_before_history: Option<String>,
+}
+
+impl InputState {
+    pub(crate) fn clamped_cursor(&self) -> usize {
+        clamp_char_boundary(&self.buf, self.cursor)
+    }
+
+    pub(crate) fn clamp_cursor(&mut self) {
+        self.cursor = self.clamped_cursor();
+    }
+}
+
+pub(crate) fn clamp_char_boundary(s: &str, pos: usize) -> usize {
+    let mut pos = pos.min(s.len());
+    while pos > 0 && !s.is_char_boundary(pos) {
+        pos -= 1;
+    }
+    pos
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct ViewportState {
+    pub scroll: usize,
+    pub auto_scroll: bool,
+    pub max_scroll: usize,
+    pub show_borders: bool,
+    pub click_map: Vec<ClickTarget>,
+    pub content_y: u16,
+    pub effective_scroll: usize,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct ClickTarget {
+    pub line_idx: usize,
+    pub start_row: usize,
+    pub end_row: usize,
+    pub action: ClickAction,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) enum ClickAction {
+    ToggleCollapse,
+    OpenSubAgentDetail { session_id: String },
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct RenderCache {
+    pub width: u16,
+    pub history_lines: Option<Vec<Line<'static>>>,
+    pub stream_width: u16,
+    pub stream_kind: MsgKind,
+    pub stream_revision: u64,
+    pub stream_lines: Option<Vec<Line<'static>>>,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct SubAgentState {
+    pub active_sessions: HashSet<String>,
+    pub line_by_session: HashMap<String, usize>,
+}
+
+impl SubAgentState {
+    pub(crate) fn session_for_line(&self, line_idx: usize) -> Option<&str> {
+        self.line_by_session
+            .iter()
+            .find_map(|(session_id, &idx)| (idx == line_idx).then_some(session_id.as_str()))
     }
 }
 
@@ -113,33 +251,17 @@ pub(crate) struct TuiState {
     pub stream_line: String,
     pub stream_kind: MsgKind,
     pub streaming: bool,
-    pub input_buf: String,
-    pub input_cursor: usize,
-    pub input_scroll_row: usize,
-    pub input_history: Vec<String>,
-    pub history_idx: Option<usize>,
+    pub input: InputState,
     pub model: String,
     pub stats: StatsSnapshot,
-    pub scroll: usize,
-    pub auto_scroll: bool,
-    pub max_scroll: usize,
-    pub show_borders: bool,
-    pub click_map: Vec<(usize, usize, usize)>,
-    pub content_y: u16,
-    pub effective_scroll: usize,
+    pub viewport: ViewportState,
     pub dirty: bool,
-    pub cached_width: u16,
-    pub cached_all: Option<Vec<Line<'static>>>,
     pub stream_revision: u64,
-    pub cached_stream_width: u16,
-    pub cached_stream_kind: MsgKind,
-    pub cached_stream_revision: u64,
-    pub cached_stream_lines: Option<Vec<Line<'static>>>,
+    pub cache: RenderCache,
     pub quit: bool,
     pub last_interrupt: Option<Instant>,
     pub work_state: WorkState,
-    pub active_sub_agent_sessions: HashSet<String>,
-    pub sub_agent_lines: HashMap<String, usize>,
+    pub sub_agents: SubAgentState,
     /// 中断当前任务（由 Ctrl+C 触发），None 表示无中断能力
     pub interrupt: Option<Arc<AtomicBool>>,
     pub view: View,
@@ -150,7 +272,7 @@ pub(crate) enum View {
     #[default]
     Main,
     SubAgentDetail {
-        line_idx: usize,
+        session_id: String,
         scroll: usize,
     },
 }
@@ -162,33 +284,21 @@ impl Default for TuiState {
             stream_line: String::new(),
             stream_kind: MsgKind::default(),
             streaming: false,
-            input_buf: String::new(),
-            input_cursor: 0,
-            input_scroll_row: 0,
-            input_history: Vec::new(),
-            history_idx: None,
+            input: InputState::default(),
             model: "flash".into(),
             stats: StatsSnapshot::default(),
-            scroll: 0,
-            auto_scroll: true,
-            max_scroll: 0,
-            show_borders: true,
-            click_map: Vec::new(),
-            content_y: 0,
-            effective_scroll: 0,
+            viewport: ViewportState {
+                auto_scroll: true,
+                show_borders: true,
+                ..Default::default()
+            },
             dirty: true,
-            cached_width: 0,
-            cached_all: None,
             stream_revision: 0,
-            cached_stream_width: 0,
-            cached_stream_kind: MsgKind::default(),
-            cached_stream_revision: 0,
-            cached_stream_lines: None,
+            cache: RenderCache::default(),
             quit: false,
             last_interrupt: None,
             work_state: WorkState::Idle,
-            active_sub_agent_sessions: HashSet::new(),
-            sub_agent_lines: HashMap::new(),
+            sub_agents: SubAgentState::default(),
             interrupt: None,
             view: View::Main,
         }
@@ -202,7 +312,7 @@ impl Debug for TuiState {
             "TuiState[lines={}, stream={}, input={}]",
             self.lines.len(),
             self.stream_line.len(),
-            self.input_buf.len()
+            self.input.buf.len()
         )
     }
 }
@@ -215,11 +325,11 @@ impl FmtDisplay for TuiState {
 
 impl TuiState {
     pub(crate) fn invalidate_all_cache(&mut self) {
-        self.cached_all = None;
+        self.cache.history_lines = None;
     }
 
     pub(crate) fn invalidate_stream_cache(&mut self) {
-        self.cached_stream_lines = None;
+        self.cache.stream_lines = None;
     }
 
     pub(crate) fn push_line(&mut self, line: MsgLine) -> usize {
@@ -236,7 +346,7 @@ impl TuiState {
         }
         self.stream_revision = self.stream_revision.wrapping_add(1);
         self.invalidate_stream_cache();
-        self.auto_scroll = true;
+        self.viewport.auto_scroll = true;
     }
 
     pub(crate) fn finalize_stream(&mut self) {

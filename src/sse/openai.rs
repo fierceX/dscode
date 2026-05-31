@@ -217,11 +217,7 @@ impl OpenAIParser {
                     if repaired.changed && !repaired.fallback {
                         build_tool_call_event(&call.name, &call.id, &repaired.repaired)?
                     } else {
-                        anyhow::bail!(
-                            "parse tool call {} input: {}",
-                            call.name,
-                            original
-                        );
+                        anyhow::bail!("parse tool call {} input: {}", call.name, original);
                     }
                 }
             };

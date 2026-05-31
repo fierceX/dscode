@@ -73,21 +73,43 @@ flash B:0.73 T:12 R:45 I:200K(50%) O:20K C:400K(40%) ¥0.12 [idle]
 | `O:20K` | 输出 tokens | 总输出 tokens |
 | `C:400K` | 上下文 | 当前对话上下文 tokens，括号内为上下文使用率 |
 | `¥0.12` | 费用 | 累计费用（按模型单价实时计算） |
-| `[idle]` | 工作状态 | idle / thinking / generating / working |
+| `[idle]` | 工作状态 | idle / waiting / thinking / generating / tool / sub-agent / compacting / error |
 
 **B 值含义**：
 
 | B 值 | 含义 |
 |------|------|
 | 0.75 | 初始（信任先验） |
-| > 0.7 | 🟢 顺利 |
-| 0.5~0.7 | 🟡 偶有小错 |
-| 0.3~0.5 | 🟠 频繁出错 |
-| < 0.3 | 🔴 严重 |
+| > 0.7 | 顺利 |
+| 0.5~0.7 | 偶有小错 |
+| 0.3~0.5 | 频繁出错 |
+| < 0.3 | 严重 |
+
+TUI 支持：
+
+- 多行输入和 UTF-8 安全编辑。
+- Ctrl+C 在任务运行时中断当前 turn。
+- 长工具结果自动折叠。
+- 子代理消息可点击进入详情页，查看 thinking/text。
+- Markdown 由内置 renderer 渲染，支持标题、列表、引用、代码块、表格和 diff。
+
+**TUI 特有操作**：
+
+| 操作 | 行为 |
+|------|------|
+| `Ctrl+C` | 工作中中断当前 turn；空闲时按退出流程处理 |
+| `/flash` / `/pro` | 切换模型，不发送给 LLM |
+| `/compact` | 手动触发上下文压缩 |
+| `/help` / `/skills` | 本地显示帮助或 skill 列表 |
+| `/exit` / `/quit` / `/q` | 退出 TUI |
+| 未知 `/xxx` | 本地提示，不发送给 LLM |
+| 行首空格 + `/xxx` | 作为普通文本发送给 LLM |
+| 鼠标点击折叠项 | 展开或收起长内容 |
+| 鼠标点击子代理消息 | 打开子代理详情页 |
 
 ### 标题栏（REPL/CLI 模式）
 
-非 TUI 模式下，终端窗口标题显示相同统计信息，通过 ANSI escape `\x1b]0;...\x07` 设置：
+REPL/CLI 模式下，终端窗口标题显示相同统计信息，通过 ANSI escape `\x1b]0;...\x07` 设置：
 
 ```
 flash B:0.73 T:12 R:45 I:200K(50%) O:20K C:400K(40%) ¥0.12
@@ -112,7 +134,7 @@ prompt 为空且 stdin 是终端时自动进入交互模式。非终端 stdin �
 
 ---
 
-## REPL 内置命令
+## 交互命令（REPL / TUI）
 
 | 命令 | 说明 |
 |------|------|
@@ -125,7 +147,7 @@ prompt 为空且 stdin 是终端时自动进入交互模式。非终端 stdin �
 | Ctrl+C | 取消当前正在执行的 turn |
 | Ctrl+D | 退出 |
 
-`/flash` 和 `/pro` 命令立即生效，不会发送给 LLM。切换后下一轮 LLM 调用使用新模型。所有其他输入作为普通消息发送给 LLM。
+`/flash` 和 `/pro` 命令立即生效，不会发送给 LLM。切换后下一轮 LLM 调用使用新模型。TUI 会拦截未知 `/xxx` 命令并提示；如果要把 slash 开头文本发给模型，在行首加一个空格。
 
 ---
 
@@ -242,7 +264,7 @@ dscode --tui
   → 原进程被替换，进程完全在沙箱中运行
 ```
 
-沙箱工具不可用时打印警告并正常运行（不阻塞）。
+启用沙箱后，如果指定或自动选择的沙箱后端不可用，dscode 会打印 fatal 错误并退出，而不是静默降级到非沙箱运行。未启用 `[sandbox] enabled = true` 时不会触发 re-exec。
 
 ---
 
@@ -253,12 +275,12 @@ dscode --tui
 | `DEEPSEEK_API_KEY` | — | **必需。** API 密钥 |
 | `DEEPSEEK_BASE_URL` | `https://api.deepseek.com/v1` | 自定义 API 端点 |
 | `JINA_API_KEY` | — | WebSearch/WebFetch 工具需要的 API 密钥 |
-| `CONTEXT_COMPACT_PCT` | `85` | 上下文压缩触发百分比（1-99） |
 | `TOOL_RESULT_MAX_BYTES` | `100000` | 单条工具结果截断上限 |
 | `FILE_WRITE_MAX_BYTES` | `1048576` | Write/Edit 工具写入上限 |
 | `LOG_EVENTS` | `true` | 设为 `0`/`false`/`no` 关闭 events.jsonl 记录 |
 | `DSCODE_SIGNAL_MODE` | `full` | 信号系统模式：`full` 启用信念跟踪、注入和恢复守卫；`off` 关闭信号提示词和运行时信号干预 |
 | `DSCODE_HOME` | `$HOME` | session 存储目录覆盖 |
+| `DSCODE_LIMITS` | — | JSON 格式 sandbox 限制配置，启用时覆盖 `[sandbox]` |
 
 ---
 
@@ -366,10 +388,14 @@ dscode --list-sessions
 
 ### 调优
 
+```toml
+# .dscoderc
+context_compact_pct = 70   # 70% 触发（更频繁）
+max_context = "1M"         # 1M 上下文窗口
+```
+
 ```bash
-CONTEXT_COMPACT_PCT=70 dscode -m flash -i          # 70% 触发（更频繁）
-CONTEXT_COMPACT_PCT=90 dscode -m flash -i          # 90% 触发（更激进）
-dscode -m flash --max-context 1M -i                # 1M 上下文窗口
+dscode -m flash --max-context 1M -i
 ```
 
 ---

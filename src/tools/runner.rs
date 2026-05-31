@@ -362,11 +362,7 @@ impl ToolExec for SubAgentTool {
         true
     }
 
-    fn execute(
-        &self,
-        input: &serde_json::Value,
-        ctx: &ToolContext,
-    ) -> anyhow::Result<ToolOutcome> {
+    fn execute(&self, input: &serde_json::Value, ctx: &ToolContext) -> anyhow::Result<ToolOutcome> {
         if ctx.tool_config.tool_disable.disable_sub_agent {
             return Ok(ToolOutcome::text(
                 "Error: SubAgent is disabled by configuration.".into(),
