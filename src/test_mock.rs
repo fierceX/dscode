@@ -249,7 +249,7 @@ fn decision_low_belief_is_inject_warning() {
         "warning should mention repeated tool failure"
     );
     assert!(
-        msg.contains("Your next tool call must be Read, Grep, Glob, or Bash"),
+        msg.contains("Your next tool call must inspect current state"),
         "warning should constrain the next tool call"
     );
     assert!(

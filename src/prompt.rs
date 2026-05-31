@@ -70,12 +70,12 @@ impl Builder {
                  - Treat it as higher priority than your current repair momentum. It means recent tool outcomes show your current approach is unreliable.\n\
                  - Enter SIGNAL_RECOVERY mode immediately after any [System note: ...] message.\n\n\
                  While in SIGNAL_RECOVERY mode, your next assistant turn MUST obey these constraints:\n\
-                 1. The FIRST tool call after the signal MUST be one of: Read, Grep, Glob, or Bash\n\
+                 1. The FIRST tool call after the signal MUST inspect current state with Read, Grep, or Glob. Use Bash only for a focused verification/state command such as build, test, or git status when shell semantics are required\n\
                  2. The FIRST tool call after the signal MUST NOT be Edit or Write, even if you think you already know the fix\n\
                  - Calling Edit or Write as the next tool action after [System note: ...] is a violation\n\
                  - Treating the signal as stale because an earlier Read already happened is a violation; each new signal restarts the first-tool rule\n\n\
                  Repeated signals:\n\
-                 - The FIRST tool after each repeated signal must again be Read, Grep, Glob, or Bash\n\
+                 - The FIRST tool after each repeated signal must again inspect current state with Read, Grep, Glob, or a focused Bash verification/state command\n\
                  - Do not treat repeated signals as noise";
             sections.push(wrap_section("belief-awareness", belief_awareness, None));
         }
@@ -108,7 +108,7 @@ impl Builder {
 
         sections.push(wrap_section(
             "using-your-tools",
-            "- Use Read for a single file. If you need multiple files, call Read multiple times.\n- Read supports optional offset and limit parameters to read specific line ranges (saves tokens for large files). Output includes line numbers.\n- Use Glob and Grep for one pattern at a time.\n- Grep supports a context parameter to show surrounding lines — use it to get enough text for Edit directly from Grep output, avoiding a separate Read.\n- Use multiple tool calls in one response when they are independent.\n- Prefer dedicated tools over Bash when a dedicated tool fits the task.\n- For Edit: copy old_string exactly (including whitespace/indent/newlines). If you already know the location from prior context, use Read with offset/limit. If you need to locate the text first, use Grep with context — its output is often sufficient for Edit without an extra Read.\n- For skills, first check the skill-index section, then use Skill(name) for the matching skill.",
+            "- Use Read for a single file. If you need multiple files, call Read multiple times.\n- Read supports optional offset and limit parameters to read specific line ranges (saves tokens for large files). Output includes line numbers.\n- Default search flow: use Glob for file paths and Grep for file contents. Do not use Bash commands such as rg, grep, find, ls, or cat when Glob/Grep/Read can do the task.\n- Use Glob and Grep for one pattern at a time.\n- Grep supports a context parameter to show surrounding lines — use it to get enough text for Edit directly from Grep output, avoiding a separate Read.\n- Use multiple tool calls in one response when they are independent.\n- Use Bash for build/test/git/package-manager/server commands and other shell-only operations.\n- For Edit: copy old_string exactly (including whitespace/indent/newlines). If you already know the location from prior context, use Read with offset/limit. If you need to locate the text first, use Grep with context — its output is often sufficient for Edit without an extra Read.\n- For skills, first check the skill-index section, then use Skill(name) for the matching skill.",
             None,
         ));
         sections.push(wrap_section(
@@ -640,7 +640,7 @@ mod tests {
         let _guard = EnvGuard::set("DSCODE_SIGNAL_MODE", "full");
         let prompt = test_builder().build_system_prompt().unwrap();
         assert!(prompt.contains("SIGNAL_RECOVERY mode"));
-        assert!(prompt.contains("The FIRST tool call after the signal MUST be one of"));
+        assert!(prompt.contains("The FIRST tool call after the signal MUST inspect current state"));
         assert!(prompt.contains(
             "Calling Edit or Write as the next tool action after [System note: ...] is a violation"
         ));

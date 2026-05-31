@@ -253,6 +253,7 @@ pub(crate) struct TuiState {
     pub streaming: bool,
     pub input: InputState,
     pub model: String,
+    pub cwd_label: String,
     pub stats: StatsSnapshot,
     pub viewport: ViewportState,
     pub dirty: bool,
@@ -286,6 +287,7 @@ impl Default for TuiState {
             streaming: false,
             input: InputState::default(),
             model: "flash".into(),
+            cwd_label: short_cwd_label(),
             stats: StatsSnapshot::default(),
             viewport: ViewportState {
                 auto_scroll: true,
@@ -303,6 +305,24 @@ impl Default for TuiState {
             view: View::Main,
         }
     }
+}
+
+pub(crate) fn short_cwd_label() -> String {
+    let Some(cwd) = std::env::current_dir().ok() else {
+        return "?".into();
+    };
+
+    if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from)
+        && cwd == home
+    {
+        return "~".into();
+    }
+
+    cwd.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("/")
+        .to_string()
 }
 
 impl Debug for TuiState {

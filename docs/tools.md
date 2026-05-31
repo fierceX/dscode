@@ -109,7 +109,7 @@ ToolCallEvent
 | `pattern` | string | glob 模式 |
 | `path` | string | 搜索目录，可选，默认当前目录 |
 
-- 基于 ripgrep 文件列表能力。
+- 基于内置 glob 匹配和目录遍历，不依赖外部 `rg` 二进制。
 - 用于快速发现文件，不读取文件内容。
 
 ## `Grep`
@@ -123,7 +123,7 @@ ToolCallEvent
 | `glob` | string | 文件过滤，可选 |
 | `context` | integer | 匹配前后上下文行数，可选 |
 
-- 基于 `rg -n`。
+- 基于内置目录遍历和 Rust `regex` 搜索，不依赖外部 `rg` 二进制。
 - 优先用于定位编辑目标。
 - `context` 往往足够直接构造 `Edit old_string`。
 

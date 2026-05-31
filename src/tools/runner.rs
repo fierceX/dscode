@@ -693,6 +693,46 @@ mod tests {
     }
 
     #[test]
+    fn tool_schema_prioritizes_search_tools_before_bash() {
+        let schema: Vec<serde_json::Value> =
+            serde_json::from_str(crate::assets::TOOLS_JSON).expect("tools schema should parse");
+        let names: Vec<&str> = schema
+            .iter()
+            .map(|tool| {
+                tool.get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .expect("schema tool name")
+            })
+            .collect();
+        let pos = |name: &str| {
+            names
+                .iter()
+                .position(|candidate| *candidate == name)
+                .expect("tool should exist in schema")
+        };
+
+        assert!(pos("Glob") < pos("Bash"));
+        assert!(pos("Grep") < pos("Bash"));
+
+        let bash_desc = schema
+            .iter()
+            .find(|tool| tool.get("name").and_then(serde_json::Value::as_str) == Some("Bash"))
+            .and_then(|tool| tool.get("description"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        assert!(bash_desc.contains("Do NOT use Bash for file discovery"));
+
+        let grep_desc = schema
+            .iter()
+            .find(|tool| tool.get("name").and_then(serde_json::Value::as_str) == Some("Grep"))
+            .and_then(|tool| tool.get("description"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        assert!(grep_desc.contains("Default tool for searching code"));
+        assert!(grep_desc.contains("Use this instead of Bash commands"));
+    }
+
+    #[test]
     fn registry_metadata_matches_legacy_helpers() {
         for tool in tool_registry() {
             assert_eq!(tool.mutating(), crate::tools::is_tool_mutating(tool.name()));

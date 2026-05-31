@@ -8,6 +8,7 @@ mod render;
 mod replay;
 mod signal;
 mod state;
+mod theme;
 
 pub use display::TuiDisplay;
 pub use signal::{SubAgentStreamKind, TuiSignal};
@@ -17,7 +18,7 @@ use input::handle_event;
 use render::render;
 use replay::load_session;
 use signal::drain_signals;
-use state::TuiState;
+use state::{TuiState, short_cwd_label};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -60,6 +61,7 @@ fn tui_main_loop(
 ) -> anyhow::Result<()> {
     let mut state = TuiState {
         lines: load_session(events_path),
+        cwd_label: short_cwd_label(),
         interrupt,
         ..Default::default()
     };
@@ -110,11 +112,12 @@ mod tests {
     use crate::tui::input::{handle_ctrl_c, handle_event};
     use crate::tui::markdown::{
         InlineNode, MdBlock, TableAlign, TableRows, normalize_markdown_input, parse_blocks,
-        push_msg, render_table, strip_ansi, wrap_lines_word,
+        push_msg, push_msg_with_width, render_table, strip_ansi, wrap_lines_word,
     };
     use crate::tui::render::{
-        build_status_line, build_visible_click_map, collapsed_summary, content_viewport_height,
-        detail_lines_for_session, detail_viewport_height, split_at_visual_width, visible_lines,
+        build_status_line, build_status_spans, build_visible_click_map, collapsed_summary,
+        content_viewport_height, detail_lines_for_session, detail_viewport_height,
+        split_at_visual_width, visible_lines,
     };
     use crate::tui::state::{
         ClickAction, ClickTarget, CollapsePolicy, MsgKind, MsgLine, SubAgentDetail, TuiState, View,
@@ -500,6 +503,38 @@ mod tests {
     }
 
     #[test]
+    fn markdown_table_wraps_long_cells_without_omitting_content() {
+        let mut lines = Vec::new();
+
+        push_msg_with_width(
+            &mut lines,
+            "| Key | Description |\n| --- | --- |\n| row | abcdefghijklmnopqrstuvwxyz0123456789 |",
+            MsgKind::Text,
+            24,
+        );
+
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
+        assert!(!rendered.contains('…'));
+        assert!(rendered.contains("abcdefghijklmnopqr"));
+        assert!(rendered.contains("stuvwxyz0123456789"));
+    }
+
+    #[test]
+    fn markdown_table_uses_available_width_before_wrapping_cells() {
+        let mut lines = Vec::new();
+
+        push_msg_with_width(
+            &mut lines,
+            "| Key | Description |\n| --- | --- |\n| row | abcdefghijklmnopqrstuvwxyz0123456789 |",
+            MsgKind::Text,
+            80,
+        );
+
+        assert_eq!(lines.len(), 3);
+        assert!(line_text(&lines[2]).contains("abcdefghijklmnopqrstuvwxyz0123456789"));
+    }
+
+    #[test]
     fn markdown_table_renderer_falls_back_for_invalid_table_rows() {
         let mut lines = Vec::new();
         let table = TableRows {
@@ -508,7 +543,7 @@ mod tests {
             rows: vec![vec!["1".into(), "2".into()], vec!["too-short".into()]],
         };
 
-        render_table(&mut lines, &table, Style::default());
+        render_table(&mut lines, &table, Style::default(), 80);
 
         assert_eq!(line_text(&lines[0]), "A | B");
         assert_eq!(line_text(&lines[1]), "1 | 2");
@@ -541,7 +576,7 @@ mod tests {
                 .add_modifier
                 .contains(ratatui::style::Modifier::ITALIC)
         );
-        assert_eq!(lines[0].spans[5].style.fg, Some(Color::Cyan));
+        assert_eq!(lines[0].spans[5].style.fg, Some(Color::Blue));
         assert!(
             lines[0].spans[5]
                 .style
@@ -572,7 +607,7 @@ mod tests {
                 .add_modifier
                 .contains(ratatui::style::Modifier::BOLD)
         );
-        assert_eq!(lines[0].spans[4].style.fg, Some(Color::Cyan));
+        assert_eq!(lines[0].spans[4].style.fg, Some(Color::Blue));
         assert!(
             lines[0].spans[4]
                 .style
@@ -595,8 +630,8 @@ mod tests {
         assert_eq!(line_text(&lines[1]), "+++ b/file");
         assert_eq!(lines[0].spans[0].style.fg, Some(Color::Yellow));
         assert_eq!(lines[2].spans[0].style.fg, Some(Color::Cyan));
-        assert_eq!(lines[3].spans[0].style.fg, Some(Color::Rgb(255, 100, 100)));
-        assert_eq!(lines[4].spans[0].style.fg, Some(Color::Rgb(100, 200, 100)));
+        assert_eq!(lines[3].spans[0].style.fg, Some(Color::Red));
+        assert_eq!(lines[4].spans[0].style.fg, Some(Color::Green));
     }
 
     #[test]
@@ -913,6 +948,7 @@ mod tests {
     fn status_line_adapts_to_terminal_width() {
         let mut state = TuiState {
             work_state: WorkState::StreamingText,
+            cwd_label: "dscode-new".into(),
             ..Default::default()
         };
         state.stats.current_turn_count = 12;
@@ -932,9 +968,65 @@ mod tests {
         assert!(unicode_width::UnicodeWidthStr::width(medium.as_str()) <= 80);
         assert!(unicode_width::UnicodeWidthStr::width(wide.as_str()) <= 120);
         assert!(!narrow.contains(" T:"));
+        assert!(!narrow.contains("@dscode-new"));
         assert!(medium.contains(" I:"));
+        assert!(medium.contains("@dscode-new"));
         assert!(wide.contains(" T:12"));
         assert!(wide.contains(" R:18"));
+    }
+
+    #[test]
+    fn status_spans_style_path_and_work_state() {
+        let mut state = TuiState {
+            model: "deepseek-chat".into(),
+            cwd_label: "dscode-new".into(),
+            work_state: WorkState::RunningTool,
+            ..Default::default()
+        };
+        state.stats.belief = 0.75;
+
+        let line = build_status_spans(&state, 120);
+
+        assert_eq!(line_text(&line), build_status_line(&state, 120));
+        assert_eq!(line.spans[1].style.fg, Some(Color::Blue));
+        assert!(
+            line.spans[1]
+                .style
+                .add_modifier
+                .contains(ratatui::style::Modifier::BOLD)
+        );
+        assert_eq!(line.spans[2].content.as_ref(), " @dscode-new");
+        assert_eq!(line.spans[2].style.fg, Some(Color::DarkGray));
+        let work_span = line.spans.last().unwrap();
+        assert_eq!(work_span.content.as_ref(), "[tool]");
+        assert_eq!(work_span.style.fg, Some(Color::Yellow));
+        assert!(
+            work_span
+                .style
+                .add_modifier
+                .contains(ratatui::style::Modifier::BOLD)
+        );
+    }
+
+    #[test]
+    fn status_spans_color_error_state_as_error() {
+        let state = TuiState {
+            work_state: WorkState::Error,
+            cwd_label: "dscode-new".into(),
+            ..Default::default()
+        };
+
+        let line = build_status_spans(&state, 120);
+        let work_span = line.spans.last().unwrap();
+
+        assert_eq!(work_span.content.as_ref(), "[error]");
+        assert_eq!(work_span.style.fg, Some(Color::Red));
+        assert!(
+            work_span
+                .style
+                .add_modifier
+                .contains(ratatui::style::Modifier::BOLD)
+        );
     }
 
     #[test]

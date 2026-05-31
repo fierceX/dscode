@@ -588,7 +588,7 @@ fn blocked_by_signal_recovery(call: ToolCallEvent) -> crate::tools::runner::Tool
         tool_use_id: call.id,
         tool_name: "SignalRecoveryGuard".to_string(),
         tool_args: call.fields,
-        content: "SIGNAL_RECOVERY guard: the requested Edit/Write was not executed. Inspect current state first with Read, Grep, Glob, or a focused Bash command before mutating.".to_string(),
+        content: "SIGNAL_RECOVERY guard: the requested Edit/Write was not executed. Inspect current state first with Read, Grep, Glob, or a focused Bash verification/state command before mutating.".to_string(),
         conv_content: String::new(),
         spawns_sub_agent: false,
         sub_agent_prompt: None,

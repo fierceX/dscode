@@ -1,6 +1,7 @@
 use crate::tui::state::MsgKind;
+use crate::tui::theme;
 use ratatui::{
-    style::{Color, Modifier, Style},
+    style::Style,
     text::{Line, Span},
 };
 
@@ -34,15 +35,13 @@ enum MarkdownMode {
 
 pub(crate) fn style_for_kind(kind: MsgKind) -> Style {
     match kind {
-        MsgKind::StreamThinking => Style::default().fg(Color::Rgb(139, 139, 139)),
-        MsgKind::Text | MsgKind::StreamText => Style::default(),
-        MsgKind::ToolCall => Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-        MsgKind::Error => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        MsgKind::Info => Style::default().fg(Color::Yellow),
-        MsgKind::SubAgent => Style::default().fg(Color::Magenta),
-        MsgKind::ToolResult => Style::default().fg(Color::Rgb(100, 100, 100)),
+        MsgKind::StreamThinking => theme::muted(),
+        MsgKind::Text | MsgKind::StreamText => theme::text(),
+        MsgKind::ToolCall => theme::primary_bold(),
+        MsgKind::Error => theme::error(),
+        MsgKind::Info => theme::info(),
+        MsgKind::SubAgent => theme::sub_agent(),
+        MsgKind::ToolResult => theme::muted(),
     }
 }
 
@@ -55,7 +54,17 @@ fn mode_for_kind(kind: MsgKind, text: &str) -> MarkdownMode {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn push_msg(lines: &mut Vec<Line<'static>>, text: &str, kind: MsgKind) {
+    push_msg_with_width(lines, text, kind, 80);
+}
+
+pub(crate) fn push_msg_with_width(
+    lines: &mut Vec<Line<'static>>,
+    text: &str,
+    kind: MsgKind,
+    max_width: u16,
+) {
     if text.is_empty() {
         return;
     }
@@ -63,7 +72,7 @@ pub(crate) fn push_msg(lines: &mut Vec<Line<'static>>, text: &str, kind: MsgKind
     let normalized = normalize_markdown_input(text, false);
     let mode = mode_for_kind(kind, &normalized);
     match mode {
-        MarkdownMode::Full => render_markdown(lines, &normalized, style_for_kind(kind)),
+        MarkdownMode::Full => render_markdown(lines, &normalized, style_for_kind(kind), max_width),
         MarkdownMode::Diff => diff::render_diff(lines, &normalized),
         MarkdownMode::Plain | MarkdownMode::ToolOutput => {
             push_plain(lines, &normalized, style_for_kind(kind));
@@ -77,7 +86,11 @@ fn push_plain(lines: &mut Vec<Line<'static>>, text: &str, style: Style) {
     }
 }
 
-pub(crate) fn render_md_with_tables(lines: &mut Vec<Line<'static>>, text: &str) {
+pub(crate) fn render_md_with_tables_with_width(
+    lines: &mut Vec<Line<'static>>,
+    text: &str,
+    max_width: u16,
+) {
     let normalized = normalize_markdown_input(text, false);
-    render_markdown(lines, &normalized, Style::default());
+    render_markdown(lines, &normalized, Style::default(), max_width);
 }

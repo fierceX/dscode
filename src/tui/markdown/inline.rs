@@ -1,6 +1,7 @@
 use super::types::InlineNode;
+use crate::tui::theme;
 use ratatui::{
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::Span,
 };
 
@@ -113,10 +114,7 @@ pub(crate) fn render_inline_spans(nodes: &[InlineNode], base: Style) -> Vec<Span
     for node in nodes {
         match node {
             InlineNode::Text(text) => spans.push(Span::styled(text.clone(), base)),
-            InlineNode::Code(text) => spans.push(Span::styled(
-                text.clone(),
-                Style::default().fg(Color::Yellow),
-            )),
+            InlineNode::Code(text) => spans.push(Span::styled(text.clone(), theme::inline_code())),
             InlineNode::Strong(children) => {
                 spans.extend(render_inline_spans(
                     children,
@@ -130,13 +128,10 @@ pub(crate) fn render_inline_spans(nodes: &[InlineNode], base: Style) -> Vec<Span
                 ));
             }
             InlineNode::Link { text, href } => {
-                let link_style = base.fg(Color::Cyan).add_modifier(Modifier::UNDERLINED);
+                let link_style = theme::link(base);
                 spans.extend(render_inline_spans(text, link_style));
                 if !href.is_empty() {
-                    spans.push(Span::styled(
-                        format!(" ({href})"),
-                        Style::default().fg(Color::DarkGray),
-                    ));
+                    spans.push(Span::styled(format!(" ({href})"), theme::muted()));
                 }
             }
         }

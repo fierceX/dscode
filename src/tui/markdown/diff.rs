@@ -1,8 +1,6 @@
 use super::normalize::strip_ansi;
-use ratatui::{
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-};
+use crate::tui::theme;
+use ratatui::text::{Line, Span};
 
 pub(super) fn is_diff_like(text: &str) -> bool {
     text.lines().take(5).any(|l| {
@@ -15,27 +13,19 @@ pub(super) fn is_diff_like(text: &str) -> bool {
 }
 
 pub(super) fn render_diff(lines: &mut Vec<Line<'static>>, text: &str) {
-    let gray = Style::default().fg(Color::Rgb(100, 100, 100));
-    let red = Style::default().fg(Color::Rgb(255, 100, 100));
-    let green = Style::default().fg(Color::Rgb(100, 200, 100));
-    let cyan = Style::default().fg(Color::Cyan);
-    let yellow = Style::default()
-        .fg(Color::Yellow)
-        .add_modifier(Modifier::BOLD);
-
     for raw in text.split('\n') {
         let clean = strip_ansi(raw);
         let trimmed = clean.trim();
         let style = if trimmed.starts_with("--- ") || trimmed.starts_with("+++ ") {
-            yellow
+            theme::diff_header()
         } else if trimmed.starts_with("@@") {
-            cyan
+            theme::secondary()
         } else if clean.starts_with('-') && !clean.starts_with("---") {
-            red
+            theme::diff_remove()
         } else if clean.starts_with('+') && !clean.starts_with("+++") {
-            green
+            theme::success()
         } else {
-            gray
+            theme::muted()
         };
         lines.push(Line::from(Span::styled(clean, style)));
     }

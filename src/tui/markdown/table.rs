@@ -1,7 +1,7 @@
 use super::types::{TableAlign, TableRows};
-use super::util::truncate_visual;
+use crate::tui::theme;
 use ratatui::{
-    style::{Color, Modifier, Style},
+    style::Style,
     text::{Line, Span},
 };
 
@@ -120,8 +120,12 @@ fn parse_table_alignment(line: &str, expected_cols: usize) -> Option<Vec<TableAl
     Some(alignments)
 }
 
-pub(crate) fn render_table(lines: &mut Vec<Line<'static>>, table: &TableRows, base: Style) {
-    const MAX_CELL_WIDTH: usize = 32;
+pub(crate) fn render_table(
+    lines: &mut Vec<Line<'static>>,
+    table: &TableRows,
+    base: Style,
+    max_width: u16,
+) {
     if table.header.is_empty()
         || table.alignments.len() != table.header.len()
         || table.rows.iter().any(|row| row.len() != table.header.len())
@@ -133,28 +137,29 @@ pub(crate) fn render_table(lines: &mut Vec<Line<'static>>, table: &TableRows, ba
     let mut widths: Vec<usize> = table
         .header
         .iter()
-        .map(|cell| unicode_width::UnicodeWidthStr::width(cell.as_str()).min(MAX_CELL_WIDTH))
+        .map(|cell| unicode_width::UnicodeWidthStr::width(cell.as_str()))
         .collect();
 
     for row in &table.rows {
         for (idx, cell) in row.iter().enumerate() {
-            let width = unicode_width::UnicodeWidthStr::width(cell.as_str()).min(MAX_CELL_WIDTH);
+            let width = unicode_width::UnicodeWidthStr::width(cell.as_str());
             widths[idx] = widths[idx].max(width);
         }
     }
+    widths = fit_widths_to_table(widths, max_width as usize);
 
-    lines.push(table_line(
+    lines.extend(table_lines(
         &table.header,
         &table.alignments,
         &widths,
-        base.add_modifier(Modifier::BOLD).fg(Color::Cyan),
+        theme::table_header(base),
     ));
     lines.push(Line::from(Span::styled(
         table_separator(&widths),
-        Style::default().fg(Color::DarkGray),
+        theme::muted(),
     )));
     for row in &table.rows {
-        lines.push(table_line(row, &table.alignments, &widths, base));
+        lines.extend(table_lines(row, &table.alignments, &widths, base));
     }
 }
 
@@ -167,8 +172,36 @@ fn render_malformed_table(lines: &mut Vec<Line<'static>>, table: &TableRows, bas
     }
 }
 
-fn table_line(
+fn table_lines(
     cells: &[String],
+    alignments: &[TableAlign],
+    widths: &[usize],
+    style: Style,
+) -> Vec<Line<'static>> {
+    let wrapped_cells: Vec<Vec<String>> = cells
+        .iter()
+        .zip(widths.iter())
+        .map(|(cell, width)| wrap_cell(cell, *width))
+        .collect();
+    let row_height = wrapped_cells
+        .iter()
+        .map(|cell| cell.len())
+        .max()
+        .unwrap_or(1);
+
+    let mut lines = Vec::with_capacity(row_height);
+    for row_idx in 0..row_height {
+        let row_cells = wrapped_cells
+            .iter()
+            .map(|cell| cell.get(row_idx).map(String::as_str).unwrap_or(""))
+            .collect::<Vec<_>>();
+        lines.push(table_line(&row_cells, alignments, widths, style));
+    }
+    lines
+}
+
+fn table_line(
+    cells: &[&str],
     alignments: &[TableAlign],
     widths: &[usize],
     style: Style,
@@ -176,10 +209,7 @@ fn table_line(
     let mut spans = Vec::new();
     for (idx, cell) in cells.iter().enumerate() {
         if idx > 0 {
-            spans.push(Span::styled(
-                " │ ".to_string(),
-                Style::default().fg(Color::DarkGray),
-            ));
+            spans.push(Span::styled(" │ ".to_string(), theme::muted()));
         }
         spans.push(Span::styled(
             align_cell(cell, widths[idx], alignments[idx]),
@@ -197,17 +227,80 @@ fn table_separator(widths: &[usize]) -> String {
         .join("─┼─")
 }
 
+fn fit_widths_to_table(natural: Vec<usize>, max_width: usize) -> Vec<usize> {
+    if natural.is_empty() {
+        return natural;
+    }
+
+    let separators = 3usize.saturating_mul(natural.len().saturating_sub(1));
+    let budget = max_width.saturating_sub(separators).max(natural.len());
+    let natural_sum: usize = natural.iter().sum();
+    if natural_sum <= budget {
+        return natural;
+    }
+
+    let mut widths: Vec<usize> = natural.iter().map(|width| (*width).min(8).max(1)).collect();
+    let min_sum: usize = widths.iter().sum();
+    if min_sum > budget {
+        widths.fill(1);
+    }
+
+    let mut remaining = budget.saturating_sub(widths.iter().sum());
+    while remaining > 0 {
+        let Some(idx) = natural
+            .iter()
+            .enumerate()
+            .filter(|(idx, width)| widths[*idx] < **width)
+            .max_by_key(|(idx, width)| width.saturating_sub(widths[*idx]))
+            .map(|(idx, _)| idx)
+        else {
+            break;
+        };
+        widths[idx] += 1;
+        remaining -= 1;
+    }
+
+    widths
+}
+
 fn align_cell(cell: &str, width: usize, align: TableAlign) -> String {
-    let text = truncate_visual(cell, width);
-    let text_width = unicode_width::UnicodeWidthStr::width(text.as_str());
+    let text_width = unicode_width::UnicodeWidthStr::width(cell);
     let pad = width.saturating_sub(text_width);
     match align {
-        TableAlign::Left => format!("{text}{}", " ".repeat(pad)),
-        TableAlign::Right => format!("{}{text}", " ".repeat(pad)),
+        TableAlign::Left => format!("{cell}{}", " ".repeat(pad)),
+        TableAlign::Right => format!("{}{cell}", " ".repeat(pad)),
         TableAlign::Center => {
             let left = pad / 2;
             let right = pad - left;
-            format!("{}{}{}", " ".repeat(left), text, " ".repeat(right))
+            format!("{}{}{}", " ".repeat(left), cell, " ".repeat(right))
         }
     }
+}
+
+fn wrap_cell(cell: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut cur_w = 0usize;
+
+    for ch in cell.chars() {
+        let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if cur_w + ch_w > width && !cur.is_empty() {
+            out.push(std::mem::take(&mut cur));
+            cur_w = 0;
+            if ch == ' ' {
+                continue;
+            }
+        }
+        cur.push(ch);
+        cur_w += ch_w;
+    }
+
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
 }

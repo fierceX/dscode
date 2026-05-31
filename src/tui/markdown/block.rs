@@ -1,14 +1,20 @@
 use super::inline::{parse_inline, render_inline_spans};
 use super::table::{parse_table, render_table};
 use super::types::MdBlock;
+use crate::tui::theme;
 use ratatui::{
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
 };
 
-pub(crate) fn render_markdown(lines: &mut Vec<Line<'static>>, text: &str, base: Style) {
+pub(crate) fn render_markdown(
+    lines: &mut Vec<Line<'static>>,
+    text: &str,
+    base: Style,
+    max_width: u16,
+) {
     let blocks = parse_blocks(text);
-    render_blocks(lines, &blocks, base);
+    render_blocks(lines, &blocks, base, max_width);
 }
 
 pub(crate) fn parse_blocks(text: &str) -> Vec<MdBlock> {
@@ -90,7 +96,7 @@ pub(crate) fn parse_blocks(text: &str) -> Vec<MdBlock> {
     blocks
 }
 
-fn render_blocks(lines: &mut Vec<Line<'static>>, blocks: &[MdBlock], base: Style) {
+fn render_blocks(lines: &mut Vec<Line<'static>>, blocks: &[MdBlock], base: Style, max_width: u16) {
     for block in blocks {
         match block {
             MdBlock::Blank => lines.push(Line::from("")),
@@ -99,25 +105,19 @@ fn render_blocks(lines: &mut Vec<Line<'static>>, blocks: &[MdBlock], base: Style
             }
             MdBlock::Heading { level, content } => {
                 let style = if *level == 1 {
-                    base.fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                    theme::primary_bold()
                 } else {
                     base.add_modifier(Modifier::BOLD)
                 };
                 lines.push(Line::from(render_inline_spans(content, style)));
             }
             MdBlock::BlockQuote(content) => {
-                let mut spans = vec![Span::styled("| ", Style::default().fg(Color::DarkGray))];
-                spans.extend(render_inline_spans(
-                    content,
-                    base.fg(Color::Rgb(150, 150, 150)),
-                ));
+                let mut spans = vec![Span::styled("| ", theme::muted())];
+                spans.extend(render_inline_spans(content, theme::muted()));
                 lines.push(Line::from(spans));
             }
             MdBlock::ListItem { marker, content } => {
-                let mut spans = vec![
-                    Span::styled(marker.clone(), Style::default().fg(Color::Yellow)),
-                    Span::raw(" "),
-                ];
+                let mut spans = vec![Span::styled(marker.clone(), theme::info()), Span::raw(" ")];
                 spans.extend(render_inline_spans(content, base));
                 lines.push(Line::from(spans));
             }
@@ -125,17 +125,14 @@ fn render_blocks(lines: &mut Vec<Line<'static>>, blocks: &[MdBlock], base: Style
                 if let Some(lang) = lang {
                     lines.push(Line::from(Span::styled(
                         format!("-- {} --", lang),
-                        Style::default().fg(Color::DarkGray),
+                        theme::muted(),
                     )));
                 }
                 for raw in code {
-                    lines.push(Line::from(Span::styled(
-                        raw.clone(),
-                        Style::default().fg(Color::Rgb(150, 150, 150)),
-                    )));
+                    lines.push(Line::from(Span::styled(raw.clone(), theme::muted())));
                 }
             }
-            MdBlock::Table(table) => render_table(lines, table, base),
+            MdBlock::Table(table) => render_table(lines, table, base, max_width),
         }
     }
 }

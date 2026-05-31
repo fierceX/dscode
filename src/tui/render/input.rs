@@ -1,7 +1,7 @@
+use crate::tui::theme;
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Color, Style},
     text::Text,
     widgets::{Block, Borders, Paragraph},
 };
@@ -9,7 +9,7 @@ use ratatui::{
 pub(super) fn render_input(f: &mut Frame, area: Rect, vis_lines: &[String]) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray));
+        .border_style(theme::border());
 
     let inner = block.inner(area);
     f.render_widget(block, area);

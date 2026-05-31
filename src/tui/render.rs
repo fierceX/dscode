@@ -21,7 +21,7 @@ pub(crate) use content::{
 pub(crate) use detail::{detail_lines_for_session, detail_viewport_height};
 pub(crate) use input::{clamp_input_scroll, split_at_visual_width};
 #[cfg(test)]
-pub(crate) use status::build_status_line;
+pub(crate) use status::{build_status_line, build_status_spans};
 
 pub(crate) fn render(f: &mut Frame, state: &mut TuiState) {
     let area = f.area();

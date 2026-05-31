@@ -84,7 +84,7 @@ impl DecisionEngine {
             )
         };
         format!(
-            "[System note: belief {:.2} is below the recovery threshold. Enter SIGNAL_RECOVERY mode as defined in the system instructions. Your next tool call must be Read, Grep, Glob, or Bash; do not start with Edit or Write.{}]",
+            "[System note: belief {:.2} is below the recovery threshold. Enter SIGNAL_RECOVERY mode as defined in the system instructions. Your next tool call must inspect current state with Read, Grep, Glob, or a focused Bash verification/state command; do not start with Edit or Write.{}]",
             b, error_section,
         )
     }
@@ -99,7 +99,7 @@ impl DecisionEngine {
             )
         };
         format!(
-            "[System note: belief {:.2} indicates repeated tool failure. Enter SIGNAL_RECOVERY mode as defined in the system instructions before any further repair momentum. Your next tool call must be Read, Grep, Glob, or Bash; do not start with Edit or Write.{}]",
+            "[System note: belief {:.2} indicates repeated tool failure. Enter SIGNAL_RECOVERY mode as defined in the system instructions before any further repair momentum. Your next tool call must inspect current state with Read, Grep, Glob, or a focused Bash verification/state command; do not start with Edit or Write.{}]",
             b, error_section,
         )
     }
@@ -146,7 +146,7 @@ mod tests {
         if let Decision::Inject(msg) = d {
             assert!(msg.starts_with("[System note:"));
             assert!(msg.contains("SIGNAL_RECOVERY mode"));
-            assert!(msg.contains("Your next tool call must be Read, Grep, Glob, or Bash"));
+            assert!(msg.contains("Your next tool call must inspect current state"));
             assert!(msg.contains("Recent reliability signals"));
             assert!(!msg.contains("Then make at most one minimal edit"));
         }

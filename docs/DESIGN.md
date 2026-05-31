@@ -393,7 +393,7 @@ Phase 4: stop = "tool_use"
 **注入内容包含具体可靠性信号**：LLM 收到进入 `SIGNAL_RECOVERY` 的短控制消息和最近信号：
 
 ```
-[System note: belief 0.37 indicates repeated tool failure. Enter SIGNAL_RECOVERY mode as defined in the system instructions before any further repair momentum. Your next tool call must be Read, Grep, Glob, or Bash; do not start with Edit or Write.
+[System note: belief 0.37 indicates repeated tool failure. Enter SIGNAL_RECOVERY mode as defined in the system instructions before any further repair momentum. Your next tool call must inspect current state with Read, Grep, Glob, or a focused Bash verification/state command; do not start with Edit or Write.
 Recent reliability signals:
 - Bash(cargo build): process exited with code 1
 - Bash(cargo build): Rust compilation error (error[E0308])

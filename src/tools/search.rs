@@ -1,4 +1,5 @@
 use anyhow::{Result, anyhow, bail};
+use std::path::{Path, PathBuf};
 
 const MAX_FILES: usize = 5000;
 const MAX_RESULTS: usize = 1000;
@@ -11,9 +12,11 @@ pub fn glob(pattern: &str, path: &str) -> Result<String> {
     let glob = globset::Glob::new(pattern)
         .map_err(|e| anyhow!("Error: invalid glob pattern '{pattern}': {e}"))?
         .compile_matcher();
+    let base = Path::new(path);
+    let walk_root = glob_walk_root(base, pattern);
 
-    let walker = ignore::WalkBuilder::new(path)
-        .standard_filters(false)
+    let walker = ignore::WalkBuilder::new(walk_root)
+        .standard_filters(true)
         .max_depth(Some(50))
         .build();
 
@@ -25,11 +28,9 @@ pub fn glob(pattern: &str, path: &str) -> Result<String> {
             continue;
         }
         let p = entry.path();
-        // ignore::Walk may yield paths with a "./" prefix; normalize for glob matching.
-        let p_display = p.display().to_string();
-        let p_normalized = p_display.strip_prefix("./").unwrap_or(&p_display);
-        if glob.is_match(p_normalized) {
-            let line = p_display;
+        let match_path = relative_match_path(p, base);
+        if glob.is_match(&match_path) {
+            let line = match_path;
             total_bytes += line.len() + 1;
             if total_bytes > MAX_OUTPUT_BYTES {
                 results.push(format!(
@@ -43,6 +44,46 @@ pub fn glob(pattern: &str, path: &str) -> Result<String> {
     }
 
     Ok(results.join("\n"))
+}
+
+fn glob_walk_root(base: &Path, pattern: &str) -> PathBuf {
+    let Some(prefix) = static_glob_dir_prefix(pattern) else {
+        return base.to_path_buf();
+    };
+    let candidate = base.join(prefix);
+    if candidate.is_dir() {
+        candidate
+    } else {
+        base.to_path_buf()
+    }
+}
+
+fn static_glob_dir_prefix(pattern: &str) -> Option<&str> {
+    let meta_idx = pattern
+        .char_indices()
+        .find_map(|(idx, ch)| matches!(ch, '*' | '?' | '[' | '{').then_some(idx))?;
+    let raw_prefix = &pattern[..meta_idx];
+    let trimmed = raw_prefix.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() {
+        return None;
+    }
+    if raw_prefix.ends_with('/') || raw_prefix.ends_with('\\') {
+        return Some(trimmed);
+    }
+    trimmed
+        .rfind(|ch| ch == '/' || ch == '\\')
+        .and_then(|idx| (idx > 0).then_some(&trimmed[..idx]))
+}
+
+fn relative_match_path(path: &Path, base: &Path) -> String {
+    let rel = path.strip_prefix(base).unwrap_or(path);
+    let normalized = rel
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/");
+    normalized
+        .strip_prefix("./")
+        .unwrap_or(&normalized)
+        .to_string()
 }
 
 pub fn grep(pattern: &str, path: &str, file_glob: &str, context: Option<usize>) -> Result<String> {
@@ -232,6 +273,29 @@ mod tests {
         let result = glob("**/*.rs", "src/tools").unwrap();
         assert!(result.contains("search.rs") || result.contains("bash.rs"));
         assert!(result.contains("runner.rs"));
+    }
+
+    #[test]
+    fn glob_matches_rooted_pattern_from_cwd() {
+        let result = glob("src/**/*.rs", ".").unwrap();
+
+        assert!(result.contains("src/tools/search.rs"));
+        assert!(result.contains("src/main.rs"));
+    }
+
+    #[test]
+    fn glob_matches_rooted_pattern_from_absolute_root() {
+        let dir = std::env::temp_dir().join(format!("glob-root-{}", std::process::id()));
+        fs::create_dir_all(dir.join("src/tools")).unwrap();
+        fs::write(dir.join("src/main.rs"), "fn main() {}\n").unwrap();
+        fs::write(dir.join("src/tools/search.rs"), "pub fn search() {}\n").unwrap();
+
+        let result = glob("src/**/*.rs", &dir.display().to_string()).unwrap();
+
+        assert!(result.contains("src/main.rs"));
+        assert!(result.contains("src/tools/search.rs"));
+
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -1,9 +1,9 @@
-use crate::tui::markdown::{push_msg, truncate_visual, wrap_lines_word};
+use crate::tui::markdown::{push_msg_with_width, truncate_visual, wrap_lines_word};
 use crate::tui::state::{ClickAction, ClickTarget, MsgKind, MsgLine, TuiState};
+use crate::tui::theme;
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Color, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph},
 };
@@ -50,26 +50,24 @@ pub(super) fn render_content(f: &mut Frame, area: Rect, state: &mut TuiState) {
     state.viewport.effective_scroll = scroll;
     state.viewport.click_map = build_visible_click_map(state, scroll, viewport);
 
-    let border_color = if state.streaming {
-        Color::Cyan
+    let border_style = if state.streaming {
+        theme::streaming_border()
     } else {
-        Color::DarkGray
+        theme::border()
     };
     let borders = if state.viewport.show_borders {
         Borders::ALL
     } else {
         Borders::NONE
     };
-    let mut block = Block::default()
-        .borders(borders)
-        .border_style(Style::default().fg(border_color));
+    let mut block = Block::default().borders(borders).border_style(border_style);
 
     let mut title_parts: Vec<Span<'static>> = Vec::new();
     if scroll > 0 {
-        title_parts.push(Span::styled(" ↥ ", Style::default().fg(Color::Yellow)));
+        title_parts.push(Span::styled(" ↥ ", theme::info()));
     }
     if scroll < max_scroll {
-        title_parts.push(Span::styled(" ↧ ", Style::default().fg(Color::Yellow)));
+        title_parts.push(Span::styled(" ↧ ", theme::info()));
     }
     if !title_parts.is_empty() {
         block = block.title_bottom(Line::from(title_parts));
@@ -105,11 +103,11 @@ fn build_message_segments(msg: &MsgLine, inner_w: u16) -> Vec<Line<'static>> {
     let mut seg = Vec::new();
     if msg.collapsed {
         let max_w = (inner_w as usize).saturating_sub(4).max(1);
-        push_msg(&mut seg, &collapsed_summary(msg, max_w), msg.kind);
+        push_msg_with_width(&mut seg, &collapsed_summary(msg, max_w), msg.kind, inner_w);
     } else if msg.is_collapsible() {
-        push_msg(&mut seg, &format!("▼ {}", msg.text), msg.kind);
+        push_msg_with_width(&mut seg, &format!("▼ {}", msg.text), msg.kind, inner_w);
     } else {
-        push_msg(&mut seg, &msg.text, msg.kind);
+        push_msg_with_width(&mut seg, &msg.text, msg.kind, inner_w);
     }
     seg
 }
@@ -217,7 +215,7 @@ fn ensure_stream_cache(state: &mut TuiState, inner_w: u16) {
     }
 
     let mut seg: Vec<Line<'static>> = Vec::new();
-    push_msg(&mut seg, &state.stream_line, state.stream_kind);
+    push_msg_with_width(&mut seg, &state.stream_line, state.stream_kind, inner_w);
     state.cache.stream_lines = Some(wrap_lines_word(&seg, inner_w));
     state.cache.stream_width = inner_w;
     state.cache.stream_kind = state.stream_kind;

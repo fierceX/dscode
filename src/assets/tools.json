@@ -24,6 +24,54 @@
     }
   },
   {
+    "name": "Glob",
+    "description": "Find files matching a single glob pattern. Default tool for file discovery. Use this instead of Bash commands like find, ls, or rg --files when you need file paths. Use multiple Glob calls if you need multiple patterns.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "pattern": {
+          "type": "string",
+          "description": "Glob pattern, for example **/*.rs or src/**/*.ts"
+        },
+        "path": {
+          "type": "string",
+          "description": "Optional directory to search from. Defaults to ."
+        }
+      },
+      "required": [
+        "pattern"
+      ]
+    }
+  },
+  {
+    "name": "Grep",
+    "description": "Default tool for searching code and file contents. Use this instead of Bash commands like rg, grep, or find | xargs grep. Supports Rust regex patterns and returns file:line matches.\n- Use context to show surrounding lines — often enough for Edit without a separate Read\n- Use glob to restrict file types or directories\n- Use multiple Grep calls if you need multiple patterns",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "pattern": {
+          "type": "string",
+          "description": "The Rust regular expression pattern to search for. For literal symbols, simple names usually work directly; escape regex metacharacters when needed."
+        },
+        "path": {
+          "type": "string",
+          "description": "File or directory to search in. Defaults to ."
+        },
+        "glob": {
+          "type": "string",
+          "description": "Glob pattern to filter files (e.g. \"*.rs\", \"src/**/*.ts\", \"*.{ts,tsx}\")"
+        },
+        "context": {
+          "type": "integer",
+          "description": "Number of lines before and after each match. Useful for getting enough context to Edit directly from Grep output."
+        }
+      },
+      "required": [
+        "pattern"
+      ]
+    }
+  },
+  {
     "name": "Write",
     "description": "Write a file to the local filesystem. Parent directories are created automatically if they don't exist (mkdir -p).",
     "input_schema": {
@@ -72,13 +120,13 @@
   },
   {
     "name": "Bash",
-    "description": "Execute a bash command. Returns stdout and stderr.",
+    "description": "Execute a focused shell command for build, test, git, package-manager, server, or other shell-only tasks. Do NOT use Bash for file discovery, code content search, or reading files when a dedicated tool fits: use Glob for paths, Grep for content search, and Read for known files or line ranges. Returns stdout and stderr.",
     "input_schema": {
       "type": "object",
       "properties": {
         "command": {
           "type": "string",
-          "description": "The bash command to execute"
+          "description": "The focused bash command to execute. Avoid search/read commands such as rg, grep, find, ls, or cat when Glob/Grep/Read can do the job."
         },
         "timeout": {
           "type": "integer",
@@ -87,26 +135,6 @@
       },
       "required": [
         "command"
-      ]
-    }
-  },
-  {
-    "name": "Glob",
-    "description": "Find files matching a single glob pattern. Use multiple Glob calls if you need multiple patterns.",
-    "input_schema": {
-      "type": "object",
-      "properties": {
-        "pattern": {
-          "type": "string",
-          "description": "Glob pattern, for example **/*.sh"
-        },
-        "path": {
-          "type": "string",
-          "description": "Optional directory to search from. Defaults to ."
-        }
-      },
-      "required": [
-        "pattern"
       ]
     }
   },
@@ -129,34 +157,6 @@
           "description": "Timeout in seconds (default: 30, min: 5, max: 300)."
         }
       }
-    }
-  },
-  {
-    "name": "Grep",
-    "description": "Search file contents with ripgrep. Supports regex patterns.\n- Use context to show surrounding lines \u2014 often enough for Edit without a separate Read\n- Use multiple Grep calls if you need multiple patterns",
-    "input_schema": {
-      "type": "object",
-      "properties": {
-        "pattern": {
-          "type": "string",
-          "description": "The regular expression pattern to search for"
-        },
-        "path": {
-          "type": "string",
-          "description": "File or directory to search in. Defaults to ."
-        },
-        "glob": {
-          "type": "string",
-          "description": "Glob pattern to filter files (e.g. \"*.js\", \"*.{ts,tsx}\")"
-        },
-        "context": {
-          "type": "integer",
-          "description": "Number of lines before and after each match. Useful for getting enough context to Edit directly from Grep output."
-        }
-      },
-      "required": [
-        "pattern"
-      ]
     }
   },
   {
