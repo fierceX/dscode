@@ -148,7 +148,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           pattern: mink-*
-          path: dist
+          path: dist/bin
           merge-multiple: true
 
       - name: Download wheel artifacts
@@ -159,12 +159,12 @@ jobs:
           merge-multiple: true
 
       - name: Show all artifacts
-        run: ls -lh dist/
+        run: ls -lh dist/ dist/bin/
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/mink-*
+          files: dist/bin/mink-*
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
