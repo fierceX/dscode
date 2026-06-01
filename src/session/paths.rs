@@ -35,7 +35,7 @@ pub fn project_key(cwd: &Path) -> String {
 
 /// Build all session paths for a given home directory, working directory, and session ID.
 pub fn paths_for(home: &Path, cwd: &Path, session_id: &str) -> Paths {
-    let project_dir = home.join(".dscode/projects").join(project_key(cwd));
+    let project_dir = home.join(".mink/projects").join(project_key(cwd));
     let session_dir = project_dir.join(session_id);
     Paths {
         base_dir: project_dir,
@@ -55,7 +55,7 @@ pub async fn ensure_dir(path: &Path) -> Result<()> {
 }
 
 pub async fn continue_session(home: &Path, cwd: &Path) -> Result<String> {
-    let dir = home.join(".dscode/projects").join(project_key(cwd));
+    let dir = home.join(".mink/projects").join(project_key(cwd));
     let mut newest: Option<(std::time::SystemTime, String)> = None;
     if !dir.exists() {
         bail!("no sessions found");

@@ -455,7 +455,7 @@ fn skill_tool(ctx: &ToolContext, name: &str) -> Result<String> {
 
     // Check embedded skills first (built into binary)
     if let Some(skill) = crate::assets::embedded_skills::find(name) {
-        let expanded = skill.content.replace("${DSCODE_SKILL_DIR}", "<built-in>");
+        let expanded = skill.content.replace("${MINK_SKILL_DIR}", "<built-in>");
         return Ok(format!(
             "Skill: {}\nBase directory: <built-in>\n\n{}",
             skill.name, expanded
@@ -468,7 +468,7 @@ fn skill_tool(ctx: &ToolContext, name: &str) -> Result<String> {
     };
     let base_dir = skill_file.parent().unwrap_or(std::path::Path::new(""));
     let content = std::fs::read_to_string(&skill_file)?
-        .replace("${DSCODE_SKILL_DIR}", &base_dir.display().to_string());
+        .replace("${MINK_SKILL_DIR}", &base_dir.display().to_string());
     Ok(format!(
         "Skill: {name}\nBase directory: {}\n\n{content}",
         base_dir.display()

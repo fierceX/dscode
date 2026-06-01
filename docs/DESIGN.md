@@ -164,7 +164,7 @@ fn should_compact(&self, trigger: &str, context_tokens: usize) -> bool {
 }
 ```
 
-`compact_pct` 通过 `.dscoderc` 的 `context_compact_pct` 配置，默认 85%。
+`compact_pct` 通过 `.minkrc` 的 `context_compact_pct` 配置，默认 85%。
 
 ### 三级 Tier
 
@@ -400,7 +400,7 @@ Recent reliability signals:
 - Grep(pattern="xxx"): No such file]
 ```
 
-**信念度感知**：默认情况下系统提示词包含 `<belief-awareness>` 区块，提前告知模型存在信念度机制、注入触发条件和 `SIGNAL_RECOVERY` 协议。模型在被注入时能理解上下文，按指引先读后写，而不是继续盲目操作。区块位于 `verification-gate` 之后、`stop-triggers` 之前，纯英文。设置 `DSCODE_SIGNAL_MODE=off` 时，该区块不会出现在系统提示词中，信号采集、注入、Abort 和恢复守卫也不会运行。
+**信念度感知**：默认情况下系统提示词包含 `<belief-awareness>` 区块，提前告知模型存在信念度机制、注入触发条件和 `SIGNAL_RECOVERY` 协议。模型在被注入时能理解上下文，按指引先读后写，而不是继续盲目操作。区块位于 `verification-gate` 之后、`stop-triggers` 之前，纯英文。设置 `MINK_SIGNAL_MODE=off` 时，该区块不会出现在系统提示词中，信号采集、注入、Abort 和恢复守卫也不会运行。
 
 **恢复首步守卫**：注入后，下一轮首个工具调用如果是 `Edit` 或 `Write`，`TurnExecutor` 会拒绝执行并返回 `SignalRecoveryGuard` 结果，要求先使用 `Read`、`Grep`、`Glob` 或聚焦的 `Bash` 检查当前状态。该守卫只约束注入后的第一步，避免模型忽略信号后继续盲改。
 
@@ -570,7 +570,7 @@ OpenAI API 只在最后一个 chunk（标记为 `[DONE]`）中提供完整的 us
 每个 session 有独立的目录：
 
 ```
-~/.dscode/projects/<project_key>/<session_id>/
+~/.mink/projects/<project_key>/<session_id>/
 ├── conversation.jsonl   ← 对话消息（逐行追加 JSON）
 ├── events.jsonl          ← 事件日志（每行一个事件）
 ├── summary.txt           ← 压缩后的上下文快照
@@ -683,11 +683,11 @@ pub fn apply_provider_defaults(cfg: &mut Config) -> Result<()> {
 | API | `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL` | 认证和端点 |
 | 大小 | `TOOL_RESULT_MAX_BYTES`, `FILE_WRITE_MAX_BYTES` | 输出限制 |
 | Web | `JINA_API_KEY` | WebSearch / WebFetch 认证 |
-| 信号 | `DSCODE_SIGNAL_MODE` | `full` 启用信号系统，`off` 关闭信号提示词和运行时干预 |
-| 沙箱 | `DSCODE_LIMITS` | JSON 格式 sandbox 限制配置 |
-| 调试 | `LOG_EVENTS`, `DSCODE_HOME` | 日志和 session 路径 |
+| 信号 | `MINK_SIGNAL_MODE` | `full` 启用信号系统，`off` 关闭信号提示词和运行时干预 |
+| 沙箱 | `MINK_LIMITS` | JSON 格式 sandbox 限制配置 |
+| 调试 | `LOG_EVENTS`, `MINK_HOME` | 日志和 session 路径 |
 
-`context_compact_pct` 通过 `.dscoderc` 配置。
+`context_compact_pct` 通过 `.minkrc` 配置。
 
 ---
 
@@ -741,7 +741,7 @@ pub fn apply_provider_defaults(cfg: &mut Config) -> Result<()> {
 <tool-selection>          ← 工具选择原则
 <safety>                  ← 安全边界
 <verification-gate>       ← 验证门控
-<belief-awareness>        ← 信号系统协议（DSCODE_SIGNAL_MODE=full 时）
+<belief-awareness>        ← 信号系统协议（MINK_SIGNAL_MODE=full 时）
 <stop-triggers>           ← 停止条件
 <output-discipline>       ← 输出纪律
 <using-your-tools>        ← 工具使用说明

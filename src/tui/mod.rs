@@ -1,4 +1,4 @@
-//! TUI module for dscode using ratatui.
+//! TUI module for mink using ratatui.
 
 mod command;
 mod display;
@@ -194,7 +194,7 @@ mod tests {
     #[test]
     fn load_session_replays_recent_turns() {
         let path = std::env::temp_dir().join(format!(
-            "dscode_tui_events_{}_{}.jsonl",
+            "mink_tui_events_{}_{}.jsonl",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -948,7 +948,7 @@ mod tests {
     fn status_line_adapts_to_terminal_width() {
         let mut state = TuiState {
             work_state: WorkState::StreamingText,
-            cwd_label: "dscode-new".into(),
+            cwd_label: "mink-new".into(),
             ..Default::default()
         };
         state.stats.current_turn_count = 12;
@@ -968,9 +968,9 @@ mod tests {
         assert!(unicode_width::UnicodeWidthStr::width(medium.as_str()) <= 80);
         assert!(unicode_width::UnicodeWidthStr::width(wide.as_str()) <= 120);
         assert!(!narrow.contains(" T:"));
-        assert!(!narrow.contains("@dscode-new"));
+        assert!(!narrow.contains("@mink-new"));
         assert!(medium.contains(" I:"));
-        assert!(medium.contains("@dscode-new"));
+        assert!(medium.contains("@mink-new"));
         assert!(wide.contains(" T:12"));
         assert!(wide.contains(" R:18"));
     }
@@ -979,7 +979,7 @@ mod tests {
     fn status_spans_style_path_and_work_state() {
         let mut state = TuiState {
             model: "deepseek-chat".into(),
-            cwd_label: "dscode-new".into(),
+            cwd_label: "mink-new".into(),
             work_state: WorkState::RunningTool,
             ..Default::default()
         };
@@ -995,7 +995,7 @@ mod tests {
                 .add_modifier
                 .contains(ratatui::style::Modifier::BOLD)
         );
-        assert_eq!(line.spans[2].content.as_ref(), " @dscode-new");
+        assert_eq!(line.spans[2].content.as_ref(), " @mink-new");
         assert_eq!(line.spans[2].style.fg, Some(Color::DarkGray));
         let work_span = line.spans.last().unwrap();
         assert_eq!(work_span.content.as_ref(), "[tool]");
@@ -1012,7 +1012,7 @@ mod tests {
     fn status_spans_color_error_state_as_error() {
         let state = TuiState {
             work_state: WorkState::Error,
-            cwd_label: "dscode-new".into(),
+            cwd_label: "mink-new".into(),
             ..Default::default()
         };
 

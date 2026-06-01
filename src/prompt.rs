@@ -26,9 +26,9 @@ impl Builder {
             .unwrap_or(&locale_raw)
             .to_string();
         let identity = if locale.starts_with("zh") {
-            "你是 dscode，一个在终端中运行的轻量级编码智能体。".to_string()
+            "你是 mink，一个在终端中运行的轻量级编码智能体。".to_string()
         } else {
-            "You are dscode, a lightweight coding agent that works in a terminal.".to_string()
+            "You are mink, a lightweight coding agent that works in a terminal.".to_string()
         };
         sections.push(wrap_section("agent-identity", &identity, None));
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "unknown".to_string());
@@ -237,7 +237,7 @@ impl Builder {
     }
 
     fn build_instruction_files_section(&self) -> Result<Option<String>> {
-        let global_file = find_instruction_file_in_dir(&self.home.join(".dscode"));
+        let global_file = find_instruction_file_in_dir(&self.home.join(".mink"));
         let project_file = find_instruction_file_in_dir(&self.cwd);
         let mut out = Vec::new();
         if let Some(f) = global_file {
@@ -318,7 +318,7 @@ impl Builder {
                     "Base directory: <built-in>\n\n{}",
                     embedded
                         .content
-                        .replace("${DSCODE_SKILL_DIR}", "<built-in>")
+                        .replace("${MINK_SKILL_DIR}", "<built-in>")
                 );
                 sections.push(wrap_section("skill", &full, Some(embedded.name)));
                 continue;
@@ -334,7 +334,7 @@ impl Builder {
                 "Base directory for this skill: {}\n\n{}",
                 skill_file.parent().unwrap_or(Path::new("")).display(),
                 content.replace(
-                    "${DSCODE_SKILL_DIR}",
+                    "${MINK_SKILL_DIR}",
                     &skill_file
                         .parent()
                         .unwrap_or(Path::new(""))
@@ -578,7 +578,7 @@ mod tests {
     #[test]
     fn build_system_prompt_contains_agent_identity() {
         let prompt = test_builder().build_system_prompt().unwrap();
-        assert!(prompt.contains("dscode"), "should contain project name");
+        assert!(prompt.contains("mink"), "should contain project name");
         assert!(
             prompt.contains("<agent-identity>"),
             "should have identity section"
@@ -598,7 +598,7 @@ mod tests {
     #[test]
     fn build_system_prompt_has_all_sections() {
         let _lock = signal_env_lock();
-        let _guard = EnvGuard::set("DSCODE_SIGNAL_MODE", "full");
+        let _guard = EnvGuard::set("MINK_SIGNAL_MODE", "full");
         let prompt = test_builder().build_system_prompt().unwrap();
         let sections = vec![
             "<agent-identity>",
@@ -637,7 +637,7 @@ mod tests {
     #[test]
     fn build_system_prompt_includes_signal_recovery_protocol() {
         let _lock = signal_env_lock();
-        let _guard = EnvGuard::set("DSCODE_SIGNAL_MODE", "full");
+        let _guard = EnvGuard::set("MINK_SIGNAL_MODE", "full");
         let prompt = test_builder().build_system_prompt().unwrap();
         assert!(prompt.contains("SIGNAL_RECOVERY mode"));
         assert!(prompt.contains("The FIRST tool call after the signal MUST inspect current state"));
@@ -652,7 +652,7 @@ mod tests {
     #[test]
     fn build_system_prompt_omits_signal_protocol_when_disabled() {
         let _lock = signal_env_lock();
-        let _guard = EnvGuard::set("DSCODE_SIGNAL_MODE", "off");
+        let _guard = EnvGuard::set("MINK_SIGNAL_MODE", "off");
         let prompt = test_builder().build_system_prompt().unwrap();
         assert!(!prompt.contains("<belief-awareness>"));
         assert!(!prompt.contains("SIGNAL_RECOVERY mode"));

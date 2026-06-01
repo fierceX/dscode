@@ -379,7 +379,7 @@ mod tests {
     use std::fs;
 
     fn temp_file(name: &str, content: &str) -> String {
-        let path = format!("/tmp/dscode-test-{}-{}", name, std::process::id());
+        let path = format!("/tmp/mink-test-{}-{}", name, std::process::id());
         fs::write(&path, content).unwrap();
         path
     }
@@ -415,7 +415,7 @@ mod tests {
 
     #[test]
     fn write_creates_file() {
-        let p = format!("/tmp/dscode-test-write-{}", std::process::id());
+        let p = format!("/tmp/mink-test-write-{}", std::process::id());
         let result = write(&p, "hello", 1000).unwrap();
         assert!(result.contains("OK"));
         assert_eq!(fs::read_to_string(&p).unwrap(), "hello");
@@ -424,7 +424,7 @@ mod tests {
 
     #[test]
     fn write_exceeds_max_bytes_error() {
-        let p = format!("/tmp/dscode-test-write-big-{}", std::process::id());
+        let p = format!("/tmp/mink-test-write-big-{}", std::process::id());
         assert!(write(&p, "toolarge", 5).is_err());
     }
 

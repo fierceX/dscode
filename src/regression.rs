@@ -93,7 +93,7 @@ async fn harness_with_config(
     static CNT: AtomicU64 = AtomicU64::new(0);
     let n = CNT.fetch_add(1, Ordering::SeqCst);
     let root = std::env::temp_dir().join(format!(
-        "dscode-regression-{}-{}-{n}",
+        "mink-regression-{}-{}-{n}",
         std::process::id(),
         name
     ));
@@ -1513,10 +1513,10 @@ async fn sub_agent_executor_with_mock_llm_captures_child_output() -> anyhow::Res
 }
 
 #[tokio::test]
-#[ignore = "requires DSCODE_REAL_API=1 and DEEPSEEK_API_KEY"]
+#[ignore = "requires MINK_REAL_API=1 and DEEPSEEK_API_KEY"]
 async fn real_deepseek_api_smoke_streams_response() -> anyhow::Result<()> {
-    if std::env::var("DSCODE_REAL_API").ok().as_deref() != Some("1") {
-        eprintln!("skipping real API regression: set DSCODE_REAL_API=1");
+    if std::env::var("MINK_REAL_API").ok().as_deref() != Some("1") {
+        eprintln!("skipping real API regression: set MINK_REAL_API=1");
         return Ok(());
     }
     let api_key = match std::env::var("DEEPSEEK_API_KEY") {

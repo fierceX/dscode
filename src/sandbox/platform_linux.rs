@@ -64,16 +64,16 @@ pub fn try_nsjail(
         }
     }
 
-    // ── DSCODE_HOME / default ~/.dscode (writable for session persistence) ──
-    let dscode_home = std::env::var("DSCODE_HOME").unwrap_or_else(|_| {
+    // ── MINK_HOME / default ~/.mink (writable for session persistence) ──
+    let mink_home = std::env::var("MINK_HOME").unwrap_or_else(|_| {
         std::env::var("HOME")
-            .map(|h| format!("{}/.dscode", h))
-            .unwrap_or_else(|_| "/tmp/.dscode".to_string())
+            .map(|h| format!("{}/.mink", h))
+            .unwrap_or_else(|_| "/tmp/.mink".to_string())
     });
-    if !dscode_home.is_empty() && dscode_home != "/" {
-        let _ = std::fs::create_dir_all(&dscode_home);
+    if !mink_home.is_empty() && mink_home != "/" {
+        let _ = std::fs::create_dir_all(&mink_home);
         cmd.push("--bindmount".into());
-        cmd.push(format!("{}:{}", dscode_home, dscode_home));
+        cmd.push(format!("{}:{}", mink_home, mink_home));
     }
 
     // Working directory: first write dir, then first read dir
@@ -174,17 +174,17 @@ pub fn try_bwrap(
         }
     }
 
-    // ── DSCODE_HOME / default ~/.dscode (writable for session persistence) ──
-    let dscode_home = std::env::var("DSCODE_HOME").unwrap_or_else(|_| {
+    // ── MINK_HOME / default ~/.mink (writable for session persistence) ──
+    let mink_home = std::env::var("MINK_HOME").unwrap_or_else(|_| {
         std::env::var("HOME")
-            .map(|h| format!("{}/.dscode", h))
-            .unwrap_or_else(|_| "/tmp/.dscode".to_string())
+            .map(|h| format!("{}/.mink", h))
+            .unwrap_or_else(|_| "/tmp/.mink".to_string())
     });
-    if !dscode_home.is_empty() && dscode_home != "/" {
-        let _ = std::fs::create_dir_all(&dscode_home);
+    if !mink_home.is_empty() && mink_home != "/" {
+        let _ = std::fs::create_dir_all(&mink_home);
         cmd.push("--bind".into());
-        cmd.push(dscode_home.clone());
-        cmd.push(dscode_home);
+        cmd.push(mink_home.clone());
+        cmd.push(mink_home);
     }
 
     // ── Namespace isolation ──────────────────────────────────

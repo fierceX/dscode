@@ -36,7 +36,7 @@ impl AsyncLlClient {
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(30))
             .timeout(Duration::from_secs(600))
-            .user_agent("dscode/3.0")
+            .user_agent("mink/3.0")
             .build()?;
         Ok(Self {
             client,
@@ -396,7 +396,7 @@ mod tests {
         static CNT: AtomicU64 = AtomicU64::new(0);
         let n = CNT.fetch_add(1, Ordering::SeqCst);
         let root = std::env::temp_dir().join(format!(
-            "dscode-client-test-{}-{name}-{n}",
+            "mink-client-test-{}-{name}-{n}",
             std::process::id()
         ));
         let home = root.join("home");

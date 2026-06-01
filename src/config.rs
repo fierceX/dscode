@@ -66,9 +66,9 @@ impl ModelTier {
     }
 }
 
-/// TOML config file structure (optional, loaded from ~/.dscoderc or <project>/.dscoderc).
+/// TOML config file structure (optional, loaded from ~/.minkrc or <project>/.minkrc).
 #[derive(Debug, Clone, Default, serde::Deserialize)]
-pub struct DscodeConfigFile {
+pub struct MinkConfigFile {
     pub api_key: Option<String>,
     pub base_url: Option<String>,
     pub model: Option<String>,
@@ -79,12 +79,12 @@ pub struct DscodeConfigFile {
     pub sub_agent_timeout: Option<i32>,
     pub context_compact_pct: Option<u8>,
     pub log_events: Option<bool>,
-    /// `[sandbox]` section — when enabled, dscode re-execs itself inside a sandbox.
+    /// `[sandbox]` section — when enabled, mink re-execs itself inside a sandbox.
     #[serde(default)]
     pub sandbox: Option<SandboxConfigFile>,
 }
 
-/// The `[sandbox]` section in .dscoderc (all fields optional, inherits defaults).
+/// The `[sandbox]` section in .minkrc (all fields optional, inherits defaults).
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(default)]
 pub struct SandboxConfigFile {
@@ -148,7 +148,7 @@ pub struct Config {
     pub cli_overrides: CliOverrides,
     /// JSON-RPC mode: read request from stdin, emit events to stdout.
     pub json_rpc: bool,
-    /// 沙箱配置（从 .dscoderc 加载）
+    /// 沙箱配置（从 .minkrc 加载）
     pub sandbox: SandboxConfig,
     /// 自定义系统提示词文件（MISSION.md）
     pub mission_file: Option<PathBuf>,
@@ -351,19 +351,19 @@ fn require_value(args: &[String], i: usize) -> Result<String> {
 }
 
 pub fn apply_config_file(cfg: &mut Config) {
-    // Priority: CLI > project .dscoderc > user ~/.dscoderc > env > default.
+    // Priority: CLI > project .minkrc > user ~/.minkrc > env > default.
     // CLI is inferred by comparing the already-parsed config to defaults.
     let defaults = Config::default();
     apply_env_defaults(cfg, &defaults);
     let cwd = std::env::current_dir().unwrap_or_default();
     let home = std::path::PathBuf::from(
-        std::env::var("DSCODE_HOME")
+        std::env::var("MINK_HOME")
             .or_else(|_| std::env::var("HOME"))
             .unwrap_or_else(|_| String::from(".")),
     );
 
-    let user_cfg = read_config_file(&home.join(".dscoderc"));
-    let project_cfg = read_config_file(&cwd.join(".dscoderc"));
+    let user_cfg = read_config_file(&home.join(".minkrc"));
+    let project_cfg = read_config_file(&cwd.join(".minkrc"));
 
     apply_config_sources(cfg, &defaults, user_cfg.as_ref(), project_cfg.as_ref());
 
@@ -383,13 +383,13 @@ fn apply_log_events_env_value(cfg: &mut Config, value: &str) {
     cfg.log_events = value != "0" && value != "false" && value != "no";
 }
 
-fn read_config_file(path: &std::path::Path) -> Option<DscodeConfigFile> {
+fn read_config_file(path: &std::path::Path) -> Option<MinkConfigFile> {
     let data = match std::fs::read_to_string(path) {
         Ok(d) => d,
         Err(e) => {
             if e.kind() != std::io::ErrorKind::NotFound {
                 eprintln!(
-                    "[dscode] Warning: failed to read config file {}: {}",
+                    "[mink] Warning: failed to read config file {}: {}",
                     path.display(),
                     e
                 );
@@ -401,7 +401,7 @@ fn read_config_file(path: &std::path::Path) -> Option<DscodeConfigFile> {
         Ok(cfg) => Some(cfg),
         Err(e) => {
             eprintln!(
-                "[dscode] Warning: failed to parse config file {}: {}",
+                "[mink] Warning: failed to parse config file {}: {}",
                 path.display(),
                 e
             );
@@ -413,8 +413,8 @@ fn read_config_file(path: &std::path::Path) -> Option<DscodeConfigFile> {
 fn apply_config_sources(
     cfg: &mut Config,
     defaults: &Config,
-    user_cfg: Option<&DscodeConfigFile>,
-    project_cfg: Option<&DscodeConfigFile>,
+    user_cfg: Option<&MinkConfigFile>,
+    project_cfg: Option<&MinkConfigFile>,
 ) {
     let cli_model = cfg.cli_overrides.model || cfg.model != defaults.model;
     let cli_api_key = cfg.cli_overrides.api_key || cfg.api_key != defaults.api_key;
@@ -470,8 +470,8 @@ fn apply_config_sources(
 /// Only active when `sandbox.enabled = true` in the highest-priority config.
 fn apply_sandbox_config(
     cfg: &mut Config,
-    user_cfg: Option<&DscodeConfigFile>,
-    project_cfg: Option<&DscodeConfigFile>,
+    user_cfg: Option<&MinkConfigFile>,
+    project_cfg: Option<&MinkConfigFile>,
 ) {
     for toml_cfg in [user_cfg, project_cfg].into_iter().flatten() {
         if let Some(ref sb) = toml_cfg.sandbox {
@@ -514,8 +514,8 @@ fn apply_sandbox_config(
         }
     }
 
-    // Also check DSCODE_LIMITS env var (JSON format) — highest priority after CLI
-    if let Ok(json) = std::env::var("DSCODE_LIMITS") {
+    // Also check MINK_LIMITS env var (JSON format) — highest priority after CLI
+    if let Ok(json) = std::env::var("MINK_LIMITS") {
         if let Ok(sb) = serde_json::from_str::<SandboxConfig>(&json) {
             if sb.enabled {
                 cfg.sandbox = sb;
@@ -597,7 +597,7 @@ pub fn parse_size_bytes(raw: &str) -> Result<usize> {
 
 // ── Sandbox configuration ──────────────────────────────────────────
 
-/// 沙箱限制配置 — 从 `.dscoderc` 的 `[sandbox]` 段或环境变量 `DSCODE_LIMITS` 加载。
+/// 沙箱限制配置 — 从 `.minkrc` 的 `[sandbox]` 段或环境变量 `MINK_LIMITS` 加载。
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(default)]
 pub struct SandboxConfig {
@@ -737,7 +737,7 @@ max_tokens = 163840
 max_context = "500K"
 tool_timeout = 120
 "#;
-        let parsed: DscodeConfigFile = toml::from_str(toml_str).unwrap();
+        let parsed: MinkConfigFile = toml::from_str(toml_str).unwrap();
         assert_eq!(parsed.model.unwrap(), "pro");
         assert_eq!(parsed.max_tokens.unwrap(), 163840);
         assert_eq!(parsed.max_context.unwrap(), "500K");
@@ -748,7 +748,7 @@ tool_timeout = 120
     fn parse_config_file_partial_fields() {
         // Only setting one field should not require others
         let toml_str = r#"log_events = false"#;
-        let parsed: DscodeConfigFile = toml::from_str(toml_str).unwrap();
+        let parsed: MinkConfigFile = toml::from_str(toml_str).unwrap();
         assert!(!parsed.log_events.unwrap());
         assert!(parsed.model.is_none());
         assert!(parsed.api_key.is_none());
@@ -757,7 +757,7 @@ tool_timeout = 120
     #[test]
     fn config_cli_overrides_project_config() {
         let defaults = Config::default();
-        let project = DscodeConfigFile {
+        let project = MinkConfigFile {
             model: Some("pro".into()),
             max_turns: Some(99),
             ..Default::default()
@@ -775,13 +775,13 @@ tool_timeout = 120
     #[test]
     fn config_project_overrides_user_config() {
         let defaults = Config::default();
-        let user = DscodeConfigFile {
+        let user = MinkConfigFile {
             api_key: Some("user-key".into()),
             model: Some("flash".into()),
             max_turns: Some(10),
             ..Default::default()
         };
-        let project = DscodeConfigFile {
+        let project = MinkConfigFile {
             api_key: Some("project-key".into()),
             model: Some("pro".into()),
             max_turns: Some(20),
@@ -797,7 +797,7 @@ tool_timeout = 120
     #[test]
     fn config_user_overrides_default() {
         let defaults = Config::default();
-        let user = DscodeConfigFile {
+        let user = MinkConfigFile {
             api_key: Some("user-key".into()),
             base_url: Some("https://user.example".into()),
             ..Default::default()
@@ -811,7 +811,7 @@ tool_timeout = 120
     #[test]
     fn config_file_sets_context_compact_pct() {
         let defaults = Config::default();
-        let user = DscodeConfigFile {
+        let user = MinkConfigFile {
             context_compact_pct: Some(72),
             ..Default::default()
         };
@@ -823,7 +823,7 @@ tool_timeout = 120
     #[test]
     fn config_file_log_events_overrides_env_default() {
         let defaults = Config::default();
-        let project = DscodeConfigFile {
+        let project = MinkConfigFile {
             log_events: Some(true),
             ..Default::default()
         };
@@ -836,7 +836,7 @@ tool_timeout = 120
     #[test]
     fn config_explicit_cli_default_value_overrides_project_config() {
         let defaults = Config::default();
-        let project = DscodeConfigFile {
+        let project = MinkConfigFile {
             max_turns: Some(99),
             tool_timeout: Some(120),
             ..Default::default()

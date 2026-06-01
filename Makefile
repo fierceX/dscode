@@ -24,7 +24,7 @@ regression-client:
 	cargo test session::compaction::tests::evaluate_and_compact_writes_clean_summary_and_keeps_valid_conversation -- --ignored --nocapture
 
 regression-api:
-	DSCODE_REAL_API=1 cargo test regression::real_deepseek_api_smoke_streams_response -- --ignored --nocapture
+	MINK_REAL_API=1 cargo test regression::real_deepseek_api_smoke_streams_response -- --ignored --nocapture
 
 regression-all: regression-mock regression-client test clippy
 
@@ -66,10 +66,10 @@ pip-install: pip-build
 	python -m pip install --force-reinstall dist/*.whl
 
 pip-wheel:
-	DSCODE_SDK_SKIP_BUILD=1 python scripts/build_wheel.py
+	MINK_SDK_SKIP_BUILD=1 python scripts/build_wheel.py
 
 pip-publish:
 	twine upload dist/*
 
 pip-clean:
-	rm -rf dscode_sdk/_binary dist *.egg-info build
+	rm -rf mink_sdk/_binary dist *.egg-info build

@@ -4,7 +4,7 @@
 
 ## 定位
 
-TUI 是 dscode 的全屏终端交互模式，基于 `ratatui`。它不是 agent 主循环的一部分，而是 `Display` 抽象的一种实现：编排器输出 UI 事件，`TuiDisplay` 转成 `TuiSignal`，TUI 事件循环负责本地状态和渲染。
+TUI 是 mink 的全屏终端交互模式，基于 `ratatui`。它不是 agent 主循环的一部分，而是 `Display` 抽象的一种实现：编排器输出 UI 事件，`TuiDisplay` 转成 `TuiSignal`，TUI 事件循环负责本地状态和渲染。
 
 ## 当前模块
 

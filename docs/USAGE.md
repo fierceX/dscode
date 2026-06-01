@@ -12,19 +12,19 @@ cargo build --release
 export DEEPSEEK_API_KEY="sk-xxx"
 
 # 单次任务
-./target/release/dscode -m flash "scan this project"
+./target/release/mink -m flash "scan this project"
 
 # REPL 交互模式
-./target/release/dscode -m flash -i
+./target/release/mink -m flash -i
 
 # TUI 全屏模式
-./target/release/dscode -m flash --tui
+./target/release/mink -m flash --tui
 
 # 继续上次会话
-./target/release/dscode -m flash --continue -i
+./target/release/mink -m flash --continue -i
 
 # stdin 管道输入
-echo "list the files" | ./target/release/dscode -m flash
+echo "list the files" | ./target/release/mink -m flash
 ```
 
 ---
@@ -38,7 +38,7 @@ echo "list the files" | ./target/release/dscode -m flash
 基于 rustyline 的行编辑器。适合日常编码交互：
 
 ```
-dscode interactive mode (type 'exit' or Ctrl+D to quit)
+mink interactive mode (type 'exit' or Ctrl+D to quit)
 > scan this project for Rust errors
 [tool] Bash(command="cargo check")
 ...
@@ -47,7 +47,7 @@ dscode interactive mode (type 'exit' or Ctrl+D to quit)
 - 输入：rustyline 行编辑（历史、Tab 补全、Ctrl+W/Del）
 - 输出：stderr 渲染（灰色 thinking、黄色 tool call、普通 text）
 - 标题栏：ANSI escape 更新终端窗口标题
-- 历史记录：持久化到 `~/.dscode/history`
+- 历史记录：持久化到 `~/.mink/history`
 
 ### TUI 模式（`--tui`）
 
@@ -121,13 +121,13 @@ flash B:0.73 T:12 R:45 I:200K(50%) O:20K C:400K(40%) ¥0.12
 
 ```bash
 # 单次查询
-./target/release/dscode -m flash "explain this"
+./target/release/mink -m flash "explain this"
 
 # 管道输入
-cat main.rs | ./target/release/dscode -m flash "review"
+cat main.rs | ./target/release/mink -m flash "review"
 
 # ndjson 结构化输出
-./target/release/dscode --print "list files"
+./target/release/mink --print "list files"
 ```
 
 prompt 为空且 stdin 是终端时自动进入交互模式。非终端 stdin 时读取 stdin 作为 prompt。
@@ -186,11 +186,11 @@ prompt 为空且 stdin 是终端时自动进入交互模式。非终端 stdin �
 
 ## 配置文件
 
-`~/.dscoderc`（用户级）和 `<project>/.dscoderc`（项目级）可选配置。
+`~/.minkrc`（用户级）和 `<project>/.minkrc`（项目级）可选配置。
 优先级：CLI 参数 > 项目配置 > 用户配置 > 环境变量 > 默认值。
 
 ```toml
-# ~/.dscoderc 示例
+# ~/.minkrc 示例
 api_key = "sk-xxx"                        # API 密钥
 base_url = "https://api.deepseek.com/v1"  # API 端点
 model = "flash"                           # 默认模型
@@ -203,19 +203,19 @@ context_compact_pct = 85                  # 压缩触发百分比
 log_events = true                         # 事件日志
 ```
 
-项目级 `.dscoderc` 覆盖用户级，CLI 参数覆盖所有文件设置。
+项目级 `.minkrc` 覆盖用户级，CLI 参数覆盖所有文件设置。
 所有字段可选，未设置的字段使用默认值或环境变量。
 
 ---
 
 ## 沙箱配置
 
-沙箱通过 OS 原生工具（Linux nsjail/bubblewrap、macOS sandbox-exec）包裹 dscode 进程，
+沙箱通过 OS 原生工具（Linux nsjail/bubblewrap、macOS sandbox-exec）包裹 mink 进程，
 在文件系统层面强制执行访问控制。
 
 ### 配置方式
 
-`.dscoderc` 的 `[sandbox]` 段控制沙箱开关和规则：
+`.minkrc` 的 `[sandbox]` 段控制沙箱开关和规则：
 
 ```toml
 [sandbox]
@@ -253,18 +253,18 @@ macOS 上的读取限制应该在应用层通过路径规范化解引用 + 白�
 
 ### 启动机制
 
-dscode 启动时检测 `[sandbox] enabled = true`，自动通过 `exec()` 将自身重新装入沙箱：
+mink 启动时检测 `[sandbox] enabled = true`，自动通过 `exec()` 将自身重新装入沙箱：
 
 ```
-dscode --tui
-  → 读取 .dscoderc
-  → exec("nsjail --bindmount_ro src /dscode --json-rpc")  // Linux
-  → exec("sandbox-exec -p '<profile>' dscode --tui")        // macOS (写入限制)
-  → 设置 DSCODE_SANDBOXED=1 防无限递归
+mink --tui
+  → 读取 .minkrc
+  → exec("nsjail --bindmount_ro src /mink --json-rpc")  // Linux
+  → exec("sandbox-exec -p '<profile>' mink --tui")        // macOS (写入限制)
+  → 设置 MINK_SANDBOXED=1 防无限递归
   → 原进程被替换，进程完全在沙箱中运行
 ```
 
-启用沙箱后，如果指定或自动选择的沙箱后端不可用，dscode 会打印 fatal 错误并退出，而不是静默降级到非沙箱运行。未启用 `[sandbox] enabled = true` 时不会触发 re-exec。
+启用沙箱后，如果指定或自动选择的沙箱后端不可用，mink 会打印 fatal 错误并退出，而不是静默降级到非沙箱运行。未启用 `[sandbox] enabled = true` 时不会触发 re-exec。
 
 ---
 
@@ -278,9 +278,9 @@ dscode --tui
 | `TOOL_RESULT_MAX_BYTES` | `100000` | 单条工具结果截断上限 |
 | `FILE_WRITE_MAX_BYTES` | `1048576` | Write/Edit 工具写入上限 |
 | `LOG_EVENTS` | `true` | 设为 `0`/`false`/`no` 关闭 events.jsonl 记录 |
-| `DSCODE_SIGNAL_MODE` | `full` | 信号系统模式：`full` 启用信念跟踪、注入和恢复守卫；`off` 关闭信号提示词和运行时信号干预 |
-| `DSCODE_HOME` | `$HOME` | session 存储目录覆盖 |
-| `DSCODE_LIMITS` | — | JSON 格式 sandbox 限制配置，启用时覆盖 `[sandbox]` |
+| `MINK_SIGNAL_MODE` | `full` | 信号系统模式：`full` 启用信念跟踪、注入和恢复守卫；`off` 关闭信号提示词和运行时信号干预 |
+| `MINK_HOME` | `$HOME` | session 存储目录覆盖 |
+| `MINK_LIMITS` | — | JSON 格式 sandbox 限制配置，启用时覆盖 `[sandbox]` |
 
 ---
 
@@ -289,7 +289,7 @@ dscode --tui
 ### 目录结构
 
 ```
-~/.dscode/
+~/.mink/
 ├── history                    ← 交互式 REPL 历史
 └── projects/<project_key>/
     └── <session_id>/
@@ -305,16 +305,16 @@ dscode --tui
 
 ```bash
 # 命名会话
-dscode -m flash --session my-fix "fix the bug"
+mink -m flash --session my-fix "fix the bug"
 
 # 恢复命名会话（保持上下文）
-dscode -m flash --session my-fix -i
+mink -m flash --session my-fix -i
 
 # 恢复最近会话
-dscode -m flash --continue -i
+mink -m flash --continue -i
 
 # 列出所有
-dscode --list-sessions
+mink --list-sessions
 ```
 
 `--continue` 自动选择最近修改的 session。恢复时会 replay 最近 10 轮 LLM 响应事件，在交互式终端重新渲染历史对话。
@@ -389,13 +389,13 @@ dscode --list-sessions
 ### 调优
 
 ```toml
-# .dscoderc
+# .minkrc
 context_compact_pct = 70   # 70% 触发（更频繁）
 max_context = "1M"         # 1M 上下文窗口
 ```
 
 ```bash
-dscode -m flash --max-context 1M -i
+mink -m flash --max-context 1M -i
 ```
 
 ---
@@ -456,13 +456,13 @@ dscode -m flash --max-context 1M -i
 
 ```bash
 # CLI 加载
-dscode -m flash --skill debugging -i
+mink -m flash --skill debugging -i
 
 # 加载多个
-dscode -m flash --skill debugging --skill tdd -i
+mink -m flash --skill debugging --skill tdd -i
 
 # 查看可用技能
-dscode --list-skills
+mink --list-skills
 ```
 
 ### 内置技能（编译时嵌入）
@@ -518,10 +518,10 @@ MISSION.md 使用一级标题（`# heading-name`）映射到系统提示词的�
 
 ```bash
 # 加载自定义提示词
-dscode --mission ./my-task.mission.md -i
+mink --mission ./my-task.mission.md -i
 
 # 结合技能使用
-dscode --mission ./my-task.mission.md --skill debugging -i
+mink --mission ./my-task.mission.md --skill debugging -i
 ```
 
 ### Python SDK
@@ -537,12 +537,12 @@ SandboxConfig(mission_content="# agent-identity\n...")
 SandboxConfig(signal_mode="off")
 ```
 
-`signal_mode=None` 时继承进程环境中的 `DSCODE_SIGNAL_MODE`；如果环境变量也未设置，dscode 默认使用 `full`。
+`signal_mode=None` 时继承进程环境中的 `MINK_SIGNAL_MODE`；如果环境变量也未设置，mink 默认使用 `full`。
 
 ### 注意事项
 
 - MISSION.md 替换的是 prompt 文本，不影响工具定义。禁用工具仍需 `--disable-bash` 等参数。
-- 未在 MISSION.md 中定义的段保持默认内容；当 `DSCODE_SIGNAL_MODE=off` 时，默认 prompt 不包含 `belief-awareness` 信号协议段。
+- 未在 MISSION.md 中定义的段保持默认内容；当 `MINK_SIGNAL_MODE=off` 时，默认 prompt 不包含 `belief-awareness` 信号协议段。
 - 建议将 MISSION.md 置于项目目录下，纳入版本管理。
 
 ---
@@ -587,7 +587,7 @@ Text: ...
 ## Stream-JSON 输出
 
 ```bash
-dscode -m flash --print "explain this"
+mink -m flash --print "explain this"
 ```
 
 每行一个 JSON 事件：
@@ -604,7 +604,7 @@ dscode -m flash --print "explain this"
 JQ 下游处理：
 
 ```bash
-dscode -m flash --print "fix the bug" | jq 'select(.type=="text") | .content'
+mink -m flash --print "fix the bug" | jq 'select(.type=="text") | .content'
 ```
 
 ---
@@ -616,13 +616,13 @@ dscode -m flash --print "fix the bug" | jq 'select(.type=="text") | .content'
 curl -H "Authorization: Bearer $DEEPSEEK_API_KEY" https://api.deepseek.com/v1/models
 
 # verbose 模式
-dscode -m flash -v "hello"
+mink -m flash -v "hello"
 
 # 扩大上下文窗口避免溢出
-dscode -m flash --max-context 1M -i
+mink -m flash --max-context 1M -i
 
 # 查看 session 列表
-dscode --list-sessions
+mink --list-sessions
 
 # 查看事件日志中的信念变化
 grep '"belief"' events.jsonl | jq '{type, belief}'

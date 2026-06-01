@@ -3,12 +3,13 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "dscode-sdk"
+name = "mink-sdk"
 version = "0.1.0"
-description = "Python SDK for dscode — sandboxed AI coding agent"
+description = "Python SDK for mink — sandboxed AI coding agent"
 readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
+authors = [{ name = "fiercex" }]
 keywords = ["ai", "coding-agent", "sandbox", "deepseek"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -23,11 +24,11 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/xialuyu/dscode"
-Source = "https://github.com/xialuyu/dscode"
+Homepage = "https://github.com/fierceX/mink"
+Source = "https://github.com/fierceX/mink"
 
 [tool.setuptools.packages.find]
-include = ["dscode_sdk", "dscode_sdk.*"]
+include = ["mink_sdk", "mink_sdk.*"]
 
 [tool.setuptools.package-data]
-"dscode_sdk" = ["_binary/*"]
+"mink_sdk" = ["_binary/*"]

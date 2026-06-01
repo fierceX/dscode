@@ -4,7 +4,7 @@
 
 ## 项目定位
 
-dscode 是一个 Rust 实现的轻量 AI coding agent，面向 DeepSeek / OpenAI-compatible API，优先服务终端中的编码工作流。
+mink 是一个 Rust 实现的轻量 AI coding agent，面向 DeepSeek / OpenAI-compatible API，优先服务终端中的编码工作流。
 
 核心目标：
 
@@ -63,7 +63,7 @@ TurnExecutor (agent/turn.rs)
 │ guard/storm.rs        │ 重复工具调用抑制
 │ agent/belief.rs       │ belief 滑动窗口和平滑
 │ agent/decision.rs     │ Inject / Abort / cooldown / recovery guard
-│ agent/signal_mode.rs  │ DSCODE_SIGNAL_MODE 开关
+│ agent/signal_mode.rs  │ MINK_SIGNAL_MODE 开关
 │ safety.rs             │ 危险 Bash 命令过滤
 └───────────────────────┘
          │
@@ -146,7 +146,7 @@ ToolRunResult
   -> None / Inject / Abort
 ```
 
-每个用户输入开始时会重置 belief、decision cooldown 和 StormBreaker 窗口。`DSCODE_SIGNAL_MODE=off` 时，信号采集、belief 更新、注入和中止逻辑都关闭。
+每个用户输入开始时会重置 belief、decision cooldown 和 StormBreaker 窗口。`MINK_SIGNAL_MODE=off` 时，信号采集、belief 更新、注入和中止逻辑都关闭。
 
 ---
 
@@ -157,7 +157,7 @@ ToolRunResult
 | 文件 | 职责 |
 |------|------|
 | `main.rs` | CLI 入口、sandbox re-exec、session 初始化、模式分发 |
-| `config.rs` | `Config`、CLI 解析、`.dscoderc` 合并、环境变量默认值、sandbox 配置 |
+| `config.rs` | `Config`、CLI 解析、`.minkrc` 合并、环境变量默认值、sandbox 配置 |
 | `context.rs` | `AgentSharedContext` 和工具层 `ToolContext` |
 | `assets.rs` | 编译期嵌入的 `tools.json` 和 skill 索引 |
 | `cancel.rs` | 父子 cancellation token |
@@ -243,7 +243,7 @@ pub struct ToolResultDisplay<'a> {
 ## Session 结构
 
 ```text
-~/.dscode/projects/<project_key>/<session_id>/
+~/.mink/projects/<project_key>/<session_id>/
 ├── conversation.jsonl
 ├── events.jsonl
 ├── summary.txt
@@ -252,7 +252,7 @@ pub struct ToolResultDisplay<'a> {
 └── stats.json
 ```
 
-`DSCODE_HOME` 可覆盖默认 home。`--continue` 会选择最近修改的 session。
+`MINK_HOME` 可覆盖默认 home。`--continue` 会选择最近修改的 session。
 
 ---
 

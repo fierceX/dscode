@@ -2,12 +2,12 @@
 
 ## 项目概览
 
-dscode 是一个 Rust 实现的轻量 AI coding agent，专为 DeepSeek/OpenAI-compatible API 优化。项目目标是单二进制、低运行时依赖、终端优先。
+mink 是一个 Rust 实现的轻量 AI coding agent，专为 DeepSeek/OpenAI-compatible API 优化。项目目标是单二进制、低运行时依赖、终端优先。
 
 核心能力：
 
 - LLM 流式请求 -> 工具执行 -> 决策的内循环
-- 信号驱动的信念系统：自动错误检测、注入修正、恢复首步守卫，可用 `DSCODE_SIGNAL_MODE=off` 关闭
+- 信号驱动的信念系统：自动错误检测、注入修正、恢复首步守卫，可用 `MINK_SIGNAL_MODE=off` 关闭
 - 上下文自适应压缩：三级 Tier，尽量保持 prefix-cache 命中
 - 维修流水线：Scavenge 回收、Truncation 修复、StormBreaker 重复调用抑制
 - Session 持久化：JSONL 追加写入，支持恢复和重放
@@ -208,7 +208,7 @@ DecisionEngine.decide()
        └── B < 0.30 -> Abort
 ```
 
-`DSCODE_SIGNAL_MODE=off` 时，不生成 `<belief-awareness>` prompt 段，也不执行信号采集、信念更新、注入、中止和恢复守卫。
+`MINK_SIGNAL_MODE=off` 时，不生成 `<belief-awareness>` prompt 段，也不执行信号采集、信念更新、注入、中止和恢复守卫。
 
 ---
 
@@ -335,10 +335,10 @@ grep '"belief"' events.jsonl | jq '{type, belief}'
 grep '"Injecting hint"' events.jsonl
 
 # stream-json 模式
-./target/release/dscode --print "..."
+./target/release/mink --print "..."
 
 # TUI 模式
-./target/release/dscode --tui
+./target/release/mink --tui
 ```
 
 ---

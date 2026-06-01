@@ -1,17 +1,17 @@
 """
-dscode SDK — Python wrapper for agent execution (optionally sandboxed).
+mink SDK — Python wrapper for agent execution (optionally sandboxed).
 
-Sandboxing is handled entirely by the Rust ``dscode`` binary internally.
+Sandboxing is handled entirely by the Rust ``mink`` binary internally.
 The Python layer does NOT construct sandbox commands — it just launches
-``dscode --json-rpc`` and passes sandbox configuration via the
-``DSCODE_LIMITS`` environment variable.
+``mink --json-rpc`` and passes sandbox configuration via the
+``MINK_LIMITS`` environment variable.
 
 * **Linux**: nsjail / bubblewrap (auto-detected, Rust re-exec).
 * **macOS**: sandbox-exec (built-in, Rust re-exec).
 
 Usage::
 
-    from dscode_sdk import SandboxConfig, AgentSession
+    from mink_sdk import SandboxConfig, AgentSession
 
     session = AgentSession(SandboxConfig(
         api_key="sk-...",
@@ -44,16 +44,16 @@ class AgentError(RuntimeError):
 # ── Helpers ──────────────────────────────────────────────────────────
 
 def _find_binary() -> str:
-    """Locate the bundled ``dscode`` binary.
+    """Locate the bundled ``mink`` binary.
 
     Resolution order:
-    1. Package-internal ``_binary/dscode`` (bundled wheel).
-    2. ``dscode`` on ``PATH``.
-    3. ``./dscode`` in the current working directory.
+    1. Package-internal ``_binary/mink`` (bundled wheel).
+    2. ``mink`` on ``PATH``.
+    3. ``./mink`` in the current working directory.
     """
     # 1. Bundled binary inside the package
     try:
-        ref = _resources.files("dscode_sdk") / "_binary" / "dscode"
+        ref = _resources.files("mink_sdk") / "_binary" / "mink"
         if ref.is_file():
             bin_path = str(ref)
             os.chmod(bin_path, 0o755)
@@ -62,25 +62,25 @@ def _find_binary() -> str:
         pass
 
     # 2. On PATH
-    which = shutil.which("dscode")
+    which = shutil.which("mink")
     if which:
         return which
 
     # 3. CWD fallback
-    cwd_bin = os.path.join(os.getcwd(), "dscode")
+    cwd_bin = os.path.join(os.getcwd(), "mink")
     if os.path.isfile(cwd_bin):
         return cwd_bin
 
     raise FileNotFoundError(
-        "dscode binary not found. "
-        "Install dscode-sdk from the correct platform wheel "
-        "or place the dscode binary on PATH."
+        "mink binary not found. "
+        "Install mink-sdk from the correct platform wheel "
+        "or place the mink binary on PATH."
     )
 
 
 def _default_home() -> str:
-    """Return the default ``DSCODE_HOME`` path."""
-    base = os.path.join(Path.home(), ".dscode")
+    """Return the default ``MINK_HOME`` path."""
+    base = os.path.join(Path.home(), ".mink")
     os.makedirs(base, exist_ok=True)
     return base
 
@@ -93,16 +93,16 @@ class SandboxConfig:
 
     Parameters
     ----------
-    dscode_home:
-        Session storage directory.  Defaults to ``~/.dscode/``.
-        Also read from the ``DSCODE_HOME`` environment variable.
+    mink_home:
+        Session storage directory.  Defaults to ``~/.mink/``.
+        Also read from the ``MINK_HOME`` environment variable.
     mission_file:
         Path to a MISSION.md file.  When set, replaces the default system
         prompt sections with those defined in the file.  Each ``# heading``
         in the file maps to a prompt section.
     mission_content:
         Inline MISSION.md content (alternative to ``mission_file``).  When set,
-        the content is written to a temp file and passed to dscode automatically.
+        the content is written to a temp file and passed to mink automatically.
         Provide either ``mission_file`` or ``mission_content``, not both.
     read_dirs:
         Directories the agent is allowed to read from.
@@ -127,7 +127,7 @@ class SandboxConfig:
         Hard timeout for the entire agent run.
     sandbox_backend:
         ``"auto"`` | ``"nsjail"`` | ``"bwrap"`` | ``"sandbox-exec"`` | ``"off"``.
-        Passed to the Rust binary via ``DSCODE_LIMITS`` — the Rust side
+        Passed to the Rust binary via ``MINK_LIMITS`` — the Rust side
         handles backend auto-detection and sandbox construction internally.
         Set to ``"off"`` to disable sandboxing entirely (no re-exec).
     api_key:
@@ -139,14 +139,14 @@ class SandboxConfig:
     signal_mode:
         Signal system mode override: ``"full"`` enables belief tracking,
         injection, and recovery guards; ``"off"`` disables signal prompt and
-        runtime signal intervention.  ``None`` inherits ``DSCODE_SIGNAL_MODE``;
-        if unset, dscode defaults to ``"full"``.
+        runtime signal intervention.  ``None`` inherits ``MINK_SIGNAL_MODE``;
+        if unset, mink defaults to ``"full"``.
     cwd:
         Working directory for the agent (default: current working directory).
     """
 
     # Paths
-    dscode_home: Optional[str] = None
+    mink_home: Optional[str] = None
     mission_file: Optional[str] = None
     mission_content: Optional[str] = None
 
@@ -194,7 +194,7 @@ class SandboxConfig:
 class AgentSession:
     """A single-shot sandboxed agent session.
 
-    Each call to :meth:`run` launches a sandboxed ``dscode`` process,
+    Each call to :meth:`run` launches a sandboxed ``mink`` process,
     executes the prompt, collects results, and cleans up.
     """
 
@@ -258,7 +258,7 @@ class AgentSession:
         request: str,
         env: dict[str, str],
     ) -> dict[str, Any]:
-        """Run the dscode process with the given command and request."""
+        """Run the mink process with the given command and request."""
         try:
             proc = subprocess.Popen(
                 cmd,
@@ -271,8 +271,8 @@ class AgentSession:
             )
         except FileNotFoundError as e:
             raise RuntimeError(
-                f"dscode binary not found ({e}). "
-                f"Ensure dscode is installed and available."
+                f"mink binary not found ({e}). "
+                f"Ensure mink is installed and available."
             ) from e
 
         self._proc = proc
@@ -347,8 +347,8 @@ class AgentSession:
         """Ensure the home directory exists."""
         cfg = self._config
         self._home = (
-            cfg.dscode_home
-            or os.environ.get("DSCODE_HOME")
+            cfg.mink_home
+            or os.environ.get("MINK_HOME")
             or _default_home()
         )
         os.makedirs(self._home, exist_ok=True)
@@ -356,26 +356,26 @@ class AgentSession:
     def _build_env(self) -> dict[str, str]:
         """Build environment variables for the agent process."""
         env = os.environ.copy()
-        env["DSCODE_HOME"] = self._home or _default_home()
+        env["MINK_HOME"] = self._home or _default_home()
         if self._config.signal_mode is not None:
             signal_mode = self._config.signal_mode.strip().lower()
             if signal_mode not in ("full", "off"):
                 raise ValueError("signal_mode must be 'full' or 'off'")
-            env["DSCODE_SIGNAL_MODE"] = signal_mode
+            env["MINK_SIGNAL_MODE"] = signal_mode
         if self._config.api_key:
             env["DEEPSEEK_API_KEY"] = self._config.api_key
         if self._config.api_url:
             env["DEEPSEEK_BASE_URL"] = self._config.api_url
 
-        # ── Pass sandbox config via DSCODE_LIMITS (Rust handles the rest) ──
+        # ── Pass sandbox config via MINK_LIMITS (Rust handles the rest) ──
         sb = self._build_sandbox_limits()
         if sb is not None:
-            env["DSCODE_LIMITS"] = json.dumps(sb)
+            env["MINK_LIMITS"] = json.dumps(sb)
 
         return env
 
     def _build_sandbox_limits(self) -> Optional[dict]:
-        """Build the DSCODE_LIMITS JSON dict for Rust's SandboxConfig.
+        """Build the MINK_LIMITS JSON dict for Rust's SandboxConfig.
 
         Returns None when sandbox is fully disabled (backend == "off").
         """
@@ -433,20 +433,20 @@ class AgentSession:
         return json.dumps(req) + "\n"
 
     def _build_sandbox_cmd(self) -> list[str]:
-        """Build the full command line: sandbox wrapper + dscode binary."""
+        """Build the full command line: sandbox wrapper + mink binary."""
         cmd = self._build_sandbox_cmd_inner()
         self._append_mission_flag(cmd)
         return cmd
 
     def _mission_home_path(self) -> str:
-        """Return the canonical mission file path inside DSCODE_HOME."""
+        """Return the canonical mission file path inside MINK_HOME."""
         return os.path.join(self._home or _default_home(), "_mission.md")
 
     def _append_mission_flag(self, cmd: list[str]) -> None:
         """Append --mission <path> if configured.
 
         When sandbox is active, the mission file is always placed under
-        DSCODE_HOME (guaranteed accessible inside all sandbox backends)
+        MINK_HOME (guaranteed accessible inside all sandbox backends)
         so that ``--mission`` resolves correctly inside the sandbox.
         """
         cfg = self._config
@@ -456,7 +456,7 @@ class AgentSession:
         sandbox_active = cfg.sandbox_backend.strip().lower() != "off"
 
         if sandbox_active:
-            # Sandbox: copy/write to DSCODE_HOME for guaranteed accessibility
+            # Sandbox: copy/write to MINK_HOME for guaranteed accessibility
             dest = self._mission_home_path()
             os.makedirs(os.path.dirname(dest), exist_ok=True)
             if cfg.mission_file:
@@ -478,7 +478,7 @@ class AgentSession:
                 cmd.extend(["--mission", dest])
 
     def _build_sandbox_cmd_inner(self) -> list[str]:
-        """Launch dscode directly — sandboxing is handled by Rust internally."""
+        """Launch mink directly — sandboxing is handled by Rust internally."""
         return [self._binary, "--json-rpc"]
 
 

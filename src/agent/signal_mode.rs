@@ -6,7 +6,7 @@ pub enum SignalMode {
 
 impl SignalMode {
     pub fn from_env() -> Self {
-        match std::env::var("DSCODE_SIGNAL_MODE")
+        match std::env::var("MINK_SIGNAL_MODE")
             .unwrap_or_else(|_| "full".to_string())
             .trim()
             .to_ascii_lowercase()

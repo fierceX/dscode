@@ -1,14 +1,14 @@
 use anyhow::Result;
-use dscode::agent::orchestrator::{OrchCmd, new_orchestrator};
-use dscode::cancel::CancellationToken;
-use dscode::config::{api_url, apply_config_file, apply_provider_defaults, parse_args};
-use dscode::context::AgentSharedContext;
-use dscode::context::ToolConfig;
-use dscode::session::compaction::CompactionEngine;
-use dscode::session::paths;
-use dscode::ui::Display;
-use dscode::ui::engine::TerminalDisplay;
-use dscode::ui::replay::replay_last_turns;
+use mink::agent::orchestrator::{OrchCmd, new_orchestrator};
+use mink::cancel::CancellationToken;
+use mink::config::{api_url, apply_config_file, apply_provider_defaults, parse_args};
+use mink::context::AgentSharedContext;
+use mink::context::ToolConfig;
+use mink::session::compaction::CompactionEngine;
+use mink::session::paths;
+use mink::ui::Display;
+use mink::ui::engine::TerminalDisplay;
+use mink::ui::replay::replay_last_turns;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -40,7 +40,7 @@ async fn run(args: Vec<String>) -> Result<()> {
 
     let cwd = std::env::current_dir()?;
     let home = PathBuf::from(
-        std::env::var("DSCODE_HOME")
+        std::env::var("MINK_HOME")
             .or_else(|_| std::env::var("HOME"))
             .unwrap_or_else(|_| String::from(".")),
     );
@@ -171,7 +171,7 @@ async fn run(args: Vec<String>) -> Result<()> {
         let current_exe = std::env::current_exe().unwrap_or_default();
         let args: Vec<String> = std::env::args().collect();
         // ⚠ Blocking call — ok here because we haven't entered the async runtime yet
-        dscode::sandbox::reexec_in_sandbox(&cfg.sandbox, &current_exe, &args);
+        mink::sandbox::reexec_in_sandbox(&cfg.sandbox, &current_exe, &args);
     }
 
     let mut sid = cfg.session_id.clone();
@@ -190,7 +190,7 @@ async fn run(args: Vec<String>) -> Result<()> {
     let new_session = !spaths.events.exists();
 
     // 共享会话初始化
-    let (store, stats) = dscode::session::init::init_session_base(&home, &cwd, &sid).await?;
+    let (store, stats) = mink::session::init::init_session_base(&home, &cwd, &sid).await?;
     let api_url_str = api_url(&cfg);
 
     // Determine interactive mode early, before ctx creation
@@ -202,7 +202,7 @@ async fn run(args: Vec<String>) -> Result<()> {
     let shared_client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(30))
         .timeout(std::time::Duration::from_secs(600))
-        .user_agent("dscode/3.0")
+        .user_agent("mink/3.0")
         .build()?;
 
     let compaction = Arc::new(CompactionEngine::new(
@@ -220,18 +220,18 @@ async fn run(args: Vec<String>) -> Result<()> {
     ));
 
     let cancel = CancellationToken::new();
-    let is_stream_json = cfg.output_format == dscode::config::OutputFormat::StreamJson;
+    let is_stream_json = cfg.output_format == mink::config::OutputFormat::StreamJson;
 
     // TUI channels (if tui_mode). Created before display so signal_tx is available.
     let tui_tx = if cfg.tui_mode {
-        let (signal_tx, signal_rx) = std::sync::mpsc::channel::<dscode::tui::TuiSignal>();
+        let (signal_tx, signal_rx) = std::sync::mpsc::channel::<mink::tui::TuiSignal>();
         Some((signal_tx, signal_rx))
     } else {
         None
     };
 
     let display: Arc<dyn Display> = if let Some((ref tx, ..)) = tui_tx {
-        Arc::new(dscode::tui::TuiDisplay::new(tx.clone())) as Arc<dyn Display>
+        Arc::new(mink::tui::TuiDisplay::new(tx.clone())) as Arc<dyn Display>
     } else {
         Arc::new(TerminalDisplay::new(is_interactive, is_stream_json))
     };
@@ -287,7 +287,7 @@ async fn run(args: Vec<String>) -> Result<()> {
         println!(r#"{{"type":"turn_end","status":"ok"}}"#);
     } else if cfg.tui_mode {
         if let Some((_, signal_rx)) = tui_tx
-            && let Err(e) = dscode::tui::run_tui(
+            && let Err(e) = mink::tui::run_tui(
                 signal_rx,
                 cmd_tx.clone(),
                 &spaths.events,
@@ -297,7 +297,7 @@ async fn run(args: Vec<String>) -> Result<()> {
             eprintln!("TUI error: {e}");
         }
     } else if is_interactive {
-        display.render_info("dscode interactive mode (type 'exit' or Ctrl+D to quit)");
+        display.render_info("mink interactive mode (type 'exit' or Ctrl+D to quit)");
         if !new_session {
             replay_last_turns(&spaths.events);
         }
@@ -334,14 +334,14 @@ async fn run(args: Vec<String>) -> Result<()> {
 }
 
 fn list_skills() {
-    let embedded = dscode::assets::embedded_skills::all();
+    let embedded = mink::assets::embedded_skills::all();
     let mut seen_fs = std::collections::HashSet::new();
     let mut fs_skills: Vec<String> = Vec::new();
 
     // Scan file-system skill dirs
     let cwd = std::env::current_dir().unwrap_or_default();
     let home = std::path::PathBuf::from(
-        std::env::var("DSCODE_HOME")
+        std::env::var("MINK_HOME")
             .or_else(|_| std::env::var("HOME"))
             .unwrap_or_else(|_| String::from(".")),
     );
@@ -449,7 +449,7 @@ async fn run_interactive(
     home: &Path,
 ) -> Result<()> {
     let cancel_clone = cancel.clone();
-    let history_path = home.join(".dscode/history");
+    let history_path = home.join(".mink/history");
     if let Some(parent) = history_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -599,7 +599,7 @@ fn simple_stdin_loop(cmd_tx: &mpsc::UnboundedSender<OrchCmd>, cancel: &Cancellat
 
 async fn list_sessions(home: &Path, cwd: &Path) -> Result<()> {
     use std::time::UNIX_EPOCH;
-    let dir = home.join(".dscode/projects").join(paths::project_key(cwd));
+    let dir = home.join(".mink/projects").join(paths::project_key(cwd));
     if !dir.exists() {
         println!("No sessions found.");
         return Ok(());
@@ -658,7 +658,7 @@ async fn list_sessions(home: &Path, cwd: &Path) -> Result<()> {
 }
 
 fn print_usage() {
-    println!("Usage: dscode [options] [prompt]");
+    println!("Usage: mink [options] [prompt]");
     println!();
     println!("Options:");
     println!("  -m, --model MODEL       Model tier: flash | pro (default: flash)");
@@ -693,5 +693,5 @@ fn print_usage() {
     println!("  DEEPSEEK_API_KEY        DeepSeek API key");
     println!("  DEEPSEEK_BASE_URL       DeepSeek base URL (default: https://api.deepseek.com/v1)");
     println!("  LOG_EVENTS              Enable event logging (default: true, 0/false/no disables)");
-    println!("  DSCODE_SIGNAL_MODE      Signal system mode: off | full (default: full)");
+    println!("  MINK_SIGNAL_MODE      Signal system mode: off | full (default: full)");
 }

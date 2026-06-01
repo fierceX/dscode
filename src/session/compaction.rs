@@ -709,7 +709,7 @@ Reflections: none",
         static CNT: AtomicU64 = AtomicU64::new(0);
         let n = CNT.fetch_add(1, Ordering::SeqCst);
         let root = std::env::temp_dir().join(format!(
-            "dscode-compact-test-{}-{name}-{n}",
+            "mink-compact-test-{}-{name}-{n}",
             std::process::id()
         ));
         let home = root.join("home");

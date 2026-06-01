@@ -5,7 +5,7 @@
 //!
 //! The core function is [`reexec_in_sandbox`] which replaces the current
 //! process image with the same binary running inside a sandbox.
-//! It sets `DSCODE_SANDBOXED=1` to prevent infinite re-exec loops.
+//! It sets `MINK_SANDBOXED=1` to prevent infinite re-exec loops.
 
 use crate::config::SandboxConfig;
 use std::os::unix::process::CommandExt;
@@ -27,7 +27,7 @@ mod platform_macos;
 /// `args` are the original command-line arguments (including argv[0]).
 pub fn reexec_in_sandbox(config: &SandboxConfig, exe: &Path, args: &[String]) {
     // Prevent infinite re-exec loop
-    if std::env::var("DSCODE_SANDBOXED").is_ok() {
+    if std::env::var("MINK_SANDBOXED").is_ok() {
         return;
     }
 
@@ -40,7 +40,7 @@ pub fn reexec_in_sandbox(config: &SandboxConfig, exe: &Path, args: &[String]) {
     // Safety: setting environment variable before process replacement is safe
     // in single-threaded context (we haven't spawned any threads yet).
     unsafe {
-        std::env::set_var("DSCODE_SANDBOXED", "1");
+        std::env::set_var("MINK_SANDBOXED", "1");
     }
 
     let result = try_reexec(config, exe, args);
@@ -50,10 +50,10 @@ pub fn reexec_in_sandbox(config: &SandboxConfig, exe: &Path, args: &[String]) {
         Ok(()) => {
             // exec succeeded and replaced us, so this is unreachable.
             // But if it didn't replace us, it means exec failed silently.
-            eprintln!("[dscode] Fatal: sandbox exec returned unexpectedly");
+            eprintln!("[mink] Fatal: sandbox exec returned unexpectedly");
         }
         Err(e) => {
-            eprintln!("[dscode] Fatal: sandbox unavailable ({}), exiting", e);
+            eprintln!("[mink] Fatal: sandbox unavailable ({}), exiting", e);
         }
     }
     std::process::exit(1);
@@ -73,7 +73,7 @@ fn try_reexec(config: &SandboxConfig, exe: &Path, args: &[String]) -> Result<(),
                         return Err(e); // explicit backend request → hard error
                     }
                     // auto mode: fall through to bwrap
-                    eprintln!("[dscode] nsjail not available: {e}");
+                    eprintln!("[mink] nsjail not available: {e}");
                 }
             }
         }

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Build a platform-specific wheel for dscode-sdk.
+"""Build a platform-specific wheel for mink-sdk.
 
 Usage:
     python scripts/build_wheel.py              # full build (Rust + wheel)
-    DSCODE_SDK_SKIP_BUILD=1 python scripts/build_wheel.py   # wheel only
+    MINK_SDK_SKIP_BUILD=1 python scripts/build_wheel.py   # wheel only
 
 The script auto-detects the current platform and produces a properly
 tagged wheel (e.g. ``macosx_11_0_arm64``, ``manylinux_2_31_x86_64``).
@@ -46,7 +46,7 @@ def main() -> None:
     print(f":: Platform tag: {tag}", flush=True)
 
     # Optionally build Rust binary
-    if not os.environ.get("DSCODE_SDK_SKIP_BUILD"):
+    if not os.environ.get("MINK_SDK_SKIP_BUILD"):
         print(":: Building Rust binary...", flush=True)
         subprocess.run(
             ["cargo", "build", "--release"],

@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  rustagent:
+  mink:
     strategy:
       fail-fast: false
       matrix:
@@ -49,24 +49,24 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
 
-      - name: Build rustagent
+      - name: Build mink
         run: |
           mkdir -p dist
           if [ "${{ matrix.runner }}" = "ubuntu-latest" ] && [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
             export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
           fi
           cargo build --release --target ${{ matrix.target }}
-          cp target/${{ matrix.target }}/release/rustagent dist/rustagent-${{ matrix.suffix }}${{ matrix.ext }}
+          cp target/${{ matrix.target }}/release/mink dist/mink-${{ matrix.suffix }}${{ matrix.ext }}
 
-      - name: Upload rustagent
+      - name: Upload mink
         uses: actions/upload-artifact@v4
         with:
-          name: rustagent-${{ matrix.suffix }}
-          path: dist/rustagent-${{ matrix.suffix }}${{ matrix.ext }}
+          name: mink-${{ matrix.suffix }}
+          path: dist/mink-${{ matrix.suffix }}${{ matrix.ext }}
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [rustagent]
+    needs: [mink]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -84,7 +84,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/rustagent-linux-amd64
-            dist/rustagent-linux-arm64
-            dist/rustagent-darwin-amd64
-            dist/rustagent-darwin-arm64
+            dist/mink-linux-amd64
+            dist/mink-linux-arm64
+            dist/mink-darwin-amd64
+            dist/mink-darwin-arm64

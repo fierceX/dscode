@@ -1,11 +1,11 @@
-# dscode-sdk 使用文档
+# mink-sdk 使用文档
 
 ## 简介
 
-dscode-sdk 是 [dscode](https://github.com/xialuyu/dscode) 的 Python 封装。`dscode` 二进制内置在 pip 包中，无需额外安装。
+mink-sdk 是 [mink](https://github.com/xialuyu/mink) 的 Python 封装。`mink` 二进制内置在 pip 包中，无需额外安装。
 
 ```bash
-pip install dscode-sdk
+pip install mink-sdk
 ```
 
 安装时会自动选择匹配当前系统平台（macOS arm64/x86_64、Linux x86_64/aarch64）的 wheel 包。
@@ -13,7 +13,7 @@ pip install dscode-sdk
 ## 快速开始
 
 ```python
-from dscode_sdk import AgentSession, SandboxConfig
+from mink_sdk import AgentSession, SandboxConfig
 
 config = SandboxConfig(
     api_key="sk-...",                            # 或设置 DEEPSEEK_API_KEY 环境变量
@@ -31,7 +31,7 @@ session.close()
 ### 单次快捷调用
 
 ```python
-from dscode_sdk import quick_run
+from mink_sdk import quick_run
 
 result = quick_run(
     "解释这段代码",
@@ -66,7 +66,7 @@ print(result["text"])
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `dscode_home` | `~/.dscode/` | 会话存储目录。也可通过 `DSCODE_HOME` 环境变量设置 |
+| `mink_home` | `~/.mink/` | 会话存储目录。也可通过 `MINK_HOME` 环境变量设置 |
 | `mission_file` | `None` | 自定义系统提示词文件路径（MISSION.md） |
 | `mission_content` | `None` | 自定义系统提示词内容（字符串），与 `mission_file` 二选一 |
 | `cwd` | 当前目录 | agent 的工作目录 |
@@ -105,15 +105,15 @@ print(result["text"])
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `verbose` | `False` | 启用详细日志输出 |
-| `signal_mode` | `None`（实际默认 `full`） | 信号系统模式覆盖：`"full"` 启用信念跟踪、注入和恢复守卫；`"off"` 关闭信号提示词和运行时信号干预；`None` 继承 `DSCODE_SIGNAL_MODE` |
+| `signal_mode` | `None`（实际默认 `full`） | 信号系统模式覆盖：`"full"` 启用信念跟踪、注入和恢复守卫；`"off"` 关闭信号提示词和运行时信号干预；`None` 继承 `MINK_SIGNAL_MODE` |
 
 ### 沙箱后端
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `sandbox_backend` | `"auto"` | 传递给 Rust 内部 (`DSCODE_LIMITS`)：`"auto"` / `"nsjail"` / `"bwrap"` / `"sandbox-exec"` / `"off"` |
+| `sandbox_backend` | `"auto"` | 传递给 Rust 内部 (`MINK_LIMITS`)：`"auto"` / `"nsjail"` / `"bwrap"` / `"sandbox-exec"` / `"off"` |
 
-沙箱由 Rust ``dscode`` 二进制内部处理。Python SDK 不构造任何沙箱命令。
+沙箱由 Rust ``mink`` 二进制内部处理。Python SDK 不构造任何沙箱命令。
 
 ### API 配置
 
@@ -125,7 +125,7 @@ print(result["text"])
 
 ## 沙箱行为说明
 
-沙箱由 Rust ``dscode`` 二进制内部通过 ``reexec_in_sandbox()`` 处理。
+沙箱由 Rust ``mink`` 二进制内部通过 ``reexec_in_sandbox()`` 处理。
 
 - **macOS**：使用 ``sandbox-exec``，写入限制 + 应用层读取限制。
 - **Linux**：自动检测 ``nsjail`` → ``bubblewrap``，文件系统隔离 + 命名空间隔离。

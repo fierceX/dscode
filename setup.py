@@ -1,4 +1,4 @@
-"""Setup script for dscode-sdk.
+"""Setup script for mink-sdk.
 
 Builds the Rust binary and packages it inside a platform-specific wheel.
 
@@ -15,13 +15,13 @@ from setuptools import setup
 from setuptools.command.build_py import build_py
 
 HERE = Path(__file__).parent.resolve()
-BINARY_SRC = HERE / "target" / "release" / "dscode"
-BINARY_DST = HERE / "dscode_sdk" / "_binary"
+BINARY_SRC = HERE / "target" / "release" / "mink"
+BINARY_DST = HERE / "mink_sdk" / "_binary"
 
 
 def _build_rust_binary() -> None:
-    """Compile the dscode Rust binary in release mode."""
-    print(":: Building dscode Rust binary (release)...", flush=True)
+    """Compile the mink Rust binary in release mode."""
+    print(":: Building mink Rust binary (release)...", flush=True)
     env = os.environ.copy()
     env["CARGO_TERM_COLOR"] = "always"
     result = subprocess.run(
@@ -39,13 +39,13 @@ def _copy_binary() -> None:
     """Copy the compiled binary into the Python package directory.
 
     Always copies if the source binary exists and is newer than the
-    destination, ensuring SDK always bundles the latest dscode binary.
+    destination, ensuring SDK always bundles the latest mink binary.
     """
     src = BINARY_SRC
-    dst = BINARY_DST / "dscode"
+    dst = BINARY_DST / "mink"
 
     if not src.exists():
-        # On Windows it would be dscode.exe, but we don't support Windows yet
+        # On Windows it would be mink.exe, but we don't support Windows yet
         raise RuntimeError(
             f"Binary not found at {src}. Run 'cargo build --release' first."
         )
@@ -67,7 +67,7 @@ class BuildPyWithBinary(build_py):
 
     def run(self) -> None:
         # Build Rust binary
-        if not os.environ.get("DSCODE_SDK_SKIP_BUILD"):
+        if not os.environ.get("MINK_SDK_SKIP_BUILD"):
             _build_rust_binary()
         _copy_binary()
         super().run()
