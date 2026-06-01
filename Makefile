@@ -72,4 +72,4 @@ pip-publish:
 	twine upload dist/*
 
 pip-clean:
-	rm -rf mink_sdk/_binary dist *.egg-info build
+	rm -rf mink_agent/_binary dist *.egg-info build

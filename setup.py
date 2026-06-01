@@ -1,4 +1,4 @@
-"""Setup script for mink-sdk.
+"""Setup script for mink-agent.
 
 Builds the Rust binary and packages it inside a platform-specific wheel.
 
@@ -16,7 +16,7 @@ from setuptools.command.build_py import build_py
 
 HERE = Path(__file__).parent.resolve()
 BINARY_SRC = HERE / "target" / "release" / "mink"
-BINARY_DST = HERE / "mink_sdk" / "_binary"
+BINARY_DST = HERE / "mink_agent" / "_binary"
 
 
 def _build_rust_binary() -> None:

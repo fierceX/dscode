@@ -13,7 +13,7 @@ pip install mink-sdk
 ## 快速开始
 
 ```python
-from mink_sdk import AgentSession, SandboxConfig
+from mink_agent import AgentSession, SandboxConfig
 
 config = SandboxConfig(
     api_key="sk-...",                            # 或设置 DEEPSEEK_API_KEY 环境变量
@@ -31,7 +31,7 @@ session.close()
 ### 单次快捷调用
 
 ```python
-from mink_sdk import quick_run
+from mink_agent import quick_run
 
 result = quick_run(
     "解释这段代码",

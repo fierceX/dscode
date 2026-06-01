@@ -1,5 +1,5 @@
 [package]
-name = "mink"
+name = "mink-agent"
 version = "0.1.0"
 edition = "2024"
 description = "A lightweight AI coding agent with signal-driven belief system"
@@ -9,6 +9,14 @@ homepage = "https://github.com/fierceX/mink"
 readme = "README.md"
 keywords = ["ai", "coding-agent", "deepseek", "terminal", "agent"]
 categories = ["command-line-utilities", "development-tools"]
+
+[lib]
+name = "mink"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mink"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"

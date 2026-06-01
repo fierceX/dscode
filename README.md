@@ -64,7 +64,7 @@ pip install mink-sdk
 ```
 
 ```python
-from mink_sdk import AgentSession, SandboxConfig
+from mink_agent import AgentSession, SandboxConfig
 
 session = AgentSession(SandboxConfig(
     api_key="sk-...",
@@ -76,7 +76,7 @@ session = AgentSession(SandboxConfig(
 result = session.run("处理文档")
 ```
 
-详见 [mink_sdk/README.md](mink_sdk/README.md)。
+详见 [mink_agent/README.md](mink_agent/README.md)。
 
 ---
 

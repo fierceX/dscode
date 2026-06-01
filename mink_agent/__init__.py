@@ -11,7 +11,7 @@ The Python layer does NOT construct sandbox commands — it just launches
 
 Usage::
 
-    from mink_sdk import SandboxConfig, AgentSession
+    from mink_agent import SandboxConfig, AgentSession
 
     session = AgentSession(SandboxConfig(
         api_key="sk-...",
@@ -53,7 +53,7 @@ def _find_binary() -> str:
     """
     # 1. Bundled binary inside the package
     try:
-        ref = _resources.files("mink_sdk") / "_binary" / "mink"
+        ref = _resources.files("mink_agent") / "_binary" / "mink"
         if ref.is_file():
             bin_path = str(ref)
             os.chmod(bin_path, 0o755)
