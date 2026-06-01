@@ -57,6 +57,19 @@ async fn run(args: Vec<String>) -> Result<()> {
     apply_config_file(&mut cfg);
     apply_provider_defaults(&mut cfg)?;
 
+    // ═══ Self-sandboxing: re-exec into nsjail/bwrap/sandbox-exec ═══
+    // This must happen BEFORE any stdin reading (JSON-RPC) so that
+    // the sandboxed child process inherits the original stdin pipe
+    // with its data still intact.
+    // If successful, the process is replaced and we never reach the next line.
+    // If it fails, we log a warning and continue without sandbox.
+    if cfg.sandbox.is_active() {
+        let current_exe = std::env::current_exe().unwrap_or_default();
+        let args: Vec<String> = std::env::args().collect();
+        // ⚠ Blocking call — ok here because we haven't entered the async runtime yet
+        mink::sandbox::reexec_in_sandbox(&cfg.sandbox, &current_exe, &args);
+    }
+
     // ═══ JSON-RPC mode: early stdin parsing (before context creation) ═══
     // We parse the request here so that tool_disable flags take effect
     // when AgentSharedContext and ToolConfig are constructed.
@@ -163,16 +176,6 @@ async fn run(args: Vec<String>) -> Result<()> {
     } else {
         None
     };
-
-    // ═══ Self-sandboxing: re-exec into nsjail/bwrap/sandbox-exec ═══
-    // If successful, the process is replaced and we never reach the next line.
-    // If it fails, we log a warning and continue without sandbox.
-    if cfg.sandbox.is_active() {
-        let current_exe = std::env::current_exe().unwrap_or_default();
-        let args: Vec<String> = std::env::args().collect();
-        // ⚠ Blocking call — ok here because we haven't entered the async runtime yet
-        mink::sandbox::reexec_in_sandbox(&cfg.sandbox, &current_exe, &args);
-    }
 
     let mut sid = cfg.session_id.clone();
     if sid.is_empty() && cfg.continue_session {
