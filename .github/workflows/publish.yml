@@ -81,15 +81,13 @@ jobs:
 
       - name: Verify wheel contains binary
         run: |
-          python -c "
           import zipfile
           from pathlib import Path
           whl = list(Path('dist').glob('*.whl'))[0]
           with zipfile.ZipFile(whl) as z:
               names = z.namelist()
-              print('\\n'.join(names))
+              print('\n'.join(names))
               assert any('_binary/mink' in n for n in names), 'missing binary'
-          "
         shell: python
 
       # ── Upload ────────────────────────────────────────────────────
