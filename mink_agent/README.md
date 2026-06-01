@@ -1,11 +1,11 @@
-# mink-sdk 使用文档
+# mink-agent 使用文档
 
 ## 简介
 
-mink-sdk 是 [mink](https://github.com/xialuyu/mink) 的 Python 封装。`mink` 二进制内置在 pip 包中，无需额外安装。
+mink-agent 是 [mink](https://github.com/xialuyu/mink) 的 Python 封装。`mink` 二进制内置在 pip 包中，无需额外安装。
 
 ```bash
-pip install mink-sdk
+pip install mink-agent
 ```
 
 安装时会自动选择匹配当前系统平台（macOS arm64/x86_64、Linux x86_64/aarch64）的 wheel 包。
