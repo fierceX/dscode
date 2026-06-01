@@ -155,11 +155,11 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           pattern: wheel-*
-          path: dist
+          path: dist/wheels
           merge-multiple: true
 
       - name: Show all artifacts
-        run: ls -lh dist/ dist/bin/
+        run: ls -lh dist/bin/ dist/wheels/
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
@@ -169,4 +169,5 @@ jobs:
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
+          packages-dir: dist/wheels
           skip-existing: true
