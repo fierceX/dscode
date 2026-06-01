@@ -34,7 +34,6 @@ jobs:
           - runner: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             suffix: linux-arm64
-            linker: gcc-aarch64-linux-gnu
           - runner: macos-14
             target: aarch64-apple-darwin
             suffix: darwin-arm64
@@ -46,16 +45,17 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Install cross linker (linux arm64)
-        if: matrix.linker
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
           sudo apt-get update
-          sudo apt-get install -y ${{ matrix.linker }}
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          which aarch64-linux-gnu-gcc || echo "linker installed"
 
       - name: Build mink binary
         run: |
           mkdir -p dist
-          if [ "${{ matrix.linker }}" != "" ]; then
-            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=${{ matrix.linker }}
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
           fi
           cargo build --release --target ${{ matrix.target }}
           cp target/${{ matrix.target }}/release/mink dist/mink-${{ matrix.suffix }}
