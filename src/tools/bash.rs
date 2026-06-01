@@ -338,12 +338,14 @@ mod tests {
 
     #[test]
     fn adaptive_timeout_with_few_samples_returns_default() {
+        ADAPTIVE_HISTORY.lock().unwrap().clear();
         let t = adaptive_timeout(Duration::from_secs(30));
         assert_eq!(t, Duration::from_secs(30));
     }
 
     #[test]
     fn adaptive_timeout_respects_default_when_no_history() {
+        ADAPTIVE_HISTORY.lock().unwrap().clear();
         let t = adaptive_timeout(Duration::from_secs(10));
         assert_eq!(t, Duration::from_secs(10));
     }
