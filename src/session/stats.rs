@@ -147,7 +147,7 @@ impl StatsTracker {
     }
 }
 
-fn chrono_now_rfc3339() -> String {
+pub(crate) fn chrono_now_rfc3339() -> String {
     let now = time::OffsetDateTime::now_utc();
     let fmt = time::format_description::well_known::Rfc3339;
     now.format(&fmt).unwrap_or_else(|_| String::new())

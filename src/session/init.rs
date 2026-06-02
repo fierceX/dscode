@@ -1,6 +1,7 @@
 //! 会话初始化辅助函数。
 //! 被 main.rs 和 sub_executor.rs 共用，消除重复代码。
 
+use crate::session::artifacts::ArtifactManager;
 use crate::session::paths::{ensure_dir, paths_for};
 use crate::session::stats::StatsTracker;
 use crate::session::store::ConversationStore;
@@ -12,9 +13,14 @@ pub async fn init_session_base(
     home: &std::path::Path,
     cwd: &std::path::Path,
     session_id: &str,
-) -> anyhow::Result<(Arc<ConversationStore>, Arc<StatsTracker>)> {
+) -> anyhow::Result<(
+    Arc<ConversationStore>,
+    Arc<StatsTracker>,
+    Arc<ArtifactManager>,
+)> {
     let paths = paths_for(home, cwd, session_id);
     ensure_dir(&paths.session_dir).await?;
+    ensure_dir(&paths.artifacts).await?;
 
     for f in [
         &paths.conversation,
@@ -32,6 +38,8 @@ pub async fn init_session_base(
     store.ensure().await?;
 
     let stats = StatsTracker::load(&paths.stats).await?;
+    let artifacts = Arc::new(ArtifactManager::new(paths.artifacts.clone()));
+    artifacts.ensure()?;
     if !paths.stats.exists()
         || tokio::fs::metadata(&paths.stats)
             .await
@@ -42,5 +50,5 @@ pub async fn init_session_base(
         let _ = tokio::fs::write(&paths.stats, format!("{initial}\n")).await;
     }
 
-    Ok((store, stats))
+    Ok((store, stats, artifacts))
 }

@@ -193,7 +193,8 @@ async fn run(args: Vec<String>) -> Result<()> {
     let new_session = !spaths.events.exists();
 
     // 共享会话初始化
-    let (store, stats) = mink::session::init::init_session_base(&home, &cwd, &sid).await?;
+    let (store, stats, artifacts) =
+        mink::session::init::init_session_base(&home, &cwd, &sid).await?;
     let api_url_str = api_url(&cfg);
 
     // Determine interactive mode early, before ctx creation
@@ -250,6 +251,10 @@ async fn run(args: Vec<String>) -> Result<()> {
         home: home.clone(),
         api_url: api_url_str.clone(),
         store,
+        artifacts,
+        snapshots: Arc::new(Mutex::new(
+            mink::tools::snapshot::FileSnapshotStore::default(),
+        )),
         stats,
         compaction,
         cancel: cancel.clone(),
@@ -675,6 +680,7 @@ fn print_usage() {
     println!("  --api-key KEY           API key (default from env)");
     println!("  --base-url URL          Override API base URL (default: api.deepseek.com)");
     println!("  --output-format FMT     Output format: human | stream-json");
+    println!("  --approval-mode MODE    Tool approval mode: yolo | write | always-ask");
     println!("  --print                 Alias for --output-format stream-json");
     println!("  --session [NAME]        Use named session");
     println!("  --continue              Continue most recent session");

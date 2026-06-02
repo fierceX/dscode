@@ -126,12 +126,15 @@ pub fn execute_script_with_interrupt(
 pub struct PythonTool;
 
 impl super::runner::ToolExec for PythonTool {
-    fn name(&self) -> &'static str {
-        "Python"
-    }
-
-    fn storm_exempt(&self) -> bool {
-        true
+    fn metadata(&self) -> super::metadata::ToolMetadata {
+        super::metadata::ToolMetadata::new(
+            "Python",
+            "Execute restricted Python code.",
+            super::metadata::ApprovalTier::Exec,
+            super::metadata::ToolResultKind::Command,
+        )
+        .storm_exempt()
+        .discoverable()
     }
 
     fn execute(

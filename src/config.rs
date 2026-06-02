@@ -1,4 +1,5 @@
 use anyhow::{Result, anyhow, bail};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +83,15 @@ pub struct MinkConfigFile {
     /// `[sandbox]` section — when enabled, mink re-execs itself inside a sandbox.
     #[serde(default)]
     pub sandbox: Option<SandboxConfigFile>,
+    /// `[tools]` section — tool approval and policy settings.
+    #[serde(default)]
+    pub tools: Option<ToolsConfigFile>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct ToolsConfigFile {
+    pub approval_mode: Option<ToolApprovalMode>,
+    pub approval: Option<BTreeMap<String, ToolApprovalPolicy>>,
 }
 
 /// The `[sandbox]` section in .minkrc (all fields optional, inherits defaults).
@@ -154,6 +164,10 @@ pub struct Config {
     pub mission_file: Option<PathBuf>,
     /// 工具禁用开关（从 CLI 或 JSON-RPC 加载）
     pub tool_disable: ToolDisableFlags,
+    /// Tool approval mode.
+    pub tool_approval_mode: ToolApprovalMode,
+    /// Per-tool approval overrides keyed by tool name.
+    pub tool_approval: BTreeMap<String, ToolApprovalPolicy>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -166,6 +180,7 @@ pub struct CliOverrides {
     pub base_url: bool,
     pub max_turns: bool,
     pub max_context_tokens: bool,
+    pub tool_approval_mode: bool,
 }
 
 impl Default for Config {
@@ -198,6 +213,8 @@ impl Default for Config {
             sandbox: SandboxConfig::default(),
             mission_file: None,
             tool_disable: ToolDisableFlags::default(),
+            tool_approval_mode: ToolApprovalMode::Yolo,
+            tool_approval: BTreeMap::new(),
         }
     }
 }
@@ -268,6 +285,12 @@ pub fn parse_args(args: Vec<String>) -> Result<Config> {
                     "stream-json" => OutputFormat::StreamJson,
                     _ => bail!("unknown output format: {v}"),
                 };
+                i += 2;
+            }
+            "--approval-mode" => {
+                let v = require_value(&args, i)?;
+                cfg.tool_approval_mode = ToolApprovalMode::parse(&v)?;
+                cfg.cli_overrides.tool_approval_mode = true;
                 i += 2;
             }
             "--print" => {
@@ -427,6 +450,8 @@ fn apply_config_sources(
         cfg.cli_overrides.tool_timeout_secs || cfg.tool_timeout_secs != defaults.tool_timeout_secs;
     let cli_sub_agent_timeout = cfg.cli_overrides.sub_agent_timeout_secs
         || cfg.sub_agent_timeout_secs != defaults.sub_agent_timeout_secs;
+    let cli_tool_approval_mode = cfg.cli_overrides.tool_approval_mode
+        || cfg.tool_approval_mode != defaults.tool_approval_mode;
 
     for toml_cfg in [user_cfg, project_cfg].into_iter().flatten() {
         if !cli_model && let Some(model) = &toml_cfg.model {
@@ -461,6 +486,16 @@ fn apply_config_sources(
         }
         if let Some(log_events) = toml_cfg.log_events {
             cfg.log_events = log_events;
+        }
+        if let Some(tools) = &toml_cfg.tools {
+            if !cli_tool_approval_mode && let Some(mode) = tools.approval_mode {
+                cfg.tool_approval_mode = mode;
+            }
+            if let Some(approval) = &tools.approval {
+                for (name, policy) in approval {
+                    cfg.tool_approval.insert(name.clone(), *policy);
+                }
+            }
         }
     }
 }
@@ -667,6 +702,33 @@ pub struct ToolDisableFlags {
     pub disable_python: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ToolApprovalMode {
+    AlwaysAsk,
+    Write,
+    Yolo,
+}
+
+impl ToolApprovalMode {
+    pub fn parse(raw: &str) -> Result<Self> {
+        match raw {
+            "always-ask" => Ok(Self::AlwaysAsk),
+            "write" => Ok(Self::Write),
+            "yolo" => Ok(Self::Yolo),
+            _ => bail!("unknown approval mode: {raw}. Use always-ask, write, or yolo"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ToolApprovalPolicy {
+    Allow,
+    Deny,
+    Prompt,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -719,6 +781,14 @@ mod tests {
     }
 
     #[test]
+    fn parse_args_approval_mode() {
+        let cfg = parse_args(vec!["--approval-mode".into(), "write".into()]).unwrap();
+        assert_eq!(cfg.tool_approval_mode, ToolApprovalMode::Write);
+        assert!(cfg.cli_overrides.tool_approval_mode);
+        assert!(parse_args(vec!["--approval-mode".into(), "bad".into()]).is_err());
+    }
+
+    #[test]
     fn parse_args_prompt() {
         let cfg = parse_args(vec!["hello world".into()]).unwrap();
         assert_eq!(cfg.prompt, "hello world");
@@ -752,6 +822,24 @@ tool_timeout = 120
         assert!(!parsed.log_events.unwrap());
         assert!(parsed.model.is_none());
         assert!(parsed.api_key.is_none());
+    }
+
+    #[test]
+    fn parse_config_file_tools_approval() {
+        let toml_str = r#"
+[tools]
+approval_mode = "write"
+
+[tools.approval]
+Bash = "prompt"
+Read = "allow"
+"#;
+        let parsed: MinkConfigFile = toml::from_str(toml_str).unwrap();
+        let tools = parsed.tools.unwrap();
+        assert_eq!(tools.approval_mode.unwrap(), ToolApprovalMode::Write);
+        let approval = tools.approval.unwrap();
+        assert_eq!(approval["Bash"], ToolApprovalPolicy::Prompt);
+        assert_eq!(approval["Read"], ToolApprovalPolicy::Allow);
     }
 
     #[test]

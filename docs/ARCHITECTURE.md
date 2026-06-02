@@ -1,6 +1,6 @@
 # 架构说明
 
-更新日期：2026-05-31
+更新日期：2026-06-03
 
 ## 项目定位
 
@@ -12,6 +12,10 @@ mink 是一个 Rust 实现的轻量 AI coding agent，面向 DeepSeek / OpenAI-c
 - Session 是一等公民，使用 JSONL 追加持久化，支持恢复、重放和压缩
 - LLM 流式输出、工具执行、信号检测、决策恢复构成闭环
 - 工具边界明确：超时、输出大小、写入大小、副作用和禁用开关都可控
+- 工具有统一 metadata 和 approval tier，支持基础审批策略
+- 超长工具输出落 session artifact，可通过 `Read artifact://<id>` 恢复
+- `Read` 是轻量资源入口，支持本地文件、artifact、skill 和 session introspection
+- `Edit` 支持 snapshot anchored patch，降低精确字符串替换失败率
 - 上下文预算是硬约束，通过摘要压缩和 immutable prefix 尽量保留 prefix cache 命中
 
 ---
@@ -21,6 +25,8 @@ mink 是一个 Rust 实现的轻量 AI coding agent，面向 DeepSeek / OpenAI-c
 - **单进程主循环**：`OrchActor` 接收命令并为每个用户输入创建 `TurnExecutor`。
 - **机器协议优先**：`--print` / `--json-rpc` 输出 stream-json 事件，便于上层编排。
 - **Session 追加友好**：conversation、events、stats、summary、plan 都落在 session 目录。
+- **长输出可恢复**：工具输出超过上限时写入 artifact，conversation 只保留摘要和引用。
+- **读取入口统一**：`Read.path` 可读取文件和轻量 internal URL，并支持行 selector。
 - **工具结果双通道**：LLM conversation 使用工具结果或工具自定义 `conv_content`，UI 通过 `ToolResultDisplay` 展示。
 - **信号驱动干预**：工具失败、错误模式、编辑循环会降低 belief，并触发注入或中止。
 
@@ -50,10 +56,12 @@ TurnExecutor (agent/turn.rs)
 └───────────────────────┘
          │
 ┌─────── 工具层 ────────┐
-│ tools/runner.rs       │ ToolExec registry、并发执行、StormBreaker、结果格式化
-│ tools/file.rs         │ Read / Write / Edit
+│ tools/runner.rs       │ ToolExec registry、metadata、approval、StormBreaker、结果格式化
+│ tools/metadata.rs     │ ApprovalTier、ToolResultKind、ToolMetadata
+│ tools/file.rs         │ Read / Write / Edit、selector、resource、anchored patch
+│ tools/snapshot.rs     │ FileSnapshotStore、行 hash 和 snapshot tag
 │ tools/search.rs       │ Glob / Grep
-│ tools/bash.rs         │ Bash 执行、超时、ANSI 过滤、安全检查
+│ tools/bash.rs         │ Bash 执行、超时、ANSI 过滤、安全检查、误用拦截
 │ tools/python.rs       │ 受限 Python 执行
 │ tools/web.rs          │ WebSearch / WebFetch
 └───────────────────────┘
@@ -69,6 +77,7 @@ TurnExecutor (agent/turn.rs)
          │
 ┌─────── 持久化层 ──────┐
 │ session/store.rs      │ ConversationStore JSONL、缓存、tool_result 写入
+│ session/artifacts.rs  │ ArtifactManager、artifact index、完整工具输出
 │ session/stats.rs      │ token、费用、请求数统计
 │ session/compaction.rs │ 三级压缩、摘要生成、turn 对齐截断
 │ session/prefix.rs     │ ImmutablePrefix
@@ -126,6 +135,7 @@ OrchActor.handle_user_input()
 ToolExec::execute()
   -> ToolOutcome { content, conversation_content, exit_code, ... }
   -> format_tool_result(tool_result_max_bytes)
+       超限时写 artifacts/<id>.txt 并追加 artifact://<id>
   -> bash noise filter / Read/Write summary / Edit first-line conv content
   -> ToolRunResult
   -> ConversationStore::add_tool_results()
@@ -188,15 +198,17 @@ ToolRunResult
 
 | 文件 | 职责 |
 |------|------|
-| `tools/runner.rs` | `ToolExec` trait、`TOOL_REGISTRY`、并发调度、结果截断和内置控制工具 |
-| `tools/file.rs` | `ReadTool`、`WriteTool`、`EditTool` |
+| `tools/metadata.rs` | `ToolMetadata`、approval tier、结果类型、副作用标记 |
+| `tools/runner.rs` | `ToolExec` trait、`TOOL_REGISTRY`、approval、并发调度、结果截断、artifact spill 和内置控制工具 |
+| `tools/file.rs` | `ReadTool`、`WriteTool`、`EditTool`、selector、resource URL、anchored patch |
+| `tools/snapshot.rs` | 文件 snapshot、tag、行 hash 校验 |
 | `tools/search.rs` | `GlobTool`、`GrepTool` |
-| `tools/bash.rs` | `BashTool` |
+| `tools/bash.rs` | `BashTool`、危险命令检查、误用拦截 |
 | `tools/python.rs` | `PythonTool` |
 | `tools/web.rs` | `WebSearchTool`、`WebFetchTool` |
 | `assets/tools.json` | 提供给模型的工具 schema |
 
-新增工具时需要同时实现 `ToolExec`、注册 `TOOL_REGISTRY`、更新 `assets/tools.json`，并按副作用决定 `mutating()`、`storm_exempt()`、`internal()` 或 `spawns_sub_agent()`。
+新增工具时需要同时实现 `ToolExec::metadata()`、注册 `TOOL_REGISTRY`、更新 `assets/tools.json`，并在 metadata 中声明 approval tier、result kind、副作用、`storm_exempt`、`internal` 或 `spawns_sub_agent`。
 
 ### UI
 
@@ -249,7 +261,10 @@ pub struct ToolResultDisplay<'a> {
 ├── summary.txt
 ├── plan.md
 ├── plan.draft
-└── stats.json
+├── stats.json
+└── artifacts/
+    ├── index.jsonl
+    └── <tool>-0001.txt
 ```
 
 `MINK_HOME` 可覆盖默认 home。`--continue` 会选择最近修改的 session。
@@ -263,6 +278,10 @@ pub struct ToolResultDisplay<'a> {
 - `ImmutablePrefix` 变更必须通过 prefix manager / invalidate 路径。
 - `ConversationStore` append 时保持内存缓存一致，不靠读盘恢复正常路径性能。
 - `ToolRunner::format_tool_result()` 是工具输出进入 LLM/UI 前的最大字节保护。
+- `ToolRunner::execute_all()` 在 StormBreaker 前执行 approval 检查。
+- 超长工具输出必须保存为当前 session artifact，而不是丢失全文。
+- `Read` 本地非 raw 输出记录 snapshot；raw 和 immutable resource 不生成可编辑 snapshot。
+- `Edit.patch` 必须校验 snapshot tag 和目标行 hash，stale 时 fail closed。
 - `render_tool_result_detail()` 必须保留默认实现。
 - TUI 输入 cursor 必须落在 UTF-8 char boundary。
 - TUI 点击目标只对应当前可见 viewport。

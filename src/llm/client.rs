@@ -407,6 +407,10 @@ mod tests {
         let store = Arc::new(ConversationStore::new(spaths.conversation.clone()));
         store.ensure().await?;
         let stats = StatsTracker::load(&spaths.stats).await?;
+        let artifacts = Arc::new(crate::session::artifacts::ArtifactManager::new(
+            spaths.artifacts.clone(),
+        ));
+        artifacts.ensure()?;
         let cfg = Config {
             model: "flash".into(),
             api_key: "secret-key".into(),
@@ -433,6 +437,10 @@ mod tests {
             home,
             api_url: api_url.to_string(),
             store,
+            artifacts,
+            snapshots: Arc::new(Mutex::new(
+                crate::tools::snapshot::FileSnapshotStore::default(),
+            )),
             stats,
             compaction,
             cancel: CancellationToken::new(),

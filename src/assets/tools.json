@@ -1,13 +1,13 @@
 [
   {
     "name": "Read",
-    "description": "Read a file from the local filesystem. Use multiple Read calls if you need multiple files. Output includes line numbers (cat -n format). By default reads the whole file; use offset/limit to read specific line ranges.\n\nIMPORTANT - Prefer Grep over Read:\n- When searching for specific content, ALWAYS use Grep first \u2014 it returns only matching lines, never truncates, and keeps context small.\n- Read loads entire files into context, which rapidly inflates token usage. Use it ONLY when you already know exactly which lines you need (e.g. after a Grep located the target), or when you must understand the full file structure.\n- Grep with context provides enough surrounding lines for Edit in most cases, eliminating the need for a separate Read.\n- If a Read result is truncated (you see a truncation notice), do NOT re-read the same range \u2014 use Grep to search instead.\n- Use Read with offset/limit only when you already know the target line range (e.g. from a prior Grep).",
+    "description": "Read a local file or lightweight resource. Use multiple Read calls if you need multiple files/resources. Local file output includes a @PATH#TAG snapshot header and line numbers unless :raw is used. By default reads the whole file/resource; use offset/limit or path selectors to read specific line ranges.\n\nSupported resource paths:\n- local files, e.g. src/main.rs or src/main.rs:10-30\n- artifact://<id> for full truncated tool output\n- skill://list and skill://<name> for built-in skills\n- session://current, session://current/stats, session://current/messages, session://current/messages/all, session://current/artifacts\n\nIMPORTANT - Prefer Grep over Read:\n- When searching for specific content, ALWAYS use Grep first \u2014 it returns only matching lines, never truncates, and keeps context small.\n- Read loads entire files/resources into context, which rapidly inflates token usage. Use it ONLY when you already know exactly which lines you need (e.g. after a Grep located the target), or when you must understand the full file/resource structure.\n- Grep with context provides enough surrounding lines for Edit in most cases, eliminating the need for a separate Read.\n- If a Read result is truncated (you see a truncation notice), do NOT re-read the same range \u2014 use Grep to search instead.\n- Use Read with offset/limit only when you already know the target line range (e.g. from a prior Grep).",
     "input_schema": {
       "type": "object",
       "properties": {
         "path": {
           "type": "string",
-          "description": "Path to the file to read"
+          "description": "File path or resource URL to read. Supports local paths, artifact://<id>, skill://<name>, and session://current resources. A path selector such as :10-20, :10+5, or :raw may be appended."
         },
         "offset": {
           "type": "integer",
@@ -94,7 +94,7 @@
   },
   {
     "name": "Edit",
-    "description": "Edit a file by replacing an exact string match with a new string. old_string must match byte-for-byte (including whitespace/indent/newlines). Before editing, locate the exact text \u2014 prefer Grep with context to capture the target in one step; use Read with offset/limit only if you already know the exact line range. Copy the exact text before calling Edit.",
+    "description": "Edit a file. Prefer anchored patch mode after Read: copy the @PATH#TAG header from Read output and use replace/delete/insert line hunks. Fallback mode replaces an exact old_string with new_string; old_string must match byte-for-byte.",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -109,12 +109,14 @@
         "new_string": {
           "type": "string",
           "description": "The replacement text"
+        },
+        "patch": {
+          "type": "string",
+          "description": "Anchored line patch using the @PATH#TAG header from Read output. Supports replace N..M:, delete N..M, insert before N:, insert after N:, insert head:, and insert tail:. Body rows must start with +."
         }
       },
       "required": [
-        "path",
-        "old_string",
-        "new_string"
+        "path"
       ]
     }
   },

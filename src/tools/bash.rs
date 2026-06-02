@@ -1,5 +1,7 @@
 use crate::safety;
 use anyhow::{Result, anyhow, bail};
+use once_cell::sync::Lazy;
+use regex::Regex;
 use std::collections::VecDeque;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,6 +10,14 @@ use std::time::{Duration, Instant};
 
 static ADAPTIVE_HISTORY: LazyLock<Mutex<VecDeque<Duration>>> =
     LazyLock::new(|| Mutex::new(VecDeque::new()));
+static RE_BASH_READ_MISUSE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)^\s*(cat|head|tail|less|more)\b").expect("regex"));
+static RE_BASH_SEARCH_MISUSE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)^\s*(rg|grep|ag|ack)\b").expect("regex"));
+static RE_BASH_FIND_MISUSE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)^\s*(find|fd|ls|tree)\b").expect("regex"));
+static RE_BASH_RG_FILES_MISUSE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)^\s*rg\s+--files\b").expect("regex"));
 
 /// Compute adaptive timeout: median of last 10 executions × 3, min 5s, max 600s.
 pub fn adaptive_timeout(default_timeout: Duration) -> Duration {
@@ -248,12 +258,16 @@ fn stream_reader<R: std::io::Read>(mut pipe: R, buf: Arc<Mutex<String>>) {
 pub struct BashTool;
 
 impl super::runner::ToolExec for BashTool {
-    fn name(&self) -> &'static str {
-        "Bash"
+    fn metadata(&self) -> super::metadata::ToolMetadata {
+        super::metadata::ToolMetadata::new(
+            "Bash",
+            "Execute a shell command.",
+            super::metadata::ApprovalTier::Exec,
+            super::metadata::ToolResultKind::Command,
+        )
+        .mutating()
     }
-    fn mutating(&self) -> bool {
-        true
-    }
+
     fn execute(
         &self,
         input: &serde_json::Value,
@@ -271,8 +285,27 @@ impl super::runner::ToolExec for BashTool {
             timeout: Option<u64>,
         }
         let args: Args = serde_json::from_value(input.clone())?;
+        if let Some(reason) = bash_misuse_reason(&args.command) {
+            bail!("Error: {reason}");
+        }
         Self::execute_with_context(&args.command, args.timeout, ctx)
     }
+}
+
+fn bash_misuse_reason(command: &str) -> Option<&'static str> {
+    let trimmed = command.trim();
+    if RE_BASH_READ_MISUSE.is_match(trimmed) {
+        return Some(
+            "Bash command looks like file reading. Use Read with an optional line selector instead.",
+        );
+    }
+    if RE_BASH_RG_FILES_MISUSE.is_match(trimmed) || RE_BASH_FIND_MISUSE.is_match(trimmed) {
+        return Some("Bash command looks like file discovery. Use Glob instead.");
+    }
+    if RE_BASH_SEARCH_MISUSE.is_match(trimmed) {
+        return Some("Bash command looks like content search. Use Grep instead.");
+    }
+    None
 }
 
 impl BashTool {
@@ -311,6 +344,32 @@ mod tests {
     #[test]
     fn blocked_command_error() {
         assert!(execute("sudo rm /tmp/foo", None, 600).is_err());
+    }
+
+    #[test]
+    fn misuse_detector_routes_file_reading_to_read() {
+        let reason = bash_misuse_reason("cat src/main.rs").unwrap();
+        assert!(reason.contains("Read"));
+    }
+
+    #[test]
+    fn misuse_detector_routes_search_to_grep() {
+        let reason = bash_misuse_reason("rg TODO src").unwrap();
+        assert!(reason.contains("Grep"));
+    }
+
+    #[test]
+    fn misuse_detector_routes_discovery_to_glob() {
+        let reason = bash_misuse_reason("find . -name '*.rs'").unwrap();
+        assert!(reason.contains("Glob"));
+        let reason = bash_misuse_reason("rg --files").unwrap();
+        assert!(reason.contains("Glob"));
+    }
+
+    #[test]
+    fn misuse_detector_allows_build_commands() {
+        assert!(bash_misuse_reason("cargo test").is_none());
+        assert!(bash_misuse_reason("git status --short").is_none());
     }
 
     #[test]

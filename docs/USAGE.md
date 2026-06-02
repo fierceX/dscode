@@ -172,6 +172,7 @@ prompt 为空且 stdin 是终端时自动进入交互模式。非终端 stdin �
 | `--tui` | — | TUI 全屏模式 |
 | `--print` | — | ndjson 结构化输出（`--output-format stream-json` 别名） |
 | `--output-format FMT` | `human` | 输出格式：`human` / `stream-json` |
+| `--approval-mode MODE` | `yolo` | 工具审批模式：`yolo` / `write` / `always-ask` |
 | `--json-rpc` | — | JSON-RPC 模式（stdin 读请求，stdout 输出事件流，隐式启用 stream-json） |
 | `--disable-bash` | `false` | 禁用 Bash 工具 |
 | `--disable-python` | `false` | 禁用 Python 工具 |
@@ -201,10 +202,18 @@ tool_timeout = 600                        # 工具超时（秒）
 sub_agent_timeout = 120                   # 子代理超时（秒）
 context_compact_pct = 85                  # 压缩触发百分比
 log_events = true                         # 事件日志
+
+[tools]
+approval_mode = "yolo"                    # yolo | write | always-ask
+
+[tools.approval]
+Bash = "prompt"                           # allow | deny | prompt
+Read = "allow"
 ```
 
 项目级 `.minkrc` 覆盖用户级，CLI 参数覆盖所有文件设置。
 所有字段可选，未设置的字段使用默认值或环境变量。
+当前版本尚未实现交互式审批 prompt；需要审批的工具调用会 fail closed。默认 `yolo` 保持旧行为。
 
 ---
 
@@ -431,9 +440,9 @@ mink -m flash --max-context 1M -i
 
 | 工具 | 用途 | 关键参数 |
 |------|------|---------|
-| `Read` | 读文件 | `path`, `offset`, `limit` |
+| `Read` | 读文件或轻量资源，支持 selector 和 `artifact://` / `skill://` / `session://` | `path`, `offset`, `limit` |
 | `Write` | 写文件 | `path`, `content` |
-| `Edit` | 精确替换 | `path`, `old_string`, `new_string` |
+| `Edit` | anchored patch 或精确替换 fallback | `path`, `patch`, `old_string`, `new_string` |
 | `Bash` | 执行命令 | `command`, `timeout` |
 | `Python` | 运行 Python 脚本（安全受限，禁用 subprocess/os.system/eval） | `script` / `script_file`, `timeout` |
 | `Glob` | 文件匹配 | `pattern`, `path` |
@@ -447,6 +456,53 @@ mink -m flash --max-context 1M -i
 | `WebFetch` | 网页获取 | `url` |
 
 详见 [tools.md](tools.md)。
+
+### Read selector 与资源 URL
+
+`Read.path` 可追加 selector：
+
+- `src/main.rs:40-80`
+- `src/main.rs:40+20`
+- `src/main.rs:raw`
+- `src/main.rs:raw:40-80`
+
+可读取的轻量资源：
+
+- `artifact://<id>`：读取被截断工具输出
+- `skill://list` / `skill://<name>`：列出或读取内置 skill
+- `session://current`：当前 session 摘要
+- `session://current/stats`：stats JSON
+- `session://current/messages` / `session://current/messages/all`：conversation 摘要
+- `session://current/artifacts`：artifact 列表
+
+示例：
+
+```jsonl
+{"path":"artifact://bash-0001:1-120"}
+{"path":"skill://debugging"}
+{"path":"session://current/messages:1-40"}
+```
+
+### Anchored Edit
+
+本地文件非 raw `Read` 会输出 snapshot header：
+
+```text
+@src/foo.rs#0A3B
+41:fn target() {
+42:    old()
+```
+
+推荐用 `Edit.patch` 修改：
+
+```json
+{
+  "path": "src/foo.rs",
+  "patch": "@src/foo.rs#0A3B\nreplace 41..42:\n+fn target() {\n+    new()\n+}"
+}
+```
+
+如果 snapshot 过期，`Edit` 会拒绝修改并要求重新 `Read`。`old_string/new_string` 仍可作为兼容 fallback。
 
 ---
 

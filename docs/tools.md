@@ -4,7 +4,7 @@
 
 ## 执行模型
 
-所有工具通过 `tools/runner.rs` 中的 `ToolExec` trait 注册到 `TOOL_REGISTRY`，由 `ToolRunner::execute_all()` 并发分发。
+所有工具通过 `tools/runner.rs` 中的 `ToolExec` trait 注册到 `TOOL_REGISTRY`，由 `ToolRunner::execute_all()` 并发分发。每个工具同时声明 `ToolMetadata`，包含 approval tier、结果类型、副作用、storm 例外和 discoverable 标记。
 
 统一流程：
 
@@ -25,17 +25,53 @@ ToolCallEvent
 
 默认 `tool_result_max_bytes` 为 `100000`，可通过环境变量 `TOOL_RESULT_MAX_BYTES` 调整。
 
+当工具输出超过上限时，完整输出会保存到当前 session 的 `artifacts/` 目录，工具结果中追加 `artifact://<id>`。可用 `Read` 按需读取，例如 `artifact://bash-0001:1-120`。
+
+`Read` 也承担轻量资源路由职责。当前只实现高收益、低耦合的内置协议分支，没有引入完整 `ResourceRouter` 框架：
+
+- `artifact://<id>`：读取被截断工具输出。
+- `skill://list` / `skill://<name>`：列出或读取内置 skill。
+- `session://current`：读取当前 session 摘要。
+- `session://current/stats`：读取当前 session stats JSON。
+- `session://current/messages`：读取最近 40 条 conversation 摘要。
+- `session://current/messages/all`：读取全部 conversation 摘要。
+- `session://current/artifacts`：列出当前 session artifacts。
+
+这些资源都支持同样的行 selector，例如 `session://current/messages:1-20`。
+
+工具审批模式由 `--approval-mode` 或 `.minkrc` 的 `[tools]` 配置控制：
+
+| 模式 | 自动允许 | 阻止/等待审批 |
+|------|----------|---------------|
+| `yolo` | Read / Write / Exec | 无，默认 |
+| `write` | Read / Write | Exec |
+| `always-ask` | Read | Write / Exec |
+
+当前版本还没有交互式审批 prompt；需要审批的调用会 fail closed，并返回工具错误。可用 `[tools.approval]` 为单个工具设置 `allow`、`deny` 或 `prompt`。
+
 ## `Read`
 
-读取文件内容。
+读取文件内容或轻量资源。
 
 | 参数 | 类型 | 说明 |
 |---|---|---|
-| `path` | string | 文件路径 |
+| `path` | string | 文件路径或资源 URL |
 | `offset` | integer | 起始行号，1-indexed，可选 |
 | `limit` | integer | 读取行数，可选 |
 
-- 输出包含行号，适合编辑前定位。
+- `path` 支持 selector：`file:10-20`、`file:10+5`、`file:raw`、`file:raw:10-20`。
+- 输出包含 snapshot header 和行号，适合 anchored edit：
+
+```text
+@src/foo.rs#0A3B
+41:fn target() {
+42:    ...
+```
+
+- `:raw` 禁用 snapshot header 和行号。
+- `artifact://<id>` 可读取被截断工具输出，支持同样的行 selector。
+- `skill://list` / `skill://<name>` 可读取内置 skills。
+- `session://current`、`session://current/stats`、`session://current/messages`、`session://current/artifacts` 可读取当前 session 状态。
 - 默认可读整文件，但大文件会受到工具结果上限保护。
 - 搜索具体内容时优先用 `Grep`，定位后再用 `Read offset/limit`。
 - UI 展示会额外加 `Read(path) [lines, bytes]` 摘要。
@@ -56,18 +92,34 @@ ToolCallEvent
 
 ## `Edit`
 
-精确字符串替换。
+编辑文件。优先使用 anchored patch；保留精确字符串替换作为兼容 fallback。
 
 | 参数 | 类型 | 说明 |
 |---|---|---|
 | `path` | string | 文件路径 |
-| `old_string` | string | 要替换的原文本 |
-| `new_string` | string | 替换后的文本 |
+| `patch` | string | anchored line patch，可选 |
+| `old_string` | string | 要替换的原文本，fallback 模式 |
+| `new_string` | string | 替换后的文本，fallback 模式 |
 
-- `old_string` 必须 byte-for-byte 精确匹配，包括缩进、空格和换行。
-- 不支持正则。
-- 适合小范围修改。
+- `patch` 必须使用最近 `Read` 输出中的 `@PATH#TAG` header。
+- patch 支持 `replace N..M:`、`delete N..M`、`insert before N:`、`insert after N:`、`insert head:`、`insert tail:`。
+- patch body 行必须以 `+` 开头。
+- patch 只能修改 snapshot 覆盖且未漂移的行；文件变化时会拒绝并要求重新 `Read`。
+- `patch` 不能和 `old_string/new_string` 混用。
+- fallback 模式中，`old_string` 必须 byte-for-byte 精确匹配，包括缩进、空格和换行，不支持正则。
 - conversation 中默认只保留结果首行，避免 diff 过度污染上下文；UI 仍可展示完整工具内容。
+
+示例：
+
+```text
+@src/foo.rs#0A3B
+replace 41..43:
++fn target() {
++    new_value()
++}
+insert after 55:
++println!("done");
+```
 
 ## `Bash`
 
@@ -80,6 +132,7 @@ ToolCallEvent
 
 - 命令通过 `bash -lc` 执行。
 - 空命令和危险命令会被安全策略拒绝。
+- 用于读文件、搜索内容或发现路径的 Bash 命令会被拦截，提示改用 `Read`、`Grep` 或 `Glob`。
 - 显式 `timeout` 优先；未设置时使用全局 `--tool-timeout` 和自适应超时，最大 600 秒。
 - Ctrl+C / interrupt 会尝试中断子进程，返回 exit code 130 语义。
 - stdout 和 stderr 合并返回，非零退出码会追加提示。
@@ -125,7 +178,7 @@ ToolCallEvent
 
 - 基于内置目录遍历和 Rust `regex` 搜索，不依赖外部 `rg` 二进制。
 - 优先用于定位编辑目标。
-- `context` 往往足够直接构造 `Edit old_string`。
+- `context` 往往足够定位目标；需要修改时优先 `Read` 目标范围拿到 `@PATH#TAG` 后使用 anchored `Edit.patch`。
 
 ## `TodoWrite`
 

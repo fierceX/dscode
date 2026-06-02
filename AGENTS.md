@@ -11,6 +11,10 @@ mink 是一个 Rust 实现的轻量 AI coding agent，专为 DeepSeek/OpenAI-com
 - 上下文自适应压缩：三级 Tier，尽量保持 prefix-cache 命中
 - 维修流水线：Scavenge 回收、Truncation 修复、StormBreaker 重复调用抑制
 - Session 持久化：JSONL 追加写入，支持恢复和重放
+- Artifact 持久化：超长工具输出落到 session `artifacts/`，可通过 `Read artifact://<id>` 读取
+- 工具元数据与审批策略：每个工具声明 approval tier、结果类型、副作用和 discoverable 状态
+- 轻量资源读取：`Read` 支持本地文件、artifact、skill 和 session introspection URL
+- Anchored Edit：`Read` 生成 snapshot header，`Edit.patch` 可按行锚定修改并检测 stale snapshot
 - 两种终端交互模式：REPL + TUI
 - 子代理：SubAgent 支持隔离上下文或 fork 当前上下文并发执行
 
@@ -120,10 +124,12 @@ TurnExecutor (agent/turn.rs)
 └───────────────────────┘
          │
 ┌─────── 工具层 ────────┐
-│ tools/runner.rs       │ ToolRegistry + 批量分发 + StormBreaker
-│ tools/file.rs         │ Read/Write/Edit
+│ tools/runner.rs       │ ToolRegistry + ToolMetadata + approval + StormBreaker + artifact spill
+│ tools/metadata.rs     │ approval tier、结果类型、副作用等工具元数据
+│ tools/file.rs         │ Read/Write/Edit + selector/resource/anchored patch
+│ tools/snapshot.rs     │ Read snapshot 和 anchored edit hash 校验
 │ tools/search.rs       │ Glob/Grep
-│ tools/bash.rs         │ Bash 执行
+│ tools/bash.rs         │ Bash 执行 + 误用拦截
 │ tools/python.rs       │ Python 执行
 │ tools/web.rs          │ WebSearch/WebFetch
 └───────────────────────┘
@@ -137,6 +143,7 @@ TurnExecutor (agent/turn.rs)
          │
 ┌─────── 持久化层 ──────┐
 │ session/store.rs      │ JSONL ConversationStore
+│ session/artifacts.rs  │ session artifacts 读写与 artifact:// 索引
 │ session/stats.rs      │ Token/费用统计
 │ session/compaction.rs │ 三级上下文压缩
 │ session/prefix.rs     │ ImmutablePrefix 缓存
@@ -178,10 +185,11 @@ OrchActor.handle_user_input()
 │ 3. Scavenge 回收遗漏工具调用                         │
 │ 4. 持久化 assistant 消息                             │
 │ 5. ToolRunner::execute_all                           │
+│    ├── ToolMetadata approval check                    │
 │    ├── StormBreaker                                  │
 │    ├── Truncation repair                             │
 │    ├── ToolExec dispatch                             │
-│    └── format_tool_result / noise filter             │
+│    └── format_tool_result / noise filter / artifact  │
 │ 6. 持久化 tool results 到 ConversationStore           │
 │ 7. Display 输出工具结果                              │
 │ 8. 信号采集 -> belief -> decision                    │
@@ -247,12 +255,49 @@ DecisionEngine.decide()
 
 | 文件 | 职责 |
 |------|------|
-| `tools/runner.rs` | ToolExec registry、批量分发、结果格式化、TodoWrite/Skill/Plan/SubAgent tools |
-| `tools/file.rs` | Read/Write/Edit |
+| `tools/metadata.rs` | ToolMetadata、ApprovalTier、ToolResultKind |
+| `tools/runner.rs` | ToolExec registry、approval、批量分发、结果格式化、artifact spill、TodoWrite/Skill/Plan/SubAgent tools |
+| `tools/file.rs` | Read/Write/Edit、path selector、resource URL、anchored patch |
+| `tools/snapshot.rs` | FileSnapshotStore、hashline 轻量校验 |
 | `tools/search.rs` | Glob/Grep |
-| `tools/bash.rs` | Bash |
+| `tools/bash.rs` | Bash、危险命令检查、误用拦截 |
 | `tools/python.rs` | Python |
 | `tools/web.rs` | WebSearch/WebFetch |
+
+### Read / Edit 协议
+
+`Read.path` 支持行 selector：
+
+- `path:raw`
+- `path:N`
+- `path:N-M`
+- `path:N+K`
+- `path:N-M:raw`
+- `path:raw:N-M`
+
+`Read.path` 支持轻量资源 URL：
+
+- `artifact://<id>`：读取被截断工具输出
+- `skill://list` / `skill://<name>`：列出或读取内置 skill
+- `session://current`：当前 session 摘要
+- `session://current/stats`：stats JSON
+- `session://current/messages` / `session://current/messages/all`：conversation 摘要
+- `session://current/artifacts`：artifact 列表
+
+本地文件非 raw `Read` 输出带 snapshot header：
+
+```text
+@src/foo.rs#0A3B
+41:fn target() {
+42:    old()
+```
+
+`Edit` 支持两种模式：
+
+- 首选 `patch`：基于 `@PATH#TAG` header 的 `replace/delete/insert` 行操作。
+- 兼容 `old_string/new_string`：精确字符串替换 fallback。
+
+Anchored patch 只修改 snapshot 覆盖且未漂移的行。tag 缺失、行 hash 不匹配、hunk 重叠、no-op 等情况必须 fail closed，并提示重新 `Read`。
 
 ### UI
 
@@ -273,6 +318,7 @@ DecisionEngine.decide()
 | 文件 | 职责 |
 |------|------|
 | `session/store.rs` | ConversationStore JSONL |
+| `session/artifacts.rs` | ArtifactManager、artifact index、完整工具输出落盘 |
 | `session/stats.rs` | token 和费用统计 |
 | `session/compaction.rs` | 三级压缩 |
 | `session/prefix.rs` | ImmutablePrefix |
@@ -294,8 +340,12 @@ DecisionEngine.decide()
 - `StormBreaker` 每个新用户输入重置
 - `BeliefTracker` 每个新用户输入 reset，初始信念为 0.75
 - `DecisionEngine` 每个新用户输入 reset cooldown
-- `ToolRunner::format_tool_result()` 是工具输出进入 LLM/UI 前的统一最大字节保护
+- `ToolRunner::execute_all()` 在 StormBreaker 前执行 approval 检查
+- 默认 approval mode 是 `yolo`；`prompt` 目前没有交互式 UI，会 fail closed
+- `ToolRunner::format_tool_result()` 是工具输出进入 LLM/UI 前的统一最大字节保护，超长输出写入 `artifact://<id>`
 - `TurnExecutor` 写入 LLM conversation 使用 `conv_content`，为空时使用 `content`
+- `Read` 本地非 raw 输出会记录 snapshot；raw 或 immutable resource 不生成可编辑 snapshot
+- `Edit.patch` 的 header path 必须和 `Edit.path` 一致，snapshot stale 时拒绝编辑
 - `Display::render_tool_result_detail()` 必须保持默认实现。
 - TUI 光标必须始终落在 UTF-8 char boundary。
 
@@ -306,9 +356,9 @@ DecisionEngine.decide()
 1. 在 `tools/*.rs` 中实现 `ToolExec` 或辅助函数。
 2. 在 `tools/runner.rs` 的 `TOOL_REGISTRY` 中注册工具。
 3. 在 `src/assets/tools.json` 中添加 schema。
-4. 如果工具有副作用，实现 `mutating()`；如果应跳过风暴检测，实现 `storm_exempt()`。
-5. 若工具需要压缩给 LLM 的内容，设置 `ToolOutcome.conversation_content`。
-6. 添加单元测试，包括错误路径、截断、信号和安全边界。
+4. 在 `metadata()` 中声明 `ApprovalTier`、`ToolResultKind`、副作用、discoverable/internal/storm_exempt 等属性。
+5. 如果工具需要压缩给 LLM 的内容，设置 `ToolOutcome.conversation_content`。
+6. 添加单元测试，包括 schema/registry 一致性、approval、错误路径、截断、artifact、信号和安全边界。
 
 ---
 
@@ -353,8 +403,6 @@ grep '"Injecting hint"' events.jsonl
 | `docs/tools.md` | 内置工具参数与行为 |
 | `docs/设计哲学-信号系统.md` | 信号系统完整设计 |
 | `docs/TUI_OPTIMIZATION_ROADMAP.md` | TUI 当前实现和维护建议 |
-| `docs/TUI_MARKDOWN_RENDERING_DESIGN.md` | TUI Markdown 渲染说明 |
-| `docs/TUI_CURRENT_STAGE_REVIEW_AND_NEXT_OPTIMIZATION_PLAN.md` | TUI 质量说明和后续建议 |
 
 ---
 

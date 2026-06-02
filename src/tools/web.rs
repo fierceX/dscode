@@ -51,12 +51,17 @@ pub struct WebSearchTool;
 pub struct WebFetchTool;
 
 impl super::runner::ToolExec for WebSearchTool {
-    fn name(&self) -> &'static str {
-        "WebSearch"
+    fn metadata(&self) -> super::metadata::ToolMetadata {
+        super::metadata::ToolMetadata::new(
+            "WebSearch",
+            "Search the web.",
+            super::metadata::ApprovalTier::Read,
+            super::metadata::ToolResultKind::Web,
+        )
+        .storm_exempt()
+        .discoverable()
     }
-    fn storm_exempt(&self) -> bool {
-        true
-    }
+
     fn execute(
         &self,
         input: &serde_json::Value,
@@ -77,12 +82,17 @@ impl super::runner::ToolExec for WebSearchTool {
 }
 
 impl super::runner::ToolExec for WebFetchTool {
-    fn name(&self) -> &'static str {
-        "WebFetch"
+    fn metadata(&self) -> super::metadata::ToolMetadata {
+        super::metadata::ToolMetadata::new(
+            "WebFetch",
+            "Fetch a web page as markdown.",
+            super::metadata::ApprovalTier::Read,
+            super::metadata::ToolResultKind::Web,
+        )
+        .storm_exempt()
+        .discoverable()
     }
-    fn storm_exempt(&self) -> bool {
-        true
-    }
+
     fn execute(
         &self,
         input: &serde_json::Value,

@@ -1,11 +1,14 @@
 use crate::cancel::CancellationToken;
-use crate::config::{Config, OutputFormat, ToolDisableFlags};
+use crate::config::{Config, OutputFormat, ToolApprovalMode, ToolApprovalPolicy, ToolDisableFlags};
+use crate::session::artifacts::ArtifactManager;
 use crate::session::compaction::CompactionEngine;
 use crate::session::prefix::ImmutablePrefix;
 use crate::session::stats::StatsTracker;
 use crate::session::store::ConversationStore;
+use crate::tools::snapshot::FileSnapshotStore;
 use crate::ui::Display;
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -20,6 +23,8 @@ pub struct ToolConfig {
     pub file_write_max_bytes: usize,
     /// 工具禁用开关（运行时覆盖）
     pub tool_disable: ToolDisableFlags,
+    pub tool_approval_mode: ToolApprovalMode,
+    pub tool_approval: BTreeMap<String, ToolApprovalPolicy>,
 }
 
 impl ToolConfig {
@@ -30,6 +35,8 @@ impl ToolConfig {
             tool_result_max_bytes: cfg.tool_result_max_bytes,
             file_write_max_bytes: cfg.file_write_max_bytes,
             tool_disable: cfg.tool_disable.clone(),
+            tool_approval_mode: cfg.tool_approval_mode,
+            tool_approval: cfg.tool_approval.clone(),
         }
     }
 }
@@ -41,6 +48,8 @@ pub struct ToolContext {
     pub cwd: PathBuf,
     pub home: PathBuf,
     pub store: Arc<ConversationStore>,
+    pub artifacts: Arc<ArtifactManager>,
+    pub snapshots: Arc<Mutex<FileSnapshotStore>>,
     pub tool_config: ToolConfig,
     pub interrupt: Arc<AtomicBool>,
 }
@@ -51,6 +60,8 @@ impl From<&AgentSharedContext> for ToolContext {
             cwd: ctx.cwd.clone(),
             home: ctx.home.clone(),
             store: ctx.store.clone(),
+            artifacts: ctx.artifacts.clone(),
+            snapshots: ctx.snapshots.clone(),
             tool_config: ctx.tool_config.clone(),
             interrupt: ctx.interrupt.clone(),
         }
@@ -64,6 +75,8 @@ pub struct AgentSharedContext {
     pub home: PathBuf,
     pub api_url: String,
     pub store: Arc<ConversationStore>,
+    pub artifacts: Arc<ArtifactManager>,
+    pub snapshots: Arc<Mutex<FileSnapshotStore>>,
     pub stats: Arc<StatsTracker>,
     pub compaction: Arc<CompactionEngine>,
     pub cancel: CancellationToken,

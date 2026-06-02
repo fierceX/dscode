@@ -6,10 +6,12 @@ use std::sync::{Arc, Mutex};
 
 use super::bash;
 use super::file;
+use super::metadata::{ApprovalTier, ToolMetadata, ToolResultKind};
 use super::python;
 use super::search;
 use super::web;
-use crate::context::ToolContext;
+use crate::config::{ToolApprovalMode, ToolApprovalPolicy};
+use crate::context::{ToolConfig, ToolContext};
 use crate::guard::storm::{StormBreaker, StormDecision};
 use crate::protocol::ToolCallEvent;
 
@@ -39,22 +41,26 @@ impl ToolOutcome {
 /// Each tool registers itself via `tool_registry()` and is dispatched
 /// without a central match block.
 pub trait ToolExec: Send + Sync {
-    fn name(&self) -> &'static str;
+    fn metadata(&self) -> ToolMetadata;
+
+    fn name(&self) -> &'static str {
+        self.metadata().name
+    }
 
     fn mutating(&self) -> bool {
-        false
+        self.metadata().mutating
     }
 
     fn storm_exempt(&self) -> bool {
-        false
+        self.metadata().storm_exempt
     }
 
     fn internal(&self) -> bool {
-        false
+        self.metadata().internal
     }
 
     fn spawns_sub_agent(&self) -> bool {
-        false
+        self.metadata().spawns_sub_agent
     }
 
     fn execute(&self, input: &serde_json::Value, ctx: &ToolContext) -> anyhow::Result<ToolOutcome>;
@@ -140,6 +146,18 @@ impl ToolRunner {
     pub async fn execute_all(&self, calls: Vec<ToolCallEvent>) -> Result<Vec<ToolRunResult>> {
         let mut handles = Vec::new();
         for call in calls {
+            if let Some(tool) = self.find_tool(&call.name)
+                && let Some(reason) = approval_block_reason(tool.metadata(), &self.ctx.tool_config)
+            {
+                let name = call.name.clone();
+                let id = call.id.clone();
+                let args = call.fields.clone();
+                handles.push(tokio::task::spawn_blocking(move || {
+                    Ok(blocked_tool_result(id, name, args, reason))
+                }));
+                continue;
+            }
+
             // Storm check: suppress repeated identical calls
             if let Some(tool) = self.find_tool(&call.name)
                 && !tool.storm_exempt()
@@ -233,7 +251,12 @@ impl ToolRunner {
             Err(e) => format!("Error: tool execution failed: {e}"),
         };
 
-        let output = format_tool_result(&output, ctx.tool_config.tool_result_max_bytes);
+        let output = format_tool_result_with_artifact(
+            &call.name,
+            &output,
+            ctx.tool_config.tool_result_max_bytes,
+            ctx,
+        );
 
         let output = if is_bash {
             filter_bash_noise(&output)
@@ -292,6 +315,63 @@ impl ToolRunner {
     }
 }
 
+fn blocked_tool_result(
+    id: String,
+    name: String,
+    args: BTreeMap<String, String>,
+    reason: String,
+) -> ToolRunResult {
+    ToolRunResult {
+        tool_use_id: id,
+        tool_name: name,
+        tool_args: args,
+        content: format!("Error: {reason}"),
+        conv_content: String::new(),
+        spawns_sub_agent: false,
+        sub_agent_prompt: None,
+        sub_agent_description: None,
+        sub_agent_fork: false,
+        exit_code: None,
+        signals: Vec::new(),
+    }
+}
+
+fn approval_block_reason(metadata: ToolMetadata, config: &ToolConfig) -> Option<String> {
+    match config.tool_approval.get(metadata.name).copied() {
+        Some(ToolApprovalPolicy::Allow) => return None,
+        Some(ToolApprovalPolicy::Deny) => {
+            return Some(format!(
+                "Tool '{}' blocked by approval policy: deny",
+                metadata.name
+            ));
+        }
+        Some(ToolApprovalPolicy::Prompt) => {
+            return Some(format!(
+                "Tool '{}' requires approval, but interactive approval prompts are not implemented yet.",
+                metadata.name
+            ));
+        }
+        None => {}
+    }
+
+    let allowed = match config.tool_approval_mode {
+        ToolApprovalMode::Yolo => true,
+        ToolApprovalMode::Write => {
+            matches!(metadata.approval, ApprovalTier::Read | ApprovalTier::Write)
+        }
+        ToolApprovalMode::AlwaysAsk => matches!(metadata.approval, ApprovalTier::Read),
+    };
+
+    if allowed {
+        None
+    } else {
+        Some(format!(
+            "Tool '{}' requires {:?} approval in {:?} mode, but interactive approval prompts are not implemented yet.",
+            metadata.name, metadata.approval, config.tool_approval_mode
+        ))
+    }
+}
+
 fn resolve_summary_path(cwd: &Path, raw: &str) -> PathBuf {
     let path = Path::new(raw);
     if path.is_absolute() {
@@ -308,12 +388,15 @@ pub struct PlanConfirmTool;
 pub struct PlanClearTool;
 
 impl ToolExec for TodoWriteTool {
-    fn name(&self) -> &'static str {
-        "TodoWrite"
-    }
-
-    fn storm_exempt(&self) -> bool {
-        true
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata::new(
+            "TodoWrite",
+            "Maintain the current session todo checklist.",
+            ApprovalTier::Write,
+            ToolResultKind::Control,
+        )
+        .mutating()
+        .storm_exempt()
     }
 
     fn execute(
@@ -331,12 +414,15 @@ impl ToolExec for TodoWriteTool {
 }
 
 impl ToolExec for SkillTool {
-    fn name(&self) -> &'static str {
-        "Skill"
-    }
-
-    fn storm_exempt(&self) -> bool {
-        true
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata::new(
+            "Skill",
+            "Load a named skill into the current turn context.",
+            ApprovalTier::Read,
+            ToolResultKind::Control,
+        )
+        .storm_exempt()
+        .discoverable()
     }
 
     fn execute(&self, input: &serde_json::Value, ctx: &ToolContext) -> anyhow::Result<ToolOutcome> {
@@ -350,16 +436,16 @@ impl ToolExec for SkillTool {
 }
 
 impl ToolExec for SubAgentTool {
-    fn name(&self) -> &'static str {
-        "SubAgent"
-    }
-
-    fn storm_exempt(&self) -> bool {
-        true
-    }
-
-    fn spawns_sub_agent(&self) -> bool {
-        true
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata::new(
+            "SubAgent",
+            "Spawn a child agent for isolated or forked work.",
+            ApprovalTier::Exec,
+            ToolResultKind::SubAgent,
+        )
+        .storm_exempt()
+        .discoverable()
+        .spawns_sub_agent()
     }
 
     fn execute(&self, input: &serde_json::Value, ctx: &ToolContext) -> anyhow::Result<ToolOutcome> {
@@ -381,16 +467,16 @@ impl ToolExec for SubAgentTool {
 }
 
 impl ToolExec for PlanConfirmTool {
-    fn name(&self) -> &'static str {
-        "PlanConfirm"
-    }
-
-    fn storm_exempt(&self) -> bool {
-        true
-    }
-
-    fn internal(&self) -> bool {
-        true
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata::new(
+            "PlanConfirm",
+            "Confirm and lock the current plan draft.",
+            ApprovalTier::Write,
+            ToolResultKind::Control,
+        )
+        .mutating()
+        .storm_exempt()
+        .internal()
     }
 
     fn execute(
@@ -403,16 +489,16 @@ impl ToolExec for PlanConfirmTool {
 }
 
 impl ToolExec for PlanClearTool {
-    fn name(&self) -> &'static str {
-        "PlanClear"
-    }
-
-    fn storm_exempt(&self) -> bool {
-        true
-    }
-
-    fn internal(&self) -> bool {
-        true
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata::new(
+            "PlanClear",
+            "Clear the current locked plan.",
+            ApprovalTier::Write,
+            ToolResultKind::Control,
+        )
+        .mutating()
+        .storm_exempt()
+        .internal()
     }
 
     fn execute(
@@ -527,6 +613,25 @@ pub fn format_tool_result(s: &str, max: usize) -> String {
     }
     let head_text = utf8_prefix_by_bytes(s, head_len);
     format!("{head_text}{marker}{tail_text}")
+}
+
+fn format_tool_result_with_artifact(
+    tool_name: &str,
+    output: &str,
+    max: usize,
+    ctx: &ToolContext,
+) -> String {
+    if output.len() <= max {
+        return output.to_string();
+    }
+    let truncated = format_tool_result(output, max);
+    match ctx
+        .artifacts
+        .write_text(tool_name, "full tool output", None, output)
+    {
+        Ok(record) => format!("{truncated}\n\n[Full output: artifact://{}]", record.id),
+        Err(_) => truncated,
+    }
 }
 
 fn last_n_lines(s: &str, n: usize) -> &str {
@@ -740,6 +845,159 @@ mod tests {
                 tool.storm_exempt(),
                 crate::tools::is_storm_exempt(tool.name())
             );
+            let meta = tool.metadata();
+            assert_eq!(tool.name(), meta.name);
+            assert_eq!(tool.mutating(), meta.mutating);
+            assert_eq!(tool.storm_exempt(), meta.storm_exempt);
+            assert_eq!(tool.internal(), meta.internal);
+            assert_eq!(tool.spawns_sub_agent(), meta.spawns_sub_agent);
+            assert!(
+                !meta.summary.trim().is_empty(),
+                "{} summary is empty",
+                meta.name
+            );
+        }
+    }
+
+    #[test]
+    fn mutating_tools_are_write_or_exec_tier() {
+        for tool in tool_registry() {
+            let meta = tool.metadata();
+            if meta.mutating {
+                assert!(
+                    matches!(meta.approval, ApprovalTier::Write | ApprovalTier::Exec),
+                    "{} is mutating but not write/exec tier",
+                    meta.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn expected_tool_metadata_contracts() {
+        let meta = |name: &str| {
+            tool_registry()
+                .iter()
+                .find(|tool| tool.name() == name)
+                .expect("tool should exist")
+                .metadata()
+        };
+
+        assert_eq!(meta("Read").approval, ApprovalTier::Read);
+        assert_eq!(meta("Read").result_kind, ToolResultKind::FileRead);
+        assert_eq!(meta("Write").approval, ApprovalTier::Write);
+        assert_eq!(meta("Write").result_kind, ToolResultKind::FileWrite);
+        assert_eq!(meta("Edit").approval, ApprovalTier::Write);
+        assert_eq!(meta("Edit").result_kind, ToolResultKind::Edit);
+        assert_eq!(meta("Bash").approval, ApprovalTier::Exec);
+        assert_eq!(meta("Bash").result_kind, ToolResultKind::Command);
+        assert_eq!(meta("Glob").approval, ApprovalTier::Read);
+        assert_eq!(meta("Glob").result_kind, ToolResultKind::Search);
+        assert_eq!(meta("Grep").approval, ApprovalTier::Read);
+        assert_eq!(meta("Grep").result_kind, ToolResultKind::Search);
+        assert_eq!(meta("WebSearch").result_kind, ToolResultKind::Web);
+        assert_eq!(meta("WebFetch").result_kind, ToolResultKind::Web);
+        assert_eq!(meta("SubAgent").approval, ApprovalTier::Exec);
+        assert_eq!(meta("SubAgent").result_kind, ToolResultKind::SubAgent);
+        assert!(meta("SubAgent").spawns_sub_agent);
+        assert!(meta("PlanConfirm").internal);
+        assert!(meta("PlanClear").internal);
+        assert!(meta("Skill").discoverable);
+        assert!(meta("Python").discoverable);
+    }
+
+    #[test]
+    fn approval_yolo_allows_exec_tools() {
+        let config = approval_test_config(ToolApprovalMode::Yolo, []);
+        let bash = tool_registry()
+            .iter()
+            .find(|tool| tool.name() == "Bash")
+            .unwrap()
+            .metadata();
+        assert!(approval_block_reason(bash, &config).is_none());
+    }
+
+    #[test]
+    fn approval_write_mode_blocks_exec_but_allows_write() {
+        let config = approval_test_config(ToolApprovalMode::Write, []);
+        let meta = |name: &str| {
+            tool_registry()
+                .iter()
+                .find(|tool| tool.name() == name)
+                .unwrap()
+                .metadata()
+        };
+
+        assert!(approval_block_reason(meta("Read"), &config).is_none());
+        assert!(approval_block_reason(meta("Write"), &config).is_none());
+        assert!(approval_block_reason(meta("Bash"), &config).is_some());
+    }
+
+    #[test]
+    fn approval_per_tool_overrides_mode() {
+        let config = approval_test_config(
+            ToolApprovalMode::Write,
+            [
+                ("Bash".to_string(), ToolApprovalPolicy::Allow),
+                ("Read".to_string(), ToolApprovalPolicy::Deny),
+            ],
+        );
+        let meta = |name: &str| {
+            tool_registry()
+                .iter()
+                .find(|tool| tool.name() == name)
+                .unwrap()
+                .metadata()
+        };
+
+        assert!(approval_block_reason(meta("Bash"), &config).is_none());
+        let reason = approval_block_reason(meta("Read"), &config).unwrap();
+        assert!(reason.contains("deny"), "{reason}");
+    }
+
+    fn approval_test_config<const N: usize>(
+        mode: ToolApprovalMode,
+        overrides: [(String, ToolApprovalPolicy); N],
+    ) -> ToolConfig {
+        ToolConfig {
+            tool_timeout_secs: 600,
+            sub_agent_timeout_secs: 300,
+            tool_result_max_bytes: 100_000,
+            file_write_max_bytes: 1_048_576,
+            tool_disable: crate::config::ToolDisableFlags::default(),
+            tool_approval_mode: mode,
+            tool_approval: overrides.into_iter().collect(),
+        }
+    }
+
+    #[test]
+    fn all_tool_result_kind_variants_have_expected_coverage() {
+        let kinds: std::collections::BTreeSet<&'static str> = tool_registry()
+            .iter()
+            .map(|tool| match tool.metadata().result_kind {
+                ToolResultKind::Text => "Text",
+                ToolResultKind::FileRead => "FileRead",
+                ToolResultKind::FileWrite => "FileWrite",
+                ToolResultKind::Edit => "Edit",
+                ToolResultKind::Command => "Command",
+                ToolResultKind::Search => "Search",
+                ToolResultKind::Web => "Web",
+                ToolResultKind::Control => "Control",
+                ToolResultKind::SubAgent => "SubAgent",
+            })
+            .collect();
+
+        for expected in [
+            "FileRead",
+            "FileWrite",
+            "Edit",
+            "Command",
+            "Search",
+            "Web",
+            "Control",
+            "SubAgent",
+        ] {
+            assert!(kinds.contains(expected), "missing result kind {expected}");
         }
     }
 }

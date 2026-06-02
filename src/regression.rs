@@ -104,7 +104,8 @@ async fn harness_with_config(
 
     let sid = "regression";
     let spaths = paths::paths_for(&home, &cwd, sid);
-    let (store, stats) = crate::session::init::init_session_base(&home, &cwd, sid).await?;
+    let (store, stats, artifacts) =
+        crate::session::init::init_session_base(&home, &cwd, sid).await?;
     let mut cfg = Config {
         model: "flash".into(),
         api_key: "test-key".into(),
@@ -139,6 +140,10 @@ async fn harness_with_config(
         home,
         api_url: crate::config::api_url(&cfg),
         store,
+        artifacts,
+        snapshots: Arc::new(Mutex::new(
+            crate::tools::snapshot::FileSnapshotStore::default(),
+        )),
         stats,
         compaction,
         cancel: crate::cancel::CancellationToken::new(),

@@ -93,7 +93,7 @@ impl SubAgentExecutor {
         crate::session::paths::ensure_dir(&paths.session_dir).await?;
 
         // 共享初始化：创建文件、store、stats
-        let (child_store, child_stats) =
+        let (child_store, child_stats, child_artifacts) =
             crate::session::init::init_session_base(&parent_ctx.home, &parent_ctx.cwd, &session_id)
                 .await?;
 
@@ -146,6 +146,10 @@ impl SubAgentExecutor {
             home: parent_ctx.home.clone(),
             api_url: parent_ctx.api_url.clone(),
             store: child_store.clone(),
+            artifacts: child_artifacts,
+            snapshots: Arc::new(Mutex::new(
+                crate::tools::snapshot::FileSnapshotStore::default(),
+            )),
             stats: child_stats,
             compaction: child_compaction,
             cancel: parent_ctx.cancel.child_token(),

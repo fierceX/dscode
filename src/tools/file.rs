@@ -1,5 +1,7 @@
 use anyhow::{Result, anyhow, bail};
+use serde_json::Value;
 use similar::{ChangeTag, TextDiff};
+use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
@@ -230,6 +232,107 @@ pub struct ReadTool;
 pub struct WriteTool;
 pub struct EditTool;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadPathSelection {
+    pub path: String,
+    pub offset: Option<usize>,
+    pub limit: Option<usize>,
+    pub raw: bool,
+}
+
+pub fn split_read_path_selection(
+    input: &str,
+    fallback_offset: Option<usize>,
+    fallback_limit: Option<usize>,
+) -> Result<ReadPathSelection> {
+    let mut rest = input;
+    let normalized;
+    let mut raw = false;
+
+    if let Some(stripped) = rest.strip_suffix(":raw") {
+        rest = stripped;
+        raw = true;
+    }
+    if let Some(stripped) = rest.strip_prefix("raw:") {
+        rest = stripped;
+        raw = true;
+    }
+    if let Some((base, tail)) = rest.rsplit_once(":raw:") {
+        normalized = format!("{base}:{tail}");
+        rest = &normalized;
+        raw = true;
+    }
+
+    let mut offset = None;
+    let mut limit = None;
+    let mut path = rest;
+
+    if let Some((base, suffix)) = rest.rsplit_once(':') {
+        if let Some((start, parsed_limit)) = parse_line_selector(suffix)? {
+            path = base;
+            offset = Some(start);
+            limit = parsed_limit;
+        }
+    }
+
+    if path.is_empty() {
+        bail!("Error: no path provided");
+    }
+
+    Ok(ReadPathSelection {
+        path: path.to_string(),
+        offset: offset.or(fallback_offset),
+        limit: limit.or(fallback_limit),
+        raw,
+    })
+}
+
+fn parse_line_selector(suffix: &str) -> Result<Option<(usize, Option<usize>)>> {
+    if suffix.is_empty() {
+        return Ok(None);
+    }
+    if !suffix
+        .chars()
+        .all(|ch| ch.is_ascii_digit() || ch == '-' || ch == '+')
+    {
+        return Ok(None);
+    }
+    let parse_line = |raw: &str| -> Result<usize> {
+        let value = raw
+            .parse::<usize>()
+            .map_err(|_| anyhow!("Error: invalid line selector: {suffix}"))?;
+        if value == 0 {
+            bail!("Error: line selectors are 1-indexed; got 0");
+        }
+        Ok(value)
+    };
+
+    if let Some((start_raw, count_raw)) = suffix.split_once('+') {
+        let start = parse_line(start_raw)?;
+        let count = count_raw
+            .parse::<usize>()
+            .map_err(|_| anyhow!("Error: invalid line selector: {suffix}"))?;
+        if count == 0 {
+            bail!("Error: line selector count must be >= 1");
+        }
+        return Ok(Some((start, Some(count))));
+    }
+
+    if let Some((start_raw, end_raw)) = suffix.split_once('-') {
+        let start = parse_line(start_raw)?;
+        if end_raw.is_empty() {
+            return Ok(Some((start, None)));
+        }
+        let end = parse_line(end_raw)?;
+        if end < start {
+            bail!("Error: line selector range ends before it starts: {suffix}");
+        }
+        return Ok(Some((start, Some(end - start + 1))));
+    }
+
+    Ok(Some((parse_line(suffix)?, None)))
+}
+
 fn resolve_tool_path(cwd: &Path, raw: &str) -> Result<PathBuf> {
     if raw.is_empty() {
         bail!("Error: no path provided");
@@ -283,9 +386,15 @@ fn normalize_lexically(path: &Path) -> PathBuf {
 }
 
 impl super::runner::ToolExec for ReadTool {
-    fn name(&self) -> &'static str {
-        "Read"
+    fn metadata(&self) -> super::metadata::ToolMetadata {
+        super::metadata::ToolMetadata::new(
+            "Read",
+            "Read a local file.",
+            super::metadata::ApprovalTier::Read,
+            super::metadata::ToolResultKind::FileRead,
+        )
     }
+
     fn execute(
         &self,
         input: &serde_json::Value,
@@ -300,19 +409,330 @@ impl super::runner::ToolExec for ReadTool {
             limit: Option<usize>,
         }
         let args: Args = serde_json::from_value(input.clone())?;
-        let path = resolve_tool_path(&ctx.cwd, &args.path)?;
-        read(&path.display().to_string(), args.offset, args.limit)
-            .map(super::runner::ToolOutcome::text)
+        let selection = split_read_path_selection(&args.path, args.offset, args.limit)?;
+        if let Some(id) = crate::session::artifacts::artifact_id_from_url(&selection.path) {
+            return ctx
+                .artifacts
+                .read_text(id)
+                .map(|text| select_text_lines(&text, selection.offset, selection.limit))
+                .map(super::runner::ToolOutcome::text);
+        }
+        if selection.path.starts_with("skill://") {
+            return read_skill_resource(&selection.path)
+                .map(|text| select_text_lines(&text, selection.offset, selection.limit))
+                .map(super::runner::ToolOutcome::text);
+        }
+        if selection.path.starts_with("session://") {
+            return read_session_resource(&selection.path, ctx)
+                .map(|text| select_text_lines(&text, selection.offset, selection.limit))
+                .map(super::runner::ToolOutcome::text);
+        }
+        let path = resolve_tool_path(&ctx.cwd, &selection.path)?;
+        let content = read(
+            &path.display().to_string(),
+            selection.offset,
+            selection.limit,
+        )?;
+        if selection.raw {
+            return Ok(super::runner::ToolOutcome::text(content));
+        }
+        let start_line = selection.offset.unwrap_or(1);
+        let snapshot = ctx
+            .snapshots
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .record(&path, &content, start_line);
+        Ok(super::runner::ToolOutcome::text(format_read_snapshot(
+            &selection.path,
+            &snapshot.tag,
+            start_line,
+            &content,
+        )))
     }
 }
 
+fn select_text_lines(text: &str, offset: Option<usize>, limit: Option<usize>) -> String {
+    if offset.is_none() && limit.is_none() {
+        return text.to_string();
+    }
+    let mut lines: Vec<&str> = text.split('\n').collect();
+    if !lines.is_empty() && lines.last().is_some_and(|line| line.is_empty()) {
+        lines.pop();
+    }
+    let total = lines.len();
+    let start = offset.unwrap_or(1).saturating_sub(1).min(total);
+    let end = limit.map_or(total, |count| (start + count).min(total));
+    lines[start..end].join("\n")
+}
+
+fn read_skill_resource(url: &str) -> Result<String> {
+    let rest = url
+        .strip_prefix("skill://")
+        .ok_or_else(|| anyhow!("Error: invalid skill resource: {url}"))?
+        .trim_matches('/');
+    if rest.is_empty() || rest == "list" || rest == "all" {
+        let mut out = String::from("# Built-in skills\n");
+        for skill in crate::assets::embedded_skills::all() {
+            out.push_str(&format!("- {}: {}\n", skill.name, skill.description));
+        }
+        return Ok(out);
+    }
+    if rest.contains('/') || rest.contains('\\') || rest.contains("..") {
+        bail!("Error: invalid skill resource path: {url}");
+    }
+    let skill = crate::assets::embedded_skills::find(rest)
+        .ok_or_else(|| anyhow!("Error: skill not found: {rest}"))?;
+    Ok(format!(
+        "# skill://{}\n\nDescription: {}\nBase directory: <built-in>\n\n{}",
+        skill.name,
+        skill.description,
+        skill.content.replace("${MINK_SKILL_DIR}", "<built-in>")
+    ))
+}
+
+fn read_session_resource(url: &str, ctx: &crate::context::ToolContext) -> Result<String> {
+    let rest = url
+        .strip_prefix("session://")
+        .ok_or_else(|| anyhow!("Error: invalid session resource: {url}"))?
+        .trim_end_matches('/');
+    match rest {
+        "current" => format_session_current(ctx),
+        "current/stats" => format_session_stats(ctx),
+        "current/messages" => format_session_messages(ctx, 40),
+        "current/messages/all" => format_session_messages(ctx, usize::MAX),
+        "current/artifacts" => format_session_artifacts(ctx),
+        _ => bail!("Error: unsupported session resource: {url}"),
+    }
+}
+
+fn session_dir(ctx: &crate::context::ToolContext) -> Result<PathBuf> {
+    ctx.store
+        .path()
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| anyhow!("Error: session path has no parent"))
+}
+
+fn format_session_current(ctx: &crate::context::ToolContext) -> Result<String> {
+    let dir = session_dir(ctx)?;
+    let session_id = dir
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "<unknown>".to_string());
+    let stats = read_optional_file(&dir.join("stats.json"))?;
+    let stats_summary = serde_json::from_str::<crate::session::stats::Stats>(&stats)
+        .map(format_stats_summary)
+        .unwrap_or_else(|_| "stats: unavailable".to_string());
+    let conversation_count = count_nonempty_lines(&dir.join("conversation.jsonl"));
+    let artifact_count = count_nonempty_lines(&dir.join("artifacts/index.jsonl"));
+
+    Ok(format!(
+        "# session://current\n\
+session_id: {session_id}\n\
+cwd: {}\n\
+home: {}\n\
+session_dir: {}\n\
+conversation_messages: {conversation_count}\n\
+artifacts: {artifact_count}\n\
+{stats_summary}\n\n\
+Resources:\n\
+- session://current/stats\n\
+- session://current/messages\n\
+- session://current/messages/all\n\
+- session://current/artifacts\n",
+        ctx.cwd.display(),
+        ctx.home.display(),
+        dir.display()
+    ))
+}
+
+fn format_session_stats(ctx: &crate::context::ToolContext) -> Result<String> {
+    let dir = session_dir(ctx)?;
+    let raw = read_optional_file(&dir.join("stats.json"))?;
+    if raw.trim().is_empty() {
+        return Ok("{}".to_string());
+    }
+    let value: Value = serde_json::from_str(&raw)?;
+    Ok(serde_json::to_string_pretty(&value)?)
+}
+
+fn format_session_messages(ctx: &crate::context::ToolContext, keep_last: usize) -> Result<String> {
+    let dir = session_dir(ctx)?;
+    let raw = read_optional_file(&dir.join("conversation.jsonl"))?;
+    let mut rows = Vec::new();
+    for (idx, line) in raw.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: Value = serde_json::from_str(line)
+            .map_err(|e| anyhow!("Error: invalid conversation JSONL at line {}: {e}", idx + 1))?;
+        rows.push(format!("{} {}", idx + 1, summarize_message(&value)));
+    }
+
+    let omitted = rows.len().saturating_sub(keep_last);
+    let visible = if keep_last == usize::MAX || keep_last >= rows.len() {
+        rows.as_slice()
+    } else {
+        &rows[omitted..]
+    };
+
+    let mut out = String::from("# session://current/messages\n");
+    if omitted > 0 {
+        out.push_str(&format!("... omitted {omitted} older messages\n"));
+    }
+    for row in visible {
+        out.push_str(row);
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+fn format_session_artifacts(ctx: &crate::context::ToolContext) -> Result<String> {
+    let dir = session_dir(ctx)?;
+    let raw = read_optional_file(&dir.join("artifacts/index.jsonl"))?;
+    let mut out = String::from("# session://current/artifacts\n");
+    for (idx, line) in raw.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: Value = serde_json::from_str(line)
+            .map_err(|e| anyhow!("Error: invalid artifact index at line {}: {e}", idx + 1))?;
+        let id = value
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("<unknown>");
+        let tool = value
+            .get("tool")
+            .and_then(Value::as_str)
+            .unwrap_or("<tool>");
+        let bytes = value.get("bytes").and_then(Value::as_u64).unwrap_or(0);
+        let description = value
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        out.push_str(&format!(
+            "- artifact://{id} {tool} {bytes} bytes {description}\n"
+        ));
+    }
+    Ok(out)
+}
+
+fn read_optional_file(path: &Path) -> Result<String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn count_nonempty_lines(path: &Path) -> usize {
+    read_optional_file(path)
+        .map(|text| text.lines().filter(|line| !line.trim().is_empty()).count())
+        .unwrap_or(0)
+}
+
+fn format_stats_summary(stats: crate::session::stats::Stats) -> String {
+    format!(
+        "turns: {}\nrequests: agent={} compact={} sub_agent={}\ntokens: input={} output={} cache_read={} cache_create={} context={}",
+        stats.current_turn_count,
+        stats.agent_request_count,
+        stats.compact_request_count,
+        stats.sub_agent_request_count,
+        stats.total_input_tokens,
+        stats.total_output_tokens,
+        stats.total_cache_read_tokens,
+        stats.total_cache_creation_tokens,
+        stats.current_context_tokens
+    )
+}
+
+fn summarize_message(value: &Value) -> String {
+    let role = value
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or("<unknown>");
+    let content = value.get("content").unwrap_or(&Value::Null);
+    format!("{role}: {}", summarize_content(content))
+}
+
+fn summarize_content(content: &Value) -> String {
+    match content {
+        Value::String(text) => truncate_for_summary(text),
+        Value::Array(items) => {
+            let mut parts = Vec::new();
+            for item in items {
+                if let Some(kind) = item.get("type").and_then(Value::as_str) {
+                    match kind {
+                        "text" => {
+                            let text = item.get("text").and_then(Value::as_str).unwrap_or("");
+                            if !text.trim().is_empty() {
+                                parts.push(format!("text {:?}", truncate_for_summary(text)));
+                            }
+                        }
+                        "thinking" => {
+                            let len = item
+                                .get("thinking")
+                                .and_then(Value::as_str)
+                                .map(str::len)
+                                .unwrap_or(0);
+                            if len > 0 {
+                                parts.push(format!("thinking {len} bytes"));
+                            }
+                        }
+                        "tool_use" => {
+                            let name = item.get("name").and_then(Value::as_str).unwrap_or("tool");
+                            parts.push(format!("tool_use {name}"));
+                        }
+                        "tool_result" => {
+                            let id = item
+                                .get("tool_use_id")
+                                .and_then(Value::as_str)
+                                .unwrap_or("<id>");
+                            let len = item
+                                .get("content")
+                                .and_then(Value::as_str)
+                                .map(str::len)
+                                .unwrap_or(0);
+                            parts.push(format!("tool_result {id} {len} bytes"));
+                        }
+                        other => parts.push(other.to_string()),
+                    }
+                }
+            }
+            if parts.is_empty() {
+                "<empty>".to_string()
+            } else {
+                parts.join("; ")
+            }
+        }
+        Value::Null => "<null>".to_string(),
+        other => truncate_for_summary(&other.to_string()),
+    }
+}
+
+fn truncate_for_summary(text: &str) -> String {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out = String::new();
+    for ch in normalized.chars().take(160) {
+        out.push(ch);
+    }
+    if normalized.chars().count() > 160 {
+        out.push_str("...");
+    }
+    out
+}
+
 impl super::runner::ToolExec for WriteTool {
-    fn name(&self) -> &'static str {
-        "Write"
+    fn metadata(&self) -> super::metadata::ToolMetadata {
+        super::metadata::ToolMetadata::new(
+            "Write",
+            "Create or overwrite a local file.",
+            super::metadata::ApprovalTier::Write,
+            super::metadata::ToolResultKind::FileWrite,
+        )
+        .mutating()
     }
-    fn mutating(&self) -> bool {
-        true
-    }
+
     fn execute(
         &self,
         input: &serde_json::Value,
@@ -336,12 +756,16 @@ impl super::runner::ToolExec for WriteTool {
 }
 
 impl super::runner::ToolExec for EditTool {
-    fn name(&self) -> &'static str {
-        "Edit"
+    fn metadata(&self) -> super::metadata::ToolMetadata {
+        super::metadata::ToolMetadata::new(
+            "Edit",
+            "Edit a local file.",
+            super::metadata::ApprovalTier::Write,
+            super::metadata::ToolResultKind::Edit,
+        )
+        .mutating()
     }
-    fn mutating(&self) -> bool {
-        true
-    }
+
     fn execute(
         &self,
         input: &serde_json::Value,
@@ -350,19 +774,36 @@ impl super::runner::ToolExec for EditTool {
         #[derive(serde::Deserialize)]
         struct Args {
             path: String,
-            old_string: String,
-            new_string: String,
+            #[serde(default)]
+            old_string: Option<String>,
+            #[serde(default)]
+            new_string: Option<String>,
+            #[serde(default)]
+            patch: Option<String>,
         }
         let args: Args = serde_json::from_value(input.clone())?;
         let path = resolve_tool_path(&ctx.cwd, &args.path)?;
         ensure_workspace_write(&ctx.cwd, &path)?;
-        edit(
-            &path.display().to_string(),
-            &args.old_string,
-            &args.new_string,
-            ctx.tool_config.file_write_max_bytes,
-        )
-        .map(|s| super::runner::ToolOutcome {
+        let result = match (args.patch, args.old_string, args.new_string) {
+            (Some(patch), None, None) => apply_anchored_patch(
+                &path,
+                &args.path,
+                &patch,
+                ctx.tool_config.file_write_max_bytes,
+                &ctx.snapshots,
+            ),
+            (None, Some(old_string), Some(new_string)) => edit(
+                &path.display().to_string(),
+                &old_string,
+                &new_string,
+                ctx.tool_config.file_write_max_bytes,
+            ),
+            (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
+                bail!("Error: provide either patch or old_string/new_string, not both")
+            }
+            (None, _, _) => bail!("Error: provide either patch or old_string/new_string"),
+        }?;
+        Ok(result).map(|s| super::runner::ToolOutcome {
             conversation_content: s.clone(),
             content: s,
             is_bash: false,
@@ -373,15 +814,388 @@ impl super::runner::ToolExec for EditTool {
     }
 }
 
+fn format_read_snapshot(display_path: &str, tag: &str, start_line: usize, content: &str) -> String {
+    let mut out = format!("@{display_path}#{tag}");
+    for (idx, line) in crate::tools::snapshot::split_content_lines(content)
+        .iter()
+        .enumerate()
+    {
+        out.push('\n');
+        out.push_str(&format!("{}:{line}", start_line + idx));
+    }
+    out
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PatchHunk {
+    Replace {
+        start: usize,
+        end: usize,
+        body: Vec<String>,
+    },
+    Delete {
+        start: usize,
+        end: usize,
+    },
+    InsertBefore {
+        line: usize,
+        body: Vec<String>,
+    },
+    InsertAfter {
+        line: usize,
+        body: Vec<String>,
+    },
+    InsertHead {
+        body: Vec<String>,
+    },
+    InsertTail {
+        body: Vec<String>,
+    },
+}
+
+fn apply_anchored_patch(
+    path: &Path,
+    display_path: &str,
+    patch: &str,
+    max_bytes: usize,
+    snapshots: &std::sync::Arc<std::sync::Mutex<crate::tools::snapshot::FileSnapshotStore>>,
+) -> Result<String> {
+    let parsed = parse_anchored_patch(patch)?;
+    if parsed.path != display_path {
+        bail!(
+            "Error: patch header path '{}' does not match Edit path '{}'",
+            parsed.path,
+            display_path
+        );
+    }
+
+    let content = std::fs::read_to_string(path)
+        .map_err(|_| anyhow!("Error: file not found: {}", path.display()))?;
+    if content.len() > max_bytes {
+        bail!(
+            "Error: file too large for edit_file ({} bytes > {} bytes)",
+            content.len(),
+            max_bytes
+        );
+    }
+    let snapshot = {
+        let guard = snapshots.lock().unwrap_or_else(|e| e.into_inner());
+        guard.get(path, &parsed.tag).cloned()
+    }
+    .ok_or_else(|| {
+        anyhow!(
+            "Error: snapshot tag {} for {} is unknown. Re-read the target range, then retry Edit with the new header.",
+            parsed.tag,
+            display_path
+        )
+    })?;
+
+    let mut lines = crate::tools::snapshot::split_content_lines(&content);
+    validate_patch_hunks(&parsed.hunks, &snapshot, &lines, display_path)?;
+    apply_hunks(&mut lines, &parsed.hunks)?;
+
+    let mut updated = lines.join("\n");
+    if content.ends_with('\n') {
+        updated.push('\n');
+    }
+    if updated == content {
+        bail!(
+            "Error: patch parsed cleanly but produced no changes. Re-read the target range before retrying."
+        );
+    }
+
+    let (diff, added, removed) = inline_diff(&path.display().to_string(), &content, &updated)?;
+    std::fs::write(path, &updated)?;
+    snapshots
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .record(path, &updated, 1);
+    Ok(format!(
+        "Edit({}) [+{} -{} lines]\n{}\n",
+        display_path, added, removed, diff
+    ))
+}
+
+#[derive(Debug)]
+struct ParsedPatch {
+    path: String,
+    tag: String,
+    hunks: Vec<PatchHunk>,
+}
+
+fn parse_anchored_patch(input: &str) -> Result<ParsedPatch> {
+    let mut lines = input.lines().enumerate().peekable();
+    let Some((_, header)) = lines.find(|(_, line)| !line.trim().is_empty()) else {
+        bail!("Error: patch is empty");
+    };
+    let header = header.trim();
+    let Some(rest) = header.strip_prefix('@') else {
+        bail!("Error: patch must begin with @PATH#TAG");
+    };
+    let Some((path, tag)) = rest.rsplit_once('#') else {
+        bail!("Error: patch header must be @PATH#TAG");
+    };
+    if path.is_empty() || tag.is_empty() {
+        bail!("Error: patch header must be @PATH#TAG");
+    }
+
+    let mut hunks = Vec::new();
+    while let Some((line_no, line)) = lines.next() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(range) = trimmed.strip_prefix("replace ") {
+            let range = range.strip_suffix(':').ok_or_else(|| {
+                anyhow!(
+                    "Error: line {}: replace hunk must end with ':'",
+                    line_no + 1
+                )
+            })?;
+            let (start, end) = parse_patch_range(range)?;
+            let body = collect_patch_body(&mut lines, line_no + 1, "replace")?;
+            hunks.push(PatchHunk::Replace { start, end, body });
+        } else if let Some(range) = trimmed.strip_prefix("delete ") {
+            let (start, end) = parse_patch_range(range.trim_end_matches(':'))?;
+            if matches!(lines.peek(), Some((_, next)) if next.starts_with('+')) {
+                bail!(
+                    "Error: line {}: delete does not take body rows",
+                    line_no + 1
+                );
+            }
+            hunks.push(PatchHunk::Delete { start, end });
+        } else if let Some(target) = trimmed.strip_prefix("insert ") {
+            let target = target.strip_suffix(':').ok_or_else(|| {
+                anyhow!("Error: line {}: insert hunk must end with ':'", line_no + 1)
+            })?;
+            let body = collect_patch_body(&mut lines, line_no + 1, "insert")?;
+            match target {
+                "head" => hunks.push(PatchHunk::InsertHead { body }),
+                "tail" => hunks.push(PatchHunk::InsertTail { body }),
+                _ if target.starts_with("before ") => {
+                    let line = parse_positive_usize(target.trim_start_matches("before "), target)?;
+                    hunks.push(PatchHunk::InsertBefore { line, body });
+                }
+                _ if target.starts_with("after ") => {
+                    let line = parse_positive_usize(target.trim_start_matches("after "), target)?;
+                    hunks.push(PatchHunk::InsertAfter { line, body });
+                }
+                _ => bail!(
+                    "Error: line {}: invalid insert target '{target}'",
+                    line_no + 1
+                ),
+            }
+        } else if line.starts_with('+') {
+            bail!(
+                "Error: line {}: payload line has no preceding hunk header",
+                line_no + 1
+            );
+        } else {
+            bail!(
+                "Error: line {}: invalid patch hunk '{}'",
+                line_no + 1,
+                trimmed
+            );
+        }
+    }
+
+    if hunks.is_empty() {
+        bail!("Error: patch contains no edit hunks");
+    }
+
+    Ok(ParsedPatch {
+        path: path.to_string(),
+        tag: tag.to_string(),
+        hunks,
+    })
+}
+
+fn collect_patch_body<'a, I>(
+    lines: &mut std::iter::Peekable<I>,
+    header_line: usize,
+    kind: &str,
+) -> Result<Vec<String>>
+where
+    I: Iterator<Item = (usize, &'a str)>,
+{
+    let mut body = Vec::new();
+    while let Some((_, next)) = lines.peek() {
+        if !next.starts_with('+') {
+            break;
+        }
+        let (_, row) = lines.next().unwrap();
+        body.push(row.strip_prefix('+').unwrap_or(row).to_string());
+    }
+    if body.is_empty() {
+        bail!("Error: line {header_line}: {kind} hunk requires at least one +TEXT body row");
+    }
+    Ok(body)
+}
+
+fn parse_patch_range(raw: &str) -> Result<(usize, usize)> {
+    let raw = raw.trim();
+    if let Some((start, end)) = raw.split_once("..") {
+        let start = parse_positive_usize(start, raw)?;
+        let end = parse_positive_usize(end, raw)?;
+        if end < start {
+            bail!("Error: range {raw} ends before it starts");
+        }
+        Ok((start, end))
+    } else {
+        let line = parse_positive_usize(raw, raw)?;
+        Ok((line, line))
+    }
+}
+
+fn parse_positive_usize(raw: &str, context: &str) -> Result<usize> {
+    let value = raw
+        .trim()
+        .parse::<usize>()
+        .map_err(|_| anyhow!("Error: invalid line number in '{context}'"))?;
+    if value == 0 {
+        bail!("Error: line numbers are 1-indexed; got 0");
+    }
+    Ok(value)
+}
+
+fn validate_patch_hunks(
+    hunks: &[PatchHunk],
+    snapshot: &crate::tools::snapshot::FileSnapshot,
+    current_lines: &[String],
+    display_path: &str,
+) -> Result<()> {
+    let mut targeted = BTreeSet::new();
+    for hunk in hunks {
+        match hunk {
+            PatchHunk::Replace { start, end, .. } | PatchHunk::Delete { start, end } => {
+                for line in *start..=*end {
+                    validate_snapshot_line(snapshot, current_lines, line, display_path)?;
+                    if !targeted.insert(line) {
+                        bail!(
+                            "Error: overlapping edit hunks target line {line}. Use one hunk per range."
+                        );
+                    }
+                }
+            }
+            PatchHunk::InsertBefore { line, .. } | PatchHunk::InsertAfter { line, .. } => {
+                validate_snapshot_line(snapshot, current_lines, *line, display_path)?;
+            }
+            PatchHunk::InsertHead { .. } | PatchHunk::InsertTail { .. } => {
+                let current_hash = crate::tools::snapshot::hash_text(&current_lines.join("\n"));
+                if current_hash != snapshot.file_hash {
+                    bail!(
+                        "Error: snapshot mismatch in {display_path}. The file changed since Read. Re-read the file before editing."
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_snapshot_line(
+    snapshot: &crate::tools::snapshot::FileSnapshot,
+    current_lines: &[String],
+    line: usize,
+    display_path: &str,
+) -> Result<()> {
+    let expected = snapshot.expected_hash(line).ok_or_else(|| {
+        anyhow!(
+            "Error: line {line} in {display_path} was not covered by snapshot {}. Re-read the target range before editing.",
+            snapshot.tag
+        )
+    })?;
+    let Some(current) = current_lines.get(line - 1) else {
+        bail!("Error: line {line} does not exist in {display_path}");
+    };
+    if crate::tools::snapshot::hash_text(current) != expected {
+        bail!(
+            "Error: snapshot mismatch in {display_path} at line {line}. The file changed since Read. Re-read the target range before editing."
+        );
+    }
+    Ok(())
+}
+
+fn apply_hunks(lines: &mut Vec<String>, hunks: &[PatchHunk]) -> Result<()> {
+    let mut ordered = hunks.to_vec();
+    ordered.sort_by_key(|hunk| std::cmp::Reverse(hunk_apply_index(hunk, lines.len())));
+    for hunk in ordered {
+        match hunk {
+            PatchHunk::Replace { start, end, body } => {
+                lines.splice(start - 1..end, body);
+            }
+            PatchHunk::Delete { start, end } => {
+                lines.drain(start - 1..end);
+            }
+            PatchHunk::InsertBefore { line, body } => {
+                lines.splice(line - 1..line - 1, body);
+            }
+            PatchHunk::InsertAfter { line, body } => {
+                lines.splice(line..line, body);
+            }
+            PatchHunk::InsertHead { body } => {
+                lines.splice(0..0, body);
+            }
+            PatchHunk::InsertTail { body } => {
+                lines.extend(body);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn hunk_apply_index(hunk: &PatchHunk, line_count: usize) -> usize {
+    match hunk {
+        PatchHunk::Replace { start, .. }
+        | PatchHunk::Delete { start, .. }
+        | PatchHunk::InsertBefore { line: start, .. } => *start,
+        PatchHunk::InsertAfter { line, .. } => line + 1,
+        PatchHunk::InsertHead { .. } => 0,
+        PatchHunk::InsertTail { .. } => line_count + 1,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context::{ToolConfig, ToolContext};
+    use crate::session::artifacts::ArtifactManager;
+    use crate::session::store::ConversationStore;
+    use serde_json::json;
     use std::fs;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, Mutex};
 
     fn temp_file(name: &str, content: &str) -> String {
         let path = format!("/tmp/mink-test-{}-{}", name, std::process::id());
         fs::write(&path, content).unwrap();
         path
+    }
+
+    fn temp_tool_context(name: &str) -> ToolContext {
+        let root =
+            std::env::temp_dir().join(format!("mink-tool-context-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let home = root.join("home");
+        let cwd = root.join("workspace");
+        let session = home.join(".mink/projects/-workspace/session-1");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(session.join("artifacts")).unwrap();
+        fs::write(session.join("conversation.jsonl"), "").unwrap();
+        fs::write(session.join("stats.json"), "{}\n").unwrap();
+        let artifacts = Arc::new(ArtifactManager::new(session.join("artifacts")));
+        artifacts.ensure().unwrap();
+        ToolContext {
+            cwd,
+            home,
+            store: Arc::new(ConversationStore::new(session.join("conversation.jsonl"))),
+            artifacts,
+            snapshots: Arc::new(Mutex::new(
+                crate::tools::snapshot::FileSnapshotStore::default(),
+            )),
+            tool_config: ToolConfig::from_config(&crate::config::Config::default()),
+            interrupt: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     #[test]
@@ -414,6 +1228,153 @@ mod tests {
     }
 
     #[test]
+    fn split_read_path_selection_plain_uses_fallbacks() {
+        let selection = split_read_path_selection("src/main.rs", Some(2), Some(4)).unwrap();
+        assert_eq!(selection.path, "src/main.rs");
+        assert_eq!(selection.offset, Some(2));
+        assert_eq!(selection.limit, Some(4));
+        assert!(!selection.raw);
+    }
+
+    #[test]
+    fn split_read_path_selection_raw_suffix() {
+        let selection = split_read_path_selection("src/main.rs:raw", None, None).unwrap();
+        assert_eq!(selection.path, "src/main.rs");
+        assert_eq!(selection.offset, None);
+        assert_eq!(selection.limit, None);
+        assert!(selection.raw);
+    }
+
+    #[test]
+    fn split_read_path_selection_range() {
+        let selection = split_read_path_selection("src/main.rs:10-14", None, None).unwrap();
+        assert_eq!(selection.path, "src/main.rs");
+        assert_eq!(selection.offset, Some(10));
+        assert_eq!(selection.limit, Some(5));
+    }
+
+    #[test]
+    fn split_read_path_selection_plus_count() {
+        let selection = split_read_path_selection("src/main.rs:10+4", None, None).unwrap();
+        assert_eq!(selection.path, "src/main.rs");
+        assert_eq!(selection.offset, Some(10));
+        assert_eq!(selection.limit, Some(4));
+    }
+
+    #[test]
+    fn split_read_path_selection_range_raw() {
+        let selection = split_read_path_selection("src/main.rs:10-14:raw", None, None).unwrap();
+        assert_eq!(selection.path, "src/main.rs");
+        assert_eq!(selection.offset, Some(10));
+        assert_eq!(selection.limit, Some(5));
+        assert!(selection.raw);
+    }
+
+    #[test]
+    fn split_read_path_selection_raw_range() {
+        let selection = split_read_path_selection("src/main.rs:raw:10-14", None, None).unwrap();
+        assert_eq!(selection.path, "src/main.rs");
+        assert_eq!(selection.offset, Some(10));
+        assert_eq!(selection.limit, Some(5));
+        assert!(selection.raw);
+    }
+
+    #[test]
+    fn split_read_path_selection_unknown_colon_suffix_left_in_path() {
+        let selection = split_read_path_selection("src/main.rs:notes", None, None).unwrap();
+        assert_eq!(selection.path, "src/main.rs:notes");
+        assert_eq!(selection.offset, None);
+        assert_eq!(selection.limit, None);
+    }
+
+    #[test]
+    fn split_read_path_selection_rejects_zero_line() {
+        assert!(split_read_path_selection("src/main.rs:0", None, None).is_err());
+    }
+
+    #[test]
+    fn split_read_path_selection_rejects_backwards_range() {
+        assert!(split_read_path_selection("src/main.rs:10-4", None, None).is_err());
+    }
+
+    #[test]
+    fn select_text_lines_applies_range() {
+        let result = select_text_lines("a\nb\nc\nd\n", Some(2), Some(2));
+        assert_eq!(result, "b\nc");
+    }
+
+    #[test]
+    fn read_skill_resource_lists_skills() {
+        let result = read_skill_resource("skill://list").unwrap();
+        assert!(result.contains("# Built-in skills"));
+        assert!(result.contains("debugging"));
+    }
+
+    #[test]
+    fn read_skill_resource_returns_skill_content() {
+        let result = read_skill_resource("skill://debugging").unwrap();
+        assert!(result.contains("# skill://debugging"));
+        assert!(result.contains("Base directory: <built-in>"));
+        assert!(result.contains("Phase 1"));
+    }
+
+    #[test]
+    fn read_skill_resource_rejects_nested_path() {
+        assert!(read_skill_resource("skill://debugging/extra").is_err());
+    }
+
+    #[test]
+    fn read_session_current_summarizes_paths_and_resources() {
+        let ctx = temp_tool_context("session-current");
+        let session = ctx.store.path().parent().unwrap().to_path_buf();
+        fs::write(
+            session.join("stats.json"),
+            r#"{"current_turn_count":2,"agent_request_count":3,"total_input_tokens":10,"total_output_tokens":4}"#,
+        )
+        .unwrap();
+        fs::write(
+            session.join("conversation.jsonl"),
+            format!(
+                "{}\n{}\n",
+                json!({"role":"user","content":"hello"}),
+                json!({"role":"assistant","content":[{"type":"text","text":"hi"}]})
+            ),
+        )
+        .unwrap();
+
+        let result = read_session_resource("session://current", &ctx).unwrap();
+
+        assert!(result.contains("session_id: session-1"));
+        assert!(result.contains("conversation_messages: 2"));
+        assert!(result.contains("turns: 2"));
+        assert!(result.contains("session://current/messages"));
+        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
+    }
+
+    #[test]
+    fn read_session_messages_summarizes_conversation_jsonl() {
+        let ctx = temp_tool_context("session-messages");
+        let session = ctx.store.path().parent().unwrap().to_path_buf();
+        fs::write(
+            session.join("conversation.jsonl"),
+            format!(
+                "{}\n{}\n{}\n",
+                json!({"role":"user","content":"please read file"}),
+                json!({"role":"assistant","content":[{"type":"thinking","thinking":"abc"},{"type":"tool_use","name":"Read","id":"u1","input":{"path":"Cargo.toml"}}]}),
+                json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"u1","content":"done"}]})
+            ),
+        )
+        .unwrap();
+
+        let result = read_session_resource("session://current/messages", &ctx).unwrap();
+
+        assert!(result.contains("1 user: please read file"));
+        assert!(result.contains("tool_use Read"));
+        assert!(result.contains("tool_result u1 4 bytes"));
+        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
+    }
+
+    #[test]
     fn write_creates_file() {
         let p = format!("/tmp/mink-test-write-{}", std::process::id());
         let result = write(&p, "hello", 1000).unwrap();
@@ -435,6 +1396,82 @@ mod tests {
         assert!(result.contains("new-value") || result.contains("+new-value"));
         assert_eq!(fs::read_to_string(&p).unwrap(), "prefix new-value suffix\n");
         fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn format_read_snapshot_includes_header_and_line_numbers() {
+        let rendered = format_read_snapshot("src/a.rs", "0A3B", 41, "alpha\nbeta\n");
+        assert_eq!(rendered, "@src/a.rs#0A3B\n41:alpha\n42:beta");
+    }
+
+    #[test]
+    fn anchored_patch_replace_success() {
+        let p = temp_file("anchored-replace", "one\ntwo\nthree\n");
+        let path = PathBuf::from(&p);
+        let snapshots = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::tools::snapshot::FileSnapshotStore::default(),
+        ));
+        let tag = snapshots
+            .lock()
+            .unwrap()
+            .record(&path, "one\ntwo\nthree\n", 1)
+            .tag;
+        let patch = format!("@{p}#{tag}\nreplace 2:\n+TWO");
+
+        let result = apply_anchored_patch(&path, &p, &patch, 1000, &snapshots).unwrap();
+
+        assert!(result.contains("Edit("));
+        assert_eq!(fs::read_to_string(&p).unwrap(), "one\nTWO\nthree\n");
+        fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn anchored_patch_rejects_stale_line() {
+        let p = temp_file("anchored-stale", "one\ntwo\nthree\n");
+        let path = PathBuf::from(&p);
+        let snapshots = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::tools::snapshot::FileSnapshotStore::default(),
+        ));
+        let tag = snapshots
+            .lock()
+            .unwrap()
+            .record(&path, "one\ntwo\nthree\n", 1)
+            .tag;
+        fs::write(&p, "one\nchanged\nthree\n").unwrap();
+        let patch = format!("@{p}#{tag}\nreplace 2:\n+TWO");
+
+        let err = apply_anchored_patch(&path, &p, &patch, 1000, &snapshots)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("snapshot mismatch"), "{err}");
+        assert_eq!(fs::read_to_string(&p).unwrap(), "one\nchanged\nthree\n");
+        fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn anchored_patch_rejects_unknown_tag() {
+        let p = temp_file("anchored-unknown", "one\ntwo\n");
+        let path = PathBuf::from(&p);
+        let snapshots = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::tools::snapshot::FileSnapshotStore::default(),
+        ));
+        let patch = format!("@{p}#FFFF\nreplace 1:\n+ONE");
+
+        let err = apply_anchored_patch(&path, &p, &patch, 1000, &snapshots)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("unknown"), "{err}");
+        fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn anchored_patch_rejects_delete_body() {
+        let err = parse_anchored_patch("@a#0001\ndelete 1\n+bad")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("delete does not take body"), "{err}");
     }
 
     #[test]

@@ -201,9 +201,15 @@ pub struct GlobTool;
 pub struct GrepTool;
 
 impl super::runner::ToolExec for GlobTool {
-    fn name(&self) -> &'static str {
-        "Glob"
+    fn metadata(&self) -> super::metadata::ToolMetadata {
+        super::metadata::ToolMetadata::new(
+            "Glob",
+            "Find files matching a glob pattern.",
+            super::metadata::ApprovalTier::Read,
+            super::metadata::ToolResultKind::Search,
+        )
     }
+
     fn execute(
         &self,
         input: &serde_json::Value,
@@ -222,9 +228,15 @@ impl super::runner::ToolExec for GlobTool {
 }
 
 impl super::runner::ToolExec for GrepTool {
-    fn name(&self) -> &'static str {
-        "Grep"
+    fn metadata(&self) -> super::metadata::ToolMetadata {
+        super::metadata::ToolMetadata::new(
+            "Grep",
+            "Search file contents with a regex pattern.",
+            super::metadata::ApprovalTier::Read,
+            super::metadata::ToolResultKind::Search,
+        )
     }
+
     fn execute(
         &self,
         input: &serde_json::Value,

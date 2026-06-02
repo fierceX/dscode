@@ -47,6 +47,8 @@ SubAgent 由 `SubAgentCoordinator` 在 turn 内部启动、收集和注入结果
 步骤 4: Scavenge 回收（从 thinking/text 复原工具调用）
 步骤 5: 持久化 assistant 消息和 usage
 步骤 6: 工具执行（ToolRunner::execute_all）
+  ├── ToolMetadata approval 检查
+  ├── StormBreaker 重复抑制
   ├── ToolSignalProcessor 采集信号并更新 belief
   ├── PlanActionHandler 处理 PlanConfirm / PlanClear
   ├── SubAgentCoordinator 启动并收集子代理
@@ -146,6 +148,19 @@ assistant 消息使用 content 数组承载多种内容类型（thinking/text/to
 - `thinking` 和 `text` 缓冲区（在每轮流式响应中累积）
 
 这些状态不在 LLM 调用之间传递，保证每轮的独立性。
+
+#### 4. Session Artifacts（会话资源）
+
+`src/session/artifacts.rs`
+
+超长工具输出不直接丢弃。`ToolRunner` 在统一结果格式化阶段，如果 `ToolOutcome.content` 超过 `tool_result_max_bytes`：
+
+1. 完整内容写入当前 session 的 `artifacts/<id>.txt`。
+2. `artifacts/index.jsonl` 追加 `ArtifactRecord`。
+3. 工具结果保留截断摘要，并追加 `artifact://<id>`。
+4. 后续可通过 `Read artifact://<id>` 或 `Read artifact://<id>:N-M` 按需读取。
+
+artifact 跟随 session 生命周期，不跨 session 共享。
 
 ---
 
@@ -260,7 +275,7 @@ for sc in &scavenged {
 
 ### 步骤 2：Truncation（截断修复）
 
-`src/tools/runner.rs:82-96`
+`src/tools/runner.rs`
 
 每个工具调用执行前，检查其 `input_json` 参数是否被截断。如果 JSON 不完整，尝试修复：
 
@@ -279,7 +294,9 @@ for sc in &scavenged {
 
 `src/tools/runner.rs:53-75`
 
-在工具执行前检查重复调用。每个工具调用的 `(name, args_json)` 进入滑动窗口。检测到同一对 `(name, args)` 连续出现 ≥3 次（窗口 6），则抑制该调用，返回抑制说明：
+在工具执行前，先按 `ToolMetadata.approval` 和 `ToolConfig` 执行 approval 检查。默认 `yolo` 保持旧行为；`write` 自动允许 Read/Write、阻止 Exec；`always-ask` 自动允许 Read、阻止 Write/Exec。单工具 `allow/deny/prompt` 可覆盖模式。当前没有交互式 prompt，`prompt` 会 fail closed。
+
+随后检查重复调用。每个工具调用的 `(name, args_json)` 进入滑动窗口。检测到同一对 `(name, args)` 连续出现 ≥3 次（窗口 6），则抑制该调用，返回抑制说明：
 
 ```rust
 StormDecision::Suppress(reason) => {
@@ -444,18 +461,16 @@ pub struct ToolRunner {
 }
 ```
 
-每个工具实现 `ToolExec`：
+每个工具实现 `ToolExec`，必须声明 metadata：
 
 ```rust
 pub trait ToolExec: Send + Sync {
-    fn name(&self) -> &'static str;
-    fn mutating(&self) -> bool { false }
-    fn storm_exempt(&self) -> bool { false }
-    fn internal(&self) -> bool { false }
-    fn spawns_sub_agent(&self) -> bool { false }
+    fn metadata(&self) -> ToolMetadata;
     fn execute(&self, input: &Value, ctx: &ToolContext) -> Result<ToolOutcome>;
 }
 ```
+
+`ToolMetadata` 包含工具名、摘要、approval tier、结果类型、副作用、storm 例外、internal、discoverable 和 sub-agent 标记。旧的 `name/mutating/storm_exempt/internal/spawns_sub_agent` helper 默认从 metadata 派生。
 
 内置工具通过 `TOOL_REGISTRY: LazyLock<Vec<Box<dyn ToolExec>>>` 注册。新增工具需要实现 `ToolExec`、加入 registry，并同步更新 `assets/tools.json`。
 
@@ -479,7 +494,7 @@ pub async fn execute_all(&self, calls: Vec<ToolCallEvent>) -> Result<Vec<ToolRun
 
 ```rust
 impl ToolExec for ReadTool {
-    fn name(&self) -> &'static str { "Read" }
+    fn metadata(&self) -> ToolMetadata { ... }
     fn execute(&self, input: &Value, ctx: &ToolContext) -> Result<ToolOutcome> {
         let args: Args = serde_json::from_value(input.clone())?;
         read_with_context(&args.path, args.offset, args.limit, ctx).map(ToolOutcome::text)
@@ -493,7 +508,7 @@ impl ToolExec for ReadTool {
 
 工具结果统一经过 `format_tool_result()` 处理：
 
-- 超过 `tool_result_max_bytes`（默认 100KB）时截断，保留头尾
+- 超过 `tool_result_max_bytes`（默认 100KB）时截断，并将完整输出写入 session artifact
 - Bash 输出经过 `filter_bash_noise()` 处理（ANSI 转义剥离 + 重复行压缩）
 - Read/Write 结果加上行数/字节数统计前缀
 - Edit 默认将首行作为 `conv_content`，减少 conversation 噪声
@@ -518,6 +533,63 @@ ToolResultDisplay {
 ```
 
 `content_preview` 用于简短展示，`content` 是工具层截断/过滤后的展示内容。LLM 读取的是 `ConversationStore` 写入的 tool result。
+
+### Read 资源入口
+
+`Read.path` 支持本地文件 selector：
+
+| 形式 | 含义 |
+|------|------|
+| `path:raw` | 原始输出，不加 snapshot header |
+| `path:N` | 从第 N 行开始 |
+| `path:N-M` | 第 N 到 M 行 |
+| `path:N+K` | 从 N 开始 K 行 |
+| `path:N-M:raw` / `path:raw:N-M` | 范围 + raw |
+
+`Read.path` 也支持轻量 internal URL：
+
+- `artifact://<id>`
+- `skill://list`
+- `skill://<name>`
+- `session://current`
+- `session://current/stats`
+- `session://current/messages`
+- `session://current/messages/all`
+- `session://current/artifacts`
+
+这些资源默认 immutable，不产生可编辑 snapshot。
+
+### Anchored Edit
+
+本地文件非 raw `Read` 输出会记录 snapshot，并渲染：
+
+```text
+@src/foo.rs#0A3B
+41:fn target() {
+42:    old()
+```
+
+`Edit` 支持 `patch`：
+
+```text
+@src/foo.rs#0A3B
+replace 41..42:
++fn target() {
++    new()
++}
+delete 80..82
+insert after 90:
++println!("done");
+```
+
+校验规则：
+
+- header path 必须和 `Edit.path` 一致。
+- tag 必须存在于当前 session snapshot store。
+- replace/delete 目标行 hash 必须仍匹配。
+- insert before/after 必须校验 anchor 行。
+- insert head/tail 校验完整文件 hash。
+- stale、overlap、unknown tag、no-op 均 fail closed。
 
 ---
 
@@ -576,7 +648,10 @@ OpenAI API 只在最后一个 chunk（标记为 `[DONE]`）中提供完整的 us
 ├── summary.txt           ← 压缩后的上下文快照
 ├── plan.md               ← 确认后的执行计划
 ├── plan.draft            ← 草稿计划
-└── stats.json            ← Token 用量统计
+├── stats.json            ← Token 用量统计
+└── artifacts/            ← 超长工具输出
+    ├── index.jsonl
+    └── bash-0001.txt
 ```
 
 `project_key` 是当前工作目录路径经过安全转义后的字符串，确保不同项目间的 session 隔离。
@@ -646,18 +721,18 @@ for line in child_store.lines().rev() {
 ### 合并优先级
 
 ```
-CLI 参数 > 环境变量 > 代码默认值
+CLI 参数 > 项目 .minkrc > 用户 ~/.minkrc > 环境变量 > 代码默认值
 ```
 
-`config.rs` 中，`parse_args()` 优先解析 CLI 参数，`apply_provider_defaults()` 再补充环境变量和默认值：
+`config.rs` 中，配置加载先读取环境变量和默认值，再合并用户级 / 项目级 `.minkrc`，最后用 CLI 参数覆盖。
 
 ```rust
 pub fn apply_provider_defaults(cfg: &mut Config) -> Result<()> {
     // 1. 环境变量覆盖特定字段
     if let Ok(v) = std::env::var("TOOL_RESULT_MAX_BYTES") { ... }
     if let Ok(v) = std::env::var("FILE_WRITE_MAX_BYTES") { ... }
-    // 2. API Key: DEEPSEEK_API_KEY > OPENAI_API_KEY > CLI 参数
-    // 3. Base URL: DEEPSEEK_BASE_URL > OPENAI_BASE_URL > CLI 参数 > 默认
+    // 2. API Key: CLI 参数或配置文件 > DEEPSEEK_API_KEY > OPENAI_API_KEY
+    // 3. Base URL: CLI 参数或配置文件 > DEEPSEEK_BASE_URL > OPENAI_BASE_URL > 默认
     // 4. 模型默认: deepseek-v4-flash
     // 5. 验证: API Key 或 Base URL 至少一个存在
 ```
@@ -687,7 +762,22 @@ pub fn apply_provider_defaults(cfg: &mut Config) -> Result<()> {
 | 沙箱 | `MINK_LIMITS` | JSON 格式 sandbox 限制配置 |
 | 调试 | `LOG_EVENTS`, `MINK_HOME` | 日志和 session 路径 |
 
-`context_compact_pct` 通过 `.minkrc` 配置。
+`context_compact_pct` 和 `[tools] approval_mode` 通过 `.minkrc` 配置。
+
+### 工具审批配置
+
+`ToolConfig` 从 `Config` 派生，随 `ToolContext` 进入工具层：
+
+```toml
+[tools]
+approval_mode = "yolo" # yolo | write | always-ask
+
+[tools.approval]
+Bash = "prompt"        # allow | deny | prompt
+Read = "allow"
+```
+
+approval 检查发生在 `ToolRunner::execute_all()` 中，早于 StormBreaker 和实际工具执行。当前 `prompt` 没有交互 UI，会作为工具错误 fail closed。
 
 ---
 
