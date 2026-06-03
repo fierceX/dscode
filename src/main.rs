@@ -410,7 +410,7 @@ fn list_skills() {
         println!();
     }
 
-    println!("Load with --skill NAME or Skill(name).");
+    println!("Load with --skill NAME or Read skill://NAME.");
 }
 
 fn find_list_skill_dirs(cwd: &std::path::Path, home: &std::path::Path) -> Vec<std::path::PathBuf> {

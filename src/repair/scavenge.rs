@@ -25,6 +25,9 @@ pub struct TruncationResult {
     pub fallback: bool,
 }
 
+/// Bounds for regex input — DSML regex can be O(n²) on adversarial input.
+const MAX_SCAVENGE_INPUT: usize = 100 * 1024;
+
 // ---- Regex patterns ----
 
 static XML_TOOL_CALL_RE: LazyLock<Regex> =
@@ -33,13 +36,10 @@ static XML_TOOL_CALL_RE: LazyLock<Regex> =
 static BRACKET_TOOL_CALL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[TOOL_CALL\]\s*(\{[^\[]*\})\s*\[/TOOL_CALL\]").unwrap());
 
-/// Bounds for regex input — DSML regex can be O(n²) on adversarial input.
-const MAX_SCAVENGE_INPUT: usize = 100 * 1024;
-
 // ---- Main API ----
 
 /// Scavenge tool calls from text content (reasoning or response text).
-/// Tries multiple formats: DSML invoke → XML → bracket → bare JSON.
+/// Tries multiple container formats while still routing through the current tool registry/schema.
 pub fn scavenge_tool_calls(text: &str) -> Option<Vec<Value>> {
     if text.len() > MAX_SCAVENGE_INPUT {
         return None;
@@ -60,15 +60,17 @@ pub fn scavenge_tool_calls(text: &str) -> Option<Vec<Value>> {
         }
     }
 
-    // 2. Try traditional wrappers
+    // 2. Try wrapper formats. The wrapper is only a container; the inner
+    // JSON is still validated later by the current tool implementation.
     for re in [&*XML_TOOL_CALL_RE, &*BRACKET_TOOL_CALL_RE] {
         let caps: Vec<_> = re.captures_iter(text).collect();
         if !caps.is_empty() {
             for cap in &caps {
                 if let Some(m) = cap.get(1)
                     && let Ok(v) = serde_json::from_str::<Value>(m.as_str())
+                    && let Some(call) = coerce_to_tool_call(&v)
                 {
-                    results.push(v);
+                    results.push(call);
                 }
             }
             if !results.is_empty() {
@@ -77,7 +79,8 @@ pub fn scavenge_tool_calls(text: &str) -> Option<Vec<Value>> {
         }
     }
 
-    // 3. Bare JSON fallback — scan for {name, arguments} shape
+    // 3. Bare JSON fallback. This is intentionally last because it has the
+    // broadest match surface.
     if let Some(call) = scavenge_bare_json(text) {
         results.push(call);
         return Some(results);
@@ -241,11 +244,12 @@ fn scavenge_bare_json(text: &str) -> Option<Value> {
     let json_str = &slice[..end];
     let v: Value = serde_json::from_str(json_str).ok()?;
 
-    // Accept any shape that looks like a tool call
     coerce_to_tool_call(&v)
 }
 
-/// Try multiple JSON shapes for tool call representation.
+/// Try supported JSON shapes for tool call representation. This keeps
+/// container recovery compatible while current tool implementations enforce
+/// the active argument schema.
 fn coerce_to_tool_call(v: &Value) -> Option<Value> {
     // Shape 1: { "name": "...", "arguments": {...} }
     if let Some(name) = v.get("name").and_then(Value::as_str)
@@ -432,25 +436,29 @@ mod tests {
 
     #[test]
     fn scavenge_xml_style() {
-        let text = r#"I'll run that <tool_call>{"name":"Bash","arguments":{"command":"ls"}}</tool_call> now"#;
+        let text = r#"I'll update it <tool_call>{"name":"Edit","arguments":{"path":"src/a.rs","patch":"@src/a.rs#0A3B\nreplace 2:\n+new()"}}</tool_call> now"#;
         let result = scavenge_tool_calls(text).unwrap();
-        assert_eq!(result[0]["name"], "Bash");
-        assert_eq!(result[0]["arguments"]["command"], "ls");
+        assert_eq!(result[0]["name"], "Edit");
+        assert_eq!(
+            result[0]["arguments"]["patch"],
+            "@src/a.rs#0A3B\nreplace 2:\n+new()"
+        );
     }
 
     #[test]
     fn scavenge_bracket_style() {
-        let text =
-            r#"Let me check [TOOL_CALL]{"name":"Read","arguments":{"path":"/tmp/x"}}[/TOOL_CALL]"#;
+        let text = r#"Let me check [TOOL_CALL]{"name":"Read","arguments":{"path":"/tmp/x:10-20"}}[/TOOL_CALL]"#;
         let result = scavenge_tool_calls(text).unwrap();
         assert_eq!(result[0]["name"], "Read");
+        assert_eq!(result[0]["arguments"]["path"], "/tmp/x:10-20");
     }
 
     #[test]
     fn scavenge_bare_json() {
-        let text = r#"Here: {"name":"Grep","arguments":{"pattern":"foo"}}"#;
+        let text = r#"Here: {"name":"Read","arguments":{"path":"artifact://bash-0001:1-20"}}"#;
         let result = scavenge_tool_calls(text).unwrap();
-        assert_eq!(result[0]["name"], "Grep");
+        assert_eq!(result[0]["name"], "Read");
+        assert_eq!(result[0]["arguments"]["path"], "artifact://bash-0001:1-20");
     }
 
     #[test]
@@ -461,8 +469,7 @@ mod tests {
 
     #[test]
     fn escape_hatches_fallback() {
-        let text =
-            r#"some text and then {"name": "Bash", "arguments": {"command": "echo hi"}} trailing"#;
+        let text = r#"some text and then {"name": "Read", "arguments": {"path": "skill://debugging"}} trailing"#;
         let result = scavenge_tool_calls(text);
         assert!(result.is_some());
     }
@@ -492,12 +499,19 @@ mod tests {
     fn scavenge_dsml_with_json_param() {
         let text = r#"<|DSML|invoke name="Edit">
 <|DSML|parameter name="path" string="true">/tmp/x<|DSML|parameter>
-<|DSML|parameter name="old_string" string="true">old<|DSML|parameter>
-<|DSML|parameter name="new_string" string="true">new<|DSML|parameter>
+<|DSML|parameter name="patch" string="true">@/tmp/x#0A3B
+replace 1:
++new<|DSML|parameter>
 </|DSML|invoke>"#;
         let result = scavenge_tool_calls(text).unwrap();
         assert_eq!(result[0]["name"], "Edit");
         assert_eq!(result[0]["arguments"]["path"], "/tmp/x");
+        assert!(
+            result[0]["arguments"]["patch"]
+                .as_str()
+                .unwrap()
+                .contains("replace 1")
+        );
     }
 
     // ---- New: 3-shape coerce ----
@@ -517,11 +531,15 @@ mod tests {
 
     #[test]
     fn coerce_tool_name_style() {
-        let v: Value =
-            serde_json::from_str(r#"{"tool_name":"Bash","tool_args":{"command":"ls"}}"#).unwrap();
+        let v: Value = serde_json::from_str(
+            r#"{"tool_name":"Read","tool_args":{"path":"session://current"}}"#,
+        )
+        .unwrap();
         let result = coerce_to_tool_call(&v);
         assert!(result.is_some());
-        assert_eq!(result.unwrap()["name"], "Bash");
+        let result = result.unwrap();
+        assert_eq!(result["name"], "Read");
+        assert_eq!(result["arguments"]["path"], "session://current");
     }
 
     #[test]
@@ -595,8 +613,8 @@ mod tests {
 
     #[test]
     fn scavenge_combined_dedup() {
-        let text1 = r#"<tool_call>{"name":"Read","arguments":{"path":"/x"}}</tool_call>"#;
-        let text2 = r#"{"name":"Read","arguments":{"path":"/x"}}"#;
+        let text1 = r#"<tool_call>{"name":"Read","arguments":{"path":"/x:1-4"}}</tool_call>"#;
+        let text2 = r#"{"name":"Read","arguments":{"path":"/x:1-4"}}"#;
         let (calls, _) = scavenge_combined(Some(text1), Some(text2), 10);
         assert_eq!(calls.len(), 1);
     }

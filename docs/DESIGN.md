@@ -273,6 +273,8 @@ for sc in &scavenged {
 5. **OpenAI style** — `{"type":"function","function":{"name","arguments"}}`
 6. **R1 variant** — `{"tool_name":"Bash","tool_args":{...}}`
 
+这些格式是“容器协议”兼容层，不代表工具本身继续支持旧参数。回收层只把内容规整成 `{name, arguments}`，之后仍由当前 `tools.json` schema、`ToolExec` 参数反序列化和工具实现校验。例如 XML/Bracket/R1 中可以恢复 `Read {"path":"src/lib.rs:40-80"}` 或 `Edit {"path":"src/lib.rs","patch":"@src/lib.rs#TAG\nreplace 40:\n+..."}`，但不会重新启用 `Read offset/limit` 或 `Edit old_string/new_string`。
+
 ### 步骤 2：Truncation（截断修复）
 
 `src/tools/runner.rs`
@@ -309,7 +311,7 @@ StormDecision::Suppress(reason) => {
 
 **Mutating 清空规则**：当 mutating 工具（Bash/Write/Edit）被调用时，清空窗口中的 read-only 条目。这允许 edit→re-read 模式正常执行。
 
-**StormExempt**：WebSearch/WebFetch/Skill/SubAgent/PlanClear/PlanConfirm/TodoWrite 跳过风暴检测。
+**StormExempt**：WebSearch/WebFetch/SubAgent/PlanClear/PlanConfirm/TodoWrite 跳过风暴检测。
 
 ---
 
@@ -470,7 +472,7 @@ pub trait ToolExec: Send + Sync {
 }
 ```
 
-`ToolMetadata` 包含工具名、摘要、approval tier、结果类型、副作用、storm 例外、internal、discoverable 和 sub-agent 标记。旧的 `name/mutating/storm_exempt/internal/spawns_sub_agent` helper 默认从 metadata 派生。
+`ToolMetadata` 包含工具名、摘要、approval tier、结果类型、副作用、storm 例外、internal、discoverable 和 sub-agent 标记。调用方直接读取 metadata，不再保留 `name/mutating/storm_exempt/internal/spawns_sub_agent` 这类旧 helper API。
 
 内置工具通过 `TOOL_REGISTRY: LazyLock<Vec<Box<dyn ToolExec>>>` 注册。新增工具需要实现 `ToolExec`、加入 registry，并同步更新 `assets/tools.json`。
 
@@ -497,7 +499,7 @@ impl ToolExec for ReadTool {
     fn metadata(&self) -> ToolMetadata { ... }
     fn execute(&self, input: &Value, ctx: &ToolContext) -> Result<ToolOutcome> {
         let args: Args = serde_json::from_value(input.clone())?;
-        read_with_context(&args.path, args.offset, args.limit, ctx).map(ToolOutcome::text)
+        read_with_context(&args.path, ctx).map(ToolOutcome::text)
     }
 }
 ```

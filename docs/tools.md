@@ -56,8 +56,6 @@ ToolCallEvent
 | 参数 | 类型 | 说明 |
 |---|---|---|
 | `path` | string | 文件路径或资源 URL |
-| `offset` | integer | 起始行号，1-indexed，可选 |
-| `limit` | integer | 读取行数，可选 |
 
 - `path` 支持 selector：`file:10-20`、`file:10+5`、`file:raw`、`file:raw:10-20`。
 - 输出包含 snapshot header 和行号，适合 anchored edit：
@@ -73,7 +71,7 @@ ToolCallEvent
 - `skill://list` / `skill://<name>` 可读取内置 skills。
 - `session://current`、`session://current/stats`、`session://current/messages`、`session://current/artifacts` 可读取当前 session 状态。
 - 默认可读整文件，但大文件会受到工具结果上限保护。
-- 搜索具体内容时优先用 `Grep`，定位后再用 `Read offset/limit`。
+- 搜索具体内容时优先用 `Grep`，定位后再用 `Read` path selector 读取目标范围。
 - UI 展示会额外加 `Read(path) [lines, bytes]` 摘要。
 
 ## `Write`
@@ -92,21 +90,17 @@ ToolCallEvent
 
 ## `Edit`
 
-编辑文件。优先使用 anchored patch；保留精确字符串替换作为兼容 fallback。
+编辑文件。仅支持 anchored patch。
 
 | 参数 | 类型 | 说明 |
 |---|---|---|
 | `path` | string | 文件路径 |
-| `patch` | string | anchored line patch，可选 |
-| `old_string` | string | 要替换的原文本，fallback 模式 |
-| `new_string` | string | 替换后的文本，fallback 模式 |
+| `patch` | string | anchored line patch |
 
 - `patch` 必须使用最近 `Read` 输出中的 `@PATH#TAG` header。
 - patch 支持 `replace N..M:`、`delete N..M`、`insert before N:`、`insert after N:`、`insert head:`、`insert tail:`。
 - patch body 行必须以 `+` 开头。
 - patch 只能修改 snapshot 覆盖且未漂移的行；文件变化时会拒绝并要求重新 `Read`。
-- `patch` 不能和 `old_string/new_string` 混用。
-- fallback 模式中，`old_string` 必须 byte-for-byte 精确匹配，包括缩进、空格和换行，不支持正则。
 - conversation 中默认只保留结果首行，避免 diff 过度污染上下文；UI 仍可展示完整工具内容。
 
 示例：
@@ -221,18 +215,6 @@ insert after 55:
 - 清空 `plan.md`。
 - 触发上下文压缩和 immutable prefix 失效。
 - 工具本身是 internal tool，具体副作用由 `PlanActionHandler` 处理。
-
-## `Skill`
-
-按需加载 skill。
-
-| 参数 | 类型 | 说明 |
-|---|---|---|
-| `name` | string | skill 名称 |
-
-- 优先读取编译期嵌入 skill。
-- 文件系统 fallback 路径由 `prompt::resolve_skill_file()` 决定。
-- 返回内容只作为当前工具结果进入对话，不会永久修改后续 system prompt。
 
 ## `SubAgent`
 

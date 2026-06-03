@@ -136,37 +136,6 @@ pub fn write(path: &str, content: &str, max_bytes: usize) -> Result<String> {
     Ok(format!("OK: wrote {sz} bytes to {path}"))
 }
 
-pub fn edit(path: &str, old_s: &str, new_s: &str, max_bytes: usize) -> Result<String> {
-    if path.is_empty() {
-        bail!("Error: no path provided");
-    }
-    if old_s.is_empty() {
-        bail!("Error: empty old_string");
-    }
-    let content =
-        std::fs::read_to_string(path).map_err(|_| anyhow!("Error: file not found: {path}"))?;
-    if content.len() > max_bytes {
-        bail!(
-            "Error: file too large for edit_file ({} bytes > {} bytes)",
-            content.len(),
-            max_bytes
-        );
-    }
-    if !content.contains(old_s) {
-        bail!(
-            "Error: old_string not found in {path}. Hint: use Grep to locate the target lines, then Read the relevant portion (with offset/limit) to copy the exact text before retrying Edit."
-        );
-    }
-    let updated = content.replacen(old_s, new_s, 1);
-    if updated.is_empty() {
-        bail!("Error: edit produced empty result, reverted");
-    }
-    let (diff, added, removed) = inline_diff(path, &content, &updated)?;
-    std::fs::write(path, updated)?;
-    let summary = format!("Edit({path}) [+{added} -{removed} lines]");
-    Ok(format!("{summary}\n{diff}\n"))
-}
-
 /// Generate a unified diff using the `similar` crate (pure Rust, no subprocess).
 fn inline_diff(path: &str, old: &str, new: &str) -> Result<(String, usize, usize)> {
     if old == new {
@@ -240,11 +209,7 @@ pub struct ReadPathSelection {
     pub raw: bool,
 }
 
-pub fn split_read_path_selection(
-    input: &str,
-    fallback_offset: Option<usize>,
-    fallback_limit: Option<usize>,
-) -> Result<ReadPathSelection> {
+pub fn split_read_path_selection(input: &str) -> Result<ReadPathSelection> {
     let mut rest = input;
     let normalized;
     let mut raw = false;
@@ -281,8 +246,8 @@ pub fn split_read_path_selection(
 
     Ok(ReadPathSelection {
         path: path.to_string(),
-        offset: offset.or(fallback_offset),
-        limit: limit.or(fallback_limit),
+        offset,
+        limit,
         raw,
     })
 }
@@ -366,9 +331,7 @@ fn canonicalize_partial(path: &Path) -> PathBuf {
         // Nothing in the path exists; return normalized as-is
         return normalized;
     }
-    let existing_canonical = existing
-        .canonicalize()
-        .unwrap_or_else(|_| existing);
+    let existing_canonical = existing.canonicalize().unwrap_or_else(|_| existing);
     let suffix: PathBuf = pending.iter().map(|c| c.as_os_str()).collect();
     if suffix.as_os_str().is_empty() {
         existing_canonical
@@ -427,15 +390,12 @@ impl super::runner::ToolExec for ReadTool {
         ctx: &crate::context::ToolContext,
     ) -> anyhow::Result<super::runner::ToolOutcome> {
         #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct Args {
             path: String,
-            #[serde(default)]
-            offset: Option<usize>,
-            #[serde(default)]
-            limit: Option<usize>,
         }
         let args: Args = serde_json::from_value(input.clone())?;
-        let selection = split_read_path_selection(&args.path, args.offset, args.limit)?;
+        let selection = split_read_path_selection(&args.path)?;
         if let Some(id) = crate::session::artifacts::artifact_id_from_url(&selection.path) {
             return ctx
                 .artifacts
@@ -798,37 +758,27 @@ impl super::runner::ToolExec for EditTool {
         ctx: &crate::context::ToolContext,
     ) -> anyhow::Result<super::runner::ToolOutcome> {
         #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct Args {
             path: String,
-            #[serde(default)]
-            old_string: Option<String>,
-            #[serde(default)]
-            new_string: Option<String>,
             #[serde(default)]
             patch: Option<String>,
         }
         let args: Args = serde_json::from_value(input.clone())?;
         let path = resolve_tool_path(&ctx.cwd, &args.path)?;
         ensure_workspace_write(&ctx.cwd, &path)?;
-        let result = match (args.patch, args.old_string, args.new_string) {
-            (Some(patch), None, None) => apply_anchored_patch(
-                &path,
-                &args.path,
-                &patch,
-                ctx.tool_config.file_write_max_bytes,
-                &ctx.snapshots,
-            ),
-            (None, Some(old_string), Some(new_string)) => edit(
-                &path.display().to_string(),
-                &old_string,
-                &new_string,
-                ctx.tool_config.file_write_max_bytes,
-            ),
-            (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
-                bail!("Error: provide either patch or old_string/new_string, not both")
-            }
-            (None, _, _) => bail!("Error: provide either patch or old_string/new_string"),
-        }?;
+        let Some(patch) = args.patch else {
+            bail!(
+                "Error: Edit requires patch. Re-read the target range, then retry with the @PATH#TAG anchored patch header."
+            );
+        };
+        let result = apply_anchored_patch(
+            &path,
+            &args.path,
+            &patch,
+            ctx.tool_config.file_write_max_bytes,
+            &ctx.snapshots,
+        )?;
         Ok(result).map(|s| super::runner::ToolOutcome {
             conversation_content: s.clone(),
             content: s,
@@ -1187,6 +1137,7 @@ mod tests {
     use crate::context::{ToolConfig, ToolContext};
     use crate::session::artifacts::ArtifactManager;
     use crate::session::store::ConversationStore;
+    use crate::tools::runner::ToolExec;
     use serde_json::json;
     use std::fs;
     use std::sync::atomic::AtomicBool;
@@ -1254,17 +1205,17 @@ mod tests {
     }
 
     #[test]
-    fn split_read_path_selection_plain_uses_fallbacks() {
-        let selection = split_read_path_selection("src/main.rs", Some(2), Some(4)).unwrap();
+    fn split_read_path_selection_plain_has_no_range() {
+        let selection = split_read_path_selection("src/main.rs").unwrap();
         assert_eq!(selection.path, "src/main.rs");
-        assert_eq!(selection.offset, Some(2));
-        assert_eq!(selection.limit, Some(4));
+        assert_eq!(selection.offset, None);
+        assert_eq!(selection.limit, None);
         assert!(!selection.raw);
     }
 
     #[test]
     fn split_read_path_selection_raw_suffix() {
-        let selection = split_read_path_selection("src/main.rs:raw", None, None).unwrap();
+        let selection = split_read_path_selection("src/main.rs:raw").unwrap();
         assert_eq!(selection.path, "src/main.rs");
         assert_eq!(selection.offset, None);
         assert_eq!(selection.limit, None);
@@ -1273,7 +1224,7 @@ mod tests {
 
     #[test]
     fn split_read_path_selection_range() {
-        let selection = split_read_path_selection("src/main.rs:10-14", None, None).unwrap();
+        let selection = split_read_path_selection("src/main.rs:10-14").unwrap();
         assert_eq!(selection.path, "src/main.rs");
         assert_eq!(selection.offset, Some(10));
         assert_eq!(selection.limit, Some(5));
@@ -1281,7 +1232,7 @@ mod tests {
 
     #[test]
     fn split_read_path_selection_plus_count() {
-        let selection = split_read_path_selection("src/main.rs:10+4", None, None).unwrap();
+        let selection = split_read_path_selection("src/main.rs:10+4").unwrap();
         assert_eq!(selection.path, "src/main.rs");
         assert_eq!(selection.offset, Some(10));
         assert_eq!(selection.limit, Some(4));
@@ -1289,7 +1240,7 @@ mod tests {
 
     #[test]
     fn split_read_path_selection_range_raw() {
-        let selection = split_read_path_selection("src/main.rs:10-14:raw", None, None).unwrap();
+        let selection = split_read_path_selection("src/main.rs:10-14:raw").unwrap();
         assert_eq!(selection.path, "src/main.rs");
         assert_eq!(selection.offset, Some(10));
         assert_eq!(selection.limit, Some(5));
@@ -1298,7 +1249,7 @@ mod tests {
 
     #[test]
     fn split_read_path_selection_raw_range() {
-        let selection = split_read_path_selection("src/main.rs:raw:10-14", None, None).unwrap();
+        let selection = split_read_path_selection("src/main.rs:raw:10-14").unwrap();
         assert_eq!(selection.path, "src/main.rs");
         assert_eq!(selection.offset, Some(10));
         assert_eq!(selection.limit, Some(5));
@@ -1307,7 +1258,7 @@ mod tests {
 
     #[test]
     fn split_read_path_selection_unknown_colon_suffix_left_in_path() {
-        let selection = split_read_path_selection("src/main.rs:notes", None, None).unwrap();
+        let selection = split_read_path_selection("src/main.rs:notes").unwrap();
         assert_eq!(selection.path, "src/main.rs:notes");
         assert_eq!(selection.offset, None);
         assert_eq!(selection.limit, None);
@@ -1315,12 +1266,36 @@ mod tests {
 
     #[test]
     fn split_read_path_selection_rejects_zero_line() {
-        assert!(split_read_path_selection("src/main.rs:0", None, None).is_err());
+        assert!(split_read_path_selection("src/main.rs:0").is_err());
     }
 
     #[test]
     fn split_read_path_selection_rejects_backwards_range() {
-        assert!(split_read_path_selection("src/main.rs:10-4", None, None).is_err());
+        assert!(split_read_path_selection("src/main.rs:10-4").is_err());
+    }
+
+    #[test]
+    fn read_tool_rejects_legacy_offset_limit_args() {
+        let ctx = temp_tool_context("read-legacy-args");
+        let err = match ReadTool.execute(&json!({"path":"src/main.rs","offset":1,"limit":10}), &ctx)
+        {
+            Ok(_) => panic!("legacy Read offset/limit args should be rejected"),
+            Err(err) => err.to_string(),
+        };
+        assert!(err.contains("unknown field"), "{err}");
+    }
+
+    #[test]
+    fn edit_tool_rejects_legacy_string_replace_args() {
+        let ctx = temp_tool_context("edit-legacy-args");
+        let err = match EditTool.execute(
+            &json!({"path":"src/main.rs","old_string":"old","new_string":"new"}),
+            &ctx,
+        ) {
+            Ok(_) => panic!("legacy Edit old_string/new_string args should be rejected"),
+            Err(err) => err.to_string(),
+        };
+        assert!(err.contains("unknown field"), "{err}");
     }
 
     #[test]
@@ -1416,15 +1391,6 @@ mod tests {
     }
 
     #[test]
-    fn edit_replaces_and_returns_diff() {
-        let p = temp_file("edit-basic", "prefix old-value suffix\n");
-        let result = edit(&p, "old-value", "new-value", 1000).unwrap();
-        assert!(result.contains("new-value") || result.contains("+new-value"));
-        assert_eq!(fs::read_to_string(&p).unwrap(), "prefix new-value suffix\n");
-        fs::remove_file(&p).ok();
-    }
-
-    #[test]
     fn format_read_snapshot_includes_header_and_line_numbers() {
         let rendered = format_read_snapshot("src/a.rs", "0A3B", 41, "alpha\nbeta\n");
         assert_eq!(rendered, "@src/a.rs#0A3B\n41:alpha\n42:beta");
@@ -1501,24 +1467,12 @@ mod tests {
     }
 
     #[test]
-    fn edit_not_found_error() {
-        let p = temp_file("edit-nf", "prefix old suffix\n");
-        assert!(edit(&p, "missing", "replacement", 1000).is_err());
-        fs::remove_file(&p).ok();
-    }
-
-    #[test]
-    fn edit_empty_old_string_error() {
-        let p = temp_file("edit-empty", "text\n");
-        assert!(edit(&p, "", "new", 1000).is_err());
-        fs::remove_file(&p).ok();
-    }
-
-    #[test]
     fn workspace_write_allows_inside_cwd() {
-        let cwd = PathBuf::from("/tmp/workspace");
+        let cwd = std::env::temp_dir().join(format!("mink-workspace-write-{}", std::process::id()));
+        fs::create_dir_all(&cwd).unwrap();
         let path = resolve_tool_path(&cwd, "src/file.txt").unwrap();
         assert!(ensure_workspace_write(&cwd, &path).is_ok());
+        fs::remove_dir_all(&cwd).ok();
     }
 
     #[test]

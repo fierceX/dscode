@@ -108,7 +108,7 @@ impl Builder {
 
         sections.push(wrap_section(
             "using-your-tools",
-            "- Use Read for a single file. If you need multiple files, call Read multiple times.\n- Read supports optional offset and limit parameters to read specific line ranges (saves tokens for large files). Output includes line numbers.\n- Default search flow: use Glob for file paths and Grep for file contents. Do not use Bash commands such as rg, grep, find, ls, or cat when Glob/Grep/Read can do the task.\n- Use Glob and Grep for one pattern at a time.\n- Grep supports a context parameter to show surrounding lines — use it to get enough text for Edit directly from Grep output, avoiding a separate Read.\n- Use multiple tool calls in one response when they are independent.\n- Use Bash for build/test/git/package-manager/server commands and other shell-only operations.\n- For Edit: copy old_string exactly (including whitespace/indent/newlines). If you already know the location from prior context, use Read with offset/limit. If you need to locate the text first, use Grep with context — its output is often sufficient for Edit without an extra Read.\n- For skills, first check the skill-index section, then use Skill(name) for the matching skill.",
+            "- Use Read for a single file or lightweight resource. If you need multiple files/resources, call Read multiple times.\n- Read ranges are expressed in the path, for example `src/lib.rs:40-80`, `src/lib.rs:40+20`, or `src/lib.rs:raw`. Do not pass offset/limit parameters.\n- Default search flow: use Glob for file paths and Grep for file contents. Do not use Bash commands such as rg, grep, find, ls, or cat when Glob/Grep/Read can do the task.\n- Use Glob and Grep for one pattern at a time.\n- Grep supports a context parameter to identify the target range. Before editing, call Read on that range to get the @PATH#TAG snapshot header.\n- Use multiple tool calls in one response when they are independent.\n- Use Bash for build/test/git/package-manager/server commands and other shell-only operations.\n- For Edit: use the patch parameter only. Copy the @PATH#TAG header from Read output and use replace/delete/insert line hunks. Do not use old_string/new_string.\n- For skills, first check the skill-index section, then use Read with `skill://<name>`.",
             None,
         ));
         sections.push(wrap_section(
@@ -316,9 +316,7 @@ impl Builder {
             if let Some(embedded) = crate::assets::embedded_skills::find(skill) {
                 let full = format!(
                     "Base directory: <built-in>\n\n{}",
-                    embedded
-                        .content
-                        .replace("${MINK_SKILL_DIR}", "<built-in>")
+                    embedded.content.replace("${MINK_SKILL_DIR}", "<built-in>")
                 );
                 sections.push(wrap_section("skill", &full, Some(embedded.name)));
                 continue;

@@ -615,6 +615,13 @@ async fn duplicate_scavenged_tool_call_is_deduplicated_against_official_call() -
 async fn edit_tool_result_uses_full_edit_preview_branch() -> anyhow::Result<()> {
     let h = harness("edit-preview").await?;
     tokio::fs::write(h.cwd.join("edit.txt"), "old\n").await?;
+    let snapshot = h
+        .ctx
+        .snapshots
+        .lock()
+        .unwrap()
+        .record(&h.cwd.join("edit.txt"), "old\n", 1);
+    let patch = format!("@edit.txt#{}\nreplace 1:\n+new", snapshot.tag);
     let llm = Arc::new(MockLlmClient::new(
         "flash",
         vec![
@@ -622,7 +629,7 @@ async fn edit_tool_result_uses_full_edit_preview_branch() -> anyhow::Result<()> 
                 Ok(Event::ToolCall(tool_call(
                     "Edit",
                     "call_edit",
-                    json!({"path":"edit.txt","old_string":"old","new_string":"new"}),
+                    json!({"path":"edit.txt","patch":patch}),
                 ))),
                 Ok(Event::Stop(StopEvent {
                     reason: "tool_calls".into(),
@@ -1331,7 +1338,10 @@ async fn tool_runner_blocks_symlink_edit_escape() -> anyhow::Result<()> {
         .execute_all(vec![tool_call(
             "Edit",
             "call_edit_symlink",
-            json!({"path": "link-edit-out/escape.txt", "old_string": "old", "new_string": "new"}),
+            json!({
+                "path": "link-edit-out/escape.txt",
+                "patch": "@link-edit-out/escape.txt#FFFF\nreplace 1:\n+new"
+            }),
         )])
         .await?;
     assert!(

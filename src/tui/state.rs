@@ -422,7 +422,7 @@ impl TuiState {
             ));
         }
         self.push_line(MsgLine::new(
-            "Use --skill NAME or Skill(name) to load.".into(),
+            "Use --skill NAME or Read skill://NAME to load.".into(),
             MsgKind::Info,
         ));
     }

@@ -43,26 +43,6 @@ impl ToolOutcome {
 pub trait ToolExec: Send + Sync {
     fn metadata(&self) -> ToolMetadata;
 
-    fn name(&self) -> &'static str {
-        self.metadata().name
-    }
-
-    fn mutating(&self) -> bool {
-        self.metadata().mutating
-    }
-
-    fn storm_exempt(&self) -> bool {
-        self.metadata().storm_exempt
-    }
-
-    fn internal(&self) -> bool {
-        self.metadata().internal
-    }
-
-    fn spawns_sub_agent(&self) -> bool {
-        self.metadata().spawns_sub_agent
-    }
-
     fn execute(&self, input: &serde_json::Value, ctx: &ToolContext) -> anyhow::Result<ToolOutcome>;
 }
 
@@ -76,7 +56,6 @@ static TOOL_REGISTRY: LazyLock<Vec<Box<dyn ToolExec>>> = LazyLock::new(|| {
         Box::new(search::GlobTool),
         Box::new(search::GrepTool),
         Box::new(TodoWriteTool),
-        Box::new(SkillTool),
         Box::new(PlanConfirmTool),
         Box::new(PlanClearTool),
         Box::new(web::WebSearchTool),
@@ -134,7 +113,7 @@ impl ToolRunner {
     fn find_tool(&self, name: &str) -> Option<&dyn ToolExec> {
         self.tools
             .iter()
-            .find(|t| t.name() == name)
+            .find(|t| t.metadata().name == name)
             .map(|t| t.as_ref())
     }
 
@@ -160,12 +139,12 @@ impl ToolRunner {
 
             // Storm check: suppress repeated identical calls
             if let Some(tool) = self.find_tool(&call.name)
-                && !tool.storm_exempt()
+                && !tool.metadata().storm_exempt
             {
                 let args_json = serde_json::to_string(&call.input_json).unwrap_or_default();
                 let decision = {
                     let mut storm = self.storm.lock().unwrap_or_else(|e| e.into_inner());
-                    storm.check(&call.name, &args_json, tool.mutating())
+                    storm.check(&call.name, &args_json, tool.metadata().mutating)
                 };
                 if let StormDecision::Suppress(reason) = decision {
                     let name = call.name.clone();
@@ -207,7 +186,9 @@ impl ToolRunner {
             // Pass tool name for lookup inside spawn_blocking
             let tool_name = call.name.clone();
             handles.push(tokio::task::spawn_blocking(move || {
-                let tool = tool_registry().iter().find(|t| t.name() == tool_name);
+                let tool = tool_registry()
+                    .iter()
+                    .find(|t| t.metadata().name == tool_name);
                 Self::execute_one_sync(&ctx, &call, tool.map(|t| t.as_ref()))
             }));
         }
@@ -232,9 +213,15 @@ impl ToolRunner {
                         outcome.is_bash,
                         outcome.conversation_content,
                         outcome.exit_code,
-                        t.spawns_sub_agent(),
+                        t.metadata().spawns_sub_agent,
                     ),
-                    Err(e) => (Err(e), false, String::new(), None, t.spawns_sub_agent()),
+                    Err(e) => (
+                        Err(e),
+                        false,
+                        String::new(),
+                        None,
+                        t.metadata().spawns_sub_agent,
+                    ),
                 }
             } else {
                 (
@@ -382,7 +369,6 @@ fn resolve_summary_path(cwd: &Path, raw: &str) -> PathBuf {
 }
 
 pub struct TodoWriteTool;
-pub struct SkillTool;
 pub struct SubAgentTool;
 pub struct PlanConfirmTool;
 pub struct PlanClearTool;
@@ -410,28 +396,6 @@ impl ToolExec for TodoWriteTool {
         }
         let args: Args = serde_json::from_value(input.clone())?;
         todo_write_tool(&args.todos).map(ToolOutcome::text)
-    }
-}
-
-impl ToolExec for SkillTool {
-    fn metadata(&self) -> ToolMetadata {
-        ToolMetadata::new(
-            "Skill",
-            "Load a named skill into the current turn context.",
-            ApprovalTier::Read,
-            ToolResultKind::Control,
-        )
-        .storm_exempt()
-        .discoverable()
-    }
-
-    fn execute(&self, input: &serde_json::Value, ctx: &ToolContext) -> anyhow::Result<ToolOutcome> {
-        #[derive(serde::Deserialize)]
-        struct Args {
-            name: String,
-        }
-        let args: Args = serde_json::from_value(input.clone())?;
-        skill_tool(ctx, &args.name).map(ToolOutcome::text)
     }
 }
 
@@ -531,34 +495,6 @@ fn todo_write_tool(todos: &[TodoArg]) -> Result<String> {
         bail!("Error: todo_write allows at most one in_progress item");
     }
     Ok(lines.join("\n"))
-}
-
-fn skill_tool(ctx: &ToolContext, name: &str) -> Result<String> {
-    let name = name.trim();
-    if name.is_empty() {
-        bail!("Error: no skill name provided");
-    }
-
-    // Check embedded skills first (built into binary)
-    if let Some(skill) = crate::assets::embedded_skills::find(name) {
-        let expanded = skill.content.replace("${MINK_SKILL_DIR}", "<built-in>");
-        return Ok(format!(
-            "Skill: {}\nBase directory: <built-in>\n\n{}",
-            skill.name, expanded
-        ));
-    }
-
-    // Fallback to file system
-    let Some(skill_file) = crate::prompt::resolve_skill_file(&ctx.cwd, &ctx.home, name) else {
-        bail!("Error: skill not found: {name}");
-    };
-    let base_dir = skill_file.parent().unwrap_or(std::path::Path::new(""));
-    let content = std::fs::read_to_string(&skill_file)?
-        .replace("${MINK_SKILL_DIR}", &base_dir.display().to_string());
-    Ok(format!(
-        "Skill: {name}\nBase directory: {}\n\n{content}",
-        base_dir.display()
-    ))
 }
 
 fn file_tool_result_summary_sync(kind: &str, display_path: &str, read_path: &str) -> String {
@@ -776,7 +712,7 @@ mod tests {
         let registry = tool_registry();
         let registry_names: std::collections::BTreeSet<String> = registry
             .iter()
-            .map(|tool| tool.name().to_string())
+            .map(|tool| tool.metadata().name.to_string())
             .collect();
 
         for name in &schema_names {
@@ -787,9 +723,9 @@ mod tests {
         }
         for tool in registry {
             assert!(
-                schema_names.contains(tool.name()),
+                schema_names.contains(tool.metadata().name),
                 "registry tool missing schema: {}",
-                tool.name()
+                tool.metadata().name
             );
         }
         for expected in ["PlanConfirm", "PlanClear", "TodoWrite", "SubAgent"] {
@@ -838,19 +774,9 @@ mod tests {
     }
 
     #[test]
-    fn registry_metadata_matches_legacy_helpers() {
+    fn registry_metadata_is_complete() {
         for tool in tool_registry() {
-            assert_eq!(tool.mutating(), crate::tools::is_tool_mutating(tool.name()));
-            assert_eq!(
-                tool.storm_exempt(),
-                crate::tools::is_storm_exempt(tool.name())
-            );
             let meta = tool.metadata();
-            assert_eq!(tool.name(), meta.name);
-            assert_eq!(tool.mutating(), meta.mutating);
-            assert_eq!(tool.storm_exempt(), meta.storm_exempt);
-            assert_eq!(tool.internal(), meta.internal);
-            assert_eq!(tool.spawns_sub_agent(), meta.spawns_sub_agent);
             assert!(
                 !meta.summary.trim().is_empty(),
                 "{} summary is empty",
@@ -878,7 +804,7 @@ mod tests {
         let meta = |name: &str| {
             tool_registry()
                 .iter()
-                .find(|tool| tool.name() == name)
+                .find(|tool| tool.metadata().name == name)
                 .expect("tool should exist")
                 .metadata()
         };
@@ -902,7 +828,6 @@ mod tests {
         assert!(meta("SubAgent").spawns_sub_agent);
         assert!(meta("PlanConfirm").internal);
         assert!(meta("PlanClear").internal);
-        assert!(meta("Skill").discoverable);
         assert!(meta("Python").discoverable);
     }
 
@@ -911,7 +836,7 @@ mod tests {
         let config = approval_test_config(ToolApprovalMode::Yolo, []);
         let bash = tool_registry()
             .iter()
-            .find(|tool| tool.name() == "Bash")
+            .find(|tool| tool.metadata().name == "Bash")
             .unwrap()
             .metadata();
         assert!(approval_block_reason(bash, &config).is_none());
@@ -923,7 +848,7 @@ mod tests {
         let meta = |name: &str| {
             tool_registry()
                 .iter()
-                .find(|tool| tool.name() == name)
+                .find(|tool| tool.metadata().name == name)
                 .unwrap()
                 .metadata()
         };
@@ -945,7 +870,7 @@ mod tests {
         let meta = |name: &str| {
             tool_registry()
                 .iter()
-                .find(|tool| tool.name() == name)
+                .find(|tool| tool.metadata().name == name)
                 .unwrap()
                 .metadata()
         };

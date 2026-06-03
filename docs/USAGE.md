@@ -440,9 +440,9 @@ mink -m flash --max-context 1M -i
 
 | 工具 | 用途 | 关键参数 |
 |------|------|---------|
-| `Read` | 读文件或轻量资源，支持 selector 和 `artifact://` / `skill://` / `session://` | `path`, `offset`, `limit` |
+| `Read` | 读文件或轻量资源，支持 selector 和 `artifact://` / `skill://` / `session://` | `path` |
 | `Write` | 写文件 | `path`, `content` |
-| `Edit` | anchored patch 或精确替换 fallback | `path`, `patch`, `old_string`, `new_string` |
+| `Edit` | anchored patch 编辑 | `path`, `patch` |
 | `Bash` | 执行命令 | `command`, `timeout` |
 | `Python` | 运行 Python 脚本（安全受限，禁用 subprocess/os.system/eval） | `script` / `script_file`, `timeout` |
 | `Glob` | 文件匹配 | `pattern`, `path` |
@@ -451,7 +451,6 @@ mink -m flash --max-context 1M -i
 | `PlanConfirm` | 确认计划 | 无参数 |
 | `PlanClear` | 清空计划 | 无参数 |
 | `SubAgent` | 启动子代理 | `prompt`, `description`, `fork` |
-| `Skill` | 按需加载 skill | `name` |
 | `WebSearch` | 网络搜索 | `query` |
 | `WebFetch` | 网页获取 | `url` |
 
@@ -502,7 +501,7 @@ mink -m flash --max-context 1M -i
 }
 ```
 
-如果 snapshot 过期，`Edit` 会拒绝修改并要求重新 `Read`。`old_string/new_string` 仍可作为兼容 fallback。
+如果 snapshot 过期，`Edit` 会拒绝修改并要求重新 `Read`。
 
 ---
 
@@ -544,7 +543,7 @@ mink --list-skills
 ### 加载机制
 
 - `--skill NAME` 在 system prompt 的 `<selected-skills>` 段嵌入 SKILL.md 全文
-- `Skill` 工具在运行时按需加载，不修改后续轮次的 system prompt
+- `Read skill://<name>` 在运行时按需读取内置 skill，不修改后续轮次的 system prompt
 - 内置技能即使在离线环境也可用（编译时已嵌入）
 
 ---

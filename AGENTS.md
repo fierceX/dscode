@@ -256,7 +256,7 @@ DecisionEngine.decide()
 | 文件 | 职责 |
 |------|------|
 | `tools/metadata.rs` | ToolMetadata、ApprovalTier、ToolResultKind |
-| `tools/runner.rs` | ToolExec registry、approval、批量分发、结果格式化、artifact spill、TodoWrite/Skill/Plan/SubAgent tools |
+| `tools/runner.rs` | ToolExec registry、approval、批量分发、结果格式化、artifact spill、TodoWrite/Plan/SubAgent tools |
 | `tools/file.rs` | Read/Write/Edit、path selector、resource URL、anchored patch |
 | `tools/snapshot.rs` | FileSnapshotStore、hashline 轻量校验 |
 | `tools/search.rs` | Glob/Grep |
@@ -292,10 +292,7 @@ DecisionEngine.decide()
 42:    old()
 ```
 
-`Edit` 支持两种模式：
-
-- 首选 `patch`：基于 `@PATH#TAG` header 的 `replace/delete/insert` 行操作。
-- 兼容 `old_string/new_string`：精确字符串替换 fallback。
+`Edit` 仅支持 `patch`：基于 `@PATH#TAG` header 的 `replace/delete/insert` 行操作。
 
 Anchored patch 只修改 snapshot 覆盖且未漂移的行。tag 缺失、行 hash 不匹配、hunk 重叠、no-op 等情况必须 fail closed，并提示重新 `Read`。
 
