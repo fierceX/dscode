@@ -45,8 +45,17 @@ pub fn try_nsjail(
     }
 
     // ── User-configured bind mounts ──────────────────────────
+    // Write dirs imply read access; skip them in the read-only list
+    // to prevent ro-bind from shadowing writable bind mount on
+    // systems where mount order behaves unexpectedly.
+    let write_paths: Vec<String> = config.write_dirs.iter()
+        .map(|d| resolve_dir(d, &cwd))
+        .collect();
     for d in &config.read_dirs {
         let resolved = resolve_dir(d, &cwd);
+        if write_paths.iter().any(|w| resolved.starts_with(w)) {
+            continue;
+        }
         cmd.push("--bindmount_ro".into());
         cmd.push(format!("{0}:{0}", resolved));
     }
@@ -152,8 +161,17 @@ pub fn try_bwrap(
     }
 
     // ── User-configured bind mounts ──────────────────────────
+    // Write dirs imply read access; skip them in the read-only list
+    // to prevent ro-bind from shadowing writable bind mount on
+    // systems where mount order behaves unexpectedly.
+    let write_paths: Vec<String> = config.write_dirs.iter()
+        .map(|d| resolve_dir(d, &cwd))
+        .collect();
     for d in &config.read_dirs {
         let resolved = resolve_dir(d, &cwd);
+        if write_paths.iter().any(|w| resolved.starts_with(w)) {
+            continue;
+        }
         cmd.push("--ro-bind".into());
         cmd.push(resolved.clone());
         cmd.push(resolved);

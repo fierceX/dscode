@@ -346,6 +346,37 @@ fn resolve_tool_path(cwd: &Path, raw: &str) -> Result<PathBuf> {
     Ok(normalize_lexically(&joined))
 }
 
+/// Canonicalize a path that may not exist yet, by walking up
+/// the directory tree to find the longest existing ancestor,
+/// canonicalizing that, then appending remaining components.
+fn canonicalize_partial(path: &Path) -> PathBuf {
+    let normalized = normalize_lexically(path);
+    let mut existing = PathBuf::new();
+    let mut pending: Vec<std::path::Component> = vec![];
+    for component in normalized.components() {
+        let candidate = existing.join(component.as_os_str());
+        if candidate.exists() {
+            existing = candidate;
+            pending.clear();
+        } else {
+            pending.push(component);
+        }
+    }
+    if existing.as_os_str().is_empty() {
+        // Nothing in the path exists; return normalized as-is
+        return normalized;
+    }
+    let existing_canonical = existing
+        .canonicalize()
+        .unwrap_or_else(|_| existing);
+    let suffix: PathBuf = pending.iter().map(|c| c.as_os_str()).collect();
+    if suffix.as_os_str().is_empty() {
+        existing_canonical
+    } else {
+        existing_canonical.join(suffix)
+    }
+}
+
 fn ensure_workspace_write(cwd: &Path, path: &Path) -> Result<()> {
     let root = cwd
         .canonicalize()
@@ -354,12 +385,7 @@ fn ensure_workspace_write(cwd: &Path, path: &Path) -> Result<()> {
         path.canonicalize()
             .unwrap_or_else(|_| normalize_lexically(path))
     } else {
-        let parent = path.parent().unwrap_or(path);
-        let parent_real = parent
-            .canonicalize()
-            .unwrap_or_else(|_| normalize_lexically(parent));
-        let name = path.file_name().map(PathBuf::from).unwrap_or_default();
-        parent_real.join(name)
+        canonicalize_partial(path)
     };
     if !target.starts_with(&root) {
         bail!(
