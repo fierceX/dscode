@@ -196,6 +196,16 @@ pub fn try_bwrap(
         cmd.push("--unshare-net".into());
     }
 
+    // ── Working directory (same logic as nsjail) ──────────────
+    let work_dir = config
+        .write_dirs
+        .first()
+        .or(config.read_dirs.first())
+        .map(|d| resolve_dir(d, &cwd))
+        .unwrap_or_else(|| cwd.display().to_string());
+    cmd.push("--chdir".into());
+    cmd.push(work_dir);
+
     // ── Target binary ────────────────────────────────────────
     cmd.push("--".into());
     cmd.push(exe.display().to_string());
