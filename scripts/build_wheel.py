@@ -11,6 +11,7 @@ tagged wheel (e.g. ``macosx_11_0_arm64``, ``manylinux_2_31_x86_64``).
 Environment variables:
   MINK_SDK_SKIP_BUILD=1   Skip Rust build, wheel only
   GLIBC_VERSION=2_28      Override manylinux glibc version (Linux only, default: 2_31)
+  PLATFORM_TAG=musllinux_1_2_x86_64   Fully override the platform tag (Linux only)
 """
 
 import os
@@ -38,6 +39,9 @@ def get_platform_tag() -> str:
         return f"macosx_{tag_major}_{tag_minor}_{arch}"
 
     elif system == "linux":
+        plat = os.environ.get("PLATFORM_TAG")
+        if plat:
+            return plat
         arch = "aarch64" if machine in ("arm64", "aarch64") else "x86_64"
         glibc_ver = os.environ.get("GLIBC_VERSION", "2_31")
         return f"manylinux_{glibc_ver}_{arch}"
