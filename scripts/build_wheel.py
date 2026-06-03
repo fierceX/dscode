@@ -6,11 +6,11 @@ Usage:
     MINK_SDK_SKIP_BUILD=1 python scripts/build_wheel.py   # wheel only
 
 The script auto-detects the current platform and produces a properly
-tagged wheel (e.g. ``macosx_11_0_arm64``, ``manylinux_2_31_x86_64``).
+tagged wheel (e.g. ``macosx_11_0_arm64``, ``manylinux_2_35_x86_64``).
 
 Environment variables:
   MINK_SDK_SKIP_BUILD=1   Skip Rust build, wheel only
-  GLIBC_VERSION=2_28      Override manylinux glibc version (Linux only, default: 2_31)
+  GLIBC_VERSION=2_35      Override manylinux glibc version (Linux only, default: 2_31)
   PLATFORM_TAG=musllinux_1_2_x86_64   Fully override the platform tag (Linux only)
 """
 
