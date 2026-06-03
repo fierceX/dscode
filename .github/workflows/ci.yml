@@ -92,60 +92,6 @@ jobs:
           name: mink-${{ matrix.suffix }}
           path: dist/mink-${{ matrix.suffix }}
 
-  # ── Build manylinux_2_28 compatible binaries & wheels ──────────
-  manylinux:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test]
-    runs-on: ubuntu-22.04
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - image: quay.io/pypa/manylinux_2_28_x86_64
-            arch: amd64
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Build in manylinux_2_28 container
-        run: |
-          docker run --rm \
-            -v ${{ github.workspace }}:/workspace \
-            -w /workspace \
-            ${{ matrix.image }} \
-            bash -c "
-              set -euo pipefail
-
-              # Install Rust
-              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-                | sh -s -- -y -q --default-toolchain stable
-              source \$HOME/.cargo/env
-
-              # Build Rust binary
-              cargo build --release
-
-              # Install Python build tools (use latest Python 3 in manylinux)
-              PYTHON=\$(ls -d /opt/python/cp3* | sort -V | tail -1)/bin/python
-              \$PYTHON -m pip install -q build
-
-              # Build wheel with manylinux_2_28 tag
-              GLIBC_VERSION=2_28 MINK_SDK_SKIP_BUILD=1 \$PYTHON scripts/build_wheel.py
-
-              # Copy artifacts to workspace
-              mkdir -p /workspace/dist
-              cp target/release/mink /workspace/dist/mink-linux-\${{ matrix.arch }}-manylinux_2_28
-              cp dist/*.whl /workspace/dist/
-            "
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: mink-linux-${{ matrix.arch }}-manylinux_2_28
-          path: dist/mink-linux-${{ matrix.arch }}-manylinux_2_28
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wheel-linux-${{ matrix.arch }}-manylinux_2_28
-          path: dist/*.whl
-
   # ── Build platform wheels ──────────────────────────────────────
   wheels:
     needs: [test]
@@ -159,73 +105,51 @@ jobs:
           - os: linux
             arch: x86_64
             runner: ubuntu-22.04
-            image: quay.io/pypa/manylinux_2_31_x86_64
           - os: linux
             arch: aarch64
             runner: ubuntu-22.04
-            image: quay.io/pypa/manylinux_2_31_aarch64
+            target: aarch64-unknown-linux-gnu
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
 
-      # ── macOS: native build ──────────────────────────────────
-      - name: Install Python (macOS)
-        if: matrix.os == 'macos'
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target || '' }}
+
+      - name: Install cross compiler (linux aarch64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Install Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install Rust toolchain (macOS)
-        if: matrix.os == 'macos'
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install build dependencies
+        run: python -m pip install --upgrade pip setuptools wheel build
 
-      - name: Build Rust binary (macOS)
-        if: matrix.os == 'macos'
-        run: cargo build --release
+      - name: Build Rust binary (release)
+        run: |
+          if [ "${{ matrix.target }}" != "" ]; then
+            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+            cargo build --release --target ${{ matrix.target }}
+            mkdir -p target/release
+            cp target/${{ matrix.target }}/release/mink target/release/mink
+          else
+            cargo build --release
+          fi
+        env:
+          CARGO_TERM_COLOR: always
 
-      - name: Build wheel (macOS)
-        if: matrix.os == 'macos'
+      - name: Build platform-specific wheel
         run: python scripts/build_wheel.py
         env:
           MINK_SDK_SKIP_BUILD: "1"
 
-      # ── Linux: build inside manylinux_2_31 Docker container ──
-      - name: Set up QEMU (aarch64)
-        if: matrix.arch == 'aarch64' && matrix.os == 'linux'
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
-
-      - name: Build in manylinux_2_31 container
-        if: matrix.os == 'linux'
-        run: |
-          docker run --rm \
-            -v ${{ github.workspace }}:/workspace \
-            -w /workspace \
-            ${{ matrix.image }} \
-            bash -c "
-              set -euo pipefail
-
-              # Install Rust
-              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-                | sh -s -- -y -q --default-toolchain stable
-              source \$HOME/.cargo/env
-
-              # Build Rust binary
-              cargo build --release
-
-              # Build wheel (use latest Python 3 in manylinux)
-              PYTHON=\$(ls -d /opt/python/cp3* | sort -V | tail -1)/bin/python
-              \$PYTHON -m pip install -q build
-
-              MINK_SDK_SKIP_BUILD=1 GLIBC_VERSION=2_31 \$PYTHON scripts/build_wheel.py
-
-              # Copy wheel to workspace
-              mkdir -p /workspace/dist
-              cp dist/*.whl /workspace/dist/
-            "
-
-      # ── Common: verify & upload ──────────────────────────────
       - name: Verify wheel contains binary
         run: |
           import zipfile
@@ -246,7 +170,7 @@ jobs:
   # ── Publish (on v* tag only) ───────────────────────────────────
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [binaries, wheels, manylinux]
+    needs: [binaries, wheels]
     runs-on: ubuntu-latest
     permissions:
       id-token: write   # PyPI Trusted Publishing
