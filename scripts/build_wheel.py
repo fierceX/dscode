@@ -7,6 +7,10 @@ Usage:
 
 The script auto-detects the current platform and produces a properly
 tagged wheel (e.g. ``macosx_11_0_arm64``, ``manylinux_2_31_x86_64``).
+
+Environment variables:
+  MINK_SDK_SKIP_BUILD=1   Skip Rust build, wheel only
+  GLIBC_VERSION=2_28      Override manylinux glibc version (Linux only, default: 2_31)
 """
 
 import os
@@ -35,7 +39,8 @@ def get_platform_tag() -> str:
 
     elif system == "linux":
         arch = "aarch64" if machine in ("arm64", "aarch64") else "x86_64"
-        return f"manylinux_2_31_{arch}"
+        glibc_ver = os.environ.get("GLIBC_VERSION", "2_31")
+        return f"manylinux_{glibc_ver}_{arch}"
 
     else:
         raise RuntimeError(f"Unsupported platform: {system}")
