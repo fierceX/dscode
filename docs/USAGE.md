@@ -283,7 +283,7 @@ mink --tui
 |------|--------|------|
 | `DEEPSEEK_API_KEY` | — | **必需。** API 密钥 |
 | `DEEPSEEK_BASE_URL` | `https://api.deepseek.com/v1` | 自定义 API 端点 |
-| `JINA_API_KEY` | — | WebSearch/WebFetch 工具需要的 API 密钥 |
+| `MINK_WEB_USER_AGENT` | Firefox-like UA | WebSearch/WebFetch 的 User-Agent 覆盖 |
 | `TOOL_RESULT_MAX_BYTES` | `100000` | 单条工具结果截断上限 |
 | `FILE_WRITE_MAX_BYTES` | `1048576` | Write/Edit 工具写入上限 |
 | `LOG_EVENTS` | `true` | 设为 `0`/`false`/`no` 关闭 events.jsonl 记录 |

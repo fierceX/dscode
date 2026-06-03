@@ -759,7 +759,7 @@ pub fn apply_provider_defaults(cfg: &mut Config) -> Result<()> {
 |------|------|------|
 | API | `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL` | 认证和端点 |
 | 大小 | `TOOL_RESULT_MAX_BYTES`, `FILE_WRITE_MAX_BYTES` | 输出限制 |
-| Web | `JINA_API_KEY` | WebSearch / WebFetch 认证 |
+| Web | `MINK_WEB_USER_AGENT` | WebSearch / WebFetch User-Agent |
 | 信号 | `MINK_SIGNAL_MODE` | `full` 启用信号系统，`off` 关闭信号提示词和运行时干预 |
 | 沙箱 | `MINK_LIMITS` | JSON 格式 sandbox 限制配置 |
 | 调试 | `LOG_EVENTS`, `MINK_HOME` | 日志和 session 路径 |

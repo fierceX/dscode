@@ -249,9 +249,10 @@ insert after 55:
 |---|---|---|
 | `query` | string | 搜索关键词 |
 
-- 基于 Jina AI Search API。
-- 依赖 `JINA_API_KEY`。
-- 默认 HTTP 超时 30 秒。
+- 基于 DuckDuckGo Lite GET，失败或空结果时回退到 DuckDuckGo HTML POST，不需要 API key。
+- 会识别 DuckDuckGo `anomaly.js` / challenge 页面，并明确返回反爬挑战错误，而不是伪装成空结果。
+- 默认使用 Firefox-like User-Agent 和基础浏览器导航请求头，可用 `MINK_WEB_USER_AGENT` 覆盖 UA。
+- 默认 HTTP 超时 15 秒。
 - 回答中应带来源链接。
 
 ## `WebFetch`
@@ -262,8 +263,9 @@ insert after 55:
 |---|---|---|
 | `url` | string | 完整 URL |
 
-- 基于 Jina AI Reader API。
-- 依赖 `JINA_API_KEY`。
+- 直接通过 HTTP GET 获取公开网页，不需要 API key。
+- HTML 会做轻量文本抽取，非 HTML 内容直接返回正文。
+- 默认使用 Firefox-like User-Agent 和基础浏览器导航请求头，可用 `MINK_WEB_USER_AGENT` 覆盖 UA。
 - 默认 HTTP 超时 60 秒。
 - HTTP URL 会升级为 HTTPS。
 - 不适合需要认证的私有 URL。

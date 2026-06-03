@@ -197,7 +197,7 @@
   },
   {
     "name": "WebSearch",
-    "description": "Search the web using a query and return search results with titles and URLs. Use this tool for accessing current information beyond your knowledge cutoff, such as recent events, latest documentation, or current data.\n\nCRITICAL REQUIREMENT - You MUST follow this:\n  - After answering the user's question, you MUST include a \"Sources:\" section at the end of your response\n  - In the Sources section, list all relevant URLs from the search results as markdown hyperlinks: [Title](URL)\n  - This is MANDATORY - never skip including sources in your response",
+    "description": "Search the web using DuckDuckGo Lite with DuckDuckGo HTML fallback and return search results with titles, URLs, and snippets. If DuckDuckGo returns an anti-bot challenge, the tool reports that explicitly instead of returning empty results. Use this tool for accessing current information beyond your knowledge cutoff, such as recent events, latest documentation, or current data.\n\nCRITICAL REQUIREMENT - You MUST follow this:\n  - After answering the user's question, you MUST include a \"Sources:\" section at the end of your response\n  - In the Sources section, list all relevant URLs from the search results as markdown hyperlinks: [Title](URL)\n  - This is MANDATORY - never skip including sources in your response",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -213,7 +213,7 @@
   },
   {
     "name": "WebFetch",
-    "description": "Fetches content from a specified URL and returns it as markdown. Use this tool when you need to retrieve and analyze web content.\n\nUsage notes:\n  - IMPORTANT: WebFetch WILL FAIL for authenticated or private URLs. Check if the URL points to an authenticated service (e.g. Google Docs, Confluence, Jira) before using.\n  - The URL must be a fully-formed valid URL\n  - HTTP URLs will be automatically upgraded to HTTPS\n  - This tool is read-only and does not modify any files\n  - Results may be summarized if the content is very large",
+    "description": "Fetches public content from a specified URL and returns readable text. Use this tool when you need to retrieve and analyze web content.\n\nUsage notes:\n  - IMPORTANT: WebFetch WILL FAIL for authenticated or private URLs. Check if the URL points to an authenticated service (e.g. Google Docs, Confluence, Jira) before using.\n  - The URL must be a fully-formed valid URL\n  - HTTP URLs will be automatically upgraded to HTTPS\n  - This tool is read-only and does not modify any files\n  - HTML is lightly extracted to text; non-HTML content is returned directly\n  - Results may be truncated if the content is very large",
     "input_schema": {
       "type": "object",
       "properties": {
