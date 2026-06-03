@@ -121,6 +121,7 @@ jobs:
         run: python scripts/build_wheel.py
         env:
           MINK_SDK_SKIP_BUILD: "1"
+          GLIBC_VERSION: ${{ matrix.target == 'x86_64-unknown-linux-musl' && '' || '2_35' }}
           PLATFORM_TAG: ${{ matrix.target == 'x86_64-unknown-linux-musl' && 'musllinux_1_2_x86_64' || '' }}
 
       - name: Verify wheel contains binary
