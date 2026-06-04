@@ -44,17 +44,32 @@ impl Builder {
         sections.push(wrap_section("environment", &environment, None));
         let rules_str = "- Be concise and concrete. No pleasantries, no explanations unless asked. Raw results only.\n- Prefer safe, exact edits.\n- Report failures clearly.";
         sections.push(wrap_section("rules", rules_str, None));
-
-        // Verification gate — iron law before completion claims
+        // Execution codes: cause-effect-verify, verification gate, stop triggers
         sections.push(wrap_section(
-            "verification-gate",
-            "BEFORE claiming any work is complete, fixed, or passing:\n\
+            "execution-codes",
+            "BEFORE every code change, answer silently:\n\
+             1. What specific behavior will this change affect? (cause)\n\
+             2. What observable result do I expect? (effect)\n\
+             3. How will I verify the cause-effect link? (verify)\n\
+             If you cannot answer all three, DO NOT make the change.\n\
+             One change at a time — multiple changes confound causality.\n\
+             Verify immediately after each change to confirm cause-effect.\n\
+             \n\
+             BEFORE claiming any work is complete, fixed, or passing:\n\
              1. IDENTIFY the verification command (test suite, build, lint, etc.)\n\
              2. RUN it fresh and capture the FULL output\n\
              3. READ the output — check exit code, count failures, read error lines\n\
              4. STATE the result WITH evidence: pass/fail, how many tests, exit code\n\
              If you skip any of these steps, you are NOT verifying — you are guessing.\n\
-             Guessing is lying.",
+             Guessing is lying.\n\
+             \n\
+             STOP and re-analyze when ANY of these triggers fire:\n\
+             - 3 consecutive tool calls returned Error:\n\
+             - You're about to make multiple changes before testing\n\
+             - A build or test failed but you skipped reading full output\n\
+             - You're thinking \"should work now\" without fresh verification\n\
+             - You skipped TodoWrite because \"the task is simple\"\n\
+             Any trigger hit means: STOP. Analyze root cause before acting.",
             None,
         ));
 
@@ -76,44 +91,53 @@ impl Builder {
                  - Treating the signal as stale because an earlier Read already happened is a violation; each new signal restarts the first-tool rule\n\n\
                  Repeated signals:\n\
                  - The FIRST tool after each repeated signal must again inspect current state with Read, Grep, Glob, or a focused Bash verification/state command\n\
-                 - Do not treat repeated signals as noise";
+                 - Do not treat repeated signals as noise\n\
+                 \n\
+                 Common rationalizations (ALL are WRONG):\n\
+                 | Rationalization | Reality |\n\
+                 |--------|---------|\n\
+                 | \"One-file change, don't need Grep\" | Without searching you WILL miss call sites. Use Grep. |\n\
+                 | \"Just two lines, skip the tests\" | Two lines can break the build chain. Run the tests. |\n\
+                 | \"Non-zero exit but it's just a warning\" | Non-zero IS failure. Read the full output. |\n\
+                 | \"I'll change 3 files at once, compile together\" | You can't isolate what broke it. One change, verify, next. |\n\
+                 | \"Task is simple, skip TodoWrite\" | Simple tasks have order too. Write the checklist. |";
             sections.push(wrap_section("belief-awareness", belief_awareness, None));
         }
 
-        // Stop triggers — red-flag patterns that force a pause
+        // Tool usage — priority order and anchored edit protocol
         sections.push(wrap_section(
-            "stop-triggers",
-            "Stop and re-analyze when:\n\
-             - 3 consecutive tool calls returned Error:\n\
-             - You're about to make multiple changes before testing\n\
-             - A build or test failed but you skipped reading full output\n\
-             - You're thinking \"should work now\" without fresh verification\n\
-             - You skipped TodoWrite because \"the task is simple\"\n\
-             Any of these means: STOP. Analyze root cause before acting.",
-            None,
-        ));
-
-        // Rationalization table — common excuses vs reality
-        sections.push(wrap_section(
-            "rationalization-table",
-            "| Rationalization | Reality |\n\
-             |--------|---------|\n\
-             | \"One-file change, don't need Grep\" | Without searching you WILL miss call sites. Use Grep. |\n\
-             | \"Just two lines, skip the tests\" | Two lines can break the build chain. Run the tests. |\n\
-             | \"Non-zero exit but it's just a warning\" | Non-zero IS failure. Read the full output. |\n\
-             | \"I'll change 3 files at once, compile together\" | You can't isolate what broke it. One change, verify, next. |\n\
-             | \"Task is simple, skip TodoWrite\" | Simple tasks have order too. Write the checklist. |\n",
-            None,
-        ));
-
-        sections.push(wrap_section(
-            "using-your-tools",
-            "- Use Read for a single file or lightweight resource. If you need multiple files/resources, call Read multiple times.\n- Read ranges are expressed in the path, for example `src/lib.rs:40-80`, `src/lib.rs:40+20`, or `src/lib.rs:raw`. Do not pass offset/limit parameters.\n- Default search flow: use Glob for file paths and Grep for file contents. Do not use Bash commands such as rg, grep, find, ls, or cat when Glob/Grep/Read can do the task.\n- Use Glob and Grep for one pattern at a time.\n- Grep supports a context parameter to identify the target range. Before editing, call Read on that range to get the @PATH#TAG snapshot header.\n- Use multiple tool calls in one response when they are independent.\n- Use Bash for build/test/git/package-manager/server commands and other shell-only operations.\n- For Edit: use the patch parameter only. Copy the @PATH#TAG header from Read output and use replace/delete/insert line hunks. Do not use old_string/new_string.\n- For skills, first check the skill-index section, then use Read with `skill://<name>`.",
-            None,
-        ));
-        sections.push(wrap_section(
-            "anchored-edit-protocol",
-            "- Treat every @PATH#TAG from Read as a snapshot of one file state and one displayed range. It is not a reusable edit token.\n- Before every Edit, you must have a fresh non-raw Read for the target file after the last successful Edit or Write to that same file.\n- If you need multiple changes in the same file from the same snapshot, combine them into one Edit.patch with multiple hunks.\n- Do not make consecutive Edit calls to the same file using the same @PATH#TAG.\n- After any successful Edit or Write, all previous snapshot tags for that file are stale. Re-read the next target range before further edits.\n- Grep can locate code but cannot authorize Edit. Use Read on the exact target range to get the @PATH#TAG header.\n- Prefer insert before/after an anchored line. Use insert head/tail only after reading enough of the file to make the file boundary intentional.\n- On snapshot mismatch, unknown tag, uncovered line, or no-op: stop editing that file, re-read the suggested target range, then retry with the new header.",
+            "tool-usage",
+            "TOOL PRIORITY (MUST follow this order — tools above Bash take precedence):\n\
+             1. File/directory reads → Read (not cat/head/tail/less/more in Bash)\n\
+             2. Content search → Grep (not grep/rg/ag/ack in Bash)\n\
+             3. Path discovery → Glob (not find/ls/fd/tree in Bash)\n\
+             4. File writes → Write (not shell redirection or heredoc)\n\
+             5. Code edits → Edit with patch parameter (not sed/awk)\n\
+             6. Skills → Read with `skill://<name>` (first check skill-index section)\n\
+             7. Build/test/git/package-manager → Bash ✓ (shell-only operations)\n\
+             8. All other shell needs → Bash ✓ (last resort)\n\
+             WARNING: Bash commands matching patterns 1-6 above are DETECTED and REJECTED at runtime.\n\
+             \n\
+             Read usage:\n\
+             - Use Read for a single file or lightweight resource. Call Read multiple times for multiple files.\n\
+             - Read accepts line ranges either way:\n\
+               - Path selector: `src/lib.rs:40-80` (lines 40-80), `src/lib.rs:40+20` (40-59), `src/lib.rs:raw` (no snapshot header)\n\
+               - Separate fields: {\"path\":\"src/lib.rs\",\"offset\":40,\"limit\":40}\n\
+             - Use Glob and Grep for one pattern at a time.\n\
+             - Grep supports a context parameter to identify the target range. Before editing, call Read on that range to get the @PATH#TAG snapshot header.\n\
+             - Use multiple tool calls in one response when they are independent.\n\
+             - For skills, use Read with `skill://<name>` (see skill-index for available skills).\n\
+             \n\
+             EDIT PROTOCOL (anchored patch):\n\
+             - For Edit: use the patch parameter with @PATH#TAG from Read, using replace/delete/insert line hunks. Old string matching (old_string/new_string) is not supported.\n\
+             - Every @PATH#TAG is a snapshot of one file state and one displayed range, valid only for one Edit.\n\
+             - Before every Edit, you must have a fresh non-raw Read for the target file after the last successful Edit or Write to that same file.\n\
+             - Multiple changes in the same file from the same snapshot → combine into one Edit.patch with multiple hunks.\n\
+             - Consecutive Edit calls to the same file require a fresh Read between them.\n\
+             - After any successful Edit or Write, all previous snapshot tags for that file are stale. Re-read the next target range before further edits.\n\
+             - Grep can locate code but cannot authorize Edit. Use Read on the exact target range to get the @PATH#TAG header.\n\
+             - Prefer insert before/after an anchored line. Use insert head/tail only after reading enough of the file to make the file boundary intentional.\n\
+             - On snapshot mismatch, unknown tag, uncovered line, or no-op: stop editing that file, re-read the suggested target range, then retry with the new header.",
             None,
         ));
         sections.push(wrap_section(
@@ -161,20 +185,6 @@ impl Builder {
         sections.push(wrap_section(
             "plan-lifecycle-guidance",
             &plan_lifecycle_guidance,
-            None,
-        ));
-        sections.push(wrap_section(
-            "causal-reasoning",
-            concat!(
-                "Before every code change, answer silently:\n",
-                "1. What specific behavior will this change affect? (cause)\n",
-                "2. What observable result do I expect? (effect)\n",
-                "3. How will I verify the cause-effect link? (verify)\n",
-                "\n",
-                "If you cannot answer all three, DO NOT make the change.\n",
-                "One change at a time — multiple changes confound causality.\n",
-                "Verify immediately after each change to confirm cause-effect."
-            ),
             None,
         ));
         if let Some(s) = self.build_instruction_files_section()? {
@@ -227,7 +237,17 @@ impl Builder {
             for heading in &mission_headings {
                 if let Some(new_content) = extract_section(&mission_content, heading) {
                     let new_wrapped = wrap_section(heading, &new_content, None);
-                    if let Some(pos) = existing_tags.iter().position(|t| t == heading) {
+                    // Backward compatibility: map old section tag names to merged sections
+                    let matched_tag = match heading.as_str() {
+                        "verification-gate" | "causal-reasoning" | "stop-triggers" => {
+                            Some("execution-codes")
+                        }
+                        "using-your-tools" | "anchored-edit-protocol" => Some("tool-usage"),
+                        "rationalization-table" => Some("belief-awareness"),
+                        _ => None,
+                    };
+                    let effective_heading = matched_tag.unwrap_or(heading);
+                    if let Some(pos) = existing_tags.iter().position(|t| t == effective_heading) {
                         // Replace existing section
                         sections[pos] = new_wrapped;
                     } else {
@@ -496,11 +516,9 @@ mod tests {
             "<agent-identity>",
             "<environment>",
             "<rules>",
-            "<verification-gate>",
+            "<execution-codes>",
             "<belief-awareness>",
-            "<stop-triggers>",
-            "<rationalization-table>",
-            "<using-your-tools>",
+            "<tool-usage>",
             "<sub-agent-guidance>",
             "<todo-guidance>",
             "<plan-lifecycle-guidance>",
@@ -512,18 +530,20 @@ mod tests {
     }
 
     #[test]
-    fn build_system_prompt_includes_verification_gate() {
+    fn build_system_prompt_includes_execution_codes() {
         let prompt = test_builder().build_system_prompt().unwrap();
-        assert!(prompt.contains("verification-gate"));
+        assert!(prompt.contains("execution-codes"));
         assert!(prompt.contains("IDENTIFY"));
         assert!(prompt.contains("Guessing is lying"));
-    }
-
-    #[test]
-    fn build_system_prompt_includes_stop_triggers() {
-        let prompt = test_builder().build_system_prompt().unwrap();
-        assert!(prompt.contains("stop-triggers"));
         assert!(prompt.contains("3 consecutive tool calls"));
+    }
+    
+    #[test]
+    fn build_system_prompt_includes_tool_usage() {
+        let prompt = test_builder().build_system_prompt().unwrap();
+        assert!(prompt.contains("tool-usage"));
+        assert!(prompt.contains("TOOL PRIORITY"));
+        assert!(prompt.contains("DETECTED and REJECTED at runtime"));
     }
 
     #[test]
@@ -552,9 +572,9 @@ mod tests {
     }
 
     #[test]
-    fn build_system_prompt_includes_rationalization_table() {
+    fn build_system_prompt_includes_rationalization_table_in_belief_awareness() {
         let prompt = test_builder().build_system_prompt().unwrap();
-        assert!(prompt.contains("rationalization-table"));
+        assert!(prompt.contains("Common rationalizations"));
         assert!(prompt.contains("Without searching you WILL miss"));
     }
 

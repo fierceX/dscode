@@ -406,9 +406,18 @@ impl super::runner::ToolExec for ReadTool {
         #[serde(deny_unknown_fields)]
         struct Args {
             path: String,
+            offset: Option<usize>,
+            limit: Option<usize>,
         }
         let args: Args = serde_json::from_value(input.clone())?;
-        let selection = split_read_path_selection(&args.path)?;
+        let mut selection = split_read_path_selection(&args.path)?;
+        // Prefer path selector range, fall back to JSON offset/limit
+        if selection.offset.is_none() && args.offset.is_some() {
+            selection.offset = args.offset;
+        }
+        if selection.limit.is_none() && args.limit.is_some() {
+            selection.limit = args.limit;
+        }
         if let Some(id) = crate::session::artifacts::artifact_id_from_url(&selection.path) {
             return ctx
                 .artifacts
@@ -1407,14 +1416,25 @@ mod tests {
     }
 
     #[test]
-    fn read_tool_rejects_legacy_offset_limit_args() {
-        let ctx = temp_tool_context("read-legacy-args");
-        let err = match ReadTool.execute(&json!({"path":"src/main.rs","offset":1,"limit":10}), &ctx)
-        {
-            Ok(_) => panic!("legacy Read offset/limit args should be rejected"),
-            Err(err) => err.to_string(),
-        };
-        assert!(err.contains("unknown field"), "{err}");
+    fn read_tool_accepts_offset_limit_args() {
+        let ctx = temp_tool_context("read-offset-limit-args");
+        // Create a file with known content
+        let dir = std::env::temp_dir().join("mink-test-read-offset-limit-args");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("test.txt");
+        std::fs::write(&p, "line1\nline2\nline3\nline4\nline5\n").unwrap();
+        let abspath = std::fs::canonicalize(&p).unwrap();
+        let result = ReadTool.execute(
+            &json!({"path": abspath.to_string_lossy(), "offset": 2, "limit": 2}),
+            &ctx,
+        );
+        assert!(result.is_ok(), "Read with offset/limit should succeed: {:?}", result.err());
+        let outcome = result.unwrap();
+        assert!(outcome.content.contains("line2"), "should contain line2");
+        assert!(outcome.content.contains("line3"), "should contain line3");
+        assert!(!outcome.content.contains("line1"), "should not contain line1");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

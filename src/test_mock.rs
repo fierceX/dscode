@@ -354,11 +354,11 @@ fn system_prompt_contains_causal_reasoning() {
     };
     let prompt = builder.build_system_prompt().unwrap();
     assert!(
-        prompt.contains("<causal-reasoning>"),
-        "should contain causal-reasoning section"
+        prompt.contains("<execution-codes>"),
+        "should contain execution-codes section (merged from causal-reasoning + verification-gate + stop-triggers)"
     );
     assert!(
-        prompt.contains("Before every code change, answer silently"),
+        prompt.contains("BEFORE every code change, answer silently"),
         "should contain causal reasoning instructions"
     );
 }

@@ -421,7 +421,7 @@ Recent reliability signals:
 - Grep(pattern="xxx"): No such file]
 ```
 
-**信念度感知**：默认情况下系统提示词包含 `<belief-awareness>` 区块，提前告知模型存在信念度机制、注入触发条件和 `SIGNAL_RECOVERY` 协议。模型在被注入时能理解上下文，按指引先读后写，而不是继续盲目操作。区块位于 `verification-gate` 之后、`stop-triggers` 之前，纯英文。设置 `MINK_SIGNAL_MODE=off` 时，该区块不会出现在系统提示词中，信号采集、注入、Abort 和恢复守卫也不会运行。
+**信念度感知**：默认情况下系统提示词包含 `<belief-awareness>` 区块，提前告知模型存在信念度机制、注入触发条件和 `SIGNAL_RECOVERY` 协议。模型在被注入时能理解上下文，按指引先读后写，而不是继续盲目操作。区块位于 `<execution-codes>` 之后，纯英文。设置 `MINK_SIGNAL_MODE=off` 时，该区块不会出现在系统提示词中，信号采集、注入、Abort 和恢复守卫也不会运行。
 
 **恢复首步守卫**：注入后，下一轮首个工具调用如果是 `Edit` 或 `Write`，`TurnExecutor` 会拒绝执行并返回 `SignalRecoveryGuard` 结果，要求先使用 `Read`、`Grep`、`Glob` 或聚焦的 `Bash` 检查当前状态。该守卫只约束注入后的第一步，避免模型忽略信号后继续盲改。
 
@@ -839,11 +839,10 @@ approval 检查发生在 `ToolRunner::execute_all()` 中，早于 StormBreaker �
 <rules>                   ← 行为规则
 <tool-selection>          ← 工具选择原则
 <safety>                  ← 安全边界
-<verification-gate>       ← 验证门控
-<belief-awareness>        ← 信号系统协议（MINK_SIGNAL_MODE=full 时）
-<stop-triggers>           ← 停止条件
+<execution-codes>         ← 因果验证、验证门控、停止条件
+<belief-awareness>        ← 信号系统协议、常见错误对照表
 <output-discipline>       ← 输出纪律
-<using-your-tools>        ← 工具使用说明
+<tool-usage>              ← 工具优先级、Read 用法、锚定编辑协议
 <sub-agent-guidance>      ← 子代理使用指引
 <todo-guidance>           ← Todo 操作指引
 <plan-lifecycle-guidance> ← Plan 生命周期
