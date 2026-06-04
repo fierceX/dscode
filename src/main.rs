@@ -376,112 +376,26 @@ async fn run(args: Vec<String>) -> Result<()> {
 }
 
 fn list_skills() {
-    let embedded = mink::assets::embedded_skills::all();
-    let mut seen_fs = std::collections::HashSet::new();
-    let mut fs_skills: Vec<String> = Vec::new();
-
-    // Scan file-system skill dirs
     let cwd = std::env::current_dir().unwrap_or_default();
     let home = std::path::PathBuf::from(
         std::env::var("MINK_HOME")
             .or_else(|_| std::env::var("HOME"))
             .unwrap_or_else(|_| String::from(".")),
     );
-    let bases = find_list_skill_dirs(&cwd, &home);
-    for base in &bases {
-        if !base.is_dir() {
-            continue;
-        }
-        for entry in (std::fs::read_dir(base).into_iter().flatten()).flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let name = path.file_name().unwrap().to_string_lossy().to_string();
-            if name.starts_with('.') || !seen_fs.insert(name.clone()) {
-                continue;
-            }
-            let skill_file = path.join("SKILL.md");
-            if !skill_file.exists() {
-                continue;
-            }
-            let content = std::fs::read_to_string(&skill_file).unwrap_or_default();
-            let desc = extract_frontmatter_field_for_list(&content, "description:")
-                .unwrap_or_else(|| String::from("(no description)"));
-            fs_skills.push(format!("{}: {}", name, desc));
-        }
-    }
 
-    // Show embedded skills
-    println!("BUILT-IN SKILLS");
+    println!("SKILLS");
     println!("{}", "-".repeat(60));
-    for skill in &embedded {
-        let marker = if seen_fs.contains(skill.name) {
-            "▶"
-        } else {
-            " "
+    for skill in mink::skills::list_available_skills(&cwd, &home) {
+        let source = match skill.source {
+            mink::skills::SkillSource::BuiltIn => "built-in",
+            mink::skills::SkillSource::FileSystem => "local",
         };
-        println!("{}  {}", marker, skill.name);
-        println!("{}     {}", marker, skill.description);
-        println!();
-    }
-
-    // Show filesystem-only skills
-    let fs_only: Vec<_> = fs_skills
-        .iter()
-        .filter(|s| {
-            !embedded
-                .iter()
-                .any(|e| s.starts_with(&format!("{}:", e.name)))
-        })
-        .collect();
-    if !fs_only.is_empty() {
-        println!("FILESYSTEM SKILLS");
-        println!("{}", "-".repeat(60));
-        for s in &fs_only {
-            println!("   {}", s);
-        }
+        println!("   {} [{}]", skill.name, source);
+        println!("      {}", skill.description);
         println!();
     }
 
     println!("Load with --skill NAME or Read skill://NAME.");
-}
-
-fn find_list_skill_dirs(cwd: &std::path::Path, home: &std::path::Path) -> Vec<std::path::PathBuf> {
-    let mut out = Vec::new();
-    let project = cwd.join(".claude/skills");
-    if project.is_dir() {
-        out.push(project);
-    }
-    let project_dev = cwd.join("skills");
-    if project_dev.is_dir() {
-        out.push(project_dev);
-    }
-    let global = home.join(".claude/skills");
-    if global.is_dir() {
-        out.push(global);
-    }
-    out
-}
-
-fn extract_frontmatter_field_for_list(content: &str, field: &str) -> Option<String> {
-    let lines: Vec<&str> = content.lines().collect();
-    if lines.first()?.trim() != "---" {
-        return None;
-    }
-    for line in &lines[1..] {
-        let trimmed = line.trim();
-        if trimmed == "---" {
-            break;
-        }
-        if let Some(value) = trimmed.strip_prefix(field) {
-            let val = value.trim().trim_matches('"').trim_matches('\'');
-            if !val.is_empty() {
-                return Some(val.to_string());
-            }
-        }
-    }
-    None
 }
 
 async fn run_interactive(
@@ -700,7 +614,7 @@ fn print_usage() {
     println!("  --session [NAME]        Use named session");
     println!("  --continue              Continue most recent session");
     println!("  --list-sessions         List saved sessions");
-    println!("  --list-skills           List built-in skills");
+    println!("  --list-skills           List available skills");
     println!("  -v, --verbose           Verbose mode");
     println!("  -i, --interactive       Interactive mode (REPL)");
     println!("  --tui                   TUI mode (alternate screen with status bar)");

@@ -13,6 +13,7 @@ pub mod cancel;
 pub mod context;
 pub mod llm;
 pub mod session;
+pub mod skills;
 
 pub mod guard;
 pub mod repair;

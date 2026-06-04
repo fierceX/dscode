@@ -411,13 +411,20 @@ impl TuiState {
     }
 
     pub(crate) fn show_skills(&mut self) {
-        self.push_line(MsgLine::new(
-            "=== Built-in Skills ===".into(),
-            MsgKind::Info,
-        ));
-        for skill in crate::assets::embedded_skills::all() {
+        self.push_line(MsgLine::new("=== Skills ===".into(), MsgKind::Info));
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let home = std::path::PathBuf::from(
+            std::env::var("MINK_HOME")
+                .or_else(|_| std::env::var("HOME"))
+                .unwrap_or_else(|_| String::from(".")),
+        );
+        for skill in crate::skills::list_available_skills(&cwd, &home) {
+            let source = match skill.source {
+                crate::skills::SkillSource::BuiltIn => "built-in",
+                crate::skills::SkillSource::FileSystem => "local",
+            };
             self.push_line(MsgLine::new(
-                format!("  {} — {}", skill.name, skill.description),
+                format!("  {} [{}] - {}", skill.name, source, skill.description),
                 MsgKind::Text,
             ));
         }

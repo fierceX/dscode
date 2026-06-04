@@ -230,6 +230,7 @@ DecisionEngine.decide()
 | `config.rs` | Config 结构体、CLI/env/配置文件合并、API key 和 sandbox 配置 |
 | `context.rs` | AgentSharedContext + ToolContext |
 | `assets.rs` | 嵌入 tools.json、内置 skills |
+| `skills.rs` | 统一 skill 发现与解析：本地目录优先、内置 skill 兜底 |
 | `cancel.rs` | CancellationToken 父子传播 |
 | `safety.rs` | 危险命令过滤 |
 | `sandbox/` | 沙箱自举和平台实现 |
@@ -278,7 +279,7 @@ DecisionEngine.decide()
 `Read.path` 支持轻量资源 URL：
 
 - `artifact://<id>`：读取被截断工具输出
-- `skill://list` / `skill://<name>`：列出或读取内置 skill
+- `skill://list` / `skill://<name>`：列出或读取可用 skill，本地 skill 优先、内置 skill 兜底
 - `session://current`：当前 session 摘要
 - `session://current/stats`：stats JSON
 - `session://current/messages` / `session://current/messages/all`：conversation 摘要

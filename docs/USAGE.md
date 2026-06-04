@@ -167,7 +167,7 @@ prompt 为空且 stdin 是终端时自动进入交互模式。非终端 stdin �
 | `--session [NAME]` | 自动生成 | 命名会话。提供名称可恢复 |
 | `--continue` | — | 恢复最近的 session |
 | `--list-sessions` | — | 列出所有 session |
-| `--list-skills` | — | 列出内置 skill |
+| `--list-skills` | — | 列出可用 skill |
 | `-i` / `--interactive` | auto | REPL 交互模式 |
 | `--tui` | — | TUI 全屏模式 |
 | `--print` | — | ndjson 结构化输出（`--output-format stream-json` 别名） |
@@ -472,7 +472,7 @@ mink -m flash --max-context 1M -i
 
 - `http(s)://...`：读取公开 URL，首次 fetch 后缓存到当前 session artifact，后续 selector 从缓存分页；cache 正文缺失时会重新 fetch
 - `artifact://<id>`：读取被截断工具输出
-- `skill://list` / `skill://<name>`：列出或读取内置 skill
+- `skill://list` / `skill://<name>`：列出或读取可用 skill；本地 skill 优先，内置 skill 兜底
 - `session://current`：当前 session 摘要
 - `session://current/stats`：stats JSON
 - `session://current/messages` / `session://current/messages/all`：conversation 摘要
@@ -542,17 +542,17 @@ mink --list-skills
 
 ### 搜索路径（优先级）
 
-1. **内置（编译时嵌入）** — 直接读取内存，零文件 I/O
-2. `<project>/.claude/skills/<name>/SKILL.md` — 项目级覆盖
-3. `<project>/skills/<name>/SKILL.md` — 项目开发目录
-4. `~/.claude/skills/<name>/SKILL.md` — 用户全局
+1. `<project>/.claude/skills/<name>/SKILL.md` — 项目级覆盖
+2. `<project>/skills/<name>/SKILL.md` — 项目开发目录
+3. `~/.claude/skills/<name>/SKILL.md` — 用户全局
+4. **内置（编译时嵌入）** — 兜底读取内存，零文件 I/O
 
 同名 skill 会被覆盖（优先级高的替代内置的）。
 
 ### 加载机制
 
 - `--skill NAME` 在 system prompt 的 `<selected-skills>` 段嵌入 SKILL.md 全文
-- `Read skill://<name>` 在运行时按需读取内置 skill，不修改后续轮次的 system prompt
+- `Read skill://<name>` 在运行时按需读取同一套 skill resolver，不修改后续轮次的 system prompt
 - 内置技能即使在离线环境也可用（编译时已嵌入）
 
 ---

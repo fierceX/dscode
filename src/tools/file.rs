@@ -417,7 +417,7 @@ impl super::runner::ToolExec for ReadTool {
                 .map(super::runner::ToolOutcome::text);
         }
         if selection.path.starts_with("skill://") {
-            return read_skill_resource(&selection.path)
+            return read_skill_resource(&selection.path, ctx)
                 .map(|text| select_text_lines(&text, selection.offset, selection.limit))
                 .map(super::runner::ToolOutcome::text);
         }
@@ -491,28 +491,29 @@ fn read_url_resource(url: &str, ctx: &crate::context::ToolContext) -> Result<Str
     Ok(text)
 }
 
-fn read_skill_resource(url: &str) -> Result<String> {
+fn read_skill_resource(url: &str, ctx: &crate::context::ToolContext) -> Result<String> {
     let rest = url
         .strip_prefix("skill://")
         .ok_or_else(|| anyhow!("Error: invalid skill resource: {url}"))?
         .trim_matches('/');
     if rest.is_empty() || rest == "list" || rest == "all" {
-        let mut out = String::from("# Built-in skills\n");
-        for skill in crate::assets::embedded_skills::all() {
-            out.push_str(&format!("- {}: {}\n", skill.name, skill.description));
+        let mut out = String::from("# Skills\n");
+        for skill in crate::skills::list_available_skills(&ctx.cwd, &ctx.home) {
+            let source = match skill.source {
+                crate::skills::SkillSource::BuiltIn => "built-in",
+                crate::skills::SkillSource::FileSystem => "local",
+            };
+            out.push_str(&format!(
+                "- {} [{}]: {}\n",
+                skill.name, source, skill.description
+            ));
         }
         return Ok(out);
     }
-    if rest.contains('/') || rest.contains('\\') || rest.contains("..") {
-        bail!("Error: invalid skill resource path: {url}");
-    }
-    let skill = crate::assets::embedded_skills::find(rest)
-        .ok_or_else(|| anyhow!("Error: skill not found: {rest}"))?;
+    let skill = crate::skills::resolve_skill(&ctx.cwd, &ctx.home, rest)?;
     Ok(format!(
-        "# skill://{}\n\nDescription: {}\nBase directory: <built-in>\n\n{}",
-        skill.name,
-        skill.description,
-        skill.content.replace("${MINK_SKILL_DIR}", "<built-in>")
+        "# skill://{}\n\nDescription: {}\nBase directory: {}\n\n{}",
+        skill.info.name, skill.info.description, skill.info.base_dir, skill.content
     ))
 }
 
@@ -1458,22 +1459,47 @@ mod tests {
 
     #[test]
     fn read_skill_resource_lists_skills() {
-        let result = read_skill_resource("skill://list").unwrap();
-        assert!(result.contains("# Built-in skills"));
+        let ctx = temp_tool_context("skill-list");
+        let result = read_skill_resource("skill://list", &ctx).unwrap();
+        assert!(result.contains("# Skills"));
         assert!(result.contains("debugging"));
+        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
     }
 
     #[test]
     fn read_skill_resource_returns_skill_content() {
-        let result = read_skill_resource("skill://debugging").unwrap();
+        let ctx = temp_tool_context("skill-content");
+        let result = read_skill_resource("skill://debugging", &ctx).unwrap();
         assert!(result.contains("# skill://debugging"));
         assert!(result.contains("Base directory: <built-in>"));
         assert!(result.contains("Phase 1"));
+        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
+    }
+
+    #[test]
+    fn read_skill_resource_prefers_filesystem_skill() {
+        let ctx = temp_tool_context("skill-local");
+        let skill_dir = ctx.cwd.join(".claude/skills/debugging");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: \"Local debugging\"\n---\n\nUse local steps.",
+        )
+        .unwrap();
+
+        let result = read_skill_resource("skill://debugging", &ctx).unwrap();
+
+        assert!(result.contains("Description: Local debugging"));
+        assert!(result.contains("Use local steps."));
+        assert!(result.contains(&format!("Base directory: {}", skill_dir.display())));
+        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
     }
 
     #[test]
     fn read_skill_resource_rejects_nested_path() {
-        assert!(read_skill_resource("skill://debugging/extra").is_err());
+        let ctx = temp_tool_context("skill-invalid");
+        assert!(read_skill_resource("skill://debugging/extra", &ctx).is_err());
+        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
     }
 
     #[test]

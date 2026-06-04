@@ -31,7 +31,7 @@ ToolCallEvent
 
 - `http(s)://...`：读取公开 URL，首次 fetch 后写入当前 session artifact cache，后续同 URL 的 selector 从缓存分页；如果 cache index 命中但正文 artifact 丢失，会重新 fetch 并写入新缓存。
 - `artifact://<id>`：读取被截断工具输出。
-- `skill://list` / `skill://<name>`：列出或读取内置 skill。
+- `skill://list` / `skill://<name>`：列出或读取可用 skill；本地 skill 优先，内置 skill 兜底。
 - `session://current`：读取当前 session 摘要。
 - `session://current/stats`：读取当前 session stats JSON。
 - `session://current/messages`：读取最近 40 条 conversation 摘要。
@@ -70,7 +70,7 @@ ToolCallEvent
 - `:raw` 禁用 snapshot header 和行号。
 - `http(s)://...` 可读取公开 URL。URL 输出不生成 editable snapshot；首次读取会保存为 `ReadUrl` artifact cache，后续同 URL selector 从缓存分页，不重复 fetch。损坏的 URL cache index 行会被跳过；cache 正文缺失时会重新 fetch。
 - `artifact://<id>` 可读取被截断工具输出，支持同样的行 selector。
-- `skill://list` / `skill://<name>` 可读取内置 skills。
+- `skill://list` / `skill://<name>` 可读取可用 skills，搜索顺序与 `--skill` 一致。
 - `session://current`、`session://current/stats`、`session://current/messages`、`session://current/artifacts` 可读取当前 session 状态。
 - 默认可读整文件，但大文件会受到工具结果上限保护。
 - 搜索具体内容时优先用 `Grep`，定位后再用 `Read` path selector 读取目标范围。
