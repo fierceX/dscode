@@ -162,6 +162,8 @@ assistant 消息使用 content 数组承载多种内容类型（thinking/text/to
 
 artifact 跟随 session 生命周期，不跨 session 共享。
 
+`Read` URL cache 复用同一 artifact 索引能力。缓存查找按 `tool + source` 反向扫描，跳过损坏的 index 行；如果记录存在但正文 artifact 已丢失，调用方会忽略该命中并重新 fetch。
+
 ---
 
 ## 主题三：上下文压缩
@@ -550,6 +552,7 @@ ToolResultDisplay {
 
 `Read.path` 也支持轻量 internal URL：
 
+- `http(s)://...`：公开 URL 读取，首次 fetch 后写入 session artifact cache，后续 selector 读取缓存文本。
 - `artifact://<id>`
 - `skill://list`
 - `skill://<name>`
@@ -592,6 +595,9 @@ insert after 90:
 - insert before/after 必须校验 anchor 行。
 - insert head/tail 校验完整文件 hash。
 - stale、overlap、unknown tag、no-op 均 fail closed。
+- 同一文件成功 `Edit` 或 `Write` 后，旧 snapshot tag 不再作为后续编辑依据。
+- 同一 snapshot 下的多处修改应合并为一次 multi-hunk patch。
+- stale、unknown tag、未覆盖行和 no-op 错误只给建议重读范围，不做自动 stale recovery。
 
 ---
 
@@ -647,6 +653,7 @@ OpenAI API 只在最后一个 chunk（标记为 `[DONE]`）中提供完整的 us
 ~/.mink/projects/<project_key>/<session_id>/
 ├── conversation.jsonl   ← 对话消息（逐行追加 JSON）
 ├── events.jsonl          ← 事件日志（每行一个事件）
+├── session.json          ← session 元数据：alias、title、cwd、时间戳
 ├── summary.txt           ← 压缩后的上下文快照
 ├── plan.md               ← 确认后的执行计划
 ├── plan.draft            ← 草稿计划
@@ -668,7 +675,7 @@ OpenAI API 只在最后一个 chunk（标记为 `[DONE]`）中提供完整的 us
 
 ### Session 恢复
 
-`--continue` 模式通过读取最新 session 目录的时间戳来选择最近的 session。`--session NAME` 直接使用指定名称。
+`--continue` 模式通过读取最新 session 目录的时间戳来选择最近的 session。`--session NAME` 会先按 alias、完整 id、id 前缀和 title 解析已有 session；匹配不到时创建新的时间戳 session，并将 NAME 规范化后写入 `session.json` 的 alias。解析时也会尝试规范化后的 alias，因此 `feature x` 能恢复 alias 为 `feature-x` 的 session。坏 `session.json` 不阻断列表和解析，会回退到目录名与 `summary.txt`。
 
 恢复时会 replay 最近 10 轮 LLM 响应事件（从 events.jsonl 读取），在交互式终端重新渲染历史对话。
 

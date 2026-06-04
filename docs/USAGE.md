@@ -304,6 +304,7 @@ mink --tui
     └── <session_id>/
         ├── conversation.jsonl ← 对话消息（JSONL 逐行追加）
         ├── events.jsonl       ← 事件日志
+        ├── session.json       ← session 元数据：alias、title、created_at、updated_at
         ├── summary.txt        ← 压缩后的上下文快照
         ├── plan.md            ← 确认后的计划
         ├── plan.draft         ← 草稿计划
@@ -325,6 +326,8 @@ mink -m flash --continue -i
 # 列出所有
 mink --list-sessions
 ```
+
+`session_id` 仍是稳定内部目录名，默认使用时间戳和随机后缀。`--session my-fix` 会先按 alias、完整 id、id 前缀和 title 匹配已有 session；匹配不到时创建新的时间戳 session，并把 `my-fix` 写入 `session.json` 的 alias。带空格或特殊字符的名称会规范化为安全 alias，例如 `feature x` 会保存并解析为 `feature-x`。如果某个 `session.json` 损坏，列表和解析会回退到目录名与 `summary.txt`，不会阻断其他 session。`--list-sessions` 优先展示 alias/title，同时保留内部 id。
 
 `--continue` 自动选择最近修改的 session。恢复时会 replay 最近 10 轮 LLM 响应事件，在交互式终端重新渲染历史对话。
 
@@ -467,6 +470,7 @@ mink -m flash --max-context 1M -i
 
 可读取的轻量资源：
 
+- `http(s)://...`：读取公开 URL，首次 fetch 后缓存到当前 session artifact，后续 selector 从缓存分页；cache 正文缺失时会重新 fetch
 - `artifact://<id>`：读取被截断工具输出
 - `skill://list` / `skill://<name>`：列出或读取内置 skill
 - `session://current`：当前 session 摘要
@@ -477,6 +481,7 @@ mink -m flash --max-context 1M -i
 示例：
 
 ```jsonl
+{"path":"https://example.com:20-60"}
 {"path":"artifact://bash-0001:1-120"}
 {"path":"skill://debugging"}
 {"path":"session://current/messages:1-40"}
@@ -501,7 +506,11 @@ mink -m flash --max-context 1M -i
 }
 ```
 
-如果 snapshot 过期，`Edit` 会拒绝修改并要求重新 `Read`。
+同一文件多处修改时，优先在一次 `Edit.patch` 中合并多个 hunk。任何成功的 `Edit` 或 `Write`
+都会让该文件之前的 snapshot tag 过期；继续编辑同一文件前，需要重新 `Read` 目标范围。
+
+如果 snapshot 过期、tag 未知、目标行未覆盖或 patch 无实际变化，`Edit` 会拒绝修改，并给出建议
+`Read path:N-M` 范围。
 
 ---
 

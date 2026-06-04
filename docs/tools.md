@@ -29,6 +29,7 @@ ToolCallEvent
 
 `Read` 也承担轻量资源路由职责。当前只实现高收益、低耦合的内置协议分支，没有引入完整 `ResourceRouter` 框架：
 
+- `http(s)://...`：读取公开 URL，首次 fetch 后写入当前 session artifact cache，后续同 URL 的 selector 从缓存分页；如果 cache index 命中但正文 artifact 丢失，会重新 fetch 并写入新缓存。
 - `artifact://<id>`：读取被截断工具输出。
 - `skill://list` / `skill://<name>`：列出或读取内置 skill。
 - `session://current`：读取当前 session 摘要。
@@ -37,7 +38,7 @@ ToolCallEvent
 - `session://current/messages/all`：读取全部 conversation 摘要。
 - `session://current/artifacts`：列出当前 session artifacts。
 
-这些资源都支持同样的行 selector，例如 `session://current/messages:1-20`。
+这些资源都支持同样的行 selector，例如 `session://current/messages:1-20` 或 `https://example.com:20-60`。
 
 工具审批模式由 `--approval-mode` 或 `.minkrc` 的 `[tools]` 配置控制：
 
@@ -67,6 +68,7 @@ ToolCallEvent
 ```
 
 - `:raw` 禁用 snapshot header 和行号。
+- `http(s)://...` 可读取公开 URL。URL 输出不生成 editable snapshot；首次读取会保存为 `ReadUrl` artifact cache，后续同 URL selector 从缓存分页，不重复 fetch。损坏的 URL cache index 行会被跳过；cache 正文缺失时会重新 fetch。
 - `artifact://<id>` 可读取被截断工具输出，支持同样的行 selector。
 - `skill://list` / `skill://<name>` 可读取内置 skills。
 - `session://current`、`session://current/stats`、`session://current/messages`、`session://current/artifacts` 可读取当前 session 状态。
@@ -97,10 +99,13 @@ ToolCallEvent
 | `path` | string | 文件路径 |
 | `patch` | string | anchored line patch |
 
-- `patch` 必须使用最近 `Read` 输出中的 `@PATH#TAG` header。
+- `patch` 必须使用最近一次非 raw `Read` 输出中的 `@PATH#TAG` header。
 - patch 支持 `replace N..M:`、`delete N..M`、`insert before N:`、`insert after N:`、`insert head:`、`insert tail:`。
 - patch body 行必须以 `+` 开头。
 - patch 只能修改 snapshot 覆盖且未漂移的行；文件变化时会拒绝并要求重新 `Read`。
+- 同一文件如果要修改多个位置，优先在一次 `Edit.patch` 中合并多个 hunk。
+- 同一文件成功 `Edit` 或 `Write` 后，之前的 snapshot tag 都视为过期；继续编辑前重新 `Read` 目标范围。
+- snapshot 过期、未知 tag、未覆盖行或 no-op 错误会给出建议 `Read path:N-M` 范围。
 - conversation 中默认只保留结果首行，避免 diff 过度污染上下文；UI 仍可展示完整工具内容。
 
 示例：

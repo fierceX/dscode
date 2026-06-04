@@ -8,6 +8,7 @@ use std::path::{Component, Path, PathBuf};
 
 /// Threshold for switching to streaming read (bytes).
 const STREAM_READ_THRESHOLD: u64 = 1_048_576; // 1MB
+const EDIT_REREAD_CONTEXT_LINES: usize = 12;
 
 pub fn read(path: &str, offset: Option<usize>, limit: Option<usize>) -> Result<String> {
     if path.is_empty() {
@@ -233,7 +234,9 @@ pub fn split_read_path_selection(input: &str) -> Result<ReadPathSelection> {
     let mut path = rest;
 
     if let Some((base, suffix)) = rest.rsplit_once(':') {
-        if let Some((start, parsed_limit)) = parse_line_selector(suffix)? {
+        if !looks_like_url_host_port(rest)
+            && let Some((start, parsed_limit)) = parse_line_selector(suffix)?
+        {
             path = base;
             offset = Some(start);
             limit = parsed_limit;
@@ -250,6 +253,16 @@ pub fn split_read_path_selection(input: &str) -> Result<ReadPathSelection> {
         limit,
         raw,
     })
+}
+
+fn looks_like_url_host_port(input: &str) -> bool {
+    if !is_web_url(input) {
+        return false;
+    }
+    let Ok(url) = reqwest::Url::parse(input) else {
+        return false;
+    };
+    url.port().is_some() && url.path() == "/" && url.query().is_none() && url.fragment().is_none()
 }
 
 fn parse_line_selector(suffix: &str) -> Result<Option<(usize, Option<usize>)>> {
@@ -413,6 +426,11 @@ impl super::runner::ToolExec for ReadTool {
                 .map(|text| select_text_lines(&text, selection.offset, selection.limit))
                 .map(super::runner::ToolOutcome::text);
         }
+        if is_web_url(&selection.path) {
+            return read_url_resource(&selection.path, ctx)
+                .map(|text| select_text_lines(&text, selection.offset, selection.limit))
+                .map(super::runner::ToolOutcome::text);
+        }
         let path = resolve_tool_path(&ctx.cwd, &selection.path)?;
         let content = read(
             &path.display().to_string(),
@@ -449,6 +467,28 @@ fn select_text_lines(text: &str, offset: Option<usize>, limit: Option<usize>) ->
     let start = offset.unwrap_or(1).saturating_sub(1).min(total);
     let end = limit.map_or(total, |count| (start + count).min(total));
     lines[start..end].join("\n")
+}
+
+fn is_web_url(path: &str) -> bool {
+    path.starts_with("http://") || path.starts_with("https://")
+}
+
+fn read_url_resource(url: &str, ctx: &crate::context::ToolContext) -> Result<String> {
+    if ctx.tool_config.tool_disable.disable_web {
+        bail!("Error: Web tools are disabled by configuration.");
+    }
+    let normalized = crate::tools::web::normalize_fetch_url(url)?;
+    if let Some(record) = ctx
+        .artifacts
+        .find_latest_by_source("ReadUrl", &normalized)?
+        && let Ok(text) = ctx.artifacts.read_record_text(&record)
+    {
+        return Ok(text);
+    }
+    let text = crate::tools::web::web_fetch(&normalized)?;
+    ctx.artifacts
+        .write_text("ReadUrl", "cached URL read", Some(&normalized), &text)?;
+    Ok(text)
 }
 
 fn read_skill_resource(url: &str) -> Result<String> {
@@ -505,6 +545,19 @@ fn format_session_current(ctx: &crate::context::ToolContext) -> Result<String> {
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_else(|| "<unknown>".to_string());
+    let metadata = read_optional_file(&dir.join("session.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+    let alias = metadata
+        .as_ref()
+        .and_then(|value| value.get("alias"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let title = metadata
+        .as_ref()
+        .and_then(|value| value.get("title"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
     let stats = read_optional_file(&dir.join("stats.json"))?;
     let stats_summary = serde_json::from_str::<crate::session::stats::Stats>(&stats)
         .map(format_stats_summary)
@@ -515,6 +568,8 @@ fn format_session_current(ctx: &crate::context::ToolContext) -> Result<String> {
     Ok(format!(
         "# session://current\n\
 session_id: {session_id}\n\
+alias: {alias}\n\
+title: {title}\n\
 cwd: {}\n\
 home: {}\n\
 session_dir: {}\n\
@@ -854,19 +909,21 @@ fn apply_anchored_patch(
             max_bytes
         );
     }
+    let mut lines = crate::tools::snapshot::split_content_lines(&content);
     let snapshot = {
         let guard = snapshots.lock().unwrap_or_else(|e| e.into_inner());
         guard.get(path, &parsed.tag).cloned()
     }
     .ok_or_else(|| {
+        let target = suggested_read_target(display_path, &parsed.hunks, lines.len());
         anyhow!(
-            "Error: snapshot tag {} for {} is unknown. Re-read the target range, then retry Edit with the new header.",
+            "Error: snapshot tag {} for {} is unknown. Re-read {}, then retry Edit with the new header.",
             parsed.tag,
-            display_path
+            display_path,
+            target
         )
     })?;
 
-    let mut lines = crate::tools::snapshot::split_content_lines(&content);
     validate_patch_hunks(&parsed.hunks, &snapshot, &lines, display_path)?;
     apply_hunks(&mut lines, &parsed.hunks)?;
 
@@ -875,8 +932,9 @@ fn apply_anchored_patch(
         updated.push('\n');
     }
     if updated == content {
+        let target = suggested_read_target(display_path, &parsed.hunks, lines.len());
         bail!(
-            "Error: patch parsed cleanly but produced no changes. Re-read the target range before retrying."
+            "Error: patch parsed cleanly but produced no changes. Re-read {target} before retrying."
         );
     }
 
@@ -1059,8 +1117,13 @@ fn validate_patch_hunks(
             PatchHunk::InsertHead { .. } | PatchHunk::InsertTail { .. } => {
                 let current_hash = crate::tools::snapshot::hash_text(&current_lines.join("\n"));
                 if current_hash != snapshot.file_hash {
+                    let target = suggested_read_target(
+                        display_path,
+                        std::slice::from_ref(hunk),
+                        current_lines.len(),
+                    );
                     bail!(
-                        "Error: snapshot mismatch in {display_path}. The file changed since Read. Re-read the file before editing."
+                        "Error: snapshot mismatch in {display_path}. The file changed since Read. Re-read {target} before editing."
                     );
                 }
             }
@@ -1076,8 +1139,9 @@ fn validate_snapshot_line(
     display_path: &str,
 ) -> Result<()> {
     let expected = snapshot.expected_hash(line).ok_or_else(|| {
+        let target = suggested_read_target_for_line(display_path, line, current_lines.len());
         anyhow!(
-            "Error: line {line} in {display_path} was not covered by snapshot {}. Re-read the target range before editing.",
+            "Error: line {line} in {display_path} was not covered by snapshot {}. Re-read {target} before editing.",
             snapshot.tag
         )
     })?;
@@ -1085,11 +1149,62 @@ fn validate_snapshot_line(
         bail!("Error: line {line} does not exist in {display_path}");
     };
     if crate::tools::snapshot::hash_text(current) != expected {
+        let target = suggested_read_target_for_line(display_path, line, current_lines.len());
         bail!(
-            "Error: snapshot mismatch in {display_path} at line {line}. The file changed since Read. Re-read the target range before editing."
+            "Error: snapshot mismatch in {display_path} at line {line}. The file changed since Read. Re-read {target} before editing."
         );
     }
     Ok(())
+}
+
+fn suggested_read_target(display_path: &str, hunks: &[PatchHunk], line_count: usize) -> String {
+    if line_count == 0 {
+        return display_path.to_string();
+    }
+    let mut min_line = usize::MAX;
+    let mut max_line = 1usize;
+    for hunk in hunks {
+        let (start, end) = hunk_read_span(hunk, line_count);
+        min_line = min_line.min(start);
+        max_line = max_line.max(end);
+    }
+    if min_line == usize::MAX {
+        return display_path.to_string();
+    }
+    format_read_target(display_path, min_line, max_line, line_count)
+}
+
+fn suggested_read_target_for_line(display_path: &str, line: usize, line_count: usize) -> String {
+    if line_count == 0 {
+        return display_path.to_string();
+    }
+    let line = line.clamp(1, line_count);
+    format_read_target(display_path, line, line, line_count)
+}
+
+fn format_read_target(
+    display_path: &str,
+    start_line: usize,
+    end_line: usize,
+    line_count: usize,
+) -> String {
+    let start = start_line.saturating_sub(EDIT_REREAD_CONTEXT_LINES).max(1);
+    let end = (end_line + EDIT_REREAD_CONTEXT_LINES).min(line_count);
+    format!("{display_path}:{start}-{end}")
+}
+
+fn hunk_read_span(hunk: &PatchHunk, line_count: usize) -> (usize, usize) {
+    match hunk {
+        PatchHunk::Replace { start, end, .. } | PatchHunk::Delete { start, end } => {
+            ((*start).min(line_count), (*end).min(line_count))
+        }
+        PatchHunk::InsertBefore { line, .. } | PatchHunk::InsertAfter { line, .. } => {
+            let line = (*line).min(line_count);
+            (line, line)
+        }
+        PatchHunk::InsertHead { .. } => (1, 1),
+        PatchHunk::InsertTail { .. } => (line_count, line_count),
+    }
 }
 
 fn apply_hunks(lines: &mut Vec<String>, hunks: &[PatchHunk]) -> Result<()> {
@@ -1265,6 +1380,22 @@ mod tests {
     }
 
     #[test]
+    fn split_read_path_selection_keeps_url_host_port() {
+        let selection = split_read_path_selection("https://example.com:8443").unwrap();
+        assert_eq!(selection.path, "https://example.com:8443");
+        assert_eq!(selection.offset, None);
+        assert_eq!(selection.limit, None);
+    }
+
+    #[test]
+    fn split_read_path_selection_url_range_after_path() {
+        let selection = split_read_path_selection("https://example.com/docs:10-14").unwrap();
+        assert_eq!(selection.path, "https://example.com/docs");
+        assert_eq!(selection.offset, Some(10));
+        assert_eq!(selection.limit, Some(5));
+    }
+
+    #[test]
     fn split_read_path_selection_rejects_zero_line() {
         assert!(split_read_path_selection("src/main.rs:0").is_err());
     }
@@ -1302,6 +1433,27 @@ mod tests {
     fn select_text_lines_applies_range() {
         let result = select_text_lines("a\nb\nc\nd\n", Some(2), Some(2));
         assert_eq!(result, "b\nc");
+    }
+
+    #[test]
+    fn read_url_resource_uses_cached_artifact_with_selector() {
+        let ctx = temp_tool_context("read-url-cache");
+        ctx.artifacts
+            .write_text(
+                "ReadUrl",
+                "cached URL read",
+                Some("https://example.com/a"),
+                "Source: https://example.com/a\n\na\nb\nc\nd",
+            )
+            .unwrap();
+
+        let result = ReadTool
+            .execute(&json!({"path":"https://example.com/a:4-5"}), &ctx)
+            .unwrap()
+            .content;
+
+        assert_eq!(result, "b\nc");
+        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
     }
 
     #[test]
@@ -1437,6 +1589,7 @@ mod tests {
             .to_string();
 
         assert!(err.contains("snapshot mismatch"), "{err}");
+        assert!(err.contains(&format!("Re-read {p}:1-3")), "{err}");
         assert_eq!(fs::read_to_string(&p).unwrap(), "one\nchanged\nthree\n");
         fs::remove_file(&p).ok();
     }
@@ -1455,6 +1608,7 @@ mod tests {
             .to_string();
 
         assert!(err.contains("unknown"), "{err}");
+        assert!(err.contains(&format!("Re-read {p}:1-2")), "{err}");
         fs::remove_file(&p).ok();
     }
 

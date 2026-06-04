@@ -258,6 +258,7 @@ pub struct ToolResultDisplay<'a> {
 ~/.mink/projects/<project_key>/<session_id>/
 ├── conversation.jsonl
 ├── events.jsonl
+├── session.json
 ├── summary.txt
 ├── plan.md
 ├── plan.draft
@@ -267,7 +268,7 @@ pub struct ToolResultDisplay<'a> {
     └── <tool>-0001.txt
 ```
 
-`MINK_HOME` 可覆盖默认 home。`--continue` 会选择最近修改的 session。
+`MINK_HOME` 可覆盖默认 home。`session_id` 是稳定内部目录名；`session.json` 保存用户可读的 alias、title、cwd 和时间戳。`--session NAME` 会按 alias、完整 id、id 前缀和 title 解析已有 session，匹配不到时创建新的时间戳 session 并把 NAME 规范化为安全 alias。列表和解析路径对损坏的 `session.json` 采用 legacy fallback，不让单个坏 metadata 阻断恢复。`--continue` 会选择最近修改的 session。
 
 ---
 

@@ -348,7 +348,7 @@ fn format_search_results(query: &str, source: &str, results: Vec<SearchResult>) 
     out
 }
 
-fn normalize_fetch_url(raw: &str) -> Result<String> {
+pub(crate) fn normalize_fetch_url(raw: &str) -> Result<String> {
     let raw = raw.trim();
     if raw.is_empty() {
         bail!("Error: no url provided");

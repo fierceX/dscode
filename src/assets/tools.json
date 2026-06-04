@@ -1,13 +1,13 @@
 [
   {
     "name": "Read",
-    "description": "Read a local file or lightweight resource. Use multiple Read calls if you need multiple files/resources. Local file output includes a @PATH#TAG snapshot header and line numbers unless :raw is used. Use path selectors to read specific line ranges.\n\nSupported resource paths:\n- local files, e.g. src/main.rs or src/main.rs:10-30\n- artifact://<id> for full truncated tool output\n- skill://list and skill://<name> for built-in skills\n- session://current, session://current/stats, session://current/messages, session://current/messages/all, session://current/artifacts\n\nIMPORTANT - Prefer Grep over Read:\n- When searching for specific content, ALWAYS use Grep first \u2014 it returns only matching lines, never truncates, and keeps context small.\n- Read loads entire files/resources into context, which rapidly inflates token usage. Use it ONLY when you already know exactly which lines you need (e.g. after a Grep located the target), or when you must understand the full file/resource structure.\n- Grep with context provides enough surrounding lines to decide the target range; then use Read path selectors to get the @PATH#TAG header for Edit.patch.\n- If a Read result is truncated (you see a truncation notice), do NOT re-read the same range \u2014 use Grep to search instead.\n- Use path selectors only when you already know the target line range (e.g. from a prior Grep).",
+    "description": "Read a local file, web URL, or lightweight resource. Use multiple Read calls if you need multiple files/resources. Local file output includes a @PATH#TAG snapshot header and line numbers unless :raw is used. Use path selectors to read specific line ranges. URL reads are fetched once into a session artifact cache, then selectors page over cached text without refetching.\n\nSupported resource paths:\n- local files, e.g. src/main.rs or src/main.rs:10-30\n- http(s) URLs, e.g. https://example.com or https://example.com:20-60\n- artifact://<id> for full truncated tool output\n- skill://list and skill://<name> for built-in skills\n- session://current, session://current/stats, session://current/messages, session://current/messages/all, session://current/artifacts\n\nIMPORTANT - Prefer Grep over Read:\n- When searching for specific local content, ALWAYS use Grep first \u2014 it returns only matching lines, never truncates, and keeps context small.\n- Read loads entire files/resources into context, which rapidly inflates token usage. Use it ONLY when you already know exactly which lines you need (e.g. after a Grep located the target), or when you must understand the full file/resource structure.\n- Grep with context provides enough surrounding lines to decide the target range; then use Read path selectors to get the @PATH#TAG header for Edit.patch.\n- If a Read result is truncated (you see a truncation notice), do NOT re-read the same range \u2014 use Grep for local search, or use a narrower Read selector for URL/resource pagination.\n- Use path selectors only when you already know the target line range (e.g. from a prior Grep or cached URL read).",
     "input_schema": {
       "type": "object",
       "properties": {
         "path": {
           "type": "string",
-          "description": "File path or resource URL to read. Supports local paths, artifact://<id>, skill://<name>, and session://current resources. Append path selectors such as :10-20, :10+5, or :raw for ranges/raw output."
+          "description": "File path, http(s) URL, or resource URL to read. Supports local paths, web URLs, artifact://<id>, skill://<name>, and session://current resources. Append path selectors such as :10-20, :10+5, or :raw for ranges/raw output."
         }
       },
       "required": [
@@ -86,7 +86,7 @@
   },
   {
     "name": "Edit",
-    "description": "Edit a file using an anchored patch after Read. Copy the @PATH#TAG header from Read output and use replace/delete/insert line hunks. Edit requires patch; exact old_string replacement is not supported.",
+    "description": "Edit a file using an anchored patch after a fresh non-raw Read. Copy the @PATH#TAG header from the most recent Read of that file and use replace/delete/insert line hunks. Edit requires patch; exact old_string replacement is not supported. A snapshot tag becomes stale after any successful Edit or Write to the same file. If modifying multiple ranges from one snapshot, combine them into one patch with multiple hunks. Do not reuse the same tag for consecutive edits to the same file.",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -96,7 +96,7 @@
         },
         "patch": {
           "type": "string",
-          "description": "Anchored line patch using the @PATH#TAG header from Read output. Supports replace N..M:, delete N..M, insert before N:, insert after N:, insert head:, and insert tail:. Body rows must start with +."
+          "description": "Anchored line patch using the @PATH#TAG header from a fresh Read output. Supports replace N..M:, delete N..M, insert before N:, insert after N:, insert head:, and insert tail:. Body rows must start with +. Combine same-file changes into one multi-hunk patch when they come from the same snapshot."
         }
       },
       "required": [

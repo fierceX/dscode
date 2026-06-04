@@ -65,7 +65,11 @@ impl ArtifactManager {
 
     pub fn read_text(&self, id: &str) -> Result<String> {
         let record = self.get(id)?;
-        std::fs::read_to_string(self.root.join(record.path)).map_err(Into::into)
+        self.read_record_text(&record)
+    }
+
+    pub fn read_record_text(&self, record: &ArtifactRecord) -> Result<String> {
+        std::fs::read_to_string(self.root.join(&record.path)).map_err(Into::into)
     }
 
     pub fn get(&self, id: &str) -> Result<ArtifactRecord> {
@@ -85,6 +89,30 @@ impl ArtifactManager {
             }
         }
         bail!("Error: artifact not found: {id}");
+    }
+
+    pub fn find_latest_by_source(
+        &self,
+        tool: &str,
+        source: &str,
+    ) -> Result<Option<ArtifactRecord>> {
+        let index = match std::fs::read_to_string(&self.index_path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        for line in index.lines().rev() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let Ok(record) = serde_json::from_str::<ArtifactRecord>(line) else {
+                continue;
+            };
+            if record.tool == tool && record.source.as_deref() == Some(source) {
+                return Ok(Some(record));
+            }
+        }
+        Ok(None)
     }
 
     fn next_id(&self, tool: &str) -> String {
@@ -159,6 +187,52 @@ mod tests {
             .unwrap();
         assert_eq!(record.id, "bash-0001");
         assert_eq!(manager.read_text(&record.id).unwrap(), "hello");
+        let _ = std::fs::remove_dir_all(manager.root);
+    }
+
+    #[test]
+    fn finds_latest_artifact_by_tool_and_source() {
+        let manager = temp_manager("find-source");
+        manager
+            .write_text("ReadUrl", "old", Some("https://example.com"), "old")
+            .unwrap();
+        let latest = manager
+            .write_text("ReadUrl", "new", Some("https://example.com"), "new")
+            .unwrap();
+        manager
+            .write_text("ReadUrl", "other", Some("https://other.example"), "other")
+            .unwrap();
+
+        let found = manager
+            .find_latest_by_source("ReadUrl", "https://example.com")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(found.id, latest.id);
+        assert_eq!(manager.read_text(&found.id).unwrap(), "new");
+        let _ = std::fs::remove_dir_all(manager.root);
+    }
+
+    #[test]
+    fn source_lookup_skips_corrupt_index_lines() {
+        use std::io::Write;
+
+        let manager = temp_manager("find-source-corrupt");
+        let latest = manager
+            .write_text("ReadUrl", "new", Some("https://example.com"), "new")
+            .unwrap();
+        let mut index = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&manager.index_path)
+            .unwrap();
+        writeln!(index, "{{not-json").unwrap();
+
+        let found = manager
+            .find_latest_by_source("ReadUrl", "https://example.com")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(found.id, latest.id);
         let _ = std::fs::remove_dir_all(manager.root);
     }
 

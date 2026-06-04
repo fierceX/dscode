@@ -177,7 +177,23 @@ async fn run(args: Vec<String>) -> Result<()> {
         None
     };
 
-    let mut sid = cfg.session_id.clone();
+    let requested_session = cfg.session_id.trim().to_string();
+    let mut session_alias = None;
+    let mut sid = String::new();
+    if !requested_session.is_empty() {
+        if let Some(resolved) =
+            mink::session::metadata::resolve_session_reference(&home, &cwd, &requested_session)
+                .await?
+        {
+            sid = resolved;
+        } else {
+            session_alias = mink::session::metadata::sanitize_alias(&requested_session);
+            if session_alias.is_none() {
+                anyhow::bail!("invalid session name: {requested_session}");
+            }
+            sid = paths::chrono_session_id();
+        }
+    }
     if sid.is_empty() && cfg.continue_session {
         sid = paths::continue_session(&home, &cwd)
             .await
@@ -187,6 +203,11 @@ async fn run(args: Vec<String>) -> Result<()> {
         sid = paths::chrono_session_id();
     }
     cfg.session_id = sid.clone();
+    let resume_session_ref = if requested_session.is_empty() {
+        sid.clone()
+    } else {
+        requested_session.clone()
+    };
 
     let spaths = paths::paths_for(&home, &cwd, &sid);
 
@@ -195,6 +216,19 @@ async fn run(args: Vec<String>) -> Result<()> {
     // 共享会话初始化
     let (store, stats, artifacts) =
         mink::session::init::init_session_base(&home, &cwd, &sid).await?;
+    let prompt_for_title = json_rpc_prompt
+        .as_deref()
+        .or_else(|| (!cfg.prompt.trim().is_empty()).then_some(cfg.prompt.as_str()));
+    mink::session::metadata::ensure_metadata(
+        &spaths,
+        &cwd,
+        mink::session::metadata::SessionSeed {
+            alias: session_alias,
+            title: prompt_for_title.and_then(mink::session::metadata::title_from_prompt),
+            first_prompt: prompt_for_title.map(ToString::to_string),
+        },
+    )
+    .await?;
     let api_url_str = api_url(&cfg);
 
     // Determine interactive mode early, before ctx creation
@@ -334,7 +368,7 @@ async fn run(args: Vec<String>) -> Result<()> {
     if !cfg.session_id.is_empty() {
         eprintln!(
             "\x1b[90mResume with: --session {}  or  --continue\x1b[0m",
-            cfg.session_id
+            resume_session_ref
         );
     }
 
@@ -606,63 +640,44 @@ fn simple_stdin_loop(cmd_tx: &mpsc::UnboundedSender<OrchCmd>, cancel: &Cancellat
 }
 
 async fn list_sessions(home: &Path, cwd: &Path) -> Result<()> {
-    use std::time::UNIX_EPOCH;
-    let dir = home.join(".mink/projects").join(paths::project_key(cwd));
-    if !dir.exists() {
-        println!("No sessions found.");
-        return Ok(());
-    }
-    struct Row {
-        name: String,
-        ts: std::time::SystemTime,
-        summary: String,
-    }
-    let mut rows: Vec<Row> = Vec::new();
-    let mut entries = tokio::fs::read_dir(&dir).await?;
-    while let Some(e) = entries.next_entry().await? {
-        if !e.path().is_dir() {
-            continue;
-        }
-        let name = e.file_name().to_string_lossy().to_string();
-        let summary_path = e.path().join("summary.txt");
-        let mut summary = String::new();
-        if let Ok(data) = tokio::fs::read_to_string(&summary_path).await {
-            for line in data.lines() {
-                let trimmed = line.trim();
-                if !trimmed.is_empty() {
-                    summary = trimmed.to_string();
-                    break;
-                }
-            }
-        }
-        rows.push(Row {
-            name,
-            ts: e.metadata().await?.modified().unwrap_or(UNIX_EPOCH),
-            summary,
-        });
-    }
+    let mut rows = mink::session::metadata::list_project_sessions(home, cwd).await?;
     if rows.is_empty() {
         println!("No sessions found.");
         return Ok(());
     }
-    rows.sort_by(|a, b| b.ts.cmp(&a.ts));
-    println!("{:<40} {:<16} PREVIEW", "NAME", "MODIFIED");
+    rows.sort_by(|a, b| b.modified.cmp(&a.modified));
+    println!("{:<20} {:<32} {:<16} ID", "ALIAS", "TITLE", "UPDATED");
     for row in rows {
-        let mut preview = row.summary;
-        if preview.len() > 60 {
-            preview.truncate(57);
-            preview.push_str("...");
-        }
-        let dt: time::OffsetDateTime = row.ts.into();
+        let alias = row.metadata.alias.as_deref().unwrap_or("-");
+        let title = row
+            .metadata
+            .title
+            .as_deref()
+            .or(row.metadata.summary.as_deref())
+            .unwrap_or("-");
+        let alias = truncate_chars(alias, 20);
+        let title = truncate_chars(title, 32);
+        let dt: time::OffsetDateTime = row.modified.into();
         let formatted = {
             use time::macros::format_description;
             static FMT: &[time::format_description::FormatItem<'_>] =
                 format_description!("[year]-[month]-[day] [hour]:[minute]");
-            dt.format(FMT).unwrap_or_else(|_| format!("{:?}", row.ts))
+            dt.format(FMT)
+                .unwrap_or_else(|_| format!("{:?}", row.modified))
         };
-        println!("{:<40} {:<16} {}", row.name, formatted, preview);
+        println!("{:<20} {:<32} {:<16} {}", alias, title, formatted, row.id);
     }
     Ok(())
+}
+
+fn truncate_chars(value: &str, max: usize) -> String {
+    if value.chars().count() <= max {
+        return value.to_string();
+    }
+    let keep = max.saturating_sub(3);
+    let mut out: String = value.chars().take(keep).collect();
+    out.push_str("...");
+    out
 }
 
 fn print_usage() {
