@@ -48,6 +48,19 @@ impl CancellationToken {
             notify: self.notify.clone(),
         }
     }
+
+    /// Create a linked child token. Parent cancellation propagates to the
+    /// child, but cancelling the child does not cancel the parent.
+    pub fn linked_child_token(&self) -> Self {
+        let child = Self::new();
+        let parent = self.clone();
+        let child_for_task = child.clone();
+        tokio::spawn(async move {
+            parent.cancelled().await;
+            child_for_task.cancel();
+        });
+        child
+    }
 }
 
 impl Default for CancellationToken {
@@ -84,5 +97,23 @@ mod tests {
         let child = parent.child_token();
         child.cancel();
         assert!(parent.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn linked_child_cancel_does_not_cancel_parent() {
+        let parent = CancellationToken::new();
+        let child = parent.linked_child_token();
+        child.cancel();
+        assert!(child.is_cancelled());
+        assert!(!parent.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn linked_child_observes_parent_cancel() {
+        let parent = CancellationToken::new();
+        let child = parent.linked_child_token();
+        parent.cancel();
+        child.cancelled().await;
+        assert!(child.is_cancelled());
     }
 }

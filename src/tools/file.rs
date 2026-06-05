@@ -31,40 +31,19 @@ pub fn read(path: &str, offset: Option<usize>, limit: Option<usize>) -> Result<S
         if !lines.is_empty() && lines.last().map(|l| l.is_empty()).unwrap_or(false) {
             lines.pop();
         }
-        let total_lines = lines.len();
-        let start = match offset {
-            Some(o) if o > 1 => {
-                if o > total_lines {
-                    bail!(
-                        "Error: offset {} exceeds total lines {} in {}",
-                        o,
-                        total_lines,
-                        path
-                    );
-                }
-                o - 1
-            }
-            _ => 0,
-        };
-        let end = match limit {
-            Some(l) if l > 0 => (start + l).min(total_lines),
-            _ => total_lines,
-        };
-        return Ok(lines[start..end].join("\n"));
+        let range = selected_line_range(lines.len(), offset, limit, path)?;
+        return Ok(lines[range].join("\n"));
     }
 
     // Large file + range: stream — scan line boundaries, then read exact byte range.
-    let start_line = offset.unwrap_or(1);
-    let count = limit.unwrap_or(usize::MAX);
+    let start_line = offset.unwrap_or(1).max(1);
+    let count = limit.filter(|count| *count > 0);
 
     let mut reader = BufReader::new(std::fs::File::open(path)?);
     // line_offsets[i] = byte offset where line (i+1) starts in the file.
     let mut line_offsets: Vec<u64> = Vec::with_capacity(4096);
 
-    // Scan line boundaries up to what we need.
-    // target_line is the last line index we need (0-based, exclusive).
-    let target_idx = (start_line.saturating_sub(1) + count) as u64;
-    let mut line_idx = 0u64;
+    let target_line_count = count.and_then(|count| start_line.checked_sub(1)?.checked_add(count));
     let mut buf = Vec::new();
 
     loop {
@@ -75,29 +54,23 @@ pub fn read(path: &str, offset: Option<usize>, limit: Option<usize>) -> Result<S
             break; // EOF
         }
         line_offsets.push(pos_before);
-        line_idx += 1;
-        if line_idx == target_idx.saturating_add(1) {
-            break; // we have all the offsets we need
+        if let Some(target) = target_line_count
+            && line_offsets.len() > target
+        {
+            break; // we have the end offset for the requested range
         }
     }
 
-    // If file is smaller than requested offset, it's an error.
-    if start_line > 1 && line_offsets.len() < start_line - 1 {
-        bail!(
-            "Error: offset {} exceeds total lines {} in {}",
-            start_line,
-            line_offsets.len(),
-            path
-        );
+    let total_lines = line_offsets.len();
+    let range = selected_line_range(total_lines, Some(start_line), count, path)?;
+    if range.is_empty() {
+        return Ok(String::new());
     }
-
-    let idx = (start_line.saturating_sub(1)) as usize;
-    let start_byte = *line_offsets.get(idx).unwrap_or(&0);
+    let start_byte = line_offsets[range.start];
 
     // End byte: either the start of the next line after the range, or EOF.
-    let end_idx = idx + count.min(line_offsets.len().saturating_sub(idx));
-    let end_byte = if end_idx < line_offsets.len() {
-        line_offsets[end_idx]
+    let end_byte = if range.end < line_offsets.len() {
+        line_offsets[range.end]
     } else {
         // Scan to end of file to find the exact byte position
         let mut buf = Vec::new();
@@ -115,7 +88,40 @@ pub fn read(path: &str, offset: Option<usize>, limit: Option<usize>) -> Result<S
     let mut content = vec![0u8; (end_byte - start_byte) as usize];
     file.read_exact(&mut content)?;
 
-    Ok(String::from_utf8(content)?)
+    let mut selected = String::from_utf8(content)?;
+    if selected.ends_with('\n') {
+        selected.pop();
+        if selected.ends_with('\r') {
+            selected.pop();
+        }
+    }
+    Ok(selected)
+}
+
+fn selected_line_range(
+    total_lines: usize,
+    offset: Option<usize>,
+    limit: Option<usize>,
+    path: &str,
+) -> Result<Range<usize>> {
+    let start_line = offset.unwrap_or(1).max(1);
+    if start_line > total_lines {
+        if total_lines == 0 && start_line == 1 {
+            return Ok(0..0);
+        }
+        bail!(
+            "Error: offset {} exceeds total lines {} in {}",
+            start_line,
+            total_lines,
+            path
+        );
+    }
+    let start = start_line - 1;
+    let end = match limit {
+        Some(count) if count > 0 => start.saturating_add(count).min(total_lines),
+        _ => total_lines,
+    };
+    Ok(start..end)
 }
 
 pub fn write(path: &str, content: &str, max_bytes: usize) -> Result<String> {
@@ -910,6 +916,7 @@ fn apply_anchored_patch(
         );
     }
 
+    let mut snapshot_guard = snapshots.lock().unwrap_or_else(|e| e.into_inner());
     let content = std::fs::read_to_string(path)
         .map_err(|_| anyhow!("Error: file not found: {}", path.display()))?;
     if content.len() > max_bytes {
@@ -920,19 +927,18 @@ fn apply_anchored_patch(
         );
     }
     let mut lines = crate::tools::snapshot::split_content_lines(&content);
-    let snapshot = {
-        let guard = snapshots.lock().unwrap_or_else(|e| e.into_inner());
-        guard.get(path, &parsed.tag).cloned()
-    }
-    .ok_or_else(|| {
-        let target = suggested_read_target(display_path, &parsed.hunks, lines.len());
-        anyhow!(
-            "Error: snapshot tag {} for {} is unknown. Re-read {}, then retry Edit with the new header.",
-            parsed.tag,
-            display_path,
-            target
-        )
-    })?;
+    let snapshot = snapshot_guard
+        .get(path, &parsed.tag)
+        .cloned()
+        .ok_or_else(|| {
+            let target = suggested_read_target(display_path, &parsed.hunks, lines.len());
+            anyhow!(
+                "Error: snapshot tag {} for {} is unknown. Re-read {}, then retry Edit with the new header.",
+                parsed.tag,
+                display_path,
+                target
+            )
+        })?;
 
     validate_patch_hunks(&parsed.hunks, &snapshot, &lines, display_path)?;
     apply_hunks(&mut lines, &parsed.hunks)?;
@@ -950,10 +956,7 @@ fn apply_anchored_patch(
 
     let (diff, added, removed) = inline_diff(&path.display().to_string(), &content, &updated)?;
     std::fs::write(path, &updated)?;
-    snapshots
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .record(path, &updated, 1);
+    snapshot_guard.record(path, &updated, 1);
     Ok(format!(
         "Edit({}) [+{} -{} lines]\n{}\n",
         display_path, added, removed, diff
@@ -1325,6 +1328,34 @@ mod tests {
     }
 
     #[test]
+    fn read_large_file_offset_exceeds_lines_error() {
+        let p = temp_file(
+            "read-large-err",
+            &format!(
+                "first\n{}\nlast\n",
+                "x".repeat(STREAM_READ_THRESHOLD as usize)
+            ),
+        );
+        let result = read(&p, Some(4), None);
+        assert!(result.is_err());
+        fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn read_large_file_range_matches_line_semantics() {
+        let p = temp_file(
+            "read-large-range",
+            &format!(
+                "first\n{}\nthird\nfourth\n",
+                "x".repeat(STREAM_READ_THRESHOLD as usize)
+            ),
+        );
+        let result = read(&p, Some(3), Some(1)).unwrap();
+        assert_eq!(result, "third");
+        fs::remove_file(&p).ok();
+    }
+
+    #[test]
     fn read_empty_path_error() {
         assert!(read("", None, None).is_err());
     }
@@ -1429,11 +1460,18 @@ mod tests {
             &json!({"path": abspath.to_string_lossy(), "offset": 2, "limit": 2}),
             &ctx,
         );
-        assert!(result.is_ok(), "Read with offset/limit should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Read with offset/limit should succeed: {:?}",
+            result.err()
+        );
         let outcome = result.unwrap();
         assert!(outcome.content.contains("line2"), "should contain line2");
         assert!(outcome.content.contains("line3"), "should contain line3");
-        assert!(!outcome.content.contains("line1"), "should not contain line1");
+        assert!(
+            !outcome.content.contains("line1"),
+            "should not contain line1"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

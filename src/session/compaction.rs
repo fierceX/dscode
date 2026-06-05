@@ -207,14 +207,7 @@ Start directly with \"Task focus:\" — no preamble, no markdown, no code fences
             self.config.max_tokens,
         )?;
 
-        let resp = self
-            .client
-            .post(&self.api_url)
-            .header("Content-Type", "application/json")
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .body(body)
-            .send()
-            .await?;
+        let resp = self.send_summary_request(body).await?;
 
         let resp_bytes = resp.bytes().await?;
         let mut out = String::new();
@@ -266,6 +259,51 @@ Start directly with \"Task focus:\" — no preamble, no markdown, no code fences
         Ok(strip_tool_labels(&strip_dsml_tags(&out)))
     }
 
+    async fn send_summary_request(&self, body: Vec<u8>) -> Result<reqwest::Response> {
+        let mut attempt = 0u32;
+        loop {
+            let response = self
+                .client
+                .post(&self.api_url)
+                .header("Content-Type", "application/json")
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .body(body.clone())
+                .send()
+                .await;
+
+            match response {
+                Ok(resp) => {
+                    let status = resp.status();
+                    if status.is_success() {
+                        return Ok(resp);
+                    }
+                    let code = status.as_u16();
+                    if !is_retryable_compaction_status(code) || attempt >= 2 {
+                        let body_text = resp.text().await.unwrap_or_default();
+                        bail!("compaction summary HTTP {}: {}", code, body_text.trim());
+                    }
+                    let delay = if code == 429 {
+                        resp.headers()
+                            .get("retry-after")
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(|v| v.parse::<u64>().ok())
+                            .unwrap_or(2)
+                    } else {
+                        1u64 << attempt
+                    };
+                    tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                }
+                Err(e) => {
+                    if attempt >= 2 {
+                        return Err(e.into());
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(1u64 << attempt)).await;
+                }
+            }
+            attempt += 1;
+        }
+    }
+
     fn log_compact_event(&self, usage: &UsageEvent) {
         let events_path = self.summary_path.with_file_name("events.jsonl");
         if let Ok(mut file) = std::fs::OpenOptions::new()
@@ -290,6 +328,10 @@ Start directly with \"Task focus:\" — no preamble, no markdown, no code fences
 
 fn is_plan_trigger(trigger: &str) -> bool {
     trigger == "plan_clear" || trigger == "plan_confirm" || trigger == "manual"
+}
+
+fn is_retryable_compaction_status(code: u16) -> bool {
+    matches!(code, 408 | 409 | 425 | 429 | 500 | 502 | 503 | 504)
 }
 
 /// Strip DSML (DeepSeek Markup Language) and common XML-like tags

@@ -478,17 +478,20 @@ pub trait ToolExec: Send + Sync {
 
 内置工具通过 `TOOL_REGISTRY: LazyLock<Vec<Box<dyn ToolExec>>>` 注册。新增工具需要实现 `ToolExec`、加入 registry，并同步更新 `assets/tools.json`。
 
-工具调用在 `execute_all()` 中批量处理，每个调用在一个独立 `spawn_blocking` 任务中执行。这允许同步工具（Read/Write/Bash/Python 等）不阻塞 async agent 循环。
+工具调用在 `execute_all()` 中按顺序扫描并分段处理：连续的只读工具批量进入 `spawn_blocking` 并发执行；写入、执行、控制和 SubAgent 类工具会先 flush 前面的只读批次，再按调用顺序单独执行。这样保留了 Read/Glob/Grep 的吞吐收益，同时避免同批工具之间出现读写竞态。
 
 ```rust
 pub async fn execute_all(&self, calls: Vec<ToolCallEvent>) -> Result<Vec<ToolRunResult>> {
+    let mut read_batch = Vec::new();
     for call in calls {
-        // Storm check
-        // Truncation repair
-        // ToolExec lookup
-        handles.push(spawn_blocking(move || execute_one_sync(&ctx, &call, tool)));
+        if requires_sequential_execution(metadata_for(&call)) {
+            results.extend(execute_read_batch(read_batch).await?);
+            results.push(execute_prepared_call(call).await?);
+        } else {
+            read_batch.push(call);
+        }
     }
-    // 等待所有 handles
+    results.extend(execute_read_batch(read_batch).await?);
 }
 ```
 
@@ -667,11 +670,11 @@ OpenAI API 只在最后一个 chunk（标记为 `[DONE]`）中提供完整的 us
 
 ### JSONL 约束
 
-**追加**：`append_line()` 使用 `OpenOptions::append` 写入，原子级单行追加。同时更新内存缓存。
+**追加**：`append_line()` 使用 `OpenOptions::append` 写入单行，并通过 store 内部写锁与 `trim_keep_last()` 串行化。同时更新内存缓存。
 
-**读取**：`lines()` 延迟加载缓存，首次读盘后缓存到 `RwLock<Option<Vec<Value>>>`。
+**读取**：`lines()` 延迟加载缓存，首次读盘后缓存到 `RwLock<Option<Vec<Value>>>`。如果文件末尾存在没有换行的半截 JSONL，会跳过这条不完整记录；已经以换行结束的坏 JSONL 仍按错误处理，避免静默吞掉真实损坏。
 
-**截断**：`trim_keep_last(k)` 是唯一修改历史文件的路径。读入全量 → 截取末尾 k 条 → 覆写 → 重建缓存。
+**截断**：`trim_keep_last(k)` 是压缩历史文件的路径。读入全量 → 截取末尾 k 条 → 覆写 → 重建缓存，并与追加写入共用同一把写锁。
 
 ### Session 恢复
 
@@ -693,7 +696,7 @@ pub async fn new(parent_ctx, session_id, fork) -> Result<Self> {
     // 2. fork 模式：复制父会话 conversation/summary/plan
     // 3. 创建独立的 ConversationStore + StatsTracker
     // 4. 创建独立的 CompactionEngine
-    // 5. 继承 cancel token（父取消→子取消）
+    // 5. 创建 linked child cancel token（父取消→子取消，子取消不影响父）
     // 6. 独立的 immutable_prefix
 }
 ```
@@ -722,6 +725,8 @@ for line in child_store.lines().rev() {
 `SubAgentPool` 使用 `tokio::sync::Semaphore` 限制最大并发数（默认 8）。每个子代理占用一个 permit，完成后释放。
 
 结果通过 `mpsc::UnboundedSender` 发送回 orchestrator，由 `handle_sub_agent_result()` 注入父会话。
+
+每个子代理有独立超时。超时后会取消子代理的 child token 并返回 failed 结果，父会话继续执行。
 
 ---
 
@@ -803,7 +808,8 @@ approval 检查发生在 `ToolRunner::execute_all()` 中，早于 StormBreaker �
 │      │                                          │
 │  ToolRunner::execute_all()                      │
 │      │                                          │
-│  spawn_blocking()  spawn_blocking()  ...        │
+│  read batch spawn_blocking() ...                │
+│  sequential spawn_blocking()                    │
 │      │              │                           │
 │  file::read()    bash::execute()                │
 │  (同步 I/O)     (子进程 + wait)                 │
@@ -825,7 +831,7 @@ approval 检查发生在 `ToolRunner::execute_all()` 中，早于 StormBreaker �
 1. 主循环退出
 2. SSE stream 在 25ms 检查窗口内停止
 3. Bash / Python 工具检查 interrupt 并尝试杀掉子进程
-4. 子代理收集循环停止等待
+4. 子代理使用 linked child token 接收父取消；子代理超时只取消自身，不取消父会话
 
 ---
 

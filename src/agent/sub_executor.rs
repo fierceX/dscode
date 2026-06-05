@@ -152,7 +152,7 @@ impl SubAgentExecutor {
             )),
             stats: child_stats,
             compaction: child_compaction,
-            cancel: parent_ctx.cancel.child_token(),
+            cancel: parent_ctx.cancel.linked_child_token(),
             display: capture.clone(), // ← CaptureDisplay，阻断实时输出
             sub_stream_tx: None,
             tool_config: parent_ctx.tool_config.clone(),
@@ -196,7 +196,15 @@ impl SubAgentExecutor {
         let session_id = self.session_id.clone();
         let child_ctx = self.child_ctx.clone();
 
-        let result = self.run_impl(prompt).await;
+        let timeout_secs = child_ctx.tool_config.sub_agent_timeout_secs.max(1) as u64;
+        let cancel = child_ctx.cancel.clone();
+        let result = tokio::select! {
+            result = self.run_impl(prompt) => result,
+            _ = tokio::time::sleep(std::time::Duration::from_secs(timeout_secs)) => {
+                cancel.cancel();
+                Err(anyhow::anyhow!("Sub-agent timed out after {timeout_secs}s"))
+            }
+        };
 
         let captured_thinking = capture.take_thinking();
         let captured_text = capture.take_text();

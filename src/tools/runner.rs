@@ -94,6 +94,11 @@ pub struct ToolRunResult {
     pub signals: Vec<crate::guard::collector::Signal>,
 }
 
+enum PreparedCall {
+    Execute(ToolCallEvent),
+    Immediate(ToolRunResult),
+}
+
 #[derive(serde::Deserialize)]
 struct TodoArg {
     content: String,
@@ -123,74 +128,47 @@ impl ToolRunner {
     }
 
     pub async fn execute_all(&self, calls: Vec<ToolCallEvent>) -> Result<Vec<ToolRunResult>> {
+        let mut results = Vec::new();
+        let mut read_batch = Vec::new();
+
+        for call in calls {
+            let metadata = self.find_tool(&call.name).map(|tool| tool.metadata());
+            if requires_sequential_execution(metadata) {
+                results.extend(
+                    self.execute_read_batch(std::mem::take(&mut read_batch))
+                        .await?,
+                );
+                results.push(self.execute_prepared_call(call).await?);
+            } else {
+                read_batch.push(call);
+            }
+        }
+
+        results.extend(self.execute_read_batch(read_batch).await?);
+        Ok(results)
+    }
+
+    async fn execute_read_batch(&self, calls: Vec<ToolCallEvent>) -> Result<Vec<ToolRunResult>> {
+        if calls.is_empty() {
+            return Ok(Vec::new());
+        }
         let mut handles = Vec::new();
         for call in calls {
-            if let Some(tool) = self.find_tool(&call.name)
-                && let Some(reason) = approval_block_reason(tool.metadata(), &self.ctx.tool_config)
-            {
-                let name = call.name.clone();
-                let id = call.id.clone();
-                let args = call.fields.clone();
-                handles.push(tokio::task::spawn_blocking(move || {
-                    Ok(blocked_tool_result(id, name, args, reason))
-                }));
-                continue;
-            }
-
-            // Storm check: suppress repeated identical calls
-            if let Some(tool) = self.find_tool(&call.name)
-                && !tool.metadata().storm_exempt
-            {
-                let args_json = serde_json::to_string(&call.input_json).unwrap_or_default();
-                let decision = {
-                    let mut storm = self.storm.lock().unwrap_or_else(|e| e.into_inner());
-                    storm.check(&call.name, &args_json, tool.metadata().mutating)
-                };
-                if let StormDecision::Suppress(reason) = decision {
-                    let name = call.name.clone();
-                    let id = call.id.clone();
-                    let args = call.fields.clone();
+            match self.prepare_call(call) {
+                PreparedCall::Immediate(result) => {
+                    handles.push(tokio::task::spawn_blocking(move || Ok(result)));
+                }
+                PreparedCall::Execute(call) => {
+                    let ctx = self.ctx.clone();
+                    let tool_name = call.name.clone();
                     handles.push(tokio::task::spawn_blocking(move || {
-                        Ok(ToolRunResult {
-                            tool_use_id: id,
-                            tool_name: name,
-                            tool_args: args,
-                            content: format!("Error: {reason}"),
-                            conv_content: String::new(),
-                            spawns_sub_agent: false,
-                            sub_agent_prompt: None,
-                            sub_agent_description: None,
-                            sub_agent_fork: false,
-                            exit_code: None,
-                            signals: Vec::new(),
-                        })
+                        let tool = tool_registry()
+                            .iter()
+                            .find(|t| t.metadata().name == tool_name);
+                        Self::execute_one_sync(&ctx, &call, tool.map(|t| t.as_ref()))
                     }));
-                    continue;
                 }
             }
-
-            let ctx = self.ctx.clone();
-            // Pre-execution: repair truncated argument JSON
-            let mut call = call;
-            {
-                let args_str = serde_json::to_string(&call.input_json).unwrap_or_default();
-                let result = crate::repair::repair_truncated_json(&args_str);
-                if result.changed
-                    && !result.fallback
-                    && let Ok(repaired_val) =
-                        serde_json::from_str::<serde_json::Value>(&result.repaired)
-                {
-                    call.input_json = repaired_val;
-                }
-            }
-            // Pass tool name for lookup inside spawn_blocking
-            let tool_name = call.name.clone();
-            handles.push(tokio::task::spawn_blocking(move || {
-                let tool = tool_registry()
-                    .iter()
-                    .find(|t| t.metadata().name == tool_name);
-                Self::execute_one_sync(&ctx, &call, tool.map(|t| t.as_ref()))
-            }));
         }
 
         let mut results = Vec::new();
@@ -200,12 +178,80 @@ impl ToolRunner {
         Ok(results)
     }
 
+    async fn execute_prepared_call(&self, call: ToolCallEvent) -> Result<ToolRunResult> {
+        match self.prepare_call(call) {
+            PreparedCall::Immediate(result) => Ok(result),
+            PreparedCall::Execute(call) => {
+                let ctx = self.ctx.clone();
+                let tool_name = call.name.clone();
+                tokio::task::spawn_blocking(move || {
+                    let tool = tool_registry()
+                        .iter()
+                        .find(|t| t.metadata().name == tool_name);
+                    Self::execute_one_sync(&ctx, &call, tool.map(|t| t.as_ref()))
+                })
+                .await?
+            }
+        }
+    }
+
+    fn prepare_call(&self, mut call: ToolCallEvent) -> PreparedCall {
+        if let Some(tool) = self.find_tool(&call.name)
+            && let Some(reason) = approval_block_reason(tool.metadata(), &self.ctx.tool_config)
+        {
+            return PreparedCall::Immediate(blocked_tool_result(
+                call.id,
+                call.name,
+                call.fields,
+                reason,
+            ));
+        }
+
+        // Storm check: suppress repeated identical calls. This runs before any
+        // concurrent scheduling so the suppression window is deterministic.
+        if let Some(tool) = self.find_tool(&call.name)
+            && !tool.metadata().storm_exempt
+        {
+            let args_json = serde_json::to_string(&call.input_json).unwrap_or_default();
+            let decision = {
+                let mut storm = self.storm.lock().unwrap_or_else(|e| e.into_inner());
+                storm.check(&call.name, &args_json, tool.metadata().mutating)
+            };
+            if let StormDecision::Suppress(reason) = decision {
+                return PreparedCall::Immediate(ToolRunResult {
+                    tool_use_id: call.id,
+                    tool_name: call.name,
+                    tool_args: call.fields,
+                    content: format!("Error: {reason}"),
+                    conv_content: String::new(),
+                    spawns_sub_agent: false,
+                    sub_agent_prompt: None,
+                    sub_agent_description: None,
+                    sub_agent_fork: false,
+                    exit_code: None,
+                    signals: Vec::new(),
+                });
+            }
+        }
+
+        let args_str = serde_json::to_string(&call.input_json).unwrap_or_default();
+        let result = crate::repair::repair_truncated_json(&args_str);
+        if result.changed
+            && !result.fallback
+            && let Ok(repaired_val) = serde_json::from_str::<serde_json::Value>(&result.repaired)
+        {
+            call.input_json = repaired_val;
+        }
+
+        PreparedCall::Execute(call)
+    }
+
     fn execute_one_sync(
         ctx: &ToolContext,
         call: &ToolCallEvent,
         tool_fn: Option<&dyn ToolExec>,
     ) -> Result<ToolRunResult> {
-        let (output, is_bash, mut conv_content, exit_code, spawns_sub_agent) =
+        let (output, is_bash, mut conv_content, exit_code, spawns_sub_agent, success, diagnostics) =
             if let Some(t) = tool_fn {
                 match t.execute(&call.input_json, ctx) {
                     Ok(outcome) => (
@@ -214,6 +260,8 @@ impl ToolRunner {
                         outcome.conversation_content,
                         outcome.exit_code,
                         t.metadata().spawns_sub_agent,
+                        outcome.success,
+                        outcome.diagnostics,
                     ),
                     Err(e) => (
                         Err(e),
@@ -221,6 +269,8 @@ impl ToolRunner {
                         String::new(),
                         None,
                         t.metadata().spawns_sub_agent,
+                        false,
+                        Vec::new(),
                     ),
                 }
             } else {
@@ -230,13 +280,25 @@ impl ToolRunner {
                     String::new(),
                     None,
                     false,
+                    false,
+                    Vec::new(),
                 )
             };
 
-        let output = match output {
+        let mut output = match output {
             Ok(v) => v,
             Err(e) => format!("Error: tool execution failed: {e}"),
         };
+        if !success && exit_code.is_none() && !output.starts_with("Error:") {
+            output = format!("Error: {output}");
+        }
+        if !diagnostics.is_empty() {
+            output.push_str("\nDiagnostics:");
+            for diagnostic in diagnostics {
+                output.push('\n');
+                output.push_str(&diagnostic);
+            }
+        }
 
         let output = format_tool_result_with_artifact(
             &call.name,
@@ -300,6 +362,23 @@ impl ToolRunner {
             signals,
         })
     }
+}
+
+fn requires_sequential_execution(metadata: Option<ToolMetadata>) -> bool {
+    let Some(metadata) = metadata else {
+        return false;
+    };
+    metadata.mutating
+        || metadata.spawns_sub_agent
+        || matches!(metadata.approval, ApprovalTier::Write | ApprovalTier::Exec)
+        || matches!(
+            metadata.result_kind,
+            ToolResultKind::FileWrite
+                | ToolResultKind::Edit
+                | ToolResultKind::Command
+                | ToolResultKind::Control
+                | ToolResultKind::SubAgent
+        )
 }
 
 fn blocked_tool_result(

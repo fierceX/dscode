@@ -1,15 +1,13 @@
 use crate::safety;
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, bail};
 use once_cell::sync::Lazy;
 use regex::Regex;
-use std::collections::VecDeque;
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-static ADAPTIVE_HISTORY: LazyLock<Mutex<VecDeque<Duration>>> =
-    LazyLock::new(|| Mutex::new(VecDeque::new()));
 static RE_BASH_READ_MISUSE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)^\s*(cat|head|tail|less|more)\b").expect("regex"));
 static RE_BASH_SEARCH_MISUSE: Lazy<Regex> =
@@ -18,27 +16,6 @@ static RE_BASH_FIND_MISUSE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)^\s*(find|fd|ls|tree)\b").expect("regex"));
 static RE_BASH_RG_FILES_MISUSE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)^\s*rg\s+--files\b").expect("regex"));
-
-/// Compute adaptive timeout: median of last 10 executions × 3, min 5s, max 600s.
-pub fn adaptive_timeout(default_timeout: Duration) -> Duration {
-    let history = ADAPTIVE_HISTORY.lock().unwrap_or_else(|e| e.into_inner());
-    if history.len() < 5 {
-        return default_timeout.min(Duration::from_secs(600));
-    }
-    let mut sorted: Vec<Duration> = history.iter().copied().collect();
-    sorted.sort();
-    let median = sorted[sorted.len() / 2];
-    let timeout = median * 3;
-    timeout
-        .max(Duration::from_secs(5))
-        .min(Duration::from_secs(600))
-}
-
-fn record_execution_time(elapsed: Duration) {
-    let mut history = ADAPTIVE_HISTORY.lock().unwrap_or_else(|e| e.into_inner());
-    history.push_front(elapsed);
-    history.truncate(10);
-}
 
 pub fn execute(
     command: &str,
@@ -54,6 +31,16 @@ pub fn execute_with_interrupt(
     default_timeout: i32,
     interrupt: Option<&AtomicBool>,
 ) -> Result<(String, Option<i32>)> {
+    execute_with_interrupt_in_dir(command, timeout_secs, default_timeout, interrupt, None)
+}
+
+fn execute_with_interrupt_in_dir(
+    command: &str,
+    timeout_secs: Option<u64>,
+    default_timeout: i32,
+    interrupt: Option<&AtomicBool>,
+    cwd: Option<&Path>,
+) -> Result<(String, Option<i32>)> {
     if command.trim().is_empty() {
         bail!("Error: no command provided");
     }
@@ -61,88 +48,14 @@ pub fn execute_with_interrupt(
         bail!("Error: command blocked by bash safety policy ({reason})");
     }
 
-    let timeout = match timeout_secs {
-        Some(t) if t > 0 => Duration::from_secs(t),
-        _ => adaptive_timeout(Duration::from_secs(if default_timeout > 0 {
-            default_timeout as u64
-        } else {
-            600
-        })),
-    };
+    let timeout = Duration::from_secs(match timeout_secs {
+        Some(t) if t > 0 => t,
+        _ if default_timeout > 0 => (default_timeout as u64).clamp(5, 600),
+        _ => 600,
+    });
 
-    let start = Instant::now();
-
-    // Use tokio async path if running inside a tokio runtime, otherwise sync fallback.
-    let (output_bytes, stderr_bytes, exit_code): (Vec<u8>, Vec<u8>, Option<i32>) =
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle) => {
-                let result = handle.block_on(async {
-                    let child = tokio::process::Command::new("bash")
-                        .arg("-lc")
-                        .arg(command)
-                        .stdout(Stdio::piped())
-                        .stderr(Stdio::piped())
-                        .kill_on_drop(true)
-                        .spawn()?;
-
-                    let output_fut = child.wait_with_output();
-                    tokio::pin!(output_fut);
-
-                    let mut interrupt_check = tokio::time::interval(Duration::from_millis(100));
-
-                    let output = tokio::time::timeout(timeout, async {
-                        loop {
-                            tokio::select! {
-                                result = &mut output_fut => {
-                                    return result.map_err(|e| anyhow!("process error: {e}"));
-                                }
-                                _ = interrupt_check.tick() => {
-                                    if let Some(flag) = interrupt
-                                        && flag.load(Ordering::SeqCst)
-                                    {
-                                        return Err(anyhow!("interrupted"));
-                                    }
-                                }
-                            }
-                        }
-                    })
-                    .await;
-
-                    match output {
-                        Ok(Ok(output)) => Ok((output.stdout, output.stderr, output.status.code())),
-                        Ok(Err(e)) => Err(e),
-                        Err(_) => Err(anyhow!("timed out")),
-                    }
-                });
-
-                match result {
-                    Ok(ok) => ok,
-                    Err(e) => {
-                        let msg = e.to_string();
-                        if msg == "timed out" {
-                            return Ok((
-                                format!(
-                                    "[... truncated, command timed out after {} seconds ...]",
-                                    timeout.as_secs()
-                                ),
-                                None,
-                            ));
-                        } else if msg == "interrupted" {
-                            return Ok(("[... command interrupted ...]".to_string(), Some(130)));
-                        } else {
-                            return Err(e);
-                        }
-                    }
-                }
-            }
-            Err(_) => {
-                let sync = execute_sync_fallback(command, timeout, interrupt)?;
-                (sync.stdout, sync.stderr, sync.code)
-            }
-        };
-
-    let elapsed = start.elapsed();
-    record_execution_time(elapsed);
+    let sync = execute_sync(command, timeout, interrupt, cwd)?;
+    let (output_bytes, stderr_bytes, exit_code) = (sync.stdout, sync.stderr, sync.code);
 
     let mut out = String::from_utf8_lossy(&output_bytes).to_string();
     let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
@@ -160,18 +73,21 @@ pub fn execute_with_interrupt(
     Ok((out, exit_code))
 }
 
-/// Fallback synchronous execution when no tokio runtime is available (e.g. in tests).
-fn execute_sync_fallback(
+fn execute_sync(
     command: &str,
     timeout: Duration,
     interrupt: Option<&AtomicBool>,
+    cwd: Option<&Path>,
 ) -> Result<SyncOutput> {
-    let mut child = std::process::Command::new("bash")
-        .arg("-lc")
+    let mut cmd = std::process::Command::new("bash");
+    cmd.arg("-lc")
         .arg(command)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+        .stderr(Stdio::piped());
+    if let Some(cwd) = cwd {
+        cmd.current_dir(cwd);
+    }
+    let mut child = cmd.spawn()?;
 
     let stdout_buf: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
     let stderr_buf: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
@@ -314,11 +230,12 @@ impl BashTool {
         timeout: Option<u64>,
         ctx: &crate::context::ToolContext,
     ) -> anyhow::Result<super::runner::ToolOutcome> {
-        execute_with_interrupt(
+        execute_with_interrupt_in_dir(
             command,
             timeout,
             ctx.tool_config.tool_timeout_secs,
             Some(ctx.interrupt.as_ref()),
+            Some(&ctx.cwd),
         )
         .map(|(s, code)| super::runner::ToolOutcome {
             content: s,
@@ -334,6 +251,16 @@ impl BashTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("{name}-{}-{nanos}", std::process::id()))
+    }
 
     #[test]
     fn empty_command_error() {
@@ -378,6 +305,33 @@ mod tests {
         assert!(result.contains("hello"));
     }
 
+    #[tokio::test]
+    async fn execute_works_inside_tokio_runtime() {
+        let (result, code) = execute_with_interrupt("echo async-ok", None, 600, None).unwrap();
+        assert_eq!(code, Some(0));
+        assert!(result.contains("async-ok"));
+    }
+
+    #[test]
+    fn execute_in_dir_uses_requested_cwd() {
+        let dir = temp_dir("mink-bash-cwd");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("marker.txt"), "ok").unwrap();
+
+        let (result, code) = execute_with_interrupt_in_dir(
+            "test -f marker.txt && echo found",
+            None,
+            600,
+            None,
+            Some(&dir),
+        )
+        .unwrap();
+
+        assert_eq!(code, Some(0));
+        assert!(result.contains("found"));
+        fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn timeout_kills_long_command() {
         let (result, _) = execute("sleep 10; echo done", Some(1), 600).unwrap();
@@ -396,16 +350,8 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_timeout_with_few_samples_returns_default() {
-        ADAPTIVE_HISTORY.lock().unwrap().clear();
-        let t = adaptive_timeout(Duration::from_secs(30));
-        assert_eq!(t, Duration::from_secs(30));
-    }
-
-    #[test]
-    fn adaptive_timeout_respects_default_when_no_history() {
-        ADAPTIVE_HISTORY.lock().unwrap().clear();
-        let t = adaptive_timeout(Duration::from_secs(10));
-        assert_eq!(t, Duration::from_secs(10));
+    fn default_timeout_is_stable_without_execution_history() {
+        let (result, _) = execute("sleep 1; echo done", None, 5).unwrap();
+        assert!(result.contains("done"));
     }
 }

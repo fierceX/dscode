@@ -1,4 +1,5 @@
 use anyhow::{Result, bail};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -32,6 +33,15 @@ pub fn execute_script_with_interrupt(
     timeout_secs: Option<u64>,
     interrupt: Option<&AtomicBool>,
 ) -> Result<(String, String, Option<i32>)> {
+    execute_script_with_interrupt_in_dir(script, timeout_secs, interrupt, None)
+}
+
+fn execute_script_with_interrupt_in_dir(
+    script: &str,
+    timeout_secs: Option<u64>,
+    interrupt: Option<&AtomicBool>,
+    cwd: Option<&Path>,
+) -> Result<(String, String, Option<i32>)> {
     if script.trim().is_empty() {
         bail!("Error: no Python script provided");
     }
@@ -45,14 +55,18 @@ pub fn execute_script_with_interrupt(
 
     let timeout = Duration::from_secs(timeout_secs.unwrap_or(30).max(5).min(300));
 
-    let mut child = Command::new("python3")
-        .arg("-B") // don't write .pyc
+    let mut cmd = Command::new("python3");
+    cmd.arg("-B") // don't write .pyc
         .arg("-W") // warning control
         .arg("ignore") // suppress warnings
         .arg("-c")
         .arg(script)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(cwd) = cwd {
+        cmd.current_dir(cwd);
+    }
+    let mut child = cmd
         .spawn()
         .map_err(|e| anyhow::anyhow!("Failed to start python3: {e}"))?;
 
@@ -178,8 +192,12 @@ impl super::runner::ToolExec for PythonTool {
             }
         };
 
-        let (stdout, stderr, exit_code) =
-            execute_script_with_interrupt(&script, args.timeout, Some(ctx.interrupt.as_ref()))?;
+        let (stdout, stderr, exit_code) = execute_script_with_interrupt_in_dir(
+            &script,
+            args.timeout,
+            Some(ctx.interrupt.as_ref()),
+            Some(&ctx.cwd),
+        )?;
 
         let mut content = stdout;
         if !stderr.is_empty() {

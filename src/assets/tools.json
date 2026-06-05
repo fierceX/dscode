@@ -107,7 +107,7 @@
   },
   {
     "name": "Bash",
-    "description": "Execute a focused shell command for build, test, git, package-manager, server, or other shell-only tasks. Do NOT use Bash for file discovery, code content search, or reading files when a dedicated tool fits: use Glob for paths, Grep for content search, and Read for known files or line ranges. Returns stdout and stderr.",
+    "description": "Execute a focused shell command in the current session working directory for build, test, git, package-manager, server, or other shell-only tasks. Do NOT use Bash for file discovery, code content search, or reading files when a dedicated tool fits: use Glob for paths, Grep for content search, and Read for known files or line ranges. Returns stdout and stderr.",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -117,7 +117,7 @@
         },
         "timeout": {
           "type": "integer",
-          "description": "Timeout in seconds. If the command exceeds this duration, it will be killed. Only use for commands expected to take a long time (e.g. build, test, server start). Default: no timeout."
+          "description": "Timeout in seconds. If the command exceeds this duration, it will be killed. Only set this for commands expected to need a non-default duration (e.g. build, test, server start). Default: global tool timeout from configuration, clamped to 5-600 seconds."
         }
       },
       "required": [

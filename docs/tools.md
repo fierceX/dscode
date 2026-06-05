@@ -1,15 +1,16 @@
 # 内置工具
 
-更新日期：2026-05-31
+更新日期：2026-06-06
 
 ## 执行模型
 
-所有工具通过 `tools/runner.rs` 中的 `ToolExec` trait 注册到 `TOOL_REGISTRY`，由 `ToolRunner::execute_all()` 并发分发。每个工具同时声明 `ToolMetadata`，包含 approval tier、结果类型、副作用、storm 例外和 discoverable 标记。
+所有工具通过 `tools/runner.rs` 中的 `ToolExec` trait 注册到 `TOOL_REGISTRY`，由 `ToolRunner::execute_all()` 调度。只读工具会按连续批次并发执行；写入、执行、控制和 SubAgent 类工具按模型调用顺序串行执行，避免同批工具之间出现读写竞态。每个工具同时声明 `ToolMetadata`，包含 approval tier、结果类型、副作用、storm 例外和 discoverable 标记。
 
 统一流程：
 
 ```text
 ToolCallEvent
+  -> Approval 检查
   -> StormBreaker 检查
   -> repair_truncated_json()
   -> ToolExec::execute()
@@ -129,10 +130,10 @@ insert after 55:
 | `command` | string | shell 命令 |
 | `timeout` | integer | 单条命令超时秒数，可选 |
 
-- 命令通过 `bash -lc` 执行。
+- 命令在当前会话 `cwd` 下通过 `bash -lc` 执行。
 - 空命令和危险命令会被安全策略拒绝。
 - 用于读文件、搜索内容或发现路径的 Bash 命令会被拦截，提示改用 `Read`、`Grep` 或 `Glob`。
-- 显式 `timeout` 优先；未设置时使用全局 `--tool-timeout` 和自适应超时，最大 600 秒。
+- 显式 `timeout` 优先；未设置时使用全局 `--tool-timeout` / 配置文件 `tool_timeout`，默认超时会稳定夹在 5 到 600 秒之间，不再根据历史执行耗时自适应调整。
 - Ctrl+C / interrupt 会尝试中断子进程，返回 exit code 130 语义。
 - stdout 和 stderr 合并返回，非零退出码会追加提示。
 
@@ -147,7 +148,7 @@ insert after 55:
 | `timeout` | integer | 超时秒数，可选，默认 30，范围 5-300 |
 
 - `script` 和 `script_file` 必须二选一，不能同时提供。
-- 使用 `python3 -B -W ignore -c` 执行。
+- 在当前会话 `cwd` 下使用 `python3 -B -W ignore -c` 执行。
 - 黑名单拦截 `subprocess`、`os.system`、`os.popen`、`shutil`、`ctypes`、`socket`、`pty`、`__import__`、`compile(`、`exec(`、`eval(` 等模式。
 - Ctrl+C / interrupt 会杀掉脚本并返回 interrupted 提示。
 - Web、系统调用、任意 import 绕过不属于该工具的目标能力。
@@ -163,10 +164,12 @@ insert after 55:
 
 - 基于 `globset` 匹配和 `ignore` 目录遍历，不依赖外部 `rg` 二进制。
 - 用于快速发现文件，不读取文件内容。
+- `path` 为空或相对路径时基于当前会话 `cwd` 解析。
 - pattern 透传给 `globset`，工具层不做自定义 glob 解析。
 - `*` 和 `?` 不跨路径分隔符；递归匹配使用 `**/`，例如 `**/*.rs`、`**/*.docx`、`**/*.*`。
 - 带路径分隔符的模式按相对路径匹配，例如 `src/*.rs` 只匹配 `src` 当前层，`src/**/*.rs` 匹配所有子层。
 - 没有匹配时返回明确的 no-match 提示，而不是静默空字符串。
+- 遍历达到上限或跳过不可读路径时，会在结果末尾追加诊断行，提示结果可能不完整。
 
 ## `Grep`
 
@@ -181,7 +184,9 @@ insert after 55:
 
 - 基于内置目录遍历和 Rust `regex` 搜索，不依赖外部 `rg` 二进制。
 - 优先用于定位编辑目标。
+- `path` 为空或相对路径时基于当前会话 `cwd` 解析；`glob` 过滤同样使用 `globset` 语义。
 - `context` 往往足够定位目标；需要修改时优先 `Read` 目标范围拿到 `@PATH#TAG` 后使用 anchored `Edit.patch`。
+- 未匹配内容时返回明确的 no-match 提示；遍历达到上限或跳过不可读路径时，会追加诊断行。
 
 ## `TodoWrite`
 

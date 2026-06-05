@@ -22,10 +22,25 @@ pub fn glob(pattern: &str, path: &str) -> Result<String> {
 
     let mut results = Vec::new();
     let mut total_bytes = 0usize;
+    let mut files_seen = 0usize;
+    let mut walk_errors = 0usize;
+    let mut truncated_walk = false;
 
-    for entry in walker.flatten().take(MAX_FILES) {
+    for entry in walker {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                walk_errors += 1;
+                continue;
+            }
+        };
         if !entry.file_type().map_or(false, |ft| ft.is_file()) {
             continue;
+        }
+        files_seen += 1;
+        if files_seen > MAX_FILES {
+            truncated_walk = true;
+            break;
         }
         let p = entry.path();
         let match_path = relative_match_path(p, base);
@@ -47,6 +62,16 @@ pub fn glob(pattern: &str, path: &str) -> Result<String> {
         let scope = base.display();
         results.push(format!(
             "No files matched pattern '{pattern}' under {scope}"
+        ));
+    }
+    if truncated_walk {
+        results.push(format!(
+            "... search truncated: scanned first {MAX_FILES} files; results may be incomplete"
+        ));
+    }
+    if walk_errors > 0 {
+        results.push(format!(
+            "... skipped {walk_errors} paths due to traversal errors"
         ));
     }
 
@@ -126,10 +151,25 @@ pub fn grep(pattern: &str, path: &str, file_glob: &str, context: Option<usize>) 
     let mut total_results = 0usize;
     let mut total_bytes = 0usize;
     let mut truncated = false;
+    let mut files_seen = 0usize;
+    let mut walk_errors = 0usize;
+    let mut truncated_walk = false;
 
-    for entry in walker.flatten().take(MAX_FILES) {
+    for entry in walker {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                walk_errors += 1;
+                continue;
+            }
+        };
         if !entry.file_type().map_or(false, |ft| ft.is_file()) {
             continue;
+        }
+        files_seen += 1;
+        if files_seen > MAX_FILES {
+            truncated_walk = true;
+            break;
         }
         let file_path = entry.path();
 
@@ -204,6 +244,22 @@ pub fn grep(pattern: &str, path: &str, file_glob: &str, context: Option<usize>) 
         }
     }
 
+    if results.is_empty() {
+        results.push(format!(
+            "No content matched pattern '{pattern}' under {path}"
+        ));
+    }
+    if truncated_walk {
+        results.push(format!(
+            "... search truncated: scanned first {MAX_FILES} files; results may be incomplete"
+        ));
+    }
+    if walk_errors > 0 {
+        results.push(format!(
+            "... skipped {walk_errors} paths due to traversal errors"
+        ));
+    }
+
     Ok(results.join("\n"))
 }
 
@@ -225,7 +281,7 @@ impl super::runner::ToolExec for GlobTool {
     fn execute(
         &self,
         input: &serde_json::Value,
-        _ctx: &crate::context::ToolContext,
+        ctx: &crate::context::ToolContext,
     ) -> anyhow::Result<super::runner::ToolOutcome> {
         #[derive(serde::Deserialize)]
         struct Args {
@@ -234,8 +290,8 @@ impl super::runner::ToolExec for GlobTool {
             path: Option<String>,
         }
         let args: Args = serde_json::from_value(input.clone())?;
-        glob(&args.pattern, args.path.as_deref().unwrap_or("."))
-            .map(super::runner::ToolOutcome::text)
+        let root = resolve_search_root(&ctx.cwd, args.path.as_deref().unwrap_or("."));
+        glob(&args.pattern, &root.display().to_string()).map(super::runner::ToolOutcome::text)
     }
 }
 
@@ -252,7 +308,7 @@ impl super::runner::ToolExec for GrepTool {
     fn execute(
         &self,
         input: &serde_json::Value,
-        _ctx: &crate::context::ToolContext,
+        ctx: &crate::context::ToolContext,
     ) -> anyhow::Result<super::runner::ToolOutcome> {
         #[derive(serde::Deserialize)]
         struct Args {
@@ -265,13 +321,23 @@ impl super::runner::ToolExec for GrepTool {
             context: Option<usize>,
         }
         let args: Args = serde_json::from_value(input.clone())?;
+        let root = resolve_search_root(&ctx.cwd, args.path.as_deref().unwrap_or("."));
         grep(
             &args.pattern,
-            args.path.as_deref().unwrap_or("."),
+            &root.display().to_string(),
             args.glob.as_deref().unwrap_or(""),
             args.context,
         )
         .map(super::runner::ToolOutcome::text)
+    }
+}
+
+fn resolve_search_root(cwd: &Path, raw: &str) -> PathBuf {
+    let path = Path::new(raw);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
     }
 }
 

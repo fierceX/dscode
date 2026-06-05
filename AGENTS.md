@@ -335,12 +335,15 @@ Anchored patch 只修改 snapshot 覆盖且未漂移的行。tag 缺失、行 ha
 - `TurnCompactor`：同一用户输入的内循环最多压缩一次上下文
 - `ImmutablePrefix`：system prompt/tools 变更必须 invalidate prefix
 - `ConversationStore` 写操作不把内存缓存设为 None
+- `ConversationStore` append/trim 写入通过内部写锁串行化；读盘只容忍文件末尾未换行的半截 JSONL
 - `StormBreaker` 每个新用户输入重置
 - `BeliefTracker` 每个新用户输入 reset，初始信念为 0.75
 - `DecisionEngine` 每个新用户输入 reset cooldown
 - `ToolRunner::execute_all()` 在 StormBreaker 前执行 approval 检查
+- `ToolRunner::execute_all()` 只并发连续只读工具；写入、执行、控制和 SubAgent 工具必须按调用顺序串行执行
 - 默认 approval mode 是 `yolo`；`prompt` 目前没有交互式 UI，会 fail closed
 - `ToolRunner::format_tool_result()` 是工具输出进入 LLM/UI 前的统一最大字节保护，超长输出写入 `artifact://<id>`
+- `Bash` / `Python` 必须在 `ToolContext.cwd` 下执行；Bash 未显式设置 `timeout` 时使用稳定的全局 tool timeout
 - `TurnExecutor` 写入 LLM conversation 使用 `conv_content`，为空时使用 `content`
 - `Read` 本地非 raw 输出会记录 snapshot；raw 或 immutable resource 不生成可编辑 snapshot
 - `Edit.patch` 的 header path 必须和 `Edit.path` 一致，snapshot stale 时拒绝编辑

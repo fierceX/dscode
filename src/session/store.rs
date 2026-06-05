@@ -3,7 +3,7 @@ use anyhow::Result;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 /// Result of executing a single tool call, persisted in the conversation store.
 #[derive(Debug, Clone)]
@@ -20,6 +20,7 @@ pub struct ConversationStore {
     path: PathBuf,
     /// In-memory cache of parsed lines, lazily loaded and invalidated on write.
     cache: RwLock<Option<Vec<Value>>>,
+    write_lock: Mutex<()>,
 }
 
 impl ConversationStore {
@@ -27,6 +28,7 @@ impl ConversationStore {
         Self {
             path,
             cache: RwLock::new(None),
+            write_lock: Mutex::new(()),
         }
     }
 
@@ -125,24 +127,31 @@ impl ConversationStore {
     async fn read_lines_from_disk(&self) -> Result<Vec<Value>> {
         let data = tokio::fs::read_to_string(&self.path).await?;
         let mut lines = Vec::new();
-        for (idx, line) in data.lines().enumerate() {
+        let ends_with_newline = data.ends_with('\n');
+        let rows: Vec<&str> = data.lines().collect();
+        for (idx, line) in rows.iter().enumerate() {
             if line.trim().is_empty() {
                 continue;
             }
-            let value = serde_json::from_str(line).map_err(|e| {
-                anyhow::anyhow!(
-                    "invalid JSONL in {} at line {}: {}",
-                    self.path.display(),
-                    idx + 1,
-                    e
-                )
-            })?;
+            let value = match serde_json::from_str(line) {
+                Ok(value) => value,
+                Err(_) if idx + 1 == rows.len() && !ends_with_newline => continue,
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "invalid JSONL in {} at line {}: {}",
+                        self.path.display(),
+                        idx + 1,
+                        e
+                    ));
+                }
+            };
             lines.push(value);
         }
         Ok(lines)
     }
 
     pub async fn trim_keep_last(&self, keep_lines: usize) -> Result<()> {
+        let _guard = self.write_lock.lock().await;
         let lines = self.lines().await?;
         if keep_lines >= lines.len() {
             return Ok(());
@@ -161,6 +170,7 @@ impl ConversationStore {
     }
 
     async fn append_line(&self, value: &Value) -> Result<()> {
+        let _guard = self.write_lock.lock().await;
         let line = serde_json::to_string(value)?;
         let mut file = tokio::fs::OpenOptions::new()
             .create(true)
@@ -383,6 +393,21 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("line 2"), "{}", warnings[0]);
+    }
+
+    #[tokio::test]
+    async fn strict_lines_skips_partial_trailing_jsonl_without_newline() {
+        let store = temp_store();
+        store.ensure().await.unwrap();
+        tokio::fs::write(
+            store.path(),
+            "{\"role\":\"user\",\"content\":\"ok\"}\n{\"role\":\"assistant\"",
+        )
+        .await
+        .unwrap();
+        let lines = store.lines().await.unwrap();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["content"], "ok");
     }
 
     #[test]
