@@ -17,13 +17,13 @@
   },
   {
     "name": "Glob",
-    "description": "Find files matching a single glob pattern. Default tool for file discovery. Use this instead of Bash commands like find, ls, or rg --files when you need file paths. Use multiple Glob calls if you need multiple patterns.",
+    "description": "Find files matching a single globset pattern. Default tool for file discovery. Use this instead of Bash commands like find, ls, or rg --files when you need file paths. Patterns are passed to the globset engine; use **/*.rs, **/*.docx, or **/*.* for recursive matches, and src/*.rs for one directory level. Use multiple Glob calls if you need multiple patterns.",
     "input_schema": {
       "type": "object",
       "properties": {
         "pattern": {
           "type": "string",
-          "description": "Glob pattern, for example **/*.rs or src/**/*.ts"
+          "description": "Globset pattern, for example *.rs, **/*.rs, **/*.docx, **/*.*, or src/**/*.ts. Use **/ for recursive matches."
         },
         "path": {
           "type": "string",
@@ -51,7 +51,7 @@
         },
         "glob": {
           "type": "string",
-          "description": "Glob pattern to filter files (e.g. \"*.rs\", \"src/**/*.ts\", \"*.{ts,tsx}\")"
+          "description": "Globset pattern to filter files (e.g. \"*.rs\", \"**/*.docx\", \"src/**/*.ts\", \"*.{ts,tsx}\"). Use **/ for recursive matches."
         },
         "context": {
           "type": "integer",

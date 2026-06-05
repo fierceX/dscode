@@ -9,7 +9,7 @@ pub fn glob(pattern: &str, path: &str) -> Result<String> {
     if pattern.is_empty() {
         bail!("Error: no pattern provided");
     }
-    let glob = globset::Glob::new(pattern)
+    let glob = build_glob_matcher(pattern)
         .map_err(|e| anyhow!("Error: invalid glob pattern '{pattern}': {e}"))?
         .compile_matcher();
     let base = Path::new(path);
@@ -43,7 +43,20 @@ pub fn glob(pattern: &str, path: &str) -> Result<String> {
         }
     }
 
+    if results.is_empty() {
+        let scope = base.display();
+        results.push(format!(
+            "No files matched pattern '{pattern}' under {scope}"
+        ));
+    }
+
     Ok(results.join("\n"))
+}
+
+fn build_glob_matcher(pattern: &str) -> std::result::Result<globset::Glob, globset::Error> {
+    globset::GlobBuilder::new(pattern)
+        .literal_separator(true)
+        .build()
 }
 
 fn glob_walk_root(base: &Path, pattern: &str) -> PathBuf {
@@ -96,7 +109,7 @@ pub fn grep(pattern: &str, path: &str, file_glob: &str, context: Option<usize>) 
 
     let file_glob_matcher = if !file_glob.is_empty() {
         Some(
-            globset::Glob::new(file_glob)
+            build_glob_matcher(file_glob)
                 .map_err(|e| anyhow!("Error: invalid glob '{file_glob}': {e}"))?
                 .compile_matcher(),
         )
@@ -121,9 +134,8 @@ pub fn grep(pattern: &str, path: &str, file_glob: &str, context: Option<usize>) 
         let file_path = entry.path();
 
         if let Some(ref matcher) = file_glob_matcher {
-            let f_display = file_path.display().to_string();
-            let f_normalized = f_display.strip_prefix("./").unwrap_or(&f_display);
-            if !matcher.is_match(f_normalized) {
+            let relative_path = relative_match_path(file_path, Path::new(path));
+            if !matcher.is_match(&relative_path) {
                 continue;
             }
         }
@@ -267,6 +279,15 @@ impl super::runner::ToolExec for GrepTool {
 mod tests {
     use super::*;
     use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("{name}-{}-{nanos}", std::process::id()))
+    }
 
     #[test]
     fn glob_empty_pattern_errors() {
@@ -306,6 +327,48 @@ mod tests {
 
         assert!(result.contains("src/main.rs"));
         assert!(result.contains("src/tools/search.rs"));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn glob_plain_pattern_matches_current_level_only() {
+        let dir = temp_dir("glob-plain");
+        fs::create_dir_all(dir.join("docs/specs")).unwrap();
+        fs::write(dir.join("root.docx"), "doc").unwrap();
+        fs::write(dir.join("docs/specs/api.docx"), "doc").unwrap();
+        fs::write(dir.join("docs/specs/notes.txt"), "note").unwrap();
+
+        let result = glob("*.docx", &dir.display().to_string()).unwrap();
+
+        assert!(result.contains("root.docx"));
+        assert!(!result.contains("docs/specs/api.docx"));
+        assert!(!result.contains("docs/specs/notes.txt"));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn glob_recursive_pattern_matches_nested_file_names() {
+        let dir = temp_dir("glob-recursive");
+        fs::create_dir_all(dir.join("src/bin")).unwrap();
+        fs::write(dir.join("src/bin/main.rs"), "fn main() {}\n").unwrap();
+
+        let result = glob("**/*.*", &dir.display().to_string()).unwrap();
+
+        assert!(result.contains("src/bin/main.rs"));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn glob_empty_result_reports_no_match() {
+        let dir = temp_dir("glob-empty");
+        fs::create_dir_all(&dir).unwrap();
+
+        let result = glob("*.docx", &dir.display().to_string()).unwrap();
+
+        assert!(result.contains("No files matched pattern '*.docx'"));
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -373,8 +436,49 @@ mod tests {
     }
 
     #[test]
-    fn glob_respects_hidden_dirs() {
-        // Glob doesn't need to respect .gitignore — it's file discovery, not search.
-        // This test verifies we can still find files in directories with dotfiles.
+    fn grep_file_glob_uses_globset_path_semantics() {
+        let dir = temp_dir("grep-glob-path");
+        fs::create_dir_all(dir.join("nested")).unwrap();
+        fs::write(dir.join("root.txt"), "secret\n").unwrap();
+        fs::write(dir.join("nested/data.txt"), "secret\n").unwrap();
+        fs::write(dir.join("nested/data.md"), "secret\n").unwrap();
+
+        let result = grep("secret", &dir.display().to_string(), "*.txt", None).unwrap();
+
+        assert!(result.contains("root.txt"));
+        assert!(!result.contains("nested/data.txt"));
+        assert!(!result.contains("nested/data.md"));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn grep_file_glob_recursive_pattern_matches_nested_files() {
+        let dir = temp_dir("grep-glob-recursive");
+        fs::create_dir_all(dir.join("nested")).unwrap();
+        fs::write(dir.join("nested/data.txt"), "secret\n").unwrap();
+        fs::write(dir.join("nested/data.md"), "secret\n").unwrap();
+
+        let result = grep("secret", &dir.display().to_string(), "**/*.txt", None).unwrap();
+
+        assert!(result.contains("nested/data.txt"));
+        assert!(!result.contains("nested/data.md"));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn glob_uses_ignore_standard_filters() {
+        let dir = temp_dir("glob-ignore");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(".hidden.txt"), "hidden\n").unwrap();
+        fs::write(dir.join("kept.txt"), "kept\n").unwrap();
+
+        let result = glob("*.txt", &dir.display().to_string()).unwrap();
+
+        assert!(result.contains("kept.txt"));
+        assert!(!result.contains(".hidden.txt"));
+
+        fs::remove_dir_all(&dir).ok();
     }
 }
