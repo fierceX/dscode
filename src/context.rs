@@ -11,7 +11,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Tool-level configuration extracted from Config, embedded in AgentSharedContext.
@@ -93,6 +93,8 @@ pub struct AgentSharedContext {
     pub is_sub_agent: bool,
     /// 用于中断当前任务的原子标志。每轮开始时重置为 false。
     pub interrupt: Arc<AtomicBool>,
+    /// Avoid repeated stderr warnings if event logging starts failing.
+    pub event_log_warned: AtomicBool,
 }
 
 impl AgentSharedContext {
@@ -119,24 +121,49 @@ impl AgentSharedContext {
     pub fn log_event(&self, value: Value) {
         let line = match serde_json::to_string(&value) {
             Ok(s) => s,
-            Err(_) => return,
+            Err(e) => {
+                self.warn_event_log_once(&format!("failed to serialize event: {e}"));
+                return;
+            }
         };
-        if self.config.log_events
-            && let Ok(mut file) = std::fs::OpenOptions::new()
+        if self.config.log_events {
+            match std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(&self.events_path)
-        {
-            let _ = writeln!(file, "{line}");
+            {
+                Ok(mut file) => {
+                    if let Err(e) = writeln!(file, "{line}") {
+                        self.warn_event_log_once(&format!(
+                            "failed to write event log {}: {e}",
+                            self.events_path.display()
+                        ));
+                    }
+                }
+                Err(e) => {
+                    self.warn_event_log_once(&format!(
+                        "failed to open event log {}: {e}",
+                        self.events_path.display()
+                    ));
+                }
+            }
         }
         if self.config.output_format == OutputFormat::StreamJson {
-            let _ = writeln!(std::io::stdout(), "{line}");
+            if let Err(e) = writeln!(std::io::stdout(), "{line}") {
+                self.warn_event_log_once(&format!("failed to write stream-json event: {e}"));
+            }
         }
     }
 
     pub fn log_typed_event(&self, event: crate::events::EventLog) {
         if let Ok(value) = serde_json::to_value(event) {
             self.log_event(value);
+        }
+    }
+
+    fn warn_event_log_once(&self, message: &str) {
+        if !self.event_log_warned.swap(true, Ordering::SeqCst) {
+            let _ = writeln!(std::io::stderr(), "[mink] Warning: {message}");
         }
     }
 }

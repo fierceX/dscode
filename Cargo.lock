@@ -1140,6 +1140,7 @@ dependencies = [
  "futures",
  "globset",
  "ignore",
+ "libc",
  "once_cell",
  "ratatui",
  "regex",

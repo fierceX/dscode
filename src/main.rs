@@ -84,7 +84,7 @@ async fn run(args: Vec<String>) -> Result<()> {
             Ok(req) => req,
             Err(e) => {
                 emit_failed_parse(&e);
-                return Ok(());
+                std::process::exit(1);
             }
         };
         if let Some(version) = req.version
@@ -93,11 +93,11 @@ async fn run(args: Vec<String>) -> Result<()> {
             emit_failed_parse(&format!(
                 "unsupported SDK protocol version: {version}, expected {PROTOCOL_VERSION}"
             ));
-            return Ok(());
+            std::process::exit(1);
         }
         if let Err(e) = validate_sdk_request(&req) {
             emit_failed_parse(&e);
-            return Ok(());
+            std::process::exit(1);
         }
         apply_sdk_request_options(&mut cfg, &req);
         Some(req)
@@ -231,6 +231,7 @@ async fn run(args: Vec<String>) -> Result<()> {
         immutable_prefix: Mutex::new(None),
         is_sub_agent: false,
         interrupt: Arc::new(AtomicBool::new(false)),
+        event_log_warned: AtomicBool::new(false),
     });
 
     let (orchestrator, cmd_tx) = new_orchestrator(ctx.clone());
@@ -246,6 +247,7 @@ async fn run(args: Vec<String>) -> Result<()> {
         ctx.log_event(serde_json::json!({"type":"session_start","session_id":sid}));
     }
 
+    let mut process_exit_code = 0i32;
     if cfg.agent_jsonl {
         // SDK protocol: prompt was already parsed above; execute one turn.
         let (done_tx, done_rx) = oneshot::channel();
@@ -272,8 +274,9 @@ async fn run(args: Vec<String>) -> Result<()> {
             summary_path: path_string(&spaths.summary),
             tool_call_count: result.tool_call_count,
             tool_error_count: result.tool_error_count,
-            error: result.error,
+            error: result.error.clone(),
         });
+        process_exit_code = exit_code_from_turn(result.status);
     } else if cfg.tui_mode {
         if let Some((_, signal_rx)) = tui_tx
             && let Err(e) = mink::tui::run_tui(
@@ -297,7 +300,21 @@ async fn run(args: Vec<String>) -> Result<()> {
             input: cfg.prompt.clone(),
             done: done_tx,
         })?;
-        let _ = done_rx.await;
+        let result = done_rx.await.unwrap_or_else(|e| {
+            mink::agent::orchestrator::TurnRunResult::failed(format!(
+                "orchestrator dropped turn result: {e}"
+            ))
+        });
+        emit_stream_json_final_if_needed(
+            &cfg,
+            &result,
+            &sid,
+            &resume_session_ref,
+            &home,
+            &cwd,
+            &spaths,
+        );
+        process_exit_code = exit_code_from_turn(result.status);
     } else {
         let mut input = String::new();
         tokio::io::AsyncReadExt::read_to_string(&mut tokio::io::stdin(), &mut input).await?;
@@ -306,7 +323,21 @@ async fn run(args: Vec<String>) -> Result<()> {
             input,
             done: done_tx,
         })?;
-        let _ = done_rx.await;
+        let result = done_rx.await.unwrap_or_else(|e| {
+            mink::agent::orchestrator::TurnRunResult::failed(format!(
+                "orchestrator dropped turn result: {e}"
+            ))
+        });
+        emit_stream_json_final_if_needed(
+            &cfg,
+            &result,
+            &sid,
+            &resume_session_ref,
+            &home,
+            &cwd,
+            &spaths,
+        );
+        process_exit_code = exit_code_from_turn(result.status);
     }
 
     cancel.cancel();
@@ -319,6 +350,10 @@ async fn run(args: Vec<String>) -> Result<()> {
         );
     }
 
+    if process_exit_code != 0 {
+        std::process::exit(process_exit_code);
+    }
+
     Ok(())
 }
 
@@ -329,6 +364,45 @@ fn sdk_status_from_turn(status: TurnStatus) -> SdkStatus {
         TurnStatus::Interrupted => SdkStatus::Interrupted,
         TurnStatus::MaxTurnsExceeded => SdkStatus::MaxTurnsExceeded,
     }
+}
+
+fn exit_code_from_turn(status: TurnStatus) -> i32 {
+    match status {
+        TurnStatus::Ok => 0,
+        TurnStatus::Failed => 1,
+        TurnStatus::Interrupted => 130,
+        TurnStatus::MaxTurnsExceeded => 2,
+    }
+}
+
+fn emit_stream_json_final_if_needed(
+    cfg: &mink::config::Config,
+    result: &mink::agent::orchestrator::TurnRunResult,
+    sid: &str,
+    resume_session_ref: &str,
+    home: &Path,
+    cwd: &Path,
+    spaths: &mink::session::paths::Paths,
+) {
+    if cfg.output_format != mink::config::OutputFormat::StreamJson || cfg.agent_jsonl {
+        return;
+    }
+    mink::sdk_protocol::emit_json_line(&SdkFinal {
+        event_type: "final",
+        version: PROTOCOL_VERSION,
+        status: sdk_status_from_turn(result.status),
+        session_id: sid.to_string(),
+        session_ref: resume_session_ref.to_string(),
+        home: path_string(home),
+        cwd: path_string(cwd),
+        events_path: path_string(&spaths.events),
+        conversation_path: path_string(&spaths.conversation),
+        artifacts_dir: path_string(&spaths.artifacts),
+        summary_path: path_string(&spaths.summary),
+        tool_call_count: result.tool_call_count,
+        tool_error_count: result.tool_error_count,
+        error: result.error.clone(),
+    });
 }
 
 fn apply_sdk_request_options(cfg: &mut mink::config::Config, req: &SdkRequest) {
@@ -364,6 +438,18 @@ fn apply_sdk_request_options(cfg: &mut mink::config::Config, req: &SdkRequest) {
     if let Some(sub_agent_timeout) = opts.sub_agent_timeout {
         cfg.sub_agent_timeout_secs = sub_agent_timeout;
         cfg.cli_overrides.sub_agent_timeout_secs = true;
+    }
+    if let Some(timeout) = opts.llm_first_event_timeout {
+        cfg.llm_first_event_timeout_secs = timeout;
+        cfg.cli_overrides.llm_first_event_timeout_secs = true;
+    }
+    if let Some(timeout) = opts.llm_idle_timeout {
+        cfg.llm_idle_timeout_secs = timeout;
+        cfg.cli_overrides.llm_idle_timeout_secs = true;
+    }
+    if let Some(timeout) = opts.llm_wait_heartbeat {
+        cfg.llm_wait_heartbeat_secs = timeout;
+        cfg.cli_overrides.llm_wait_heartbeat_secs = true;
     }
     if let Some(verbose) = opts.verbose {
         cfg.verbose = verbose;
@@ -605,6 +691,9 @@ fn print_usage() {
     println!("  --max-tokens N          Max output tokens (default: 81920)");
     println!("  --tool-timeout N        Tool execution timeout in seconds (default: 600)");
     println!("  --sub-agent-timeout N   Sub-agent execution timeout in seconds (default: 300)");
+    println!("  --llm-first-event-timeout N  Seconds to wait for first model event (default: 60)");
+    println!("  --llm-idle-timeout N    Seconds to wait between model events (default: 90)");
+    println!("  --llm-wait-heartbeat N  Waiting notice interval in seconds (default: 30)");
     println!("  --skill NAME            Load skill from .claude/skills/NAME/SKILL.md");
     println!("  --mission PATH          Load custom system prompt from MISSION.md file");
     println!("  --max-turns N           Max agent turns (default: 40)");

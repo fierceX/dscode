@@ -140,6 +140,12 @@ class SandboxConfig:
         Maximum number of processes (nsjail cgroup only).
     timeout_secs:
         Hard timeout for the entire agent run.
+    llm_first_event_timeout:
+        Seconds to wait for the first model stream event.
+    llm_idle_timeout:
+        Seconds to wait between model stream events.
+    llm_wait_heartbeat:
+        Seconds between waiting notices; set to 0 to disable notices.
     sandbox_backend:
         ``"auto"`` | ``"nsjail"`` | ``"bwrap"`` | ``"sandbox-exec"`` | ``"off"``.
         Passed to the Rust binary via ``MINK_LIMITS`` — the Rust side
@@ -182,6 +188,9 @@ class SandboxConfig:
     timeout_secs: int = 600
     tool_timeout: int = 600
     sub_agent_timeout: int = 300
+    llm_first_event_timeout: int = 60
+    llm_idle_timeout: int = 90
+    llm_wait_heartbeat: int = 30
     max_tokens: int = 81920
     max_turns: int = 40
     verbose: bool = False
@@ -583,6 +592,12 @@ class AgentSession:
             options["tool_timeout"] = self._config.tool_timeout
         if self._config.sub_agent_timeout != 300:
             options["sub_agent_timeout"] = self._config.sub_agent_timeout
+        if self._config.llm_first_event_timeout != 60:
+            options["llm_first_event_timeout"] = self._config.llm_first_event_timeout
+        if self._config.llm_idle_timeout != 90:
+            options["llm_idle_timeout"] = self._config.llm_idle_timeout
+        if self._config.llm_wait_heartbeat != 30:
+            options["llm_wait_heartbeat"] = self._config.llm_wait_heartbeat
         if self._config.verbose:
             options["verbose"] = True
         if extra_options:
@@ -609,12 +624,16 @@ class AgentSession:
             "timeout_secs": cfg.timeout_secs,
             "tool_timeout": cfg.tool_timeout,
             "sub_agent_timeout": cfg.sub_agent_timeout,
+            "llm_first_event_timeout": cfg.llm_first_event_timeout,
+            "llm_idle_timeout": cfg.llm_idle_timeout,
             "max_tokens": cfg.max_tokens,
             "max_turns": cfg.max_turns,
         }
         for name, value in positive_fields.items():
             if value <= 0:
                 raise ValueError(f"{name} must be greater than 0")
+        if cfg.llm_wait_heartbeat < 0:
+            raise ValueError("llm_wait_heartbeat must be zero or greater")
 
     def _build_sandbox_cmd(self) -> list[str]:
         """Build the full command line: sandbox wrapper + mink binary."""

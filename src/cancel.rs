@@ -54,10 +54,13 @@ impl CancellationToken {
     pub fn linked_child_token(&self) -> Self {
         let child = Self::new();
         let parent = self.clone();
-        let child_for_task = child.clone();
+        let child_from_parent = child.clone();
+        let child_done = child.clone();
         tokio::spawn(async move {
-            parent.cancelled().await;
-            child_for_task.cancel();
+            tokio::select! {
+                _ = parent.cancelled() => child_from_parent.cancel(),
+                _ = child_done.cancelled() => {}
+            }
         });
         child
     }

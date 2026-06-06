@@ -87,6 +87,7 @@ fn execute_sync(
     if let Some(cwd) = cwd {
         cmd.current_dir(cwd);
     }
+    crate::util::configure_child_process_group(&mut cmd);
     let mut child = cmd.spawn()?;
 
     let stdout_buf: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
@@ -112,14 +113,12 @@ fn execute_sync(
             }
             Ok(None) => {
                 if interrupt.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    crate::util::terminate_child_process_tree(&mut child);
                     exit_code = Some(130);
                     break;
                 }
                 if start_sync.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    crate::util::terminate_child_process_tree(&mut child);
                     timed_out = true;
                     break;
                 }

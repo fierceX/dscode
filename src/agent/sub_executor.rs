@@ -163,6 +163,7 @@ impl SubAgentExecutor {
             immutable_prefix: Mutex::new(None),
             is_sub_agent: true,
             interrupt: parent_ctx.interrupt.clone(),
+            event_log_warned: std::sync::atomic::AtomicBool::new(false),
         });
 
         Ok(Self {

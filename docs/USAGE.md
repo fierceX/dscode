@@ -162,6 +162,9 @@ prompt 为空且 stdin 是终端时自动进入交互模式。非终端 stdin �
 | `--max-context` | `1000000` | 上下文 token 上限。支持 `k`/`m` 后缀（如 `500K` / `1M`） |
 | `--tool-timeout` | `600` | 工具执行超时（秒） |
 | `--sub-agent-timeout` | `300` | 子代理执行超时（秒） |
+| `--llm-first-event-timeout` | `60` | LLM 请求成功后等待首个 stream event 的秒数 |
+| `--llm-idle-timeout` | `90` | LLM stream 两个事件之间允许空闲的秒数 |
+| `--llm-wait-heartbeat` | `30` | 等待模型响应时的提示间隔；设为 `0` 关闭提示 |
 | `--skill NAME` | — | 加载 skill（可重复使用） |
 | `--mission PATH` | — | 加载 MISSION.md 文件替换默认系统提示词 |
 | `--session [NAME]` | 自动生成 | 命名会话。提供名称可恢复 |
@@ -170,7 +173,7 @@ prompt 为空且 stdin 是终端时自动进入交互模式。非终端 stdin �
 | `--list-skills` | — | 列出可用 skill |
 | `-i` / `--interactive` | auto | REPL 交互模式 |
 | `--tui` | — | TUI 全屏模式 |
-| `--print` | — | ndjson 结构化输出（`--output-format stream-json` 别名） |
+| `--print` | — | ndjson 结构化输出（`--output-format stream-json` 别名），最后输出 `type=final` |
 | `--output-format FMT` | `human` | 输出格式：`human` / `stream-json` |
 | `--approval-mode MODE` | `yolo` | 工具审批模式：`yolo` / `write` / `always-ask` |
 | `--agent-jsonl` | — | Agent JSONL 协议（stdin 读 versioned request，stdout 输出事件流和最终 `final`，隐式启用 stream-json） |
@@ -200,6 +203,9 @@ max_turns = 40                            # 最大轮次
 max_context = "1M"                        # 最大上下文（支持 K/M 后缀）
 tool_timeout = 600                        # 工具超时（秒）
 sub_agent_timeout = 120                   # 子代理超时（秒）
+llm_first_event_timeout = 60              # 等待首个模型 stream event 的秒数
+llm_idle_timeout = 90                     # 模型 stream 空闲超时（秒）
+llm_wait_heartbeat = 30                   # 等待模型响应的提示间隔（秒，0=关闭）
 context_compact_pct = 85                  # 压缩触发百分比
 log_events = true                         # 事件日志
 

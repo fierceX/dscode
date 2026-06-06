@@ -23,7 +23,7 @@ mink 是一个 Rust 实现的轻量 AI coding agent，面向 DeepSeek / OpenAI-c
 ## 核心原则
 
 - **单进程主循环**：`OrchActor` 接收命令并为每个用户输入创建 `TurnExecutor`。
-- **机器协议优先**：`--print` 输出 stream-json 事件，`--agent-jsonl` 输出 single-shot Agent JSONL 事件和 `final`，便于上层编排。
+- **机器协议优先**：`--print` 输出 stream-json 事件并以 `final` 收尾，`--agent-jsonl` 输出 single-shot Agent JSONL 事件和 `final`，便于上层编排。
 - **Session 追加友好**：conversation、events、stats、summary、plan 都落在 session 目录。
 - **长输出可恢复**：工具输出超过上限时写入 artifact，conversation 只保留摘要和引用。
 - **读取入口统一**：`Read.path` 可读取文件和轻量 internal URL，并支持行 selector。

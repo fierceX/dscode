@@ -10,6 +10,7 @@ use anyhow::Result;
 use futures::StreamExt;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 
 /// 存储 LLM 流式响应阶段（Phase 1）的输出。
 struct StreamOutput {
@@ -127,6 +128,13 @@ impl TurnExecutor {
         let mut stop = String::new();
         let mut usage: Option<UsageEvent> = None;
         let mut saw_stop = false;
+        let mut saw_any_event = false;
+        let stream_started = Instant::now();
+        let mut last_event_at = stream_started;
+        let mut last_heartbeat_at = stream_started;
+        let first_event_timeout = positive_duration(self.ctx.config.llm_first_event_timeout_secs);
+        let idle_timeout = positive_duration(self.ctx.config.llm_idle_timeout_secs);
+        let heartbeat = positive_duration(self.ctx.config.llm_wait_heartbeat_secs);
 
         loop {
             if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.load(Ordering::SeqCst) {
@@ -140,6 +148,20 @@ impl TurnExecutor {
             let result = tokio::select! {
                 result = stream.next() => result,
                 _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {
+                    self.check_llm_wait_timeout(
+                        saw_any_event,
+                        stream_started,
+                        last_event_at,
+                        first_event_timeout,
+                        idle_timeout,
+                    )?;
+                    self.maybe_render_llm_wait_heartbeat(
+                        saw_any_event,
+                        stream_started,
+                        last_event_at,
+                        &mut last_heartbeat_at,
+                        heartbeat,
+                    );
                     if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.load(Ordering::SeqCst) {
                         self.ctx
                             .log_event(serde_json::json!({"type":"stop","reason":"interrupted"}));
@@ -154,6 +176,8 @@ impl TurnExecutor {
                 break;
             };
             let evt = result?;
+            saw_any_event = true;
+            last_event_at = Instant::now();
 
             match evt {
                 Event::Thinking(t) => {
@@ -214,6 +238,83 @@ impl TurnExecutor {
             stop,
             usage,
         })
+    }
+
+    fn check_llm_wait_timeout(
+        &self,
+        saw_any_event: bool,
+        stream_started: Instant,
+        last_event_at: Instant,
+        first_event_timeout: Option<Duration>,
+        idle_timeout: Option<Duration>,
+    ) -> anyhow::Result<()> {
+        let now = Instant::now();
+        if !saw_any_event {
+            if let Some(timeout) = first_event_timeout
+                && now.duration_since(stream_started) >= timeout
+            {
+                let message = format!(
+                    "LLM stream first event timeout after {} seconds",
+                    timeout.as_secs()
+                );
+                self.ctx.log_event(serde_json::json!({
+                    "type": "turn_error",
+                    "category": "llm_first_event_timeout",
+                    "error": message,
+                    "elapsed_ms": now.duration_since(stream_started).as_millis(),
+                }));
+                anyhow::bail!(message);
+            }
+            return Ok(());
+        }
+
+        if let Some(timeout) = idle_timeout
+            && now.duration_since(last_event_at) >= timeout
+        {
+            let message = format!(
+                "LLM stream idle timeout after {} seconds without events",
+                timeout.as_secs()
+            );
+            self.ctx.log_event(serde_json::json!({
+                "type": "turn_error",
+                "category": "llm_idle_timeout",
+                "error": message,
+                "idle_ms": now.duration_since(last_event_at).as_millis(),
+            }));
+            anyhow::bail!(message);
+        }
+        Ok(())
+    }
+
+    fn maybe_render_llm_wait_heartbeat(
+        &self,
+        saw_any_event: bool,
+        stream_started: Instant,
+        last_event_at: Instant,
+        last_heartbeat_at: &mut Instant,
+        heartbeat: Option<Duration>,
+    ) {
+        let Some(heartbeat) = heartbeat else {
+            return;
+        };
+        let now = Instant::now();
+        if now.duration_since(*last_heartbeat_at) < heartbeat {
+            return;
+        }
+        *last_heartbeat_at = now;
+        let phase = if saw_any_event { "idle" } else { "first_event" };
+        let elapsed = now.duration_since(stream_started).as_secs();
+        let idle = now.duration_since(last_event_at).as_secs();
+        self.ctx.log_event(serde_json::json!({
+            "type": "llm_wait",
+            "phase": phase,
+            "elapsed_secs": elapsed,
+            "idle_secs": idle,
+        }));
+        self.ctx.display.render_info(&format!(
+            "Waiting for model response... elapsed={}s idle={}s",
+            elapsed, idle
+        ));
     }
 
     /// Phase 1b: 从 thinking/text 中回收漏报的工具调用（scavenge）。
@@ -579,6 +680,10 @@ impl TurnExecutor {
 
 fn is_recovery_blocked_tool(name: &str) -> bool {
     matches!(name, "Edit" | "Write")
+}
+
+fn positive_duration(seconds: i32) -> Option<Duration> {
+    (seconds > 0).then(|| Duration::from_secs(seconds as u64))
 }
 
 fn blocked_by_signal_recovery(call: ToolCallEvent) -> crate::tools::runner::ToolRunResult {

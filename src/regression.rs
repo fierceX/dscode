@@ -17,12 +17,55 @@ use crate::session::compaction::CompactionEngine;
 use crate::session::paths;
 use crate::tools::runner::{ToolRunResult, ToolRunner};
 use crate::ui::{Display, StatsSnapshot};
+use futures::StreamExt;
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+struct PendingLlmClient;
+
+#[async_trait::async_trait]
+impl LlmClient for PendingLlmClient {
+    fn model(&self) -> &str {
+        "flash"
+    }
+
+    async fn stream(
+        &self,
+        _ctx: &AgentSharedContext,
+        _messages_json: &[serde_json::Value],
+        _tools_json: &[serde_json::Value],
+        _system_prompt: &str,
+    ) -> anyhow::Result<Box<dyn futures::Stream<Item = anyhow::Result<Event>> + Unpin + Send>> {
+        Ok(Box::new(futures::stream::pending()))
+    }
+}
+
+struct IdleAfterTextLlmClient;
+
+#[async_trait::async_trait]
+impl LlmClient for IdleAfterTextLlmClient {
+    fn model(&self) -> &str {
+        "flash"
+    }
+
+    async fn stream(
+        &self,
+        _ctx: &AgentSharedContext,
+        _messages_json: &[serde_json::Value],
+        _tools_json: &[serde_json::Value],
+        _system_prompt: &str,
+    ) -> anyhow::Result<Box<dyn futures::Stream<Item = anyhow::Result<Event>> + Unpin + Send>> {
+        let stream = futures::stream::iter(vec![Ok(Event::Text(TextEvent {
+            content: "partial".into(),
+        }))])
+        .chain(futures::stream::pending());
+        Ok(Box::new(stream))
+    }
+}
 
 struct NoopDisplay {
     info: Mutex<Vec<String>>,
@@ -157,6 +200,7 @@ async fn harness_with_config(
         immutable_prefix: Mutex::new(None),
         is_sub_agent,
         interrupt: Arc::new(AtomicBool::new(false)),
+        event_log_warned: AtomicBool::new(false),
     });
     Ok(TestHarness { ctx, cwd, display })
 }
@@ -459,6 +503,54 @@ async fn turn_stream_without_stop_event_fails_without_assistant_message() -> any
     let lines = h.ctx.store.lines().await?;
     assert_eq!(lines.len(), 1);
     assert_eq!(lines[0]["role"], "user");
+    Ok(())
+}
+
+#[tokio::test]
+async fn turn_llm_first_event_timeout_fails_with_clear_error() -> anyhow::Result<()> {
+    let h = harness_with_config("turn-first-event-timeout", false, 300, |cfg| {
+        cfg.llm_first_event_timeout_secs = 1;
+        cfg.llm_idle_timeout_secs = 10;
+        cfg.llm_wait_heartbeat_secs = 0;
+    })
+    .await?;
+    let mut executor = TurnExecutor::new(h.ctx.clone(), Arc::new(PendingLlmClient));
+    let err = executor
+        .execute("model never starts", None)
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("first event timeout"), "{err}");
+    let events = tokio::fs::read_to_string(&h.ctx.events_path).await?;
+    assert!(
+        events.contains(r#""category":"llm_first_event_timeout""#),
+        "{events}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn turn_llm_idle_timeout_fails_after_partial_stream() -> anyhow::Result<()> {
+    let h = harness_with_config("turn-idle-timeout", false, 300, |cfg| {
+        cfg.llm_first_event_timeout_secs = 10;
+        cfg.llm_idle_timeout_secs = 1;
+        cfg.llm_wait_heartbeat_secs = 0;
+    })
+    .await?;
+    let mut executor = TurnExecutor::new(h.ctx.clone(), Arc::new(IdleAfterTextLlmClient));
+    let err = executor
+        .execute("model stalls", None)
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("idle timeout"), "{err}");
+    let events = tokio::fs::read_to_string(&h.ctx.events_path).await?;
+    assert!(
+        events.contains(r#""category":"llm_idle_timeout""#),
+        "{events}"
+    );
     Ok(())
 }
 
@@ -1001,6 +1093,8 @@ async fn orchestrator_user_input_runs_turn_and_logs_tracking() -> anyhow::Result
     let events = tokio::fs::read_to_string(&h.ctx.events_path).await?;
     assert!(events.contains(r#""type":"turn_start""#), "{events}");
     assert!(events.contains(r#""type":"turn_tracking""#), "{events}");
+    assert!(events.contains(r#""type":"turn_final""#), "{events}");
+    assert!(events.contains(r#""status":"ok""#), "{events}");
     assert!(events.contains(r#""decision":"Stop""#), "{events}");
     Ok(())
 }

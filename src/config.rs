@@ -78,6 +78,9 @@ pub struct MinkConfigFile {
     pub max_context: Option<String>, // supports K/M suffix
     pub tool_timeout: Option<i32>,
     pub sub_agent_timeout: Option<i32>,
+    pub llm_first_event_timeout: Option<i32>,
+    pub llm_idle_timeout: Option<i32>,
+    pub llm_wait_heartbeat: Option<i32>,
     pub context_compact_pct: Option<u8>,
     pub log_events: Option<bool>,
     /// `[sandbox]` section — when enabled, mink re-execs itself inside a sandbox.
@@ -137,6 +140,9 @@ pub struct Config {
     pub max_tokens: i32,
     pub tool_timeout_secs: i32,
     pub sub_agent_timeout_secs: i32,
+    pub llm_first_event_timeout_secs: i32,
+    pub llm_idle_timeout_secs: i32,
+    pub llm_wait_heartbeat_secs: i32,
     pub tool_result_max_bytes: usize,
     pub file_write_max_bytes: usize,
     pub output_format: OutputFormat,
@@ -176,6 +182,9 @@ pub struct CliOverrides {
     pub max_tokens: bool,
     pub tool_timeout_secs: bool,
     pub sub_agent_timeout_secs: bool,
+    pub llm_first_event_timeout_secs: bool,
+    pub llm_idle_timeout_secs: bool,
+    pub llm_wait_heartbeat_secs: bool,
     pub api_key: bool,
     pub base_url: bool,
     pub max_turns: bool,
@@ -190,6 +199,9 @@ impl Default for Config {
             max_tokens: 81920,
             tool_timeout_secs: 600,
             sub_agent_timeout_secs: 300,
+            llm_first_event_timeout_secs: 60,
+            llm_idle_timeout_secs: 90,
+            llm_wait_heartbeat_secs: 30,
             tool_result_max_bytes: 100_000,
             file_write_max_bytes: 1_048_576,
             output_format: OutputFormat::Human,
@@ -246,6 +258,24 @@ pub fn parse_args(args: Vec<String>) -> Result<Config> {
             "--sub-agent-timeout" => {
                 cfg.sub_agent_timeout_secs = require_value(&args, i)?.parse()?;
                 cfg.cli_overrides.sub_agent_timeout_secs = true;
+                i += 2;
+            }
+            "--llm-first-event-timeout" => {
+                cfg.llm_first_event_timeout_secs =
+                    require_positive_i32_value(&args, i, "--llm-first-event-timeout")?;
+                cfg.cli_overrides.llm_first_event_timeout_secs = true;
+                i += 2;
+            }
+            "--llm-idle-timeout" => {
+                cfg.llm_idle_timeout_secs =
+                    require_positive_i32_value(&args, i, "--llm-idle-timeout")?;
+                cfg.cli_overrides.llm_idle_timeout_secs = true;
+                i += 2;
+            }
+            "--llm-wait-heartbeat" => {
+                cfg.llm_wait_heartbeat_secs =
+                    require_nonnegative_i32_value(&args, i, "--llm-wait-heartbeat")?;
+                cfg.cli_overrides.llm_wait_heartbeat_secs = true;
                 i += 2;
             }
             "--skill" => {
@@ -373,6 +403,22 @@ fn require_value(args: &[String], i: usize) -> Result<String> {
     Ok(args[i + 1].clone())
 }
 
+fn require_positive_i32_value(args: &[String], i: usize, name: &str) -> Result<i32> {
+    let value: i32 = require_value(args, i)?.parse()?;
+    if value <= 0 {
+        bail!("{name} must be greater than 0");
+    }
+    Ok(value)
+}
+
+fn require_nonnegative_i32_value(args: &[String], i: usize, name: &str) -> Result<i32> {
+    let value: i32 = require_value(args, i)?.parse()?;
+    if value < 0 {
+        bail!("{name} must be zero or greater");
+    }
+    Ok(value)
+}
+
 pub fn apply_config_file(cfg: &mut Config) {
     // Priority: CLI > project .minkrc > user ~/.minkrc > env > default.
     // CLI is inferred by comparing the already-parsed config to defaults.
@@ -450,6 +496,12 @@ fn apply_config_sources(
         cfg.cli_overrides.tool_timeout_secs || cfg.tool_timeout_secs != defaults.tool_timeout_secs;
     let cli_sub_agent_timeout = cfg.cli_overrides.sub_agent_timeout_secs
         || cfg.sub_agent_timeout_secs != defaults.sub_agent_timeout_secs;
+    let cli_llm_first_event_timeout = cfg.cli_overrides.llm_first_event_timeout_secs
+        || cfg.llm_first_event_timeout_secs != defaults.llm_first_event_timeout_secs;
+    let cli_llm_idle_timeout = cfg.cli_overrides.llm_idle_timeout_secs
+        || cfg.llm_idle_timeout_secs != defaults.llm_idle_timeout_secs;
+    let cli_llm_wait_heartbeat = cfg.cli_overrides.llm_wait_heartbeat_secs
+        || cfg.llm_wait_heartbeat_secs != defaults.llm_wait_heartbeat_secs;
     let cli_tool_approval_mode = cfg.cli_overrides.tool_approval_mode
         || cfg.tool_approval_mode != defaults.tool_approval_mode;
 
@@ -481,6 +533,23 @@ fn apply_config_sources(
         if !cli_sub_agent_timeout && let Some(sub_agent_timeout) = toml_cfg.sub_agent_timeout {
             cfg.sub_agent_timeout_secs = sub_agent_timeout;
         }
+        if !cli_llm_first_event_timeout && let Some(timeout) = toml_cfg.llm_first_event_timeout {
+            apply_positive_i32_config(
+                &mut cfg.llm_first_event_timeout_secs,
+                timeout,
+                "llm_first_event_timeout",
+            );
+        }
+        if !cli_llm_idle_timeout && let Some(timeout) = toml_cfg.llm_idle_timeout {
+            apply_positive_i32_config(&mut cfg.llm_idle_timeout_secs, timeout, "llm_idle_timeout");
+        }
+        if !cli_llm_wait_heartbeat && let Some(timeout) = toml_cfg.llm_wait_heartbeat {
+            apply_nonnegative_i32_config(
+                &mut cfg.llm_wait_heartbeat_secs,
+                timeout,
+                "llm_wait_heartbeat",
+            );
+        }
         if let Some(context_compact_pct) = toml_cfg.context_compact_pct {
             cfg.context_compact_pct = context_compact_pct;
         }
@@ -497,6 +566,22 @@ fn apply_config_sources(
                 }
             }
         }
+    }
+}
+
+fn apply_positive_i32_config(target: &mut i32, value: i32, name: &str) {
+    if value > 0 {
+        *target = value;
+    } else {
+        eprintln!("[mink] Warning: ignoring {name}={value}; must be greater than 0");
+    }
+}
+
+fn apply_nonnegative_i32_config(target: &mut i32, value: i32, name: &str) {
+    if value >= 0 {
+        *target = value;
+    } else {
+        eprintln!("[mink] Warning: ignoring {name}={value}; must be zero or greater");
     }
 }
 
@@ -813,18 +898,53 @@ mod tests {
     }
 
     #[test]
+    fn parse_args_llm_timeout_flags() {
+        let cfg = parse_args(vec![
+            "--llm-first-event-timeout".into(),
+            "7".into(),
+            "--llm-idle-timeout".into(),
+            "8".into(),
+            "--llm-wait-heartbeat".into(),
+            "9".into(),
+        ])
+        .unwrap();
+        assert_eq!(cfg.llm_first_event_timeout_secs, 7);
+        assert_eq!(cfg.llm_idle_timeout_secs, 8);
+        assert_eq!(cfg.llm_wait_heartbeat_secs, 9);
+        assert!(cfg.cli_overrides.llm_first_event_timeout_secs);
+        assert!(cfg.cli_overrides.llm_idle_timeout_secs);
+        assert!(cfg.cli_overrides.llm_wait_heartbeat_secs);
+    }
+
+    #[test]
+    fn parse_args_rejects_invalid_llm_timeout_flags() {
+        assert!(parse_args(vec!["--llm-first-event-timeout".into(), "0".into()]).is_err());
+        assert!(parse_args(vec!["--llm-idle-timeout".into(), "-1".into()]).is_err());
+        assert!(parse_args(vec!["--llm-wait-heartbeat".into(), "-1".into()]).is_err());
+
+        let cfg = parse_args(vec!["--llm-wait-heartbeat".into(), "0".into()]).unwrap();
+        assert_eq!(cfg.llm_wait_heartbeat_secs, 0);
+    }
+
+    #[test]
     fn parse_config_file_overrides_model() {
         let toml_str = r#"
 model = "pro"
 max_tokens = 163840
 max_context = "500K"
 tool_timeout = 120
+llm_first_event_timeout = 11
+llm_idle_timeout = 22
+llm_wait_heartbeat = 3
 "#;
         let parsed: MinkConfigFile = toml::from_str(toml_str).unwrap();
         assert_eq!(parsed.model.unwrap(), "pro");
         assert_eq!(parsed.max_tokens.unwrap(), 163840);
         assert_eq!(parsed.max_context.unwrap(), "500K");
         assert_eq!(parsed.tool_timeout.unwrap(), 120);
+        assert_eq!(parsed.llm_first_event_timeout.unwrap(), 11);
+        assert_eq!(parsed.llm_idle_timeout.unwrap(), 22);
+        assert_eq!(parsed.llm_wait_heartbeat.unwrap(), 3);
     }
 
     #[test]
@@ -932,6 +1052,28 @@ Read = "allow"
         apply_log_events_env_value(&mut cfg, "0");
         apply_config_sources(&mut cfg, &defaults, None, Some(&project));
         assert!(cfg.log_events);
+    }
+
+    #[test]
+    fn config_file_invalid_llm_timeouts_are_ignored() {
+        let defaults = Config::default();
+        let project = MinkConfigFile {
+            llm_first_event_timeout: Some(0),
+            llm_idle_timeout: Some(-5),
+            llm_wait_heartbeat: Some(-1),
+            ..Default::default()
+        };
+        let mut cfg = Config::default();
+        apply_config_sources(&mut cfg, &defaults, None, Some(&project));
+        assert_eq!(
+            cfg.llm_first_event_timeout_secs,
+            defaults.llm_first_event_timeout_secs
+        );
+        assert_eq!(cfg.llm_idle_timeout_secs, defaults.llm_idle_timeout_secs);
+        assert_eq!(
+            cfg.llm_wait_heartbeat_secs,
+            defaults.llm_wait_heartbeat_secs
+        );
     }
 
     #[test]

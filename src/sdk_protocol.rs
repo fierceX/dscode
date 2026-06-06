@@ -36,6 +36,9 @@ pub struct SdkOptions {
     pub max_turns: Option<i32>,
     pub tool_timeout: Option<i32>,
     pub sub_agent_timeout: Option<i32>,
+    pub llm_first_event_timeout: Option<i32>,
+    pub llm_idle_timeout: Option<i32>,
+    pub llm_wait_heartbeat: Option<i32>,
     pub verbose: Option<bool>,
     pub session_id: Option<String>,
 }
@@ -147,6 +150,23 @@ pub fn validate_sdk_request(req: &SdkRequest) -> Result<(), String> {
     {
         return Err("invalid SDK request: sub_agent_timeout must be greater than 0".to_string());
     }
+    if let Some(timeout) = opts.llm_first_event_timeout
+        && timeout <= 0
+    {
+        return Err(
+            "invalid SDK request: llm_first_event_timeout must be greater than 0".to_string(),
+        );
+    }
+    if let Some(timeout) = opts.llm_idle_timeout
+        && timeout <= 0
+    {
+        return Err("invalid SDK request: llm_idle_timeout must be greater than 0".to_string());
+    }
+    if let Some(timeout) = opts.llm_wait_heartbeat
+        && timeout < 0
+    {
+        return Err("invalid SDK request: llm_wait_heartbeat must be zero or greater".to_string());
+    }
     Ok(())
 }
 
@@ -184,6 +204,20 @@ mod tests {
             parse_agent_jsonl_request(r#"{"prompt":"hi","options":{"max_tokens":0}}"#).unwrap();
         let err = validate_sdk_request(&req).unwrap_err();
         assert!(err.contains("max_tokens must be greater than 0"));
+    }
+
+    #[test]
+    fn validate_sdk_request_rejects_bad_llm_timeout_options() {
+        let req = parse_agent_jsonl_request(r#"{"prompt":"hi","options":{"llm_idle_timeout":0}}"#)
+            .unwrap();
+        let err = validate_sdk_request(&req).unwrap_err();
+        assert!(err.contains("llm_idle_timeout must be greater than 0"));
+
+        let req =
+            parse_agent_jsonl_request(r#"{"prompt":"hi","options":{"llm_wait_heartbeat":-1}}"#)
+                .unwrap();
+        let err = validate_sdk_request(&req).unwrap_err();
+        assert!(err.contains("llm_wait_heartbeat must be zero or greater"));
     }
 
     #[test]

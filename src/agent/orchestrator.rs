@@ -6,6 +6,7 @@ use crate::llm::client::{AsyncLlClient, LlmClient};
 use anyhow::Result;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 use tokio::sync::{mpsc, oneshot};
 
 /// OrchActor is the central orchestrator: receives user inputs,
@@ -45,6 +46,17 @@ pub enum TurnStatus {
     Failed,
     Interrupted,
     MaxTurnsExceeded,
+}
+
+impl TurnStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TurnStatus::Ok => "ok",
+            TurnStatus::Failed => "failed",
+            TurnStatus::Interrupted => "interrupted",
+            TurnStatus::MaxTurnsExceeded => "max_turns_exceeded",
+        }
+    }
 }
 
 impl TurnRunResult {
@@ -178,6 +190,7 @@ impl OrchActor {
     }
 
     async fn handle_user_input(&mut self, input: String) -> TurnRunResult {
+        let started_at = Instant::now();
         self.belief.reset();
         self.ctx.interrupt.store(false, Ordering::SeqCst);
         self.refresh_title().await;
@@ -189,7 +202,9 @@ impl OrchActor {
                     .display
                     .render_error(&format!("Failed to prepare turn: {e}"));
                 self.refresh_title().await;
-                return TurnRunResult::failed(format!("failed to prepare turn: {e}"));
+                let result = TurnRunResult::failed(format!("failed to prepare turn: {e}"));
+                self.log_turn_final(&result, started_at.elapsed().as_millis() as u64);
+                return result;
             }
         };
 
@@ -202,6 +217,7 @@ impl OrchActor {
         };
 
         self.refresh_title().await;
+        self.log_turn_final(&result, started_at.elapsed().as_millis() as u64);
         result
     }
 
@@ -276,6 +292,17 @@ impl OrchActor {
             "tool_error_count": executor.tool_error_count(),
             "belief": self.belief.belief(),
             "model": model,
+        }));
+    }
+
+    fn log_turn_final(&self, result: &TurnRunResult, elapsed_ms: u64) {
+        self.ctx.log_event(serde_json::json!({
+            "type": "turn_final",
+            "status": result.status.as_str(),
+            "tool_call_count": result.tool_call_count,
+            "tool_error_count": result.tool_error_count,
+            "elapsed_ms": elapsed_ms,
+            "error": result.error.clone(),
         }));
     }
 

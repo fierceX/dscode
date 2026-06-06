@@ -224,11 +224,11 @@ impl LlmClient for AsyncLlClient {
         let resp = self.send_with_retry(ctx, body).await?;
 
         let (tx, rx) = mpsc::unbounded_channel();
-        let cancel = ctx.cancel.child_token();
+        let cancel = ctx.cancel.linked_child_token();
 
-        Self::spawn_stream_task(resp, cancel, tx);
+        Self::spawn_stream_task(resp, cancel.clone(), tx);
 
-        Ok(Box::new(SseEventStream { rx }))
+        Ok(Box::new(SseEventStream { rx, cancel }))
     }
 }
 
@@ -242,6 +242,13 @@ fn can_retry(attempt: u32, start: std::time::Instant) -> bool {
 
 pub struct SseEventStream {
     rx: mpsc::UnboundedReceiver<Result<Event>>,
+    cancel: crate::cancel::CancellationToken,
+}
+
+impl Drop for SseEventStream {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
 }
 
 impl futures::Stream for SseEventStream {
@@ -454,6 +461,7 @@ mod tests {
             immutable_prefix: Mutex::new(None),
             is_sub_agent: false,
             interrupt: Arc::new(AtomicBool::new(false)),
+            event_log_warned: AtomicBool::new(false),
         }))
     }
 

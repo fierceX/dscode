@@ -111,6 +111,9 @@ print(result["text"])
 | `timeout_secs` | `600` | agent 运行总超时（秒），超时会终止 agent 进程组 |
 | `tool_timeout` | `600` | 单次工具调用超时（秒） |
 | `sub_agent_timeout` | `300` | 子代理执行超时（秒） |
+| `llm_first_event_timeout` | `60` | 等待首个模型 stream event 的秒数 |
+| `llm_idle_timeout` | `90` | 模型 stream 空闲超时（秒） |
+| `llm_wait_heartbeat` | `30` | 等待模型响应的提示间隔；设为 `0` 关闭提示 |
 | `max_tokens` | `81920` | 输出 token 上限 |
 | `max_turns` | `40` | 最大循环轮数 |
 | `max_memory_mb` | `1024` | 内存限制（仅 nsjail cgroup） |
