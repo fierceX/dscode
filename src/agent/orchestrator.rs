@@ -23,12 +23,71 @@ pub struct OrchActor {
 pub enum OrchCmd {
     UserInput {
         input: String,
-        done: oneshot::Sender<()>,
+        done: oneshot::Sender<TurnRunResult>,
     },
     SetModel(String),
     Compact {
         done: oneshot::Sender<()>,
     },
+}
+
+#[derive(Debug, Clone)]
+pub struct TurnRunResult {
+    pub status: TurnStatus,
+    pub tool_call_count: u32,
+    pub tool_error_count: u32,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnStatus {
+    Ok,
+    Failed,
+    Interrupted,
+    MaxTurnsExceeded,
+}
+
+impl TurnRunResult {
+    pub fn ok(tool_call_count: u32, tool_error_count: u32) -> Self {
+        Self {
+            status: TurnStatus::Ok,
+            tool_call_count,
+            tool_error_count,
+            error: None,
+        }
+    }
+
+    pub fn failed(error: impl Into<String>) -> Self {
+        Self {
+            status: TurnStatus::Failed,
+            tool_call_count: 0,
+            tool_error_count: 0,
+            error: Some(error.into()),
+        }
+    }
+
+    fn from_decision(decision: &TurnDecision, executor: &TurnExecutor) -> Self {
+        let status = match decision {
+            TurnDecision::Stop | TurnDecision::Continue => TurnStatus::Ok,
+            TurnDecision::Interrupted => TurnStatus::Interrupted,
+            TurnDecision::MaxTurnsExceeded => TurnStatus::MaxTurnsExceeded,
+            TurnDecision::Failed(_) => TurnStatus::Failed,
+        };
+        let error = match decision {
+            TurnDecision::Failed(msg) => Some(msg.clone()),
+            TurnDecision::Interrupted => Some("interrupted".to_string()),
+            TurnDecision::MaxTurnsExceeded => {
+                Some("max_turns exhausted before end_turn".to_string())
+            }
+            _ => None,
+        };
+        Self {
+            status,
+            tool_call_count: executor.tool_call_count(),
+            tool_error_count: executor.tool_error_count(),
+            error,
+        }
+    }
 }
 
 impl OrchActor {
@@ -64,8 +123,8 @@ impl OrchActor {
             tokio::select! {
                 cmd = self.cmd_rx.recv() => match cmd {
                     Some(OrchCmd::UserInput { input, done }) => {
-                        self.handle_user_input(input).await;
-                        let _ = done.send(());
+                        let result = self.handle_user_input(input).await;
+                        let _ = done.send(result);
                     }
                     Some(OrchCmd::SetModel(model)) => {
                         self.handle_model_command(&model).await;
@@ -118,7 +177,7 @@ impl OrchActor {
         Ok(())
     }
 
-    async fn handle_user_input(&mut self, input: String) {
+    async fn handle_user_input(&mut self, input: String) -> TurnRunResult {
         self.belief.reset();
         self.ctx.interrupt.store(false, Ordering::SeqCst);
         self.refresh_title().await;
@@ -129,21 +188,21 @@ impl OrchActor {
                 self.ctx
                     .display
                     .render_error(&format!("Failed to prepare turn: {e}"));
-                return;
+                self.refresh_title().await;
+                return TurnRunResult::failed(format!("failed to prepare turn: {e}"));
             }
         };
 
-        match executor.execute(&input, Some(&mut self.belief)).await {
+        let result = match executor.execute(&input, Some(&mut self.belief)).await {
             Ok((decision, effects)) => {
                 self.post_process_turn(decision, effects, &executor, &model)
-                    .await;
+                    .await
             }
-            Err(e) => {
-                self.handle_turn_error(e, &model).await;
-            }
-        }
+            Err(e) => self.handle_turn_error(e, &executor, &model).await,
+        };
 
         self.refresh_title().await;
+        result
     }
 
     async fn prepare_turn(&mut self) -> Result<(String, String, TurnExecutor)> {
@@ -175,7 +234,7 @@ impl OrchActor {
         effects: Vec<TurnEffect>,
         executor: &TurnExecutor,
         model: &str,
-    ) {
+    ) -> TurnRunResult {
         for effect in &effects {
             match effect {
                 TurnEffect::PlanCleared => {
@@ -187,20 +246,27 @@ impl OrchActor {
             }
         }
 
-        self.log_turn_end(executor, &decision, model);
+        self.log_turn_tracking(executor, &decision, model);
 
         if let TurnDecision::Failed(ref msg) = decision
             && msg != "interrupted"
         {
             self.ctx.display.render_error(msg);
         }
+        if decision == TurnDecision::MaxTurnsExceeded {
+            self.ctx
+                .display
+                .render_error("max_turns exhausted before end_turn");
+        }
+        TurnRunResult::from_decision(&decision, executor)
     }
 
-    fn log_turn_end(&self, executor: &TurnExecutor, decision: &TurnDecision, model: &str) {
+    fn log_turn_tracking(&self, executor: &TurnExecutor, decision: &TurnDecision, model: &str) {
         let decision_str = match decision {
             TurnDecision::Stop => "Stop",
             TurnDecision::Continue => "Continue",
             TurnDecision::Interrupted => "Interrupted",
+            TurnDecision::MaxTurnsExceeded => "MaxTurnsExceeded",
             TurnDecision::Failed(_) => "Failed",
         };
         self.ctx.log_event(serde_json::json!({
@@ -213,11 +279,17 @@ impl OrchActor {
         }));
     }
 
-    async fn handle_turn_error(&mut self, e: anyhow::Error, model: &str) {
+    async fn handle_turn_error(
+        &mut self,
+        e: anyhow::Error,
+        executor: &TurnExecutor,
+        model: &str,
+    ) -> TurnRunResult {
         let info = errors::classify_anyhow(&e);
+        let error = format!("{e}");
         self.ctx.log_event(serde_json::json!({
             "type": "turn_error",
-            "error": format!("{e}"),
+            "error": error,
             "category": format!("{:?}", info.category),
             "severity": format!("{:?}", info.severity),
             "belief": self.belief.belief(),
@@ -229,6 +301,12 @@ impl OrchActor {
             self.ctx
                 .display
                 .render_error(&format!("Turn execution error: {e}"));
+        }
+        TurnRunResult {
+            status: TurnStatus::Failed,
+            tool_call_count: executor.tool_call_count(),
+            tool_error_count: executor.tool_error_count(),
+            error: Some(error),
         }
     }
 

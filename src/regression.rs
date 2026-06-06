@@ -485,10 +485,7 @@ async fn turn_max_turns_exhaustion_is_failed_not_stop() -> anyhow::Result<()> {
     let mut executor = TurnExecutor::new(h.ctx.clone(), llm);
     let (decision, effects) = executor.execute("read until exhausted", None).await?;
 
-    assert_eq!(
-        decision,
-        TurnDecision::Failed("max_turns exhausted before end_turn".into())
-    );
+    assert_eq!(decision, TurnDecision::MaxTurnsExceeded);
     assert!(effects.is_empty());
     assert_eq!(executor.tool_call_count(), 1);
     Ok(())
@@ -832,10 +829,7 @@ async fn clean_tool_call_with_belief_takes_decision_none_path() -> anyhow::Resul
     let mut executor = TurnExecutor::new(h.ctx.clone(), llm);
     let mut belief = BeliefTracker::new(16);
     let (decision, effects) = executor.execute("read clean", Some(&mut belief)).await?;
-    assert_eq!(
-        decision,
-        TurnDecision::Failed("max_turns exhausted before end_turn".into())
-    );
+    assert_eq!(decision, TurnDecision::MaxTurnsExceeded);
     assert!(effects.is_empty());
     Ok(())
 }

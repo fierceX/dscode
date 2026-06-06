@@ -50,6 +50,7 @@ pub enum TurnDecision {
     Continue,
     Stop,
     Interrupted,
+    MaxTurnsExceeded,
     Failed(String),
 }
 
@@ -572,10 +573,7 @@ impl TurnExecutor {
             messages = self.ctx.store.lines().await?;
         }
 
-        Ok((
-            TurnDecision::Failed("max_turns exhausted before end_turn".into()),
-            effects,
-        ))
+        Ok((TurnDecision::MaxTurnsExceeded, effects))
     }
 }
 

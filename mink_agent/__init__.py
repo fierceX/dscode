@@ -3,7 +3,7 @@ mink SDK — Python wrapper for agent execution (optionally sandboxed).
 
 Sandboxing is handled entirely by the Rust ``mink`` binary internally.
 The Python layer does NOT construct sandbox commands — it just launches
-``mink --json-rpc`` and passes sandbox configuration via the
+``mink --agent-jsonl`` and passes sandbox configuration via the
 ``MINK_LIMITS`` environment variable.
 
 * **Linux**: nsjail / bubblewrap (auto-detected, Rust re-exec).
@@ -28,11 +28,16 @@ from __future__ import annotations
 import importlib.resources as _resources
 import json
 import os
+import queue
+import signal
 import shutil
 import subprocess
+import threading
+import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 
 # ── Exceptions ───────────────────────────────────────────────────────
@@ -47,10 +52,20 @@ def _find_binary() -> str:
     """Locate the bundled ``mink`` binary.
 
     Resolution order:
-    1. Package-internal ``_binary/mink`` (bundled wheel).
-    2. ``mink`` on ``PATH``.
-    3. ``./mink`` in the current working directory.
+    1. ``MINK_BINARY`` environment override.
+    2. Package-internal ``_binary/mink`` (bundled wheel).
+    3. ``mink`` on ``PATH``.
+    4. ``./mink`` in the current working directory.
     """
+    override = os.environ.get("MINK_BINARY")
+    if override:
+        override_path = os.path.abspath(override)
+        if not os.path.isfile(override_path):
+            raise FileNotFoundError(f"MINK_BINARY does not exist: {override}")
+        if not os.access(override_path, os.X_OK):
+            raise PermissionError(f"MINK_BINARY is not executable: {override}")
+        return override_path
+
     # 1. Bundled binary inside the package
     try:
         ref = _resources.files("mink_agent") / "_binary" / "mink"
@@ -203,6 +218,7 @@ class AgentSession:
         self._binary: str = _find_binary()
         self._home: Optional[str] = None
         self._proc: Optional[subprocess.Popen] = None
+        self._run_lock = threading.Lock()
 
     # ── Public API ────────────────────────────────────────────────
 
@@ -218,14 +234,73 @@ class AgentSession:
         * ``error`` — error message if the agent failed
         * ``stderr`` — raw stderr output (for debugging)
         """
-        self._prepare()
+        text_parts: list[str] = []
+        thinking_parts: list[str] = []
+        tool_calls: list[dict] = []
+        tool_results: list[dict] = []
+        events: list[dict] = []
+        final: Optional[dict] = None
 
-        cmd = self._build_sandbox_cmd()
-        request = self._build_request(prompt, extra_options)
-        env = self._build_env()
+        for event in self.stream(prompt, extra_options=extra_options):
+            events.append(event)
+            event_type = event.get("type", "")
+            if event_type == "text":
+                text_parts.append(event.get("content", ""))
+            elif event_type == "thinking":
+                thinking_parts.append(event.get("content", ""))
+            elif event_type == "tool_call":
+                tool_calls.append(event)
+            elif event_type == "tool_result":
+                tool_results.append(event)
+            elif event_type == "final":
+                final = event
 
-        result = self._run_process(cmd, request, env)
-        return result
+        final = final or {}
+        status = final.get("status")
+        stderr_text = final.get("stderr", "")
+        error_message = final.get("error")
+        exit_code = int(final.get("exit_code", 1 if error_message else 0))
+        if status not in (None, "ok") and not error_message:
+            error_message = str(status)
+
+        return {
+            "text": "".join(text_parts),
+            "thinking": "".join(thinking_parts),
+            "tool_calls": tool_calls,
+            "tool_results": tool_results,
+            "events": events,
+            "status": status,
+            "session_id": final.get("session_id"),
+            "session_ref": final.get("session_ref"),
+            "home": final.get("home"),
+            "events_path": final.get("events_path"),
+            "conversation_path": final.get("conversation_path"),
+            "artifacts_dir": final.get("artifacts_dir"),
+            "summary_path": final.get("summary_path"),
+            "tool_call_count": final.get("tool_call_count", len(tool_calls)),
+            "tool_error_count": final.get("tool_error_count", 0),
+            "exit_code": exit_code,
+            "error": error_message,
+            "stderr": stderr_text,
+        }
+
+    def stream(
+        self,
+        prompt: str,
+        *,
+        extra_options: Optional[dict] = None,
+    ) -> Iterator[dict[str, Any]]:
+        """Execute a prompt and yield protocol events as dictionaries."""
+        if not self._run_lock.acquire(blocking=False):
+            raise RuntimeError("AgentSession does not support concurrent runs")
+        try:
+            self._prepare()
+            cmd = self._build_sandbox_cmd()
+            request = self._build_request(prompt, extra_options)
+            env = self._build_env()
+            yield from self._stream_process(cmd, request, env)
+        finally:
+            self._run_lock.release()
 
     def close(self) -> None:
         """Terminate the agent process if still running.
@@ -241,34 +316,31 @@ class AgentSession:
             self._proc = None
             return
 
-        # Try graceful termination first
-        proc.terminate()  # SIGTERM
-        try:
-            proc.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            proc.kill()   # SIGKILL
-            proc.wait()
+        self._terminate_process_tree(proc, grace_seconds=3)
         self._proc = None
 
     # ── Internals ──────────────────────────────────────────────────
 
-    def _run_process(
+    def _stream_process(
         self,
         cmd: list[str],
         request: str,
         env: dict[str, str],
-    ) -> dict[str, Any]:
-        """Run the mink process with the given command and request."""
+    ) -> Iterator[dict[str, Any]]:
+        """Run the mink process with the given command and yield JSONL events."""
         try:
-            proc = subprocess.Popen(
-                cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                env=env,
-                cwd=self._config.cwd,
-                text=True,
-            )
+            popen_kwargs: dict[str, Any] = {
+                "args": cmd,
+                "stdin": subprocess.PIPE,
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.PIPE,
+                "env": env,
+                "cwd": self._config.cwd,
+                "text": True,
+            }
+            if os.name != "nt":
+                popen_kwargs["start_new_session"] = True
+            proc = subprocess.Popen(**popen_kwargs)
         except FileNotFoundError as e:
             raise RuntimeError(
                 f"mink binary not found ({e}). "
@@ -276,72 +348,162 @@ class AgentSession:
             ) from e
 
         self._proc = proc
+        stderr_parts: list[str] = []
+        stdout_queue: queue.Queue[Optional[str]] = queue.Queue()
 
-        try:
-            # Send the JSON-RPC request
+        def drain_stderr() -> None:
+            if proc.stderr is None:
+                return
             try:
-                proc.stdin.write(request)
-                proc.stdin.close()
-            except BrokenPipeError:
-                stderr_text = proc.stderr.read()
-                raise AgentError(
-                    f"Agent process exited early. exit_code={proc.returncode} "
-                    f"stderr: {stderr_text}"
-                )
-
-            # Read the JSON event stream
-            text_parts: list[str] = []
-            thinking_parts: list[str] = []
-            tool_calls: list[dict] = []
-            error_message: Optional[str] = None
-
-            for line in proc.stdout:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-
-                event_type = event.get("type", "")
-                if event_type == "text":
-                    text_parts.append(event.get("content", ""))
-                elif event_type == "thinking":
-                    thinking_parts.append(event.get("content", ""))
-                elif event_type == "tool_call":
-                    tool_calls.append(event)
-                elif event_type == "turn_end":
-                    break
-                elif event_type == "error":
-                    error_message = event.get("message", "Unknown error")
-
-            # Wait for process to finish
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
-
-            # Read remaining stderr
-            stderr_text = ""
-            try:
-                remaining = proc.stderr.read()
-                if remaining:
-                    stderr_text = remaining
+                for chunk in proc.stderr:
+                    stderr_parts.append(chunk)
             except OSError:
                 pass
 
-            return {
-                "text": "".join(text_parts),
-                "thinking": "".join(thinking_parts),
-                "tool_calls": tool_calls,
-                "exit_code": proc.returncode,
-                "error": error_message,
-                "stderr": stderr_text,
-            }
+        def drain_stdout() -> None:
+            if proc.stdout is None:
+                stdout_queue.put(None)
+                return
+            try:
+                for line in proc.stdout:
+                    stdout_queue.put(line)
+            except OSError:
+                pass
+            finally:
+                stdout_queue.put(None)
+
+        stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
+        stdout_thread = threading.Thread(target=drain_stdout, daemon=True)
+        stderr_thread.start()
+        stdout_thread.start()
+
+        try:
+            try:
+                if proc.stdin is not None:
+                    proc.stdin.write(request)
+                    proc.stdin.close()
+            except BrokenPipeError:
+                proc.wait(timeout=5)
+                stderr_thread.join(timeout=1)
+                raise AgentError(
+                    f"Agent process exited early. exit_code={proc.returncode} "
+                    f"stderr: {''.join(stderr_parts)}"
+                )
+
+            saw_final = False
+            final_event: Optional[dict[str, Any]] = None
+            timed_out = False
+            post_final_exit_timeout = False
+            deadline = time.monotonic() + max(1, int(self._config.timeout_secs))
+
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    if proc.poll() is None:
+                        self._terminate_process_tree(proc, grace_seconds=3)
+                    break
+                try:
+                    line = stdout_queue.get(timeout=min(0.1, remaining))
+                except queue.Empty:
+                    if proc.poll() is not None and not stdout_thread.is_alive():
+                        break
+                    continue
+                if line is None:
+                    break
+                else:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+
+                    if event.get("type") == "final":
+                        saw_final = True
+                        final_event = event
+                        break
+                    yield event
+
+            if proc.poll() is None:
+                remaining_after_final = deadline - time.monotonic()
+                if remaining_after_final <= 0:
+                    post_final_exit_timeout = True
+                    self._terminate_process_tree(proc, grace_seconds=3)
+                else:
+                    try:
+                        proc.wait(timeout=min(5, remaining_after_final))
+                    except subprocess.TimeoutExpired:
+                        post_final_exit_timeout = True
+                        self._terminate_process_tree(proc, grace_seconds=3)
+
+            stdout_thread.join(timeout=1)
+            stderr_thread.join(timeout=1)
+            stderr_text = "".join(stderr_parts)
+
+            if final_event is None:
+                error_text = None
+                if timed_out:
+                    error_text = f"agent timed out after {self._config.timeout_secs} seconds"
+                elif proc.returncode != 0:
+                    error_text = f"agent exited with code {proc.returncode}"
+                final_event = {
+                    "type": "final",
+                    "version": 1,
+                    "status": "failed" if proc.returncode else "ok",
+                    "error": error_text,
+                }
+            final_event["exit_code"] = proc.returncode
+            final_event["stderr"] = stderr_text
+            if post_final_exit_timeout:
+                final_event["status"] = "failed"
+                final_event["error"] = (
+                    final_event.get("error")
+                    or "agent did not exit after final event"
+                )
+            if not saw_final and stderr_text and final_event.get("error") is None and proc.returncode:
+                final_event["error"] = stderr_text
+            yield final_event
         finally:
+            if proc.poll() is None:
+                self._terminate_process_tree(proc, grace_seconds=3)
+            for pipe in (proc.stdin, proc.stdout, proc.stderr):
+                try:
+                    if pipe is not None:
+                        pipe.close()
+                except OSError:
+                    pass
+            stdout_thread.join(timeout=1)
+            stderr_thread.join(timeout=1)
             self._proc = None
+
+    @staticmethod
+    def _terminate_process_tree(
+        proc: subprocess.Popen,
+        *,
+        grace_seconds: int,
+    ) -> None:
+        """Terminate the agent process and child processes where supported."""
+        if proc.poll() is not None:
+            return
+        try:
+            if os.name != "nt":
+                os.killpg(proc.pid, signal.SIGTERM)
+            else:
+                proc.terminate()
+            proc.wait(timeout=grace_seconds)
+        except ProcessLookupError:
+            return
+        except subprocess.TimeoutExpired:
+            try:
+                if os.name != "nt":
+                    os.killpg(proc.pid, signal.SIGKILL)
+                else:
+                    proc.kill()
+                proc.wait()
+            except ProcessLookupError:
+                return
 
     def _prepare(self) -> None:
         """Ensure the home directory exists."""
@@ -400,7 +562,8 @@ class AgentSession:
         return limits
 
     def _build_request(self, prompt: str, extra_options: Optional[dict]) -> str:
-        """Build the JSON-RPC request string."""
+        """Build the Agent JSONL request string."""
+        self._validate_request_config()
         options: dict[str, bool | str | int] = {}
         if not self._config.allow_bash:
             options["disable_bash"] = True
@@ -425,12 +588,33 @@ class AgentSession:
         if extra_options:
             options.update(extra_options)
 
-        req: dict[str, Any] = {"prompt": prompt}
+        req: dict[str, Any] = {"version": 1, "prompt": prompt}
         if self._config.session_id:
             req["session_id"] = self._config.session_id
         if options:
             req["options"] = options
         return json.dumps(req) + "\n"
+
+    def _validate_request_config(self) -> None:
+        """Validate SDK-side options before launching mink."""
+        cfg = self._config
+        if cfg.model and cfg.model not in (
+            "flash",
+            "pro",
+            "deepseek-v4-flash",
+            "deepseek-v4-pro",
+        ):
+            raise ValueError("model must be 'flash' or 'pro'")
+        positive_fields = {
+            "timeout_secs": cfg.timeout_secs,
+            "tool_timeout": cfg.tool_timeout,
+            "sub_agent_timeout": cfg.sub_agent_timeout,
+            "max_tokens": cfg.max_tokens,
+            "max_turns": cfg.max_turns,
+        }
+        for name, value in positive_fields.items():
+            if value <= 0:
+                raise ValueError(f"{name} must be greater than 0")
 
     def _build_sandbox_cmd(self) -> list[str]:
         """Build the full command line: sandbox wrapper + mink binary."""
@@ -439,8 +623,8 @@ class AgentSession:
         return cmd
 
     def _mission_home_path(self) -> str:
-        """Return the canonical mission file path inside MINK_HOME."""
-        return os.path.join(self._home or _default_home(), "_mission.md")
+        """Return a per-run mission file path inside MINK_HOME."""
+        return os.path.join(self._home or _default_home(), f"_mission-{uuid.uuid4().hex}.md")
 
     def _append_mission_flag(self, cmd: list[str]) -> None:
         """Append --mission <path> if configured.
@@ -479,7 +663,7 @@ class AgentSession:
 
     def _build_sandbox_cmd_inner(self) -> list[str]:
         """Launch mink directly — sandboxing is handled by Rust internally."""
-        return [self._binary, "--json-rpc"]
+        return [self._binary, "--agent-jsonl"]
 
 
 # ── Convenience ──────────────────────────────────────────────────────

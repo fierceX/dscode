@@ -156,13 +156,13 @@ pub struct Config {
     pub list_skills: bool,
     pub log_events: bool,
     pub cli_overrides: CliOverrides,
-    /// JSON-RPC mode: read request from stdin, emit events to stdout.
-    pub json_rpc: bool,
+    /// Stable single-shot SDK protocol: stdin request + stdout JSONL events + final.
+    pub agent_jsonl: bool,
     /// 沙箱配置（从 .minkrc 加载）
     pub sandbox: SandboxConfig,
     /// 自定义系统提示词文件（MISSION.md）
     pub mission_file: Option<PathBuf>,
-    /// 工具禁用开关（从 CLI 或 JSON-RPC 加载）
+    /// 工具禁用开关（从 CLI 或 Agent JSONL 加载）
     pub tool_disable: ToolDisableFlags,
     /// Tool approval mode.
     pub tool_approval_mode: ToolApprovalMode,
@@ -209,7 +209,7 @@ impl Default for Config {
             list_skills: false,
             log_events: true,
             cli_overrides: CliOverrides::default(),
-            json_rpc: false,
+            agent_jsonl: false,
             sandbox: SandboxConfig::default(),
             mission_file: None,
             tool_disable: ToolDisableFlags::default(),
@@ -332,8 +332,8 @@ pub fn parse_args(args: Vec<String>) -> Result<Config> {
             "-h" | "--help" => {
                 return Err(anyhow!("__HELP__"));
             }
-            "--json-rpc" => {
-                cfg.json_rpc = true;
+            "--agent-jsonl" => {
+                cfg.agent_jsonl = true;
                 cfg.output_format = OutputFormat::StreamJson;
                 i += 1;
             }
@@ -688,10 +688,10 @@ impl SandboxConfig {
     }
 }
 
-// ── Tool disable flags (from CLI / JSON-RPC) ─────────────────
+// ── Tool disable flags (from CLI / Agent JSONL) ─────────────────
 
 /// 工具级别的运行时禁用开关。
-/// 来源：CLI `--disable-bash` 等，或 JSON-RPC `options.disable_*`。
+/// 来源：CLI `--disable-bash` 等，或 Agent JSONL `options.disable_*`。
 /// 注意：与 SandboxConfig 中的 allow_* 是独立的层次 —
 /// SandboxConfig 决定沙箱策略，ToolDisableFlags 是运行时覆盖。
 #[derive(Debug, Clone, Default)]
@@ -778,6 +778,19 @@ mod tests {
         assert!(cfg.verbose);
         assert!(cfg.interactive);
         assert_eq!(cfg.output_format, OutputFormat::StreamJson);
+    }
+
+    #[test]
+    fn parse_args_agent_jsonl_enables_single_shot_protocol() {
+        let cfg = parse_args(vec!["--agent-jsonl".into()]).unwrap();
+        assert!(cfg.agent_jsonl);
+        assert_eq!(cfg.output_format, OutputFormat::StreamJson);
+    }
+
+    #[test]
+    fn parse_args_json_rpc_is_removed() {
+        let err = parse_args(vec!["--json-rpc".into()]).unwrap_err();
+        assert!(err.to_string().contains("unknown option"));
     }
 
     #[test]

@@ -117,17 +117,15 @@ impl AgentSharedContext {
 
     /// Append a JSON line to events.jsonl. In stream-json mode, also emit to stdout.
     pub fn log_event(&self, value: Value) {
-        if !self.config.log_events {
-            return;
-        }
         let line = match serde_json::to_string(&value) {
             Ok(s) => s,
             Err(_) => return,
         };
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.events_path)
+        if self.config.log_events
+            && let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.events_path)
         {
             let _ = writeln!(file, "{line}");
         }

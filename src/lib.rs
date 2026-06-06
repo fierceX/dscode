@@ -6,6 +6,7 @@ pub mod events;
 pub mod prompt;
 pub mod protocol;
 pub mod safety;
+pub mod sdk_protocol;
 pub mod sse;
 
 // New async modules

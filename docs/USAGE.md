@@ -173,7 +173,7 @@ prompt 为空且 stdin 是终端时自动进入交互模式。非终端 stdin �
 | `--print` | — | ndjson 结构化输出（`--output-format stream-json` 别名） |
 | `--output-format FMT` | `human` | 输出格式：`human` / `stream-json` |
 | `--approval-mode MODE` | `yolo` | 工具审批模式：`yolo` / `write` / `always-ask` |
-| `--json-rpc` | — | JSON-RPC 模式（stdin 读请求，stdout 输出事件流，隐式启用 stream-json） |
+| `--agent-jsonl` | — | Agent JSONL 协议（stdin 读 versioned request，stdout 输出事件流和最终 `final`，隐式启用 stream-json） |
 | `--disable-bash` | `false` | 禁用 Bash 工具 |
 | `--disable-python` | `false` | 禁用 Python 工具 |
 | `--disable-sub-agent` | `false` | 禁用 SubAgent 工具 |
@@ -267,7 +267,7 @@ mink 启动时检测 `[sandbox] enabled = true`，自动通过 `exec()` 将自�
 ```
 mink --tui
   → 读取 .minkrc
-  → exec("nsjail --bindmount_ro src /mink --json-rpc")  // Linux
+  → exec("nsjail --bindmount_ro src mink --tui")        // Linux
   → exec("sandbox-exec -p '<profile>' mink --tui")        // macOS (写入限制)
   → 设置 MINK_SANDBOXED=1 防无限递归
   → 原进程被替换，进程完全在沙箱中运行

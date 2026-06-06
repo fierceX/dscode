@@ -45,16 +45,32 @@ print(result["text"])
 
 ### `run(prompt, *, extra_options=None) -> dict`
 
-执行一个提示词并返回结果。
+执行一个提示词并返回聚合结果。每次调用都会启动一个新的 `mink --agent-jsonl` 进程；持续交互通过相同的 `mink_home + session_id` 复用磁盘 session，而不是复用同一个进程。同一个 `AgentSession` 实例不支持并发调用；并发任务应创建多个实例或由外层应用排队。
 
 | 返回字段 | 类型 | 说明 |
 |---------|------|------|
 | `text` | `str` | agent 的文本回复 |
 | `thinking` | `str` | agent 的推理过程（如有） |
 | `tool_calls` | `list[dict]` | agent 执行的工具调用记录 |
+| `tool_results` | `list[dict]` | 工具结果事件 |
+| `events` | `list[dict]` | 本次调用的完整 JSONL 事件 |
+| `status` | `str or None` | `final.status`，如 `ok`、`failed`、`interrupted` |
+| `session_id` | `str or None` | Rust 侧解析后的真实 session id |
+| `session_ref` | `str or None` | 调用方传入的 session 引用或真实 id |
+| `home` | `str or None` | 实际 `MINK_HOME` |
+| `events_path` | `str or None` | session `events.jsonl` 路径 |
+| `conversation_path` | `str or None` | session `conversation.jsonl` 路径 |
+| `artifacts_dir` | `str or None` | session artifacts 目录 |
+| `summary_path` | `str or None` | session summary 路径 |
+| `tool_call_count` | `int` | 本次调用执行的工具调用数量 |
+| `tool_error_count` | `int` | 本次调用检测到的工具错误数量 |
 | `exit_code` | `int` | 进程退出码（0 表示成功） |
 | `error` | `str or None` | 错误信息（如有） |
 | `stderr` | `str` | 进程原始错误输出（调试用） |
+
+### `stream(prompt, *, extra_options=None) -> Iterator[dict]`
+
+执行一个提示词并逐条产出 Agent JSONL 协议事件。普通事件会即时返回；最终事件为 `{"type": "final", ...}`，其中包含 `status`、session 路径和 stderr。
 
 ### `close()`
 
@@ -92,7 +108,7 @@ print(result["text"])
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `timeout_secs` | `600` | agent 运行总超时（秒） |
+| `timeout_secs` | `600` | agent 运行总超时（秒），超时会终止 agent 进程组 |
 | `tool_timeout` | `600` | 单次工具调用超时（秒） |
 | `sub_agent_timeout` | `300` | 子代理执行超时（秒） |
 | `max_tokens` | `81920` | 输出 token 上限 |
@@ -106,6 +122,8 @@ print(result["text"])
 |------|--------|------|
 | `verbose` | `False` | 启用详细日志输出 |
 | `signal_mode` | `None`（实际默认 `full`） | 信号系统模式覆盖：`"full"` 启用信念跟踪、注入和恢复守卫；`"off"` 关闭信号提示词和运行时信号干预；`None` 继承 `MINK_SIGNAL_MODE` |
+
+本地调试可以通过 `MINK_BINARY=/path/to/mink` 覆盖 SDK 使用的二进制。未设置时优先使用 wheel 内置二进制，然后查找 `PATH`。
 
 ### 沙箱后端
 
@@ -121,7 +139,7 @@ print(result["text"])
 |------|--------|------|
 | `api_key` | `""` | DeepSeek API 密钥。也可通过 `DEEPSEEK_API_KEY` 环境变量设置 |
 | `api_url` | `""` | DeepSeek API 地址。也可通过 `DEEPSEEK_BASE_URL` 环境变量设置 |
-| `model` | `""` | 模型名（如 `"deepseek-chat"`） |
+| `model` | `""` | 模型档位：`"flash"` / `"pro"`，也接受内部名 `"deepseek-v4-flash"` / `"deepseek-v4-pro"` |
 
 ## 沙箱行为说明
 
@@ -150,6 +168,9 @@ print(result["text"])
             "type": "tool_call"
         }
     ],
+    "status": "ok",
+    "session_id": "20260606-101500-abcd",
+    "events_path": "/Users/me/.mink/projects/-path-to-project/20260606-101500-abcd/events.jsonl",
     "exit_code": 0,
     "error": None,
     "stderr": ""

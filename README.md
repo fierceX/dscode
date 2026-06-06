@@ -20,7 +20,7 @@
 - **技能系统** — 按需加载 skill 文件，不污染后续 prompt
 - **自定义提示词** — `--mission` 加载 MISSION.md 文件，替换默认系统提示词，自由定义 agent 目标和行为
 - **Python SDK** — `mink-agent` pip 包，内置二进制，支持沙箱控制和全参数配置
-- **机器协议** — `--print` 输出 ndjson 事件流；`--json-rpc` 行协议供外部程序调用
+- **机器协议** — `--print` 输出 ndjson 事件流；`--agent-jsonl` 提供 single-shot Agent JSONL 协议
 - **沙箱防护** — Linux nsjail/bubblewrap（完整文件系统隔离）、macOS sandbox-exec（写入隔离）
 - **运行时约束** — `--disable-bash` / `--disable-sub-agent` / `--disable-web` 按场景禁用工具
 
@@ -74,6 +74,7 @@ session = AgentSession(SandboxConfig(
     signal_mode="full",
 ))
 result = session.run("处理文档")
+print(result["status"], result["events_path"])
 ```
 
 详见 [mink_agent/README.md](mink_agent/README.md)。

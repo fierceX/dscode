@@ -307,6 +307,9 @@ impl SubAgentExecutor {
                 Ok((result_thinking, result_text))
             }
             TurnDecision::Interrupted => Ok((String::new(), "Sub-agent interrupted.".into())),
+            TurnDecision::MaxTurnsExceeded => Err(anyhow::anyhow!(
+                "sub-agent max_turns exhausted before end_turn"
+            )),
             TurnDecision::Failed(msg) => Err(anyhow::anyhow!(msg)),
         }
     }

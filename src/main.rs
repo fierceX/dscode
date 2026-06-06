@@ -1,9 +1,13 @@
 use anyhow::Result;
-use mink::agent::orchestrator::{OrchCmd, new_orchestrator};
+use mink::agent::orchestrator::{OrchCmd, TurnStatus, new_orchestrator};
 use mink::cancel::CancellationToken;
 use mink::config::{api_url, apply_config_file, apply_provider_defaults, parse_args};
 use mink::context::AgentSharedContext;
 use mink::context::ToolConfig;
+use mink::sdk_protocol::{
+    PROTOCOL_VERSION, SdkFinal, SdkRequest, SdkStatus, emit_failed_parse,
+    parse_agent_jsonl_request, path_string, validate_sdk_request,
+};
 use mink::session::compaction::CompactionEngine;
 use mink::session::paths;
 use mink::ui::Display;
@@ -58,7 +62,7 @@ async fn run(args: Vec<String>) -> Result<()> {
     apply_provider_defaults(&mut cfg)?;
 
     // ═══ Self-sandboxing: re-exec into nsjail/bwrap/sandbox-exec ═══
-    // This must happen BEFORE any stdin reading (JSON-RPC) so that
+    // This must happen BEFORE any stdin reading (Agent JSONL) so that
     // the sandboxed child process inherits the original stdin pipe
     // with its data still intact.
     // If successful, the process is replaced and we never reach the next line.
@@ -70,109 +74,33 @@ async fn run(args: Vec<String>) -> Result<()> {
         mink::sandbox::reexec_in_sandbox(&cfg.sandbox, &current_exe, &args);
     }
 
-    // ═══ JSON-RPC mode: early stdin parsing (before context creation) ═══
-    // We parse the request here so that tool_disable flags take effect
-    // when AgentSharedContext and ToolConfig are constructed.
-    let json_rpc_prompt: Option<String> = if cfg.json_rpc {
+    // ═══ SDK protocol mode: early stdin parsing (before context creation) ═══
+    // We parse the request here so that tool_disable flags take effect when
+    // AgentSharedContext and ToolConfig are constructed.
+    let sdk_request: Option<SdkRequest> = if cfg.agent_jsonl {
         let mut input = String::new();
         tokio::io::AsyncReadExt::read_to_string(&mut tokio::io::stdin(), &mut input).await?;
-        let req: serde_json::Value =
-            serde_json::from_str(&input).unwrap_or_else(|_| serde_json::json!({"prompt": input}));
-        // Apply optional tool disable flags and config overrides
-        if let Some(opts) = req.get("options") {
-            if opts
-                .get("disable_bash")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-            {
-                cfg.tool_disable.disable_bash = true;
+        let req = match parse_agent_jsonl_request(&input) {
+            Ok(req) => req,
+            Err(e) => {
+                emit_failed_parse(&e);
+                return Ok(());
             }
-            if opts
-                .get("disable_sub_agent")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-            {
-                cfg.tool_disable.disable_sub_agent = true;
-            }
-            if opts
-                .get("disable_web")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-            {
-                cfg.tool_disable.disable_web = true;
-            }
-            if opts
-                .get("disable_python")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-            {
-                cfg.tool_disable.disable_python = true;
-            }
-            // Config overrides from JSON-RPC
-            if let Some(v) = opts
-                .get("model")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-            {
-                cfg.model = v;
-                cfg.cli_overrides.model = true;
-            }
-            if let Some(v) = opts
-                .get("max_tokens")
-                .and_then(|v| v.as_i64())
-                .map(|i| i as i32)
-            {
-                cfg.max_tokens = v;
-                cfg.cli_overrides.max_tokens = true;
-            }
-            if let Some(v) = opts
-                .get("max_turns")
-                .and_then(|v| v.as_i64())
-                .map(|i| i as i32)
-            {
-                cfg.max_turns = v.max(1);
-                cfg.cli_overrides.max_turns = true;
-            }
-            if let Some(v) = opts
-                .get("tool_timeout")
-                .and_then(|v| v.as_i64())
-                .map(|i| i as i32)
-            {
-                cfg.tool_timeout_secs = v.max(5);
-                cfg.cli_overrides.tool_timeout_secs = true;
-            }
-            if let Some(v) = opts
-                .get("sub_agent_timeout")
-                .and_then(|v| v.as_i64())
-                .map(|i| i as i32)
-            {
-                cfg.sub_agent_timeout_secs = v.max(5);
-                cfg.cli_overrides.sub_agent_timeout_secs = true;
-            }
-            if let Some(v) = opts.get("verbose").and_then(|v| v.as_bool()) {
-                cfg.verbose = v;
-            }
-        }
-        // session_id at top level (or in options)
-        if let Some(v) = req.get("session_id").and_then(|v| v.as_str()) {
-            if !v.is_empty() {
-                cfg.session_id = v.to_string();
-            }
-        } else if let Some(v) = req
-            .get("options")
-            .and_then(|o| o.get("session_id"))
-            .and_then(|v| v.as_str())
+        };
+        if let Some(version) = req.version
+            && version != PROTOCOL_VERSION
         {
-            if !v.is_empty() {
-                cfg.session_id = v.to_string();
-            }
+            emit_failed_parse(&format!(
+                "unsupported SDK protocol version: {version}, expected {PROTOCOL_VERSION}"
+            ));
+            return Ok(());
         }
-        Some(
-            req.get("prompt")
-                .and_then(|v| v.as_str())
-                .unwrap_or(&input)
-                .to_string(),
-        )
+        if let Err(e) = validate_sdk_request(&req) {
+            emit_failed_parse(&e);
+            return Ok(());
+        }
+        apply_sdk_request_options(&mut cfg, &req);
+        Some(req)
     } else {
         None
     };
@@ -216,8 +144,9 @@ async fn run(args: Vec<String>) -> Result<()> {
     // 共享会话初始化
     let (store, stats, artifacts) =
         mink::session::init::init_session_base(&home, &cwd, &sid).await?;
-    let prompt_for_title = json_rpc_prompt
-        .as_deref()
+    let prompt_for_title = sdk_request
+        .as_ref()
+        .map(|r| r.prompt.as_str())
         .or_else(|| (!cfg.prompt.trim().is_empty()).then_some(cfg.prompt.as_str()));
     mink::session::metadata::ensure_metadata(
         &spaths,
@@ -317,16 +246,34 @@ async fn run(args: Vec<String>) -> Result<()> {
         ctx.log_event(serde_json::json!({"type":"session_start","session_id":sid}));
     }
 
-    if cfg.json_rpc {
-        // JSON-RPC: prompt was already parsed above; just execute and emit turn-end
+    if cfg.agent_jsonl {
+        // SDK protocol: prompt was already parsed above; execute one turn.
         let (done_tx, done_rx) = oneshot::channel();
         cmd_tx.send(OrchCmd::UserInput {
-            input: json_rpc_prompt.unwrap_or_default(),
+            input: sdk_request.map(|r| r.prompt).unwrap_or_default(),
             done: done_tx,
         })?;
-        let _ = done_rx.await;
-        // End marker so caller knows processing is complete
-        println!(r#"{{"type":"turn_end","status":"ok"}}"#);
+        let result = done_rx.await.unwrap_or_else(|e| {
+            mink::agent::orchestrator::TurnRunResult::failed(format!(
+                "orchestrator dropped turn result: {e}"
+            ))
+        });
+        mink::sdk_protocol::emit_json_line(&SdkFinal {
+            event_type: "final",
+            version: PROTOCOL_VERSION,
+            status: sdk_status_from_turn(result.status),
+            session_id: sid.clone(),
+            session_ref: resume_session_ref.clone(),
+            home: path_string(&home),
+            cwd: path_string(&cwd),
+            events_path: path_string(&spaths.events),
+            conversation_path: path_string(&spaths.conversation),
+            artifacts_dir: path_string(&spaths.artifacts),
+            summary_path: path_string(&spaths.summary),
+            tool_call_count: result.tool_call_count,
+            tool_error_count: result.tool_error_count,
+            error: result.error,
+        });
     } else if cfg.tui_mode {
         if let Some((_, signal_rx)) = tui_tx
             && let Err(e) = mink::tui::run_tui(
@@ -373,6 +320,62 @@ async fn run(args: Vec<String>) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn sdk_status_from_turn(status: TurnStatus) -> SdkStatus {
+    match status {
+        TurnStatus::Ok => SdkStatus::Ok,
+        TurnStatus::Failed => SdkStatus::Failed,
+        TurnStatus::Interrupted => SdkStatus::Interrupted,
+        TurnStatus::MaxTurnsExceeded => SdkStatus::MaxTurnsExceeded,
+    }
+}
+
+fn apply_sdk_request_options(cfg: &mut mink::config::Config, req: &SdkRequest) {
+    let opts = &req.options;
+    if opts.disable_bash {
+        cfg.tool_disable.disable_bash = true;
+    }
+    if opts.disable_sub_agent {
+        cfg.tool_disable.disable_sub_agent = true;
+    }
+    if opts.disable_web {
+        cfg.tool_disable.disable_web = true;
+    }
+    if opts.disable_python {
+        cfg.tool_disable.disable_python = true;
+    }
+    if let Some(model) = &opts.model {
+        cfg.model = model.clone();
+        cfg.cli_overrides.model = true;
+    }
+    if let Some(max_tokens) = opts.max_tokens {
+        cfg.max_tokens = max_tokens;
+        cfg.cli_overrides.max_tokens = true;
+    }
+    if let Some(max_turns) = opts.max_turns {
+        cfg.max_turns = max_turns;
+        cfg.cli_overrides.max_turns = true;
+    }
+    if let Some(tool_timeout) = opts.tool_timeout {
+        cfg.tool_timeout_secs = tool_timeout;
+        cfg.cli_overrides.tool_timeout_secs = true;
+    }
+    if let Some(sub_agent_timeout) = opts.sub_agent_timeout {
+        cfg.sub_agent_timeout_secs = sub_agent_timeout;
+        cfg.cli_overrides.sub_agent_timeout_secs = true;
+    }
+    if let Some(verbose) = opts.verbose {
+        cfg.verbose = verbose;
+    }
+    if let Some(session_id) = req
+        .session_id
+        .as_deref()
+        .or(opts.session_id.as_deref())
+        .filter(|s| !s.is_empty())
+    {
+        cfg.session_id = session_id.to_string();
+    }
 }
 
 fn list_skills() {
@@ -492,7 +495,7 @@ async fn run_interactive(
                     break;
                 }
                 match done_rx.try_recv() {
-                    Ok(()) | Err(tokio::sync::oneshot::error::TryRecvError::Closed) => break,
+                    Ok(_) | Err(tokio::sync::oneshot::error::TryRecvError::Closed) => break,
                     Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
                         std::thread::sleep(std::time::Duration::from_millis(100));
                     }
@@ -619,7 +622,7 @@ fn print_usage() {
     println!("  -i, --interactive       Interactive mode (REPL)");
     println!("  --tui                   TUI mode (alternate screen with status bar)");
     println!(
-        "  --json-rpc              JSON-RPC mode (read request from stdin, emit events to stdout)"
+        "  --agent-jsonl           Agent JSONL protocol (stdin request, stdout events + final)"
     );
     println!("  --disable-bash          Disable Bash tool");
     println!("  --disable-python        Disable Python tool");
