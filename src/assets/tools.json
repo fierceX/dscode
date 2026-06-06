@@ -96,7 +96,7 @@
         },
         "patch": {
           "type": "string",
-          "description": "Anchored line patch using the @PATH#TAG header from a fresh Read output. Supports replace N..M:, delete N..M, insert before N:, insert after N:, insert head:, and insert tail:. Body rows must start with +. Combine same-file changes into one multi-hunk patch when they come from the same snapshot."
+          "description": "Anchored line patch using the @PATH#TAG header from a fresh Read output. Supports replace N..M:, delete N..M, insert before N:, insert after N:, insert head:, and insert tail:. Body rows are ONLY the new lines, each prefixed with +. NEVER include original lines (the N..M range already identifies them). Example: replace 5..5:\\n+    return result\\nCombine same-file changes into one multi-hunk patch when they come from the same snapshot."
         }
       },
       "required": [

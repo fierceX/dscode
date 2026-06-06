@@ -1101,6 +1101,13 @@ where
         body.push(row.strip_prefix('+').unwrap_or(row).to_string());
     }
     if body.is_empty() {
+        if let Some((_, next)) = lines.peek() {
+            let trimmed = next.trim();
+            if !trimmed.is_empty() && !trimmed.starts_with('+') {
+                let preview = &trimmed[..trimmed.len().min(60)];
+                bail!("Error: line {header_line}: body starts with non-`+` line '{preview}...'. Body rows are ONLY new lines prefixed with `+`. Do NOT include original lines (the N..M range already identifies them).");
+            }
+        }
         bail!("Error: line {header_line}: {kind} hunk requires at least one +TEXT body row");
     }
     Ok(body)
