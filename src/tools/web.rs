@@ -174,9 +174,7 @@ fn web_user_agent() -> String {
 fn send_text(req: reqwest::RequestBuilder, label: &str) -> Result<String> {
     let handle = tokio::runtime::Handle::try_current().map_err(|_| anyhow!("no tokio runtime"))?;
     std::thread::spawn(move || {
-        handle.block_on(async move {
-            Ok::<String, reqwest::Error>(req.send().await?.error_for_status()?.text().await?)
-        })
+        handle.block_on(async move { req.send().await?.error_for_status()?.text().await })
     })
     .join()
     .map_err(|_| anyhow!("{label} thread panicked"))?

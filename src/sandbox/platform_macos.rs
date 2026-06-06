@@ -70,10 +70,7 @@ fn build_sb_profile(config: &SandboxConfig, _exe: &Path, cwd: &Path) -> String {
         lines.push("(allow file-write* (subpath \"/private/tmp\"))".into());
 
         // Always allow mink session storage
-        lines.push(format!(
-            "(allow file-write* (subpath \"{}/.mink\"))",
-            home
-        ));
+        lines.push(format!("(allow file-write* (subpath \"{}/.mink\"))", home));
         lines.push(format!(
             "(allow file-write* (subpath \"{}/.mink\"))",
             cwd.display()

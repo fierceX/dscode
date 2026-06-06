@@ -5,7 +5,6 @@ use regex::Regex;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 static RE_BASH_READ_MISUSE: Lazy<Regex> =
@@ -90,16 +89,15 @@ fn execute_sync(
     crate::util::configure_child_process_group(&mut cmd);
     let mut child = cmd.spawn()?;
 
-    let stdout_buf: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
-    let stderr_buf: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+    let stdout_buf = crate::util::ProcessOutputBuffer::default();
+    let stderr_buf = crate::util::ProcessOutputBuffer::default();
+    let mut readers = Vec::new();
 
     if let Some(stdout) = child.stdout.take() {
-        let buf = stdout_buf.clone();
-        std::thread::spawn(move || stream_reader(stdout, buf));
+        readers.push(crate::util::spawn_output_reader(stdout, stdout_buf.clone()));
     }
     if let Some(stderr) = child.stderr.take() {
-        let buf = stderr_buf.clone();
-        std::thread::spawn(move || stream_reader(stderr, buf));
+        readers.push(crate::util::spawn_output_reader(stderr, stderr_buf.clone()));
     }
 
     let start_sync = Instant::now();
@@ -128,11 +126,12 @@ fn execute_sync(
         }
     }
 
-    // Allow reader threads to drain pipes before we lock the buffers.
-    std::thread::sleep(Duration::from_millis(30));
+    for reader in readers {
+        let _ = reader.join();
+    }
 
-    let mut out = stdout_buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    let stderr_out = stderr_buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let mut out = stdout_buf.to_string_lossy("stdout");
+    let stderr_out = stderr_buf.to_string_lossy("stderr");
     if !stderr_out.is_empty() {
         if !out.is_empty() {
             out.push('\n');
@@ -160,14 +159,6 @@ struct SyncOutput {
     stdout: Vec<u8>,
     stderr: Vec<u8>,
     code: Option<i32>,
-}
-
-fn stream_reader<R: std::io::Read>(mut pipe: R, buf: Arc<Mutex<String>>) {
-    let mut data = Vec::new();
-    let _ = pipe.read_to_end(&mut data);
-    if let Ok(mut guard) = buf.lock() {
-        guard.push_str(&String::from_utf8_lossy(&data));
-    }
 }
 
 pub struct BashTool;

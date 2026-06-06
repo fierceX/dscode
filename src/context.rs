@@ -148,10 +148,10 @@ impl AgentSharedContext {
                 }
             }
         }
-        if self.config.output_format == OutputFormat::StreamJson {
-            if let Err(e) = writeln!(std::io::stdout(), "{line}") {
-                self.warn_event_log_once(&format!("failed to write stream-json event: {e}"));
-            }
+        if self.config.output_format == OutputFormat::StreamJson
+            && let Err(e) = writeln!(std::io::stdout(), "{line}")
+        {
+            self.warn_event_log_once(&format!("failed to write stream-json event: {e}"));
         }
     }
 

@@ -53,7 +53,7 @@ fn execute_script_with_interrupt_in_dir(
         }
     }
 
-    let timeout = Duration::from_secs(timeout_secs.unwrap_or(30).max(5).min(300));
+    let timeout = Duration::from_secs(timeout_secs.unwrap_or(30).clamp(5, 300));
 
     let mut cmd = Command::new("python3");
     cmd.arg("-B") // don't write .pyc
@@ -70,6 +70,16 @@ fn execute_script_with_interrupt_in_dir(
     let mut child = cmd
         .spawn()
         .map_err(|e| anyhow::anyhow!("Failed to start python3: {e}"))?;
+
+    let stdout_buf = crate::util::ProcessOutputBuffer::default();
+    let stderr_buf = crate::util::ProcessOutputBuffer::default();
+    let mut readers = Vec::new();
+    if let Some(stdout) = child.stdout.take() {
+        readers.push(crate::util::spawn_output_reader(stdout, stdout_buf.clone()));
+    }
+    if let Some(stderr) = child.stderr.take() {
+        readers.push(crate::util::spawn_output_reader(stderr, stderr_buf.clone()));
+    }
 
     // Read output with timeout
     let start = Instant::now();
@@ -101,21 +111,11 @@ fn execute_script_with_interrupt_in_dir(
         }
     }
 
-    // Collect output
-    let mut stdout = String::new();
-    let mut stderr = String::new();
-    if let Some(mut out) = child.stdout.take() {
-        use std::io::Read;
-        let mut buf = Vec::new();
-        let _ = out.read_to_end(&mut buf);
-        stdout = String::from_utf8_lossy(&buf).to_string();
+    for reader in readers {
+        let _ = reader.join();
     }
-    if let Some(mut err) = child.stderr.take() {
-        use std::io::Read;
-        let mut buf = Vec::new();
-        let _ = err.read_to_end(&mut buf);
-        stderr = String::from_utf8_lossy(&buf).to_string();
-    }
+    let mut stdout = stdout_buf.to_string_lossy("stdout");
+    let stderr = stderr_buf.to_string_lossy("stderr");
 
     if timed_out {
         if !stdout.is_empty() {
@@ -252,6 +252,15 @@ mod tests {
     fn timeout_kills_long_script() {
         let (stdout, _, _) = execute_script("import time; time.sleep(10)", Some(1)).unwrap();
         assert!(stdout.contains("timed out"));
+    }
+
+    #[test]
+    fn large_stdout_is_drained_and_bounded() {
+        let script = "import sys\nsys.stdout.write('x' * 1200000)\n";
+        let (stdout, stderr, code) = execute_script(script, Some(10)).unwrap();
+        assert_eq!(code, Some(0));
+        assert!(stderr.is_empty());
+        assert!(stdout.contains("truncated stdout"));
     }
 
     #[test]

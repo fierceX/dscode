@@ -1453,7 +1453,7 @@ async fn sub_agent_recursion_is_rejected_without_running_child() -> anyhow::Resu
     let mut result = internal_result("SubAgent");
     result.spawns_sub_agent = true;
     result.sub_agent_prompt = Some("nested task".into());
-    let runner = Arc::new(|_, _, _, _| {
+    let runner = Arc::new(|_, _, _, _, _| {
         panic!("runner must not execute when recursion is blocked");
     });
     let processed = coordinator.process_with_runner(vec![result], runner).await;
@@ -1469,7 +1469,7 @@ async fn sub_agent_success_formats_result_and_records_usage() -> anyhow::Result<
     let mut result = internal_result("SubAgent");
     result.spawns_sub_agent = true;
     result.sub_agent_prompt = Some("task".into());
-    let runner = Arc::new(|_, _, _, _| SubAgentResult {
+    let runner = Arc::new(|_, _, _, _, _| SubAgentResult {
         status: "ok".into(),
         thinking: "child thought".into(),
         text: "child text".into(),
@@ -1503,7 +1503,7 @@ async fn sub_agent_runner_panic_is_reported_as_failed_result() -> anyhow::Result
     let mut result = internal_result("SubAgent");
     result.spawns_sub_agent = true;
     result.sub_agent_prompt = Some("panic task".into());
-    let runner = Arc::new(|_, _, _, _| -> SubAgentResult {
+    let runner = Arc::new(|_, _, _, _, _| -> SubAgentResult {
         panic!("panic from test runner");
     });
     let processed = coordinator.process_with_runner(vec![result], runner).await;
@@ -1537,17 +1537,35 @@ async fn sub_agent_timeout_marks_incomplete() -> anyhow::Result<()> {
     let mut result = internal_result("SubAgent");
     result.spawns_sub_agent = true;
     result.sub_agent_prompt = Some("slow task".into());
-    let runner = Arc::new(|_, _, _, _| {
-        std::thread::sleep(Duration::from_millis(50));
-        SubAgentResult {
-            status: "ok".into(),
-            thinking: String::new(),
-            text: "late".into(),
-            usage: Default::default(),
-        }
-    });
+    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cancelled_runner = cancelled.clone();
+    let runner = Arc::new(
+        move |_, _, _, _, cancel: crate::cancel::CancellationToken| {
+            let start = std::time::Instant::now();
+            while start.elapsed() < Duration::from_millis(200) {
+                if cancel.is_cancelled() {
+                    cancelled_runner.store(true, Ordering::SeqCst);
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            SubAgentResult {
+                status: "ok".into(),
+                thinking: String::new(),
+                text: "late".into(),
+                usage: Default::default(),
+            }
+        },
+    );
     let processed = coordinator.process_with_runner(vec![result], runner).await;
-    assert_eq!(processed[0].content, "Sub-agent did not complete.");
+    assert_eq!(processed[0].content, "Sub-agent timed out after 0s.");
+    for _ in 0..20 {
+        if cancelled.load(Ordering::SeqCst) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(cancelled.load(Ordering::SeqCst));
     Ok(())
 }
 
@@ -1563,7 +1581,7 @@ async fn sub_agent_collection_enters_timeout_even_when_more_than_limit_are_launc
         result.sub_agent_prompt = Some(format!("slow task {idx}"));
         calls.push(result);
     }
-    let runner = Arc::new(|_, _, _, _| {
+    let runner = Arc::new(|_, _, _, _, _| {
         std::thread::sleep(Duration::from_millis(50));
         SubAgentResult {
             status: "ok".into(),
@@ -1581,7 +1599,7 @@ async fn sub_agent_collection_enters_timeout_even_when_more_than_limit_are_launc
     assert!(
         processed
             .iter()
-            .all(|r| r.content == "Sub-agent did not complete.")
+            .all(|r| r.content == "Sub-agent timed out after 0s.")
     );
     Ok(())
 }

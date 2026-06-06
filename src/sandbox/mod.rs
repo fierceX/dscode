@@ -98,7 +98,7 @@ fn try_reexec(config: &SandboxConfig, exe: &Path, args: &[String]) -> Result<(),
         match platform_macos::try_sandbox_exec(config, exe, args) {
             Ok(cmd) => {
                 exec_cmd(&cmd);
-                return Err("sandbox-exec failed".into());
+                Err("sandbox-exec failed".into())
             }
             Err(e) => Err(e),
         }

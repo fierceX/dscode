@@ -34,7 +34,7 @@ pub fn glob(pattern: &str, path: &str) -> Result<String> {
                 continue;
             }
         };
-        if !entry.file_type().map_or(false, |ft| ft.is_file()) {
+        if !entry.file_type().is_some_and(|ft| ft.is_file()) {
             continue;
         }
         files_seen += 1;
@@ -109,7 +109,7 @@ fn static_glob_dir_prefix(pattern: &str) -> Option<&str> {
         return Some(trimmed);
     }
     trimmed
-        .rfind(|ch| ch == '/' || ch == '\\')
+        .rfind(['/', '\\'])
         .and_then(|idx| (idx > 0).then_some(&trimmed[..idx]))
 }
 
@@ -163,7 +163,7 @@ pub fn grep(pattern: &str, path: &str, file_glob: &str, context: Option<usize>) 
                 continue;
             }
         };
-        if !entry.file_type().map_or(false, |ft| ft.is_file()) {
+        if !entry.file_type().is_some_and(|ft| ft.is_file()) {
             continue;
         }
         files_seen += 1;
@@ -209,14 +209,14 @@ pub fn grep(pattern: &str, path: &str, file_glob: &str, context: Option<usize>) 
                 }
                 in_hunk = true;
 
-                for ctx_i in start..end {
+                for (ctx_i, ctx_line) in lines.iter().enumerate().take(end).skip(start) {
                     let marker = if ctx_i == i { '>' } else { ' ' };
                     let line_str = format!(
                         "{}:{}:{} {}",
                         file_path.display(),
                         ctx_i + 1,
                         marker,
-                        lines[ctx_i]
+                        ctx_line
                     );
                     total_bytes += line_str.len() + 1;
                     if total_bytes > MAX_OUTPUT_BYTES {

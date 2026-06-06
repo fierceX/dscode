@@ -239,7 +239,7 @@ fn fit_widths_to_table(natural: Vec<usize>, max_width: usize) -> Vec<usize> {
         return natural;
     }
 
-    let mut widths: Vec<usize> = natural.iter().map(|width| (*width).min(8).max(1)).collect();
+    let mut widths: Vec<usize> = natural.iter().map(|width| (*width).clamp(1, 8)).collect();
     let min_sum: usize = widths.iter().sum();
     if min_sum > budget {
         widths.fill(1);

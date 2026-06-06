@@ -1,7 +1,12 @@
 //! Shared utility functions used across the codebase.
 
+use std::io::Read;
 use std::process::{Child, Command};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+
+const PROCESS_OUTPUT_CAPTURE_LIMIT: usize = 1_000_000;
 
 /// Truncate a string to at most `n` bytes on a UTF-8 character boundary,
 /// appending "..." if truncation occurred.
@@ -31,6 +36,59 @@ pub(crate) fn fmt_k(n: u64) -> String {
         let rem = n % 1000;
         format!("{}.{}K", k, rem / 100)
     }
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct ProcessOutputBuffer {
+    inner: Arc<Mutex<ProcessOutputBufferInner>>,
+}
+
+#[derive(Default)]
+struct ProcessOutputBufferInner {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+impl ProcessOutputBuffer {
+    pub(crate) fn append(&self, data: &[u8]) {
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let remaining = PROCESS_OUTPUT_CAPTURE_LIMIT.saturating_sub(guard.bytes.len());
+        if data.len() > remaining {
+            guard.bytes.extend_from_slice(&data[..remaining]);
+            guard.truncated = true;
+        } else {
+            guard.bytes.extend_from_slice(data);
+        }
+    }
+
+    pub(crate) fn to_string_lossy(&self, stream_name: &str) -> String {
+        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut out = String::from_utf8_lossy(&guard.bytes).to_string();
+        if guard.truncated {
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(&format!(
+                "[... truncated {stream_name} after {PROCESS_OUTPUT_CAPTURE_LIMIT} bytes ...]"
+            ));
+        }
+        out
+    }
+}
+
+pub(crate) fn spawn_output_reader<R>(mut pipe: R, buffer: ProcessOutputBuffer) -> JoinHandle<()>
+where
+    R: Read + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let mut chunk = [0u8; 8192];
+        loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => buffer.append(&chunk[..n]),
+            }
+        }
+    })
 }
 
 /// Put spawned Unix children in their own process group so timeout/cancel can

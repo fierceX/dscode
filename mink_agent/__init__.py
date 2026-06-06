@@ -39,6 +39,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
+_CAPTURE_LIMIT_BYTES = 1_000_000
+_STDOUT_QUEUE_MAX_LINES = 1024
 
 # ── Exceptions ───────────────────────────────────────────────────────
 
@@ -358,28 +360,64 @@ class AgentSession:
 
         self._proc = proc
         stderr_parts: list[str] = []
-        stdout_queue: queue.Queue[Optional[str]] = queue.Queue()
+        stderr_bytes = 0
+        stderr_truncated = False
+        stdout_dropped_lines = 0
+        stdout_queue: queue.Queue[Optional[str]] = queue.Queue(maxsize=_STDOUT_QUEUE_MAX_LINES)
+
+        def append_stderr(chunk: str) -> None:
+            nonlocal stderr_bytes, stderr_truncated
+            encoded_len = len(chunk.encode("utf-8", errors="replace"))
+            remaining = _CAPTURE_LIMIT_BYTES - stderr_bytes
+            if remaining <= 0:
+                stderr_truncated = True
+                return
+            if encoded_len <= remaining:
+                stderr_parts.append(chunk)
+                stderr_bytes += encoded_len
+                return
+            encoded = chunk.encode("utf-8", errors="replace")[:remaining]
+            stderr_parts.append(encoded.decode("utf-8", errors="replace"))
+            stderr_bytes = _CAPTURE_LIMIT_BYTES
+            stderr_truncated = True
+
+        def enqueue_stdout(line: Optional[str]) -> None:
+            nonlocal stdout_dropped_lines
+            try:
+                stdout_queue.put_nowait(line)
+                return
+            except queue.Full:
+                pass
+            try:
+                stdout_queue.get_nowait()
+                stdout_dropped_lines += 1
+            except queue.Empty:
+                pass
+            try:
+                stdout_queue.put_nowait(line)
+            except queue.Full:
+                stdout_dropped_lines += 1
 
         def drain_stderr() -> None:
             if proc.stderr is None:
                 return
             try:
                 for chunk in proc.stderr:
-                    stderr_parts.append(chunk)
+                    append_stderr(chunk)
             except OSError:
                 pass
 
         def drain_stdout() -> None:
             if proc.stdout is None:
-                stdout_queue.put(None)
+                enqueue_stdout(None)
                 return
             try:
                 for line in proc.stdout:
-                    stdout_queue.put(line)
+                    enqueue_stdout(line)
             except OSError:
                 pass
             finally:
-                stdout_queue.put(None)
+                enqueue_stdout(None)
 
         stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
         stdout_thread = threading.Thread(target=drain_stdout, daemon=True)
@@ -450,6 +488,10 @@ class AgentSession:
             stdout_thread.join(timeout=1)
             stderr_thread.join(timeout=1)
             stderr_text = "".join(stderr_parts)
+            if stderr_truncated:
+                stderr_text += (
+                    f"\n[... truncated stderr after {_CAPTURE_LIMIT_BYTES} bytes ...]"
+                )
 
             if final_event is None:
                 error_text = None
@@ -465,6 +507,8 @@ class AgentSession:
                 }
             final_event["exit_code"] = proc.returncode
             final_event["stderr"] = stderr_text
+            if stdout_dropped_lines:
+                final_event["stdout_dropped_lines"] = stdout_dropped_lines
             if post_final_exit_timeout:
                 final_event["status"] = "failed"
                 final_event["error"] = (

@@ -48,7 +48,9 @@ pub fn try_nsjail(
     // Write dirs imply read access; skip them in the read-only list
     // to prevent ro-bind from shadowing writable bind mount on
     // systems where mount order behaves unexpectedly.
-    let write_paths: Vec<String> = config.write_dirs.iter()
+    let write_paths: Vec<String> = config
+        .write_dirs
+        .iter()
         .map(|d| resolve_dir(d, &cwd))
         .collect();
     for d in &config.read_dirs {
@@ -164,7 +166,9 @@ pub fn try_bwrap(
     // Write dirs imply read access; skip them in the read-only list
     // to prevent ro-bind from shadowing writable bind mount on
     // systems where mount order behaves unexpectedly.
-    let write_paths: Vec<String> = config.write_dirs.iter()
+    let write_paths: Vec<String> = config
+        .write_dirs
+        .iter()
         .map(|d| resolve_dir(d, &cwd))
         .collect();
     for d in &config.read_dirs {

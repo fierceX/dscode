@@ -3,8 +3,10 @@ use crate::session::prefix::ImmutablePrefix;
 use anyhow::Result;
 use std::sync::Arc;
 
+type ToolDisableCheck = fn(&crate::config::ToolDisableFlags) -> bool;
+
 /// Tool names that map to disable flags.
-const TOOL_DISABLE_MAP: &[(&str, fn(&crate::config::ToolDisableFlags) -> bool)] = &[
+const TOOL_DISABLE_MAP: &[(&str, ToolDisableCheck)] = &[
     ("Bash", |f| f.disable_bash),
     ("Python", |f| f.disable_python),
     ("WebSearch", |f| f.disable_web),

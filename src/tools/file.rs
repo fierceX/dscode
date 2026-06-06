@@ -10,6 +10,29 @@ use std::path::{Component, Path, PathBuf};
 const STREAM_READ_THRESHOLD: u64 = 1_048_576; // 1MB
 const EDIT_REREAD_CONTEXT_LINES: usize = 12;
 
+fn ensure_full_read_within_limit(
+    path: &Path,
+    offset: Option<usize>,
+    limit: Option<usize>,
+    max_bytes: usize,
+) -> Result<()> {
+    if offset.is_some() || limit.is_some() {
+        return Ok(());
+    }
+    let meta = std::fs::metadata(path)
+        .map_err(|_| anyhow!("Error: file not found or unreadable: {}", path.display()))?;
+    if meta.len() as u128 > max_bytes as u128 {
+        bail!(
+            "Error: file too large for full Read ({} bytes > {} bytes): {}. Use a line selector such as '{}:1-200' or pass offset/limit.",
+            meta.len(),
+            max_bytes,
+            path.display(),
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 pub fn read(path: &str, offset: Option<usize>, limit: Option<usize>) -> Result<String> {
     if path.is_empty() {
         bail!("Error: no path provided");
@@ -191,8 +214,7 @@ fn inline_diff(path: &str, old: &str, new: &str) -> Result<(String, usize, usize
                     }
                 };
                 let val = change.value();
-                if val.ends_with('\n') {
-                    let trimmed = &val[..val.len() - 1];
+                if let Some(trimmed) = val.strip_suffix('\n') {
                     output.push_str(&format!("{ansi}{sign}{reset}{ansi}{trimmed}{reset}\n"));
                 } else {
                     output.push_str(&format!("{ansi}{sign}{reset}{ansi}{val}{reset}\n"));
@@ -239,14 +261,13 @@ pub fn split_read_path_selection(input: &str) -> Result<ReadPathSelection> {
     let mut limit = None;
     let mut path = rest;
 
-    if let Some((base, suffix)) = rest.rsplit_once(':') {
-        if !looks_like_url_host_port(rest)
-            && let Some((start, parsed_limit)) = parse_line_selector(suffix)?
-        {
-            path = base;
-            offset = Some(start);
-            limit = parsed_limit;
-        }
+    if let Some((base, suffix)) = rest.rsplit_once(':')
+        && !looks_like_url_host_port(rest)
+        && let Some((start, parsed_limit)) = parse_line_selector(suffix)?
+    {
+        path = base;
+        offset = Some(start);
+        limit = parsed_limit;
     }
 
     if path.is_empty() {
@@ -350,7 +371,7 @@ fn canonicalize_partial(path: &Path) -> PathBuf {
         // Nothing in the path exists; return normalized as-is
         return normalized;
     }
-    let existing_canonical = existing.canonicalize().unwrap_or_else(|_| existing);
+    let existing_canonical = existing.canonicalize().unwrap_or(existing);
     let suffix: PathBuf = pending.iter().map(|c| c.as_os_str()).collect();
     if suffix.as_os_str().is_empty() {
         existing_canonical
@@ -447,6 +468,12 @@ impl super::runner::ToolExec for ReadTool {
                 .map(super::runner::ToolOutcome::text);
         }
         let path = resolve_tool_path(&ctx.cwd, &selection.path)?;
+        ensure_full_read_within_limit(
+            &path,
+            selection.offset,
+            selection.limit,
+            ctx.tool_config.tool_result_max_bytes,
+        )?;
         let content = read(
             &path.display().to_string(),
             selection.offset,
@@ -1473,6 +1500,27 @@ mod tests {
             "should not contain line1"
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn read_tool_rejects_large_full_read_before_loading_content() {
+        let mut ctx = temp_tool_context("read-large-full-limit");
+        ctx.tool_config.tool_result_max_bytes = 8;
+        let p = ctx.cwd.join("large.txt");
+        std::fs::write(&p, "0123456789abcdef\nsecond\n").unwrap();
+
+        let err = match ReadTool.execute(&json!({"path": "large.txt"}), &ctx) {
+            Ok(_) => panic!("large full Read should be rejected"),
+            Err(err) => err.to_string(),
+        };
+        assert!(err.contains("file too large for full Read"), "{err}");
+
+        let ranged = ReadTool
+            .execute(&json!({"path": "large.txt", "offset": 2, "limit": 1}), &ctx)
+            .unwrap();
+        assert!(ranged.content.contains("second"), "{}", ranged.content);
+
+        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
     }
 
     #[test]

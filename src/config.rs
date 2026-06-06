@@ -98,7 +98,7 @@ pub struct ToolsConfigFile {
 }
 
 /// The `[sandbox]` section in .minkrc (all fields optional, inherits defaults).
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(default)]
 pub struct SandboxConfigFile {
     pub enabled: Option<bool>,
@@ -113,25 +113,6 @@ pub struct SandboxConfigFile {
     pub max_memory_mb: Option<u64>,
     pub max_pids: Option<u32>,
     pub timeout_secs: Option<u64>,
-}
-
-impl Default for SandboxConfigFile {
-    fn default() -> Self {
-        Self {
-            enabled: None,
-            backend: None,
-            read_dirs: None,
-            write_dirs: None,
-            allow_bash: None,
-            bash_allow_commands: None,
-            allow_python: None,
-            allow_network: None,
-            allow_sub_agent: None,
-            max_memory_mb: None,
-            max_pids: None,
-            timeout_secs: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -251,12 +232,13 @@ pub fn parse_args(args: Vec<String>) -> Result<Config> {
                 i += 2;
             }
             "--tool-timeout" => {
-                cfg.tool_timeout_secs = require_value(&args, i)?.parse()?;
+                cfg.tool_timeout_secs = require_positive_i32_value(&args, i, "--tool-timeout")?;
                 cfg.cli_overrides.tool_timeout_secs = true;
                 i += 2;
             }
             "--sub-agent-timeout" => {
-                cfg.sub_agent_timeout_secs = require_value(&args, i)?.parse()?;
+                cfg.sub_agent_timeout_secs =
+                    require_positive_i32_value(&args, i, "--sub-agent-timeout")?;
                 cfg.cli_overrides.sub_agent_timeout_secs = true;
                 i += 2;
             }
@@ -528,10 +510,14 @@ fn apply_config_sources(
             cfg.max_context_tokens = v;
         }
         if !cli_tool_timeout && let Some(tool_timeout) = toml_cfg.tool_timeout {
-            cfg.tool_timeout_secs = tool_timeout;
+            apply_positive_i32_config(&mut cfg.tool_timeout_secs, tool_timeout, "tool_timeout");
         }
         if !cli_sub_agent_timeout && let Some(sub_agent_timeout) = toml_cfg.sub_agent_timeout {
-            cfg.sub_agent_timeout_secs = sub_agent_timeout;
+            apply_positive_i32_config(
+                &mut cfg.sub_agent_timeout_secs,
+                sub_agent_timeout,
+                "sub_agent_timeout",
+            );
         }
         if !cli_llm_first_event_timeout && let Some(timeout) = toml_cfg.llm_first_event_timeout {
             apply_positive_i32_config(
@@ -635,12 +621,11 @@ fn apply_sandbox_config(
     }
 
     // Also check MINK_LIMITS env var (JSON format) — highest priority after CLI
-    if let Ok(json) = std::env::var("MINK_LIMITS") {
-        if let Ok(sb) = serde_json::from_str::<SandboxConfig>(&json) {
-            if sb.enabled {
-                cfg.sandbox = sb;
-            }
-        }
+    if let Ok(json) = std::env::var("MINK_LIMITS")
+        && let Ok(sb) = serde_json::from_str::<SandboxConfig>(&json)
+        && sb.enabled
+    {
+        cfg.sandbox = sb;
     }
 }
 
@@ -927,6 +912,14 @@ mod tests {
     }
 
     #[test]
+    fn parse_args_rejects_invalid_tool_timeout_flags() {
+        assert!(parse_args(vec!["--tool-timeout".into(), "0".into()]).is_err());
+        assert!(parse_args(vec!["--tool-timeout".into(), "-1".into()]).is_err());
+        assert!(parse_args(vec!["--sub-agent-timeout".into(), "0".into()]).is_err());
+        assert!(parse_args(vec!["--sub-agent-timeout".into(), "-1".into()]).is_err());
+    }
+
+    #[test]
     fn parse_config_file_overrides_model() {
         let toml_str = r#"
 model = "pro"
@@ -1058,6 +1051,8 @@ Read = "allow"
     fn config_file_invalid_llm_timeouts_are_ignored() {
         let defaults = Config::default();
         let project = MinkConfigFile {
+            tool_timeout: Some(0),
+            sub_agent_timeout: Some(-5),
             llm_first_event_timeout: Some(0),
             llm_idle_timeout: Some(-5),
             llm_wait_heartbeat: Some(-1),
@@ -1065,6 +1060,8 @@ Read = "allow"
         };
         let mut cfg = Config::default();
         apply_config_sources(&mut cfg, &defaults, None, Some(&project));
+        assert_eq!(cfg.tool_timeout_secs, defaults.tool_timeout_secs);
+        assert_eq!(cfg.sub_agent_timeout_secs, defaults.sub_agent_timeout_secs);
         assert_eq!(
             cfg.llm_first_event_timeout_secs,
             defaults.llm_first_event_timeout_secs

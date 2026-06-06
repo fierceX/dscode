@@ -88,6 +88,16 @@ impl SubAgentExecutor {
         session_id: String,
         fork: bool,
     ) -> Result<Self> {
+        let cancel = parent_ctx.cancel.linked_child_token();
+        Self::new_with_cancel(parent_ctx, session_id, fork, cancel).await
+    }
+
+    pub(crate) async fn new_with_cancel(
+        parent_ctx: Arc<AgentSharedContext>,
+        session_id: String,
+        fork: bool,
+        cancel: crate::cancel::CancellationToken,
+    ) -> Result<Self> {
         let paths =
             crate::session::paths::paths_for(&parent_ctx.home, &parent_ctx.cwd, &session_id);
         crate::session::paths::ensure_dir(&paths.session_dir).await?;
@@ -152,7 +162,7 @@ impl SubAgentExecutor {
             )),
             stats: child_stats,
             compaction: child_compaction,
-            cancel: parent_ctx.cancel.linked_child_token(),
+            cancel,
             display: capture.clone(), // ← CaptureDisplay，阻断实时输出
             sub_stream_tx: None,
             tool_config: parent_ctx.tool_config.clone(),
