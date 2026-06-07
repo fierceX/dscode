@@ -901,7 +901,7 @@ fn format_read_snapshot(display_path: &str, tag: &str, start_line: usize, conten
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum PatchHunk {
+pub(crate) enum PatchHunk {
     Replace {
         start: usize,
         end: usize,
@@ -934,7 +934,7 @@ fn apply_anchored_patch(
     max_bytes: usize,
     snapshots: &std::sync::Arc<std::sync::Mutex<crate::tools::snapshot::FileSnapshotStore>>,
 ) -> Result<String> {
-    let parsed = parse_anchored_patch(patch)?;
+    let (parsed, _warnings) = crate::tools::hashline::parse_patch(patch)?;
     if parsed.path != display_path {
         bail!(
             "Error: patch header path '{}' does not match Edit path '{}'",
@@ -991,10 +991,10 @@ fn apply_anchored_patch(
 }
 
 #[derive(Debug)]
-struct ParsedPatch {
-    path: String,
-    tag: String,
-    hunks: Vec<PatchHunk>,
+pub(crate) struct ParsedPatch {
+    pub(crate) path: String,
+    pub(crate) tag: String,
+    pub(crate) hunks: Vec<PatchHunk>,
 }
 
 fn parse_anchored_patch(input: &str) -> Result<ParsedPatch> {
