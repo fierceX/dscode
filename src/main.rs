@@ -716,6 +716,7 @@ fn print_usage() {
     println!("  --disable-bash          Disable Bash tool");
     println!("  --disable-python        Disable Python tool");
     println!("  --disable-sub-agent     Disable SubAgent tool");
+    println!("  --enable-python-sandbox Enable PythonSandbox tool (default: disabled)");
     println!("  --disable-web           Disable WebSearch/WebFetch tools");
     println!("  -h, --help              Show this help");
     println!();

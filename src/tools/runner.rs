@@ -10,6 +10,7 @@ use super::metadata::{ApprovalTier, ToolMetadata, ToolResultKind};
 use super::python;
 use super::search;
 use super::web;
+use super::sandbox_python;
 use crate::config::{ToolApprovalMode, ToolApprovalPolicy};
 use crate::context::{ToolConfig, ToolContext};
 use crate::guard::storm::{StormBreaker, StormDecision};
@@ -61,6 +62,7 @@ static TOOL_REGISTRY: LazyLock<Vec<Box<dyn ToolExec>>> = LazyLock::new(|| {
         Box::new(web::WebSearchTool),
         Box::new(web::WebFetchTool),
         Box::new(python::PythonTool),
+        Box::new(sandbox_python::PythonSandboxTool),
         Box::new(SubAgentTool),
     ]
 });
@@ -971,6 +973,7 @@ mod tests {
             tool_disable: crate::config::ToolDisableFlags::default(),
             tool_approval_mode: mode,
             tool_approval: overrides.into_iter().collect(),
+            sandbox_python: crate::config::SandboxPythonConfig::default(),
         }
     }
 

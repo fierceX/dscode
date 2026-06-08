@@ -127,7 +127,7 @@
   },
   {
     "name": "Python",
-    "description": "Execute Python code. Returns stdout and stderr. The environment is restricted: subprocess, os.system, shutil, ctypes, socket, eval/exec are blocked for security. Use this for data processing, analysis, or running helper scripts.",
+    "description": "Execute Python code directly on the host system with full capabilities — network, subprocess, file system, and C extensions are all available. Returns stdout and stderr. Use this for data processing, analysis, or running helper scripts that need full Python ecosystem access. For sandboxed execution with restricted permissions, use PythonSandbox tool instead.",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -248,5 +248,26 @@
       },
       "required": ["prompt"]
     }
-  }
+  },
+  {
+    "name": "PythonSandbox",
+    "description": "Execute Python code in a CPython WASI sandbox with restricted permissions — only specific directories have read/write access. No subprocess, no network, no C extensions. Full CPython standard library available (json/csv/re/math/datetime/xml etc.). Use this for safe execution of untrusted or sensitive Python code.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "script": {
+          "type": "string",
+          "description": "Inline Python code to execute."
+        },
+        "script_file": {
+          "type": "string",
+          "description": "Path to a Python file to execute. Provide either 'script' or 'script_file', not both."
+        },
+        "timeout": {
+          "type": "integer",
+          "description": "Timeout in seconds (default: 30, min: 5, max: 300)."
+        }
+      }
+    }
+    }
 ]

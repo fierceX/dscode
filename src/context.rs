@@ -14,7 +14,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// Tool-level configuration extracted from Config, embedded in AgentSharedContext.
+use crate::config::SandboxPythonConfig;
+
 #[derive(Clone)]
 pub struct ToolConfig {
     pub tool_timeout_secs: i32,
@@ -25,6 +26,8 @@ pub struct ToolConfig {
     pub tool_disable: ToolDisableFlags,
     pub tool_approval_mode: ToolApprovalMode,
     pub tool_approval: BTreeMap<String, ToolApprovalPolicy>,
+    /// CPython WASI 沙箱工具配置
+    pub sandbox_python: SandboxPythonConfig,
 }
 
 impl ToolConfig {
@@ -37,6 +40,7 @@ impl ToolConfig {
             tool_disable: cfg.tool_disable.clone(),
             tool_approval_mode: cfg.tool_approval_mode,
             tool_approval: cfg.tool_approval.clone(),
+            sandbox_python: cfg.sandbox_python.clone(),
         }
     }
 }

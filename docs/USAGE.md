@@ -178,7 +178,8 @@ prompt 为空且 stdin 是终端时自动进入交互模式。非终端 stdin �
 | `--approval-mode MODE` | `yolo` | 工具审批模式：`yolo` / `write` / `always-ask` |
 | `--agent-jsonl` | — | Agent JSONL 协议（stdin 读 versioned request，stdout 输出事件流和最终 `final`，隐式启用 stream-json） |
 | `--disable-bash` | `false` | 禁用 Bash 工具 |
-| `--disable-python` | `false` | 禁用 Python 工具 |
+| `--disable-python` | `false` | 禁用 Python 工具（宿主） |
+| `--enable-python-sandbox` | `true`（禁用） | 启用 PythonSandbox 工具（默认禁用） |
 | `--disable-sub-agent` | `false` | 禁用 SubAgent 工具 |
 | `--disable-web` | `false` | 禁用 WebSearch / WebFetch 工具 |
 | `--api-key KEY` | env | 覆盖 API Key |
@@ -253,6 +254,68 @@ max_memory_mb = 1024
 max_pids = 64
 timeout_secs = 600
 ```
+
+### PythonSandbox 沙箱配置
+
+#### python.wasm 文件
+
+`python.wasm` 是 **CPython 编译为 WASI 的二进制**，由 CPython 核心开发者 Brett Cannon 维护的 [cpython-wasi-build](https://github.com/brettcannon/cpython-wasi-build) 项目自动构建发布。
+
+- **版本**: Python 3.13.13（稳定版），3.14.5，3.15.0 beta
+- **大小**: ~29MB（python.wasm）+ ~9MB（标准库 .py 文件）
+- **运行时**: wasmtime
+- **C 扩展**: 仅包含 CPython 内置 C 模块（math/hashlib/binascii 等），不含第三方 C 扩展
+
+下载方式：
+
+```bash
+# 手动下载
+curl -sL "https://github.com/brettcannon/cpython-wasi-build/releases/download/v3.13.13/python-3.13.13-wasi_sdk-24.zip" -o python-wasi.zip
+unzip python-wasi.zip -d cpython-wasi
+```
+
+下载后，项目目录结构应为：
+
+```
+cpython-wasi/
+├── python.wasm          # CPython WASI 二进制（~29MB）
+├── lib/python3.13/      # CPython 标准库
+└── LICENSE
+```
+
+然后在 `.minkrc` 中配置路径：
+
+```toml
+[sandbox_python]
+enable = true                            # 启用（默认禁用）
+wasm_path = "cpython-wasi/python.wasm"   # python.wasm 路径
+stdlib_dir = "cpython-wasi"              # 标准库目录
+```
+
+#### 路径与权限配置
+
+`[sandbox_python]` 段还支持以下配置项：
+
+```toml
+[sandbox_python]
+enable = true
+wasm_path = "cpython-wasi/python.wasm"
+stdlib_dir = "cpython-wasi"
+timeout = 30                             # 超时秒数
+read_dirs = ["./data"]                   # 允许读取的目录
+write_dirs = ["./output"]               # 允许写入的目录
+package_dirs = ["./packages"]            # Python 包目录（挂载到 /packages）
+```
+
+路径解析通过沙箱自动注入的 `os.chdir` 实现，三种路径写法均支持：
+- `open("./output/f.txt", "w")` — 相对路径
+- `open("output/f.txt", "w")` — 无前缀相对路径
+- `open("/absolute/path/to/output/f.txt", "w")` — 绝对路径
+
+权限规则：
+- 仅在 `read_dirs` / `write_dirs` 中声明的目录可访问
+- `write_dirs` 优先于 CWD 只读（显式声明的写入权限覆盖 CWD 默认只读）
+- 路径穿越（`../`）无法逃逸 preopen 范围
 
 ### 平台差异
 
@@ -453,7 +516,8 @@ mink -m flash --max-context 1M -i
 | `Write` | 写文件 | `path`, `content` |
 | `Edit` | anchored patch 编辑 | `path`, `patch` |
 | `Bash` | 执行命令 | `command`, `timeout` |
-| `Python` | 运行 Python 脚本（安全受限，禁用 subprocess/os.system/eval） | `script` / `script_file`, `timeout` |
+| `Python` | 运行 Python 脚本（宿主环境，完整生态） | `script` / `script_file`, `timeout` |
+| `PythonSandbox` | WASI 沙箱中执行 Python（受限，默认禁用） | `script` / `script_file`, `timeout` |
 | `Glob` | 文件匹配 | `pattern`, `path` |
 | `Grep` | 内容搜索 | `pattern`, `path`, `glob`, `context` |
 | `TodoWrite` | 维护 checklist | `todos[{content, status}]` |

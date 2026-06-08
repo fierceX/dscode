@@ -89,6 +89,9 @@ pub struct MinkConfigFile {
     /// `[tools]` section — tool approval and policy settings.
     #[serde(default)]
     pub tools: Option<ToolsConfigFile>,
+    /// `[sandbox_python]` section — CPython WASI 沙箱工具的配置。
+    #[serde(default)]
+    pub sandbox_python: Option<SandboxPythonConfigFile>,
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
@@ -113,6 +116,64 @@ pub struct SandboxConfigFile {
     pub max_memory_mb: Option<u64>,
     pub max_pids: Option<u32>,
     pub timeout_secs: Option<u64>,
+}
+
+/// `[sandbox_python]` section in .minkrc — CPython WASI 沙箱配置。
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default)]
+pub struct SandboxPythonConfigFile {
+    /// python.wasm 路径（默认: cpython-wasi/python.wasm）
+    pub wasm_path: Option<String>,
+    /// 标准库目录路径（挂载为 /usr/local）
+    pub stdlib_dir: Option<String>,
+    /// 超时秒数（默认: 30）
+    pub timeout: Option<u64>,
+    /// 允许读取的目录
+    pub read_dirs: Option<Vec<String>>,
+    /// 允许写入的目录
+    pub write_dirs: Option<Vec<String>>,
+    /// Python 包目录（挂载到 /packages）
+    pub package_dirs: Option<Vec<String>>,
+    /// 是否启用 PythonSandbox 工具（默认禁用，需显式开启）
+    pub enable: Option<bool>,
+}
+
+/// CPython WASI 沙箱工具的运行时配置（从 .minkrc 的 `[sandbox_python]` 加载）。
+#[derive(Debug, Clone)]
+pub struct SandboxPythonConfig {
+    pub wasm_path: String,
+    pub stdlib_dir: String,
+    pub timeout: u64,
+    pub read_dirs: Vec<String>,
+    pub write_dirs: Vec<String>,
+    pub package_dirs: Vec<String>,
+}
+
+impl Default for SandboxPythonConfig {
+    fn default() -> Self {
+        Self {
+            wasm_path: "cpython-wasi/python.wasm".into(),
+            stdlib_dir: "cpython-wasi".into(),
+            timeout: 30,
+            read_dirs: Vec::new(),
+            write_dirs: Vec::new(),
+            package_dirs: Vec::new(),
+        }
+    }
+}
+
+impl SandboxPythonConfig {
+    pub fn from_file(cfg: Option<&SandboxPythonConfigFile>) -> Self {
+        let Some(cfg) = cfg else { return Self::default() };
+        Self {
+            wasm_path: cfg.wasm_path.clone().unwrap_or_else(|| "cpython-wasi/python.wasm".into()),
+            stdlib_dir: cfg.stdlib_dir.clone().unwrap_or_else(|| "cpython-wasi".into()),
+            timeout: cfg.timeout.unwrap_or(30),
+            read_dirs: cfg.read_dirs.clone().unwrap_or_default(),
+            write_dirs: cfg.write_dirs.clone().unwrap_or_default(),
+            package_dirs: cfg.package_dirs.clone().unwrap_or_default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -147,6 +208,8 @@ pub struct Config {
     pub agent_jsonl: bool,
     /// 沙箱配置（从 .minkrc 加载）
     pub sandbox: SandboxConfig,
+    /// CPython WASI 沙箱工具配置
+    pub sandbox_python: SandboxPythonConfig,
     /// 自定义系统提示词文件（MISSION.md）
     pub mission_file: Option<PathBuf>,
     /// 工具禁用开关（从 CLI 或 Agent JSONL 加载）
@@ -204,6 +267,7 @@ impl Default for Config {
             cli_overrides: CliOverrides::default(),
             agent_jsonl: false,
             sandbox: SandboxConfig::default(),
+            sandbox_python: SandboxPythonConfig::default(),
             mission_file: None,
             tool_disable: ToolDisableFlags::default(),
             tool_approval_mode: ToolApprovalMode::Yolo,
@@ -363,6 +427,10 @@ pub fn parse_args(args: Vec<String>) -> Result<Config> {
             }
             "--disable-python" => {
                 cfg.tool_disable.disable_python = true;
+                i += 1;
+            }
+            "--enable-python-sandbox" => {
+                cfg.tool_disable.disable_python_sandbox = false;
                 i += 1;
             }
             _ => {
@@ -618,6 +686,31 @@ fn apply_sandbox_config(
                 cfg.sandbox.timeout_secs = v;
             }
         }
+
+        // 合并 sandbox_python 配置（project 覆盖 user 覆盖 default）
+        if let Some(ref sp) = toml_cfg.sandbox_python {
+            if let Some(ref v) = sp.wasm_path {
+                cfg.sandbox_python.wasm_path = v.clone();
+            }
+            if let Some(ref v) = sp.stdlib_dir {
+                cfg.sandbox_python.stdlib_dir = v.clone();
+            }
+            if let Some(v) = sp.timeout {
+                cfg.sandbox_python.timeout = v;
+            }
+            if let Some(ref v) = sp.read_dirs {
+                cfg.sandbox_python.read_dirs = v.clone();
+            }
+            if let Some(ref v) = sp.write_dirs {
+                cfg.sandbox_python.write_dirs = v.clone();
+            }
+            if let Some(ref v) = sp.package_dirs {
+                cfg.sandbox_python.package_dirs = v.clone();
+            }
+            if let Some(v) = sp.enable {
+                cfg.tool_disable.disable_python_sandbox = !v;
+            }
+        }
     }
 
     // Also check MINK_LIMITS env var (JSON format) — highest priority after CLI
@@ -764,12 +857,27 @@ impl SandboxConfig {
 /// 来源：CLI `--disable-bash` 等，或 Agent JSONL `options.disable_*`。
 /// 注意：与 SandboxConfig 中的 allow_* 是独立的层次 —
 /// SandboxConfig 决定沙箱策略，ToolDisableFlags 是运行时覆盖。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ToolDisableFlags {
     pub disable_bash: bool,
     pub disable_sub_agent: bool,
     pub disable_web: bool,
     pub disable_python: bool,
+    /// 默认禁用 PythonSandbox，避免与宿主 Python 混用
+    /// 通过 --enable-python-sandbox 或 .minkrc 中的设置启用
+    pub disable_python_sandbox: bool,
+}
+
+impl Default for ToolDisableFlags {
+    fn default() -> Self {
+        Self {
+            disable_bash: false,
+            disable_sub_agent: false,
+            disable_web: false,
+            disable_python: false,
+            disable_python_sandbox: true, // 默认禁用
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]

@@ -139,7 +139,8 @@ insert after 55:
 
 ## `Python`
 
-执行受限 Python 脚本。
+执行 Python 脚本（宿主环境）。可使用完整 Python 生态：网络、子进程、C 扩展均可用。
+如需沙箱隔离环境，使用 `PythonSandbox` 工具。
 
 | 参数 | 类型 | 说明 |
 |---|---|---|
@@ -149,9 +150,53 @@ insert after 55:
 
 - `script` 和 `script_file` 必须二选一，不能同时提供。
 - 在当前会话 `cwd` 下使用 `python3 -B -W ignore -c` 执行。
-- 黑名单拦截 `subprocess`、`os.system`、`os.popen`、`shutil`、`ctypes`、`socket`、`pty`、`__import__`、`compile(`、`exec(`、`eval(` 等模式。
 - Ctrl+C / interrupt 会杀掉脚本并返回 interrupted 提示。
-- Web、系统调用、任意 import 绕过不属于该工具的目标能力。
+
+## `PythonSandbox`
+
+在 CPython WASI 沙箱中执行 Python 代码。基于 wasmtime + CPython WASI（Brett Cannon 的 cpython-wasi-build），提供 WASI 级进程隔离。
+
+仅配置的目录有读写权限，无子进程、无网络、无 C 扩展，完整 CPython 标准库可用。
+默认禁用，需通过 `--enable-python-sandbox` 或 `.minkrc` 中 `[sandbox_python] enable = true` 启用。
+
+### python.wasm 说明
+
+沙箱使用的 `python.wasm` 是 CPython 3.13+ 编译为 WASI 的二进制，需单独下载：
+
+```bash
+curl -sL "https://github.com/brettcannon/cpython-wasi-build/releases/download/v3.13.13/python-3.13.13-wasi_sdk-24.zip" -o python-wasi.zip
+unzip python-wasi.zip -d cpython-wasi
+```
+
+项目结构：
+```
+cpython-wasi/
+├── python.wasm          # ~29MB
+├── lib/python3.13/      # 标准库
+└── LICENSE
+```
+
+### 参数
+
+| 参数 | 类型 | 说明 |
+|---|---|---|
+| `script` | string | 内联 Python 代码 |
+| `script_file` | string | Python 文件路径 |
+| `timeout` | integer | 超时秒数，可选，默认 30，范围 5-300 |
+
+### 限制
+- 完整 CPython 标准库（json/csv/re/math/datetime/xml 等）
+- 无 C 扩展（numpy/pandas/lxml 不可用）
+- 无子进程、无网络
+- 仅配置的目录可读写
+
+### 路径规则
+
+通过 `os.chdir` 注入使相对路径自然工作：
+```python
+open("./output/f.txt", "w")                  # 相对路径 ✅
+open("/absolute/path/to/project/output/f.txt", "w")  # 绝对路径 ✅
+```
 
 ## `Glob`
 

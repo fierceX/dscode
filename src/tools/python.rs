@@ -5,20 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 /// Patterns that are blocked in Python scripts for safety.
-const BLOCKED_PATTERNS: &[(&str, &str)] = &[
-    ("subprocess", "subprocess module is disabled for security"),
-    ("os.system", "os.system() is disabled for security"),
-    ("os.popen", "os.popen() is disabled for security"),
-    ("shutil", "shutil module is disabled for security"),
-    ("ctypes", "ctypes module is disabled for security"),
-    ("socket", "socket module is disabled for security"),
-    ("pty", "pty module is disabled for security"),
-    ("__import__", "__import__() is disabled for security"),
-    ("compile(", "compile() is disabled for security"),
-    ("exec(", "exec() is disabled for security"),
-    ("eval(", "eval() is disabled for security"),
-    ("open(__", "opening /dev/fd or similar is disabled"),
-];
+/// 已废弃：安全策略交给 OS 进程沙箱处理，不再在工具层做静态字符串过滤。
 
 /// Execute a Python script and return (stdout, stderr, exit_code).
 pub fn execute_script(
@@ -46,12 +33,7 @@ fn execute_script_with_interrupt_in_dir(
         bail!("Error: no Python script provided");
     }
 
-    // Safety check: scan for blocked patterns
-    for (pattern, reason) in BLOCKED_PATTERNS {
-        if script.contains(pattern) {
-            bail!("Error: unsafe Python code detected ({reason})");
-        }
-    }
+    // 安全策略已交给 OS 进程沙箱处理
 
     let timeout = Duration::from_secs(timeout_secs.unwrap_or(30).clamp(5, 300));
 
@@ -241,11 +223,12 @@ mod tests {
     }
 
     #[test]
-    fn blocked_patterns_rejected() {
-        assert!(execute_script("import subprocess", None).is_err());
-        assert!(execute_script("os.system('rm')", None).is_err());
-        assert!(execute_script("import shutil", None).is_err());
-        assert!(execute_script("eval('1+1')", None).is_err());
+    #[test]
+    fn unrestricted_scripts_execute() {
+        // 限制已移除：这些脚本现在应该正常执行
+        let (out, _, code) = execute_script("import subprocess; print('ok')", None).unwrap();
+        assert_eq!(code, Some(0));
+        assert!(out.contains("ok"));
     }
 
     #[test]
