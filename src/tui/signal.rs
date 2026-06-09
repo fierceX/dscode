@@ -1,3 +1,4 @@
+use crate::tui::notify::TaskNotificationKind;
 use crate::tui::sanitize::sanitize_tui_text;
 use crate::tui::state::{MsgKind, MsgLine, SubAgentDetail, TuiState, WorkState};
 use crate::ui::StatsSnapshot;
@@ -76,6 +77,7 @@ impl TuiState {
             TuiSignal::Stop => {
                 self.finalize_stream();
                 self.work_state = WorkState::Idle;
+                self.finish_task_notification(TaskNotificationKind::Completed);
             }
             TuiSignal::Retry => {
                 self.finalize_stream();
@@ -106,6 +108,7 @@ impl TuiState {
                 self.finalize_stream();
                 self.work_state = WorkState::Error;
                 self.push_line(MsgLine::new(format!("Error: {m}"), MsgKind::Error));
+                self.finish_task_notification(TaskNotificationKind::Failed);
             }
             TuiSignal::TitleUpdate(m, s) => {
                 self.model = m.clone();

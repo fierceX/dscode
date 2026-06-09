@@ -451,8 +451,15 @@ fn handle_enter(
             }
             SlashCommand::Compact => {
                 let (done_tx, _) = tokio::sync::oneshot::channel();
-                let _ = orch_tx.send(OrchCmd::Compact { done: done_tx });
-                state.work_state = WorkState::Compacting;
+                if orch_tx.send(OrchCmd::Compact { done: done_tx }).is_ok() {
+                    state.arm_task_notification();
+                    state.work_state = WorkState::Compacting;
+                } else {
+                    state.push_line(MsgLine::new(
+                        "Failed to send compact command.".into(),
+                        MsgKind::Error,
+                    ));
+                }
             }
             SlashCommand::Help => state.add_help(),
             SlashCommand::Skills => state.show_skills(),
@@ -463,11 +470,21 @@ fn handle_enter(
         },
         Ok(None) => {
             let (done_tx, _) = tokio::sync::oneshot::channel();
-            let _ = orch_tx.send(OrchCmd::UserInput {
-                input,
-                done: done_tx,
-            });
-            state.work_state = WorkState::WaitingModel;
+            if orch_tx
+                .send(OrchCmd::UserInput {
+                    input,
+                    done: done_tx,
+                })
+                .is_ok()
+            {
+                state.arm_task_notification();
+                state.work_state = WorkState::WaitingModel;
+            } else {
+                state.push_line(MsgLine::new(
+                    "Failed to send user input.".into(),
+                    MsgKind::Error,
+                ));
+            }
         }
         Err(_) => {
             state.push_line(MsgLine::new(

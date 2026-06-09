@@ -1,4 +1,5 @@
 use crate::tui::file_picker::{FilePickerPolicy, FilePickerState};
+use crate::tui::notify::{TaskNotification, TaskNotificationKind};
 use crate::tui::sanitize::sanitize_tui_text;
 use crate::ui::StatsSnapshot;
 use ratatui::text::Line;
@@ -281,6 +282,8 @@ pub(crate) struct TuiState {
     pub view: View,
     pub overlay: Option<ActiveOverlay>,
     pub file_picker_policy: FilePickerPolicy,
+    pub(crate) task_notification_armed: bool,
+    pub(crate) pending_task_notification: Option<TaskNotification>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -325,6 +328,8 @@ impl Default for TuiState {
             view: View::Main,
             overlay: None,
             file_picker_policy: FilePickerPolicy::default(),
+            task_notification_armed: false,
+            pending_task_notification: None,
         }
     }
 }
@@ -394,6 +399,23 @@ impl TuiState {
     pub(crate) fn finalize_stream(&mut self) {
         self.save_stream();
         self.streaming = false;
+    }
+
+    pub(crate) fn arm_task_notification(&mut self) {
+        self.task_notification_armed = true;
+        self.pending_task_notification = None;
+    }
+
+    pub(crate) fn finish_task_notification(&mut self, kind: TaskNotificationKind) {
+        if !self.task_notification_armed {
+            return;
+        }
+        self.task_notification_armed = false;
+        self.pending_task_notification = Some(TaskNotification::new(kind, &self.model));
+    }
+
+    pub(crate) fn take_task_notification(&mut self) -> Option<TaskNotification> {
+        self.pending_task_notification.take()
     }
 
     pub(crate) fn add_help(&mut self) {

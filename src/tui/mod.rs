@@ -5,6 +5,7 @@ mod display;
 mod file_picker;
 mod input;
 mod markdown;
+mod notify;
 mod render;
 mod replay;
 mod sanitize;
@@ -19,6 +20,7 @@ use crate::agent::orchestrator::OrchCmd;
 use crate::config::SandboxConfig;
 use file_picker::FilePickerPolicy;
 use input::handle_event;
+use notify::send_task_notification;
 use render::render;
 use replay::load_session;
 use signal::drain_signals;
@@ -86,6 +88,9 @@ fn tui_main_loop(
         if drain_signals(&mut sig_rx, &mut state) {
             state.dirty = true;
         }
+        if let Some(notification) = state.take_task_notification() {
+            send_task_notification(&notification);
+        }
         if state.quit {
             break;
         }
@@ -130,6 +135,7 @@ mod tests {
         InlineNode, MdBlock, TableAlign, TableRows, normalize_markdown_input, parse_blocks,
         push_msg, push_msg_with_width, render_table, strip_ansi, wrap_lines_word,
     };
+    use crate::tui::notify::TaskNotificationKind;
     use crate::tui::render::{
         build_status_line, build_status_spans, build_visible_click_map, collapsed_summary,
         content_viewport_height, detail_lines_for_session, detail_viewport_height,
@@ -335,6 +341,88 @@ mod tests {
         assert!(state.sub_agents.active_sessions.is_empty());
         assert_eq!(state.work_state, WorkState::WaitingModel);
         assert!(state.lines[0].text.contains("timed_out"));
+    }
+
+    #[test]
+    fn user_task_stop_emits_completion_notification() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = TuiState::default();
+        state.model = "pro".into();
+        state.input.buf = "do the task".into();
+        state.input.cursor = state.input.buf.len();
+
+        assert!(!handle_event(
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &mut state,
+            &tx,
+        ));
+        assert!(state.take_task_notification().is_none());
+
+        state.apply(&TuiSignal::Stop);
+
+        let notification = state.take_task_notification().unwrap();
+        assert_eq!(notification.kind, TaskNotificationKind::Completed);
+        assert_eq!(notification.title, "mink 任务完成");
+        assert!(notification.body.contains("pro"));
+        assert!(state.take_task_notification().is_none());
+    }
+
+    #[test]
+    fn user_task_error_emits_failure_notification() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = TuiState::default();
+        state.input.buf = "do the task".into();
+        state.input.cursor = state.input.buf.len();
+
+        assert!(!handle_event(
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &mut state,
+            &tx,
+        ));
+
+        state.apply(&TuiSignal::Error("network timeout".into()));
+
+        let notification = state.take_task_notification().unwrap();
+        assert_eq!(notification.kind, TaskNotificationKind::Failed);
+        assert_eq!(notification.title, "mink 任务失败");
+    }
+
+    #[test]
+    fn local_help_does_not_emit_completion_notification() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = TuiState::default();
+        state.input.buf = "/help".into();
+        state.input.cursor = state.input.buf.len();
+
+        assert!(!handle_event(
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &mut state,
+            &tx,
+        ));
+
+        state.apply(&TuiSignal::Stop);
+
+        assert!(state.take_task_notification().is_none());
+    }
+
+    #[test]
+    fn compact_stop_emits_completion_notification() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = TuiState::default();
+        state.input.buf = "/compact".into();
+        state.input.cursor = state.input.buf.len();
+
+        assert!(!handle_event(
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &mut state,
+            &tx,
+        ));
+        assert_eq!(state.work_state, WorkState::Compacting);
+
+        state.apply(&TuiSignal::Stop);
+
+        let notification = state.take_task_notification().unwrap();
+        assert_eq!(notification.kind, TaskNotificationKind::Completed);
     }
 
     #[test]

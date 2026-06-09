@@ -13,6 +13,7 @@ TUI 是 mink 的全屏终端交互模式，基于 `ratatui`。它不是 agent �
 | `src/tui/mod.rs` | TUI 入口、事件循环、集成测试 |
 | `src/tui/display.rs` | `Display` 到 `TuiSignal` 的适配 |
 | `src/tui/file_picker.rs` | 输入区路径补全、父目录扫描和沙箱感知过滤 |
+| `src/tui/notify.rs` | TUI 任务结束后的系统通知，按平台尽力发送 |
 | `src/tui/signal.rs` | `TuiSignal` reducer |
 | `src/tui/state.rs` | 消息、输入、视口、缓存、子代理状态 |
 | `src/tui/input.rs` | 键盘、鼠标、粘贴、历史和 slash command |
@@ -44,8 +45,11 @@ TUI 是 mink 的全屏终端交互模式，基于 `ratatui`。它不是 agent �
 | 未知 slash command | 本地提示，不进入 LLM conversation |
 | 行首空格 + slash 文本 | 作为普通用户消息发送 |
 | `Tab` | 打开路径选择器，支持当前目录、相对路径和受限父目录补全 |
+| 任务结束 | 普通输入和 `/compact` 完成后发送系统通知，失败时发送失败通知 |
 | 点击折叠消息 | 展开或收起长内容 |
 | 点击子代理消息 | 打开详情页，查看 thinking/text |
+
+系统通知按平台尽力发送：TUI 会先向终端写入常见通知 OSC escape（iTerm2/WezTerm/rxvt 风格）和 bell fallback，再异步调用系统通知命令；macOS 优先使用 `terminal-notifier`，未安装时回退到 `/usr/bin/osascript`，Linux/FreeBSD 使用 `notify-send`。通知发送失败不影响 TUI 主循环。
 
 ## Markdown 渲染
 
@@ -64,10 +68,10 @@ TUI 是 mink 的全屏终端交互模式，基于 `ratatui`。它不是 agent �
 
 ```text
 cargo test tui
-70 passed
+76 passed
 
 cargo test
-460 passed, 31 ignored
+466 passed, 31 ignored
 ```
 
 TUI 相关测试覆盖输入、中断、slash command、Markdown、表格、diff、折叠、点击目标、子代理详情、状态栏和 replay。
