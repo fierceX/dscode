@@ -50,10 +50,11 @@ jobs:
         if: matrix.freebsd
         uses: vmactions/freebsd-vm@v1
         with:
+          release: "15.0"
           usesh: true
           mem: 4096
           prepare: |
-            pkg install -y rust rust-bindgen llvm
+            pkg install -y rust llvm
           run: |
             cargo build --release
             mkdir -p dist
