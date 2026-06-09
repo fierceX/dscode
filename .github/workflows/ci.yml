@@ -37,10 +37,31 @@ jobs:
           - runner: macos-14
             target: aarch64-apple-darwin
             suffix: darwin-arm64
+          - runner: ubuntu-latest
+            target: x86_64-unknown-freebsd
+            suffix: freebsd-amd64
+            freebsd: true
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+
+      # ── FreeBSD build (via VM) ──
+      - name: Build on FreeBSD VM
+        if: matrix.freebsd
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          mem: 4096
+          prepare: |
+            pkg install -y rust rust-bindgen llvm
+          run: |
+            cargo build --release
+            mkdir -p dist
+            cp target/release/mink dist/mink-freebsd-amd64
+
+      # ── Linux / macOS build ──
       - uses: dtolnay/rust-toolchain@stable
+        if: '!matrix.freebsd'
         with:
           targets: ${{ matrix.target }}
 
@@ -55,6 +76,7 @@ jobs:
         run: pip install -q cargo-zigbuild
 
       - name: Build mink binary
+        if: '!matrix.freebsd'
         run: |
           mkdir -p dist
           if [ "${{ matrix.target }}" = "x86_64-unknown-linux-musl" ]; then
