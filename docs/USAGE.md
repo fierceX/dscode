@@ -157,15 +157,6 @@ prompt 为空且 stdin 是终端时自动进入交互模式。非终端 stdin �
 |------|--------|------|
 | `PROMPT` | — | 用户输入（位置参数） |
 | `-m` / `--model` | `flash` | 模型名：`flash` / `pro` / `deepseek-v4-flash` / `deepseek-v4-pro` |
-| `--max-tokens` | `81920` | 每次 LLM 响应的最大 token 数 |
-| `--max-turns` | `40` | 每用户输入的最大 LLM 调用轮数 |
-| `--max-context` | `1000000` | 上下文 token 上限。支持 `k`/`m` 后缀（如 `500K` / `1M`） |
-| `--tool-timeout` | `600` | 工具执行超时（秒） |
-| `--sub-agent-timeout` | `300` | 子代理执行超时（秒） |
-| `--llm-first-event-timeout` | `60` | LLM 请求成功后等待首个 stream event 的秒数 |
-| `--llm-idle-timeout` | `90` | LLM stream 两个事件之间允许空闲的秒数 |
-| `--llm-wait-heartbeat` | `30` | 等待模型响应时的提示间隔；设为 `0` 关闭提示 |
-| `--skill NAME` | — | 加载 skill（可重复使用） |
 | `--mission PATH` | — | 加载 MISSION.md 文件替换默认系统提示词 |
 | `--session [NAME]` | 自动生成 | 命名会话。提供名称可恢复 |
 | `--continue` | — | 恢复最近的 session |
@@ -173,20 +164,44 @@ prompt 为空且 stdin 是终端时自动进入交互模式。非终端 stdin �
 | `--list-skills` | — | 列出可用 skill |
 | `-i` / `--interactive` | auto | REPL 交互模式 |
 | `--tui` | — | TUI 全屏模式 |
-| `--print` | — | ndjson 结构化输出（`--output-format stream-json` 别名），最后输出 `type=final` |
-| `--output-format FMT` | `human` | 输出格式：`human` / `stream-json` |
-| `--approval-mode MODE` | `yolo` | 工具审批模式：`yolo` / `write` / `always-ask` |
+| `--print` | — | ndjson 结构化输出，最后输出 `type=final` |
 | `--agent-jsonl` | — | Agent JSONL 协议（stdin 读 versioned request，stdout 输出事件流和最终 `final`，隐式启用 stream-json） |
-| `--disable-bash` | `false` | 禁用 Bash 工具 |
-| `--disable-python` | `false` | 禁用 Python 工具（宿主） |
-| `--enable-python-sandbox` | `true`（禁用） | 启用 PythonSandbox 工具（默认禁用） |
-| `--disable-sub-agent` | `false` | 禁用 SubAgent 工具 |
-| `--disable-web` | `false` | 禁用 WebSearch / WebFetch 工具 |
 | `--api-key KEY` | env | 覆盖 API Key |
 | `--base-url URL` | 默认端点 | 覆盖 API 端点 |
+| `--disable-bash` | `false` | 禁用 Bash 工具 |
+| `--disable-python` | `false` | 禁用 Python 工具（宿主） |
+| `--enable-python-sandbox` | `false` | 启用 PythonSandbox 工具（默认禁用） |
+| `--disable-sub-agent` | `false` | 禁用 SubAgent 工具 |
+| `--disable-web` | `false` | 禁用 WebSearch / WebFetch 工具 |
+| `--config <toml>` | — | 通过 TOML 字符串设置配置（见下文） |
 | `-v` / `--verbose` | `false` | 详细日志 |
 | `-h` / `--help` | — | 显示帮助 |
 
+### `--config` TOML 格式
+
+中低频参数通过 `--config` 传递，支持全部可选字段：
+
+```toml
+# 标量字段
+max_tokens = 4096
+max_turns = 20
+max_context = "500K"
+tool_timeout = 300
+sub_agent_timeout = 120
+llm_first_event_timeout = 60
+llm_idle_timeout = 90
+llm_wait_heartbeat = 30
+output_format = "stream-json"
+approval_mode = "write"
+skills = ["python", "debugging"]
+
+# [sandbox_python] 段
+[sandbox_python]
+wasm_path = "/path/to/python.wasm"
+read_dirs = ["./data"]
+```
+
+等价于旧版独立的 CLI 参数。也支持设置 `model`、`api_key`、`base_url`，但推荐使用独立参数以便 SDK 控制。
 ---
 
 ## 配置文件
@@ -589,11 +604,11 @@ mink -m flash --max-context 1M -i
 ### 启用方式
 
 ```bash
-# CLI 加载
-mink -m flash --skill debugging -i
+# CLI 加载（通过 --config）
+mink -m flash --config 'skills=["debugging"]' -i
 
 # 加载多个
-mink -m flash --skill debugging --skill tdd -i
+mink -m flash --config 'skills=["debugging","tdd"]' -i
 
 # 查看可用技能
 mink --list-skills
@@ -621,7 +636,7 @@ mink --list-skills
 
 ### 加载机制
 
-- `--skill NAME` 在 system prompt 的 `<selected-skills>` 段嵌入 SKILL.md 全文
+- Skill 通过 `.minkrc` 的 `skills` 字段或 `--config "skills=[\"name\"]"` 加载，加载后在 system prompt 的 `<selected-skills>` 段嵌入 SKILL.md 全文
 - `Read skill://<name>` 在运行时按需读取同一套 skill resolver，不修改后续轮次的 system prompt
 - 内置技能即使在离线环境也可用（编译时已嵌入）
 
@@ -654,8 +669,9 @@ MISSION.md 使用一级标题（`# heading-name`）映射到系统提示词的�
 # 加载自定义提示词
 mink --mission ./my-task.mission.md -i
 
-# 结合技能使用
-mink --mission ./my-task.mission.md --skill debugging -i
+```bash
+# 结合技能使用（通过 --config）
+mink --mission ./my-task.mission.md --config 'skills=["debugging"]' -i
 ```
 
 ### Python SDK
@@ -714,7 +730,7 @@ Text: ...
 
 ### 超时
 
-子代理默认超时 300 秒（5 分钟），可通过 `--sub-agent-timeout` 参数或配置文件的 `sub_agent_timeout` 字段调整。超时后子代理被标记为 `failed`，父会话继续执行。
+子代理默认超时 300 秒（5 分钟），可通过 `--config` 或 `.minkrc` 的 `sub_agent_timeout` 字段调整。超时后子代理被标记为 `failed`，父会话继续执行。
 
 ---
 

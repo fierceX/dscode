@@ -41,7 +41,7 @@ ToolCallEvent
 
 这些资源都支持同样的行 selector，例如 `session://current/messages:1-20` 或 `https://example.com:20-60`。
 
-工具审批模式由 `--approval-mode` 或 `.minkrc` 的 `[tools]` 配置控制：
+工具审批模式由 `--config 'approval_mode=\"write\"'` 或 `.minkrc` 的 `[tools]` 配置控制：
 
 | 模式 | 自动允许 | 阻止/等待审批 |
 |------|----------|---------------|
@@ -71,7 +71,7 @@ ToolCallEvent
 - `:raw` 禁用 snapshot header 和行号。
 - `http(s)://...` 可读取公开 URL。URL 输出不生成 editable snapshot；首次读取会保存为 `ReadUrl` artifact cache，后续同 URL selector 从缓存分页，不重复 fetch。损坏的 URL cache index 行会被跳过；cache 正文缺失时会重新 fetch。
 - `artifact://<id>` 可读取被截断工具输出，支持同样的行 selector。
-- `skill://list` / `skill://<name>` 可读取可用 skills，搜索顺序与 `--skill` 一致。
+- `skill://list` / `skill://<name>` 可读取可用 skills，搜索顺序与 `--config` 或 `.minkrc` 的 `skills` 字段一致。
 - `session://current`、`session://current/stats`、`session://current/messages`、`session://current/artifacts` 可读取当前 session 状态。
 - 默认可读整文件，但大文件会受到工具结果上限保护。
 - 搜索具体内容时优先用 `Grep`，定位后再用 `Read` path selector 读取目标范围。
@@ -133,7 +133,7 @@ insert after 55:
 - 命令在当前会话 `cwd` 下通过 `bash -lc` 执行。
 - 空命令和危险命令会被安全策略拒绝。
 - 用于读文件、搜索内容或发现路径的 Bash 命令会被拦截，提示改用 `Read`、`Grep` 或 `Glob`。
-- 显式 `timeout` 优先；未设置时使用全局 `--tool-timeout` / 配置文件 `tool_timeout`，默认超时会稳定夹在 5 到 600 秒之间，不再根据历史执行耗时自适应调整。
+- 显式 `timeout` 优先；未设置时使用全局 `tool_timeout`（`--config` 或 `.minkrc` 设置），默认超时会稳定夹在 5 到 600 秒之间，不再根据历史执行耗时自适应调整。
 - Ctrl+C / interrupt 会尝试中断子进程，返回 exit code 130 语义。
 - stdout 和 stderr 合并返回，非零退出码会追加提示。
 

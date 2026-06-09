@@ -83,6 +83,9 @@ pub struct MinkConfigFile {
     pub llm_wait_heartbeat: Option<i32>,
     pub context_compact_pct: Option<u8>,
     pub log_events: Option<bool>,
+    pub output_format: Option<String>,
+    pub approval_mode: Option<String>,
+    pub skills: Option<Vec<String>>,
     /// `[sandbox]` section — when enabled, mink re-execs itself inside a sandbox.
     #[serde(default)]
     pub sandbox: Option<SandboxConfigFile>,
@@ -213,6 +216,8 @@ pub struct Config {
     /// 自定义系统提示词文件（MISSION.md）
     pub mission_file: Option<PathBuf>,
     /// 工具禁用开关（从 CLI 或 Agent JSONL 加载）
+    /// 从 --config CLI 参数解析的 TOML 配置（最高优先级，在 apply_config_sources 中应用）
+    pub cli_config: Option<MinkConfigFile>,
     pub tool_disable: ToolDisableFlags,
     /// Tool approval mode.
     pub tool_approval_mode: ToolApprovalMode,
@@ -234,6 +239,7 @@ pub struct CliOverrides {
     pub max_turns: bool,
     pub max_context_tokens: bool,
     pub tool_approval_mode: bool,
+    pub output_format: bool,
 }
 
 impl Default for Config {
@@ -270,6 +276,7 @@ impl Default for Config {
             sandbox_python: SandboxPythonConfig::default(),
             mission_file: None,
             tool_disable: ToolDisableFlags::default(),
+            cli_config: None,
             tool_approval_mode: ToolApprovalMode::Yolo,
             tool_approval: BTreeMap::new(),
         }
@@ -290,58 +297,8 @@ pub fn parse_args(args: Vec<String>) -> Result<Config> {
                 cfg.cli_overrides.model = true;
                 i += 2;
             }
-            "--max-tokens" => {
-                cfg.max_tokens = parse_size_bytes(&require_value(&args, i)?)? as i32;
-                cfg.cli_overrides.max_tokens = true;
-                i += 2;
-            }
-            "--tool-timeout" => {
-                cfg.tool_timeout_secs = require_positive_i32_value(&args, i, "--tool-timeout")?;
-                cfg.cli_overrides.tool_timeout_secs = true;
-                i += 2;
-            }
-            "--sub-agent-timeout" => {
-                cfg.sub_agent_timeout_secs =
-                    require_positive_i32_value(&args, i, "--sub-agent-timeout")?;
-                cfg.cli_overrides.sub_agent_timeout_secs = true;
-                i += 2;
-            }
-            "--llm-first-event-timeout" => {
-                cfg.llm_first_event_timeout_secs =
-                    require_positive_i32_value(&args, i, "--llm-first-event-timeout")?;
-                cfg.cli_overrides.llm_first_event_timeout_secs = true;
-                i += 2;
-            }
-            "--llm-idle-timeout" => {
-                cfg.llm_idle_timeout_secs =
-                    require_positive_i32_value(&args, i, "--llm-idle-timeout")?;
-                cfg.cli_overrides.llm_idle_timeout_secs = true;
-                i += 2;
-            }
-            "--llm-wait-heartbeat" => {
-                cfg.llm_wait_heartbeat_secs =
-                    require_nonnegative_i32_value(&args, i, "--llm-wait-heartbeat")?;
-                cfg.cli_overrides.llm_wait_heartbeat_secs = true;
-                i += 2;
-            }
-            "--skill" => {
-                cfg.skills.push(require_value(&args, i)?);
-                i += 2;
-            }
             "--mission" => {
                 cfg.mission_file = Some(require_value(&args, i)?.into());
-                i += 2;
-            }
-            "--max-turns" => {
-                cfg.max_turns = require_value(&args, i)?.parse()?;
-                cfg.cli_overrides.max_turns = true;
-                i += 2;
-            }
-            "--max-context" => {
-                let val = require_value(&args, i)?;
-                cfg.max_context_tokens = parse_size_bytes(&val)
-                    .map_err(|_| anyhow!("Invalid --max-context: {}", val))?;
-                cfg.cli_overrides.max_context_tokens = true;
                 i += 2;
             }
             "--api-key" => {
@@ -352,21 +309,6 @@ pub fn parse_args(args: Vec<String>) -> Result<Config> {
             "--base-url" => {
                 cfg.base_url = require_value(&args, i)?;
                 cfg.cli_overrides.base_url = true;
-                i += 2;
-            }
-            "--output-format" => {
-                let v = require_value(&args, i)?;
-                cfg.output_format = match v.as_str() {
-                    "human" => OutputFormat::Human,
-                    "stream-json" => OutputFormat::StreamJson,
-                    _ => bail!("unknown output format: {v}"),
-                };
-                i += 2;
-            }
-            "--approval-mode" => {
-                let v = require_value(&args, i)?;
-                cfg.tool_approval_mode = ToolApprovalMode::parse(&v)?;
-                cfg.cli_overrides.tool_approval_mode = true;
                 i += 2;
             }
             "--print" => {
@@ -433,6 +375,13 @@ pub fn parse_args(args: Vec<String>) -> Result<Config> {
                 cfg.tool_disable.disable_python_sandbox = false;
                 i += 1;
             }
+            "--config" => {
+                let toml_str = require_value(&args, i)?;
+                if let Ok(cc) = toml::from_str::<MinkConfigFile>(&toml_str) {
+                    cfg.cli_config = Some(cc);
+                }
+                i += 2;
+            }
             _ => {
                 if arg.starts_with('-') {
                     bail!("unknown option: {arg}");
@@ -483,11 +432,10 @@ pub fn apply_config_file(cfg: &mut Config) {
 
     let user_cfg = read_config_file(&home.join(".minkrc"));
     let project_cfg = read_config_file(&cwd.join(".minkrc"));
-
-    apply_config_sources(cfg, &defaults, user_cfg.as_ref(), project_cfg.as_ref());
-
-    // Apply sandbox config: project overrides user, user overrides default
-    apply_sandbox_config(cfg, user_cfg.as_ref(), project_cfg.as_ref());
+    let cli_cfg = cfg.cli_config.take();
+    apply_config_sources(cfg, &defaults, user_cfg.as_ref(), project_cfg.as_ref(), cli_cfg.as_ref());
+    apply_sandbox_config(cfg, user_cfg.as_ref(), project_cfg.as_ref(), cli_cfg.as_ref());
+    cfg.cli_config = cli_cfg;
 }
 
 fn apply_env_defaults(cfg: &mut Config, defaults: &Config) {
@@ -534,6 +482,7 @@ fn apply_config_sources(
     defaults: &Config,
     user_cfg: Option<&MinkConfigFile>,
     project_cfg: Option<&MinkConfigFile>,
+    cli_cfg: Option<&MinkConfigFile>,
 ) {
     let cli_model = cfg.cli_overrides.model || cfg.model != defaults.model;
     let cli_api_key = cfg.cli_overrides.api_key || cfg.api_key != defaults.api_key;
@@ -554,8 +503,9 @@ fn apply_config_sources(
         || cfg.llm_wait_heartbeat_secs != defaults.llm_wait_heartbeat_secs;
     let cli_tool_approval_mode = cfg.cli_overrides.tool_approval_mode
         || cfg.tool_approval_mode != defaults.tool_approval_mode;
+    let cli_output_format = cfg.cli_overrides.output_format || cfg.output_format != defaults.output_format;
 
-    for toml_cfg in [user_cfg, project_cfg].into_iter().flatten() {
+    for toml_cfg in [user_cfg, project_cfg, cli_cfg].into_iter().flatten() {
         if !cli_model && let Some(model) = &toml_cfg.model {
             cfg.model = model.clone();
         }
@@ -620,6 +570,21 @@ fn apply_config_sources(
                 }
             }
         }
+        if !cli_output_format && let Some(ref v) = toml_cfg.output_format {
+            match v.as_str() {
+                "human" => cfg.output_format = OutputFormat::Human,
+                "stream-json" => cfg.output_format = OutputFormat::StreamJson,
+                _ => {}
+            }
+        }
+        if let Some(ref v) = toml_cfg.skills {
+            cfg.skills = v.clone();
+        }
+        if !cli_tool_approval_mode && let Some(ref v) = toml_cfg.approval_mode {
+            if let Ok(m) = ToolApprovalMode::parse(v) {
+                cfg.tool_approval_mode = m;
+            }
+        }
     }
 }
 
@@ -646,8 +611,9 @@ fn apply_sandbox_config(
     cfg: &mut Config,
     user_cfg: Option<&MinkConfigFile>,
     project_cfg: Option<&MinkConfigFile>,
+    cli_cfg: Option<&MinkConfigFile>,
 ) {
-    for toml_cfg in [user_cfg, project_cfg].into_iter().flatten() {
+    for toml_cfg in [user_cfg, project_cfg, cli_cfg].into_iter().flatten() {
         if let Some(ref sb) = toml_cfg.sandbox {
             if let Some(v) = sb.enabled {
                 cfg.sandbox.enabled = v;
@@ -973,10 +939,13 @@ mod tests {
 
     #[test]
     fn parse_args_approval_mode() {
-        let cfg = parse_args(vec!["--approval-mode".into(), "write".into()]).unwrap();
+        let toml = r#"approval_mode = "write""#;
+        let mut cfg = parse_args(vec!["--config".into(), toml.into()]).unwrap();
+        let defaults = Config::default();
+        let cli = cfg.cli_config.take();
+        apply_config_sources(&mut cfg, &defaults, None, None, cli.as_ref());
+        cfg.cli_config = cli;
         assert_eq!(cfg.tool_approval_mode, ToolApprovalMode::Write);
-        assert!(cfg.cli_overrides.tool_approval_mode);
-        assert!(parse_args(vec!["--approval-mode".into(), "bad".into()]).is_err());
     }
 
     #[test]
@@ -991,40 +960,26 @@ mod tests {
     }
 
     #[test]
-    fn parse_args_llm_timeout_flags() {
-        let cfg = parse_args(vec![
-            "--llm-first-event-timeout".into(),
-            "7".into(),
-            "--llm-idle-timeout".into(),
-            "8".into(),
-            "--llm-wait-heartbeat".into(),
-            "9".into(),
-        ])
-        .unwrap();
+    fn parse_args_llm_timeout_via_config() {
+        let toml = "llm_first_event_timeout = 7\nllm_idle_timeout = 8\nllm_wait_heartbeat = 9";
+        let mut cfg = parse_args(vec!["--config".into(), toml.into()]).unwrap();
+        let defaults = Config::default();
+                let cli = cfg.cli_config.take();
+        apply_config_sources(&mut cfg, &defaults, None, None, cli.as_ref());
+        cfg.cli_config = cli;
         assert_eq!(cfg.llm_first_event_timeout_secs, 7);
         assert_eq!(cfg.llm_idle_timeout_secs, 8);
         assert_eq!(cfg.llm_wait_heartbeat_secs, 9);
-        assert!(cfg.cli_overrides.llm_first_event_timeout_secs);
-        assert!(cfg.cli_overrides.llm_idle_timeout_secs);
-        assert!(cfg.cli_overrides.llm_wait_heartbeat_secs);
     }
 
     #[test]
-    fn parse_args_rejects_invalid_llm_timeout_flags() {
-        assert!(parse_args(vec!["--llm-first-event-timeout".into(), "0".into()]).is_err());
-        assert!(parse_args(vec!["--llm-idle-timeout".into(), "-1".into()]).is_err());
-        assert!(parse_args(vec!["--llm-wait-heartbeat".into(), "-1".into()]).is_err());
-
-        let cfg = parse_args(vec!["--llm-wait-heartbeat".into(), "0".into()]).unwrap();
+    fn config_llm_timeout_via_toml() {
+        let mut cfg = parse_args(vec!["--config".into(), "llm_wait_heartbeat = 0".into()]).unwrap();
+        let defaults = Config::default();
+                let cli = cfg.cli_config.take();
+        apply_config_sources(&mut cfg, &defaults, None, None, cli.as_ref());
+        cfg.cli_config = cli;
         assert_eq!(cfg.llm_wait_heartbeat_secs, 0);
-    }
-
-    #[test]
-    fn parse_args_rejects_invalid_tool_timeout_flags() {
-        assert!(parse_args(vec!["--tool-timeout".into(), "0".into()]).is_err());
-        assert!(parse_args(vec!["--tool-timeout".into(), "-1".into()]).is_err());
-        assert!(parse_args(vec!["--sub-agent-timeout".into(), "0".into()]).is_err());
-        assert!(parse_args(vec!["--sub-agent-timeout".into(), "-1".into()]).is_err());
     }
 
     #[test]
@@ -1089,7 +1044,7 @@ Read = "allow"
             max_turns: 12,
             ..Default::default()
         };
-        apply_config_sources(&mut cfg, &defaults, None, Some(&project));
+        apply_config_sources(&mut cfg, &defaults, None, Some(&project), None);
         assert_eq!(cfg.model, "flash");
         assert_eq!(cfg.max_turns, 12);
     }
@@ -1110,7 +1065,7 @@ Read = "allow"
             ..Default::default()
         };
         let mut cfg = Config::default();
-        apply_config_sources(&mut cfg, &defaults, Some(&user), Some(&project));
+        apply_config_sources(&mut cfg, &defaults, Some(&user), Some(&project), None);
         assert_eq!(cfg.api_key, "project-key");
         assert_eq!(cfg.model, "pro");
         assert_eq!(cfg.max_turns, 20);
@@ -1125,7 +1080,7 @@ Read = "allow"
             ..Default::default()
         };
         let mut cfg = Config::default();
-        apply_config_sources(&mut cfg, &defaults, Some(&user), None);
+        apply_config_sources(&mut cfg, &defaults, Some(&user), None, None);
         assert_eq!(cfg.api_key, "user-key");
         assert_eq!(cfg.base_url, "https://user.example");
     }
@@ -1138,7 +1093,7 @@ Read = "allow"
             ..Default::default()
         };
         let mut cfg = Config::default();
-        apply_config_sources(&mut cfg, &defaults, Some(&user), None);
+        apply_config_sources(&mut cfg, &defaults, Some(&user), None, None);
         assert_eq!(cfg.context_compact_pct, 72);
     }
 
@@ -1151,7 +1106,7 @@ Read = "allow"
         };
         let mut cfg = Config::default();
         apply_log_events_env_value(&mut cfg, "0");
-        apply_config_sources(&mut cfg, &defaults, None, Some(&project));
+        apply_config_sources(&mut cfg, &defaults, None, Some(&project), None);
         assert!(cfg.log_events);
     }
 
@@ -1167,7 +1122,7 @@ Read = "allow"
             ..Default::default()
         };
         let mut cfg = Config::default();
-        apply_config_sources(&mut cfg, &defaults, None, Some(&project));
+        apply_config_sources(&mut cfg, &defaults, None, Some(&project), None);
         assert_eq!(cfg.tool_timeout_secs, defaults.tool_timeout_secs);
         assert_eq!(cfg.sub_agent_timeout_secs, defaults.sub_agent_timeout_secs);
         assert_eq!(
@@ -1182,22 +1137,17 @@ Read = "allow"
     }
 
     #[test]
-    fn config_explicit_cli_default_value_overrides_project_config() {
-        let defaults = Config::default();
-        let project = MinkConfigFile {
-            max_turns: Some(99),
-            tool_timeout: Some(120),
-            ..Default::default()
-        };
+    fn config_parse_toml_via_cli() {
         let mut cfg = parse_args(vec![
-            "--max-turns".into(),
-            "40".into(),
-            "--tool-timeout".into(),
-            "600".into(),
+            "--config".into(),
+            "max_turns = 50\ntool_timeout = 300".into(),
         ])
         .unwrap();
-        apply_config_sources(&mut cfg, &defaults, None, Some(&project));
-        assert_eq!(cfg.max_turns, 40);
-        assert_eq!(cfg.tool_timeout_secs, 600);
+        let defaults = Config::default();
+                let cli = cfg.cli_config.take();
+        apply_config_sources(&mut cfg, &defaults, None, None, cli.as_ref());
+        cfg.cli_config = cli;
+        assert_eq!(cfg.max_turns, 50);
+        assert_eq!(cfg.tool_timeout_secs, 300);
     }
 }

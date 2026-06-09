@@ -131,11 +131,15 @@ class SandboxConfig:
     bash_allow_commands:
         Command-name whitelist for Bash.  Empty = use built-in deny list only.
     allow_python:
-        Whether Python scripts may be executed via Bash.
+        Whether the host Python tool is enabled.
     allow_network:
         Whether network access is allowed (LLM API requires this).
     allow_sub_agent:
         Whether the SubAgent tool is enabled.
+    enable_python_sandbox:
+        Enable the CPython WASI sandboxed Python tool (PythonSandbox).
+        Default False, use --enable-python-sandbox CLI or enable=true in
+        [sandbox_python] section of .minkrc.
     max_memory_mb:
         Maximum memory for the sandboxed process (nsjail cgroup only).
     max_pids:
@@ -183,6 +187,14 @@ class SandboxConfig:
     allow_python: bool = True
     allow_network: bool = True
     allow_sub_agent: bool = True
+    # PythonSandbox tool (CPython WASI sandbox, default: disabled)
+    enable_python_sandbox: bool = False
+    python_sandbox_wasm_path: str = "cpython-wasi/python.wasm"
+    python_sandbox_stdlib_dir: str = "cpython-wasi"
+    python_sandbox_read_dirs: list[str] = field(default_factory=list)
+    python_sandbox_write_dirs: list[str] = field(default_factory=list)
+    python_sandbox_package_dirs: list[str] = field(default_factory=list)
+    python_sandbox_timeout: int = 30
 
     # Resource limits
     max_memory_mb: int = 1024
@@ -626,6 +638,7 @@ class AgentSession:
             options["disable_web"] = True
         if not self._config.allow_python:
             options["disable_python"] = True
+        # enable_python_sandbox passed via --enable-python-sandbox CLI arg
         if self._config.model:
             options["model"] = self._config.model
         if self._config.max_tokens != 81920:
@@ -726,7 +739,51 @@ class AgentSession:
 
     def _build_sandbox_cmd_inner(self) -> list[str]:
         """Launch mink directly — sandboxing is handled by Rust internally."""
-        return [self._binary, "--agent-jsonl"]
+        cmd = [self._binary, "--agent-jsonl"]
+        cfg = self._config
+
+        toml = {}
+        toml["max_tokens"] = cfg.max_tokens
+        toml["max_turns"] = cfg.max_turns
+        toml["tool_timeout"] = cfg.tool_timeout
+        toml["sub_agent_timeout"] = cfg.sub_agent_timeout
+        toml["llm_first_event_timeout"] = cfg.llm_first_event_timeout
+        toml["llm_idle_timeout"] = cfg.llm_idle_timeout
+        toml["llm_wait_heartbeat"] = cfg.llm_wait_heartbeat
+        if cfg.verbose:
+            toml["verbose"] = True
+
+        # PythonSandbox 配置
+        if cfg.enable_python_sandbox:
+            cmd.append("--enable-python-sandbox")
+            sp = {}
+            if cfg.python_sandbox_wasm_path != "cpython-wasi/python.wasm":
+                sp["wasm_path"] = cfg.python_sandbox_wasm_path
+            if cfg.python_sandbox_stdlib_dir != "cpython-wasi":
+                sp["stdlib_dir"] = cfg.python_sandbox_stdlib_dir
+            if cfg.python_sandbox_timeout != 30:
+                sp["timeout"] = cfg.python_sandbox_timeout
+            if cfg.python_sandbox_read_dirs:
+                sp["read_dirs"] = cfg.python_sandbox_read_dirs
+            if cfg.python_sandbox_write_dirs:
+                sp["write_dirs"] = cfg.python_sandbox_write_dirs
+            if cfg.python_sandbox_package_dirs:
+                sp["package_dirs"] = cfg.python_sandbox_package_dirs
+            if sp:
+                toml["sandbox_python"] = sp
+
+        if toml:
+            import json as _json
+            lines = []
+            for k, v in toml.items():
+                if isinstance(v, dict):
+                    lines.append(f"[{k}]")
+                    for sk, sv in v.items():
+                        lines.append(f"{sk} = {_json.dumps(sv)}")
+                else:
+                    lines.append(f"{k} = {_json.dumps(v)}")
+            cmd.extend(["--config", "\n".join(lines)])
+        return cmd
 
 
 # ── Convenience ──────────────────────────────────────────────────────
