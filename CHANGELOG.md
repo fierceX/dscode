@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.1.7 (2026-06-09)
+
+### Features
+
+- **TUI 文件选择器** — 新增 Tab 路径补全、父目录入口和沙箱感知过滤 (`src/tui/file_picker.rs`)
+- **TUI 任务完成通知** — 新增任务完成/失败通知链路，兼容 macOS 系统通知，接入用户输入与 compact 流程
+
+### Refactor
+
+- **精简 CLI 参数** — 移除 11 个中低频 CLI 参数，改为 `--config <toml>` 统一传递
+  - 涉及参数：max-tokens、max-turns、max-context、tool-timeout 等
+  - 对齐 Python SDK 的配置构建方式，统一走 TOML 通道
+
+### CI & Build
+
+- **新增 FreeBSD CI 构建目标** (`x86_64-unknown-freebsd`)
+- **修复 FreeBSD CI** 包名和 release 版本
+
+### Tests
+
+- **测试加速** — 标记 25 个 PythonSandbox 重型测试为 `slow-tests` feature gate
+  - 日常 `cargo test` 从 ~120 秒降至 ~5 秒
+  - CI 环境通过 `--features slow-tests -- --include-ignored` 全量覆盖
+
 ## v0.1.6 (2026-06-09)
 
 ### Features
