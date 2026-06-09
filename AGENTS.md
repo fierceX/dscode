@@ -368,13 +368,22 @@ Anchored patch 只修改 snapshot 覆盖且未漂移的行。tag 缺失、行 ha
 ```bash
 cargo build
 cargo build --release
-cargo test
-cargo test tui
+cargo test              # 日常测试（跳过重型测试，~5 秒）
+cargo test tui          # 仅 TUI 模块测试
 cargo clippy --all-targets
 make build
 make check
 make test
+
+# 全量测试（含 WASM 沙箱测试，~120 秒）
+cargo test --features slow-tests -- --include-ignored
+
+# 仅运行重型测试（CPython WASI 沙箱）
+cargo test --features slow-tests -- --include-ignored tools::sandbox_python
 ```
+
+`src/tools/sandbox_python.rs` 的 25 个测试默认跳过。它们通过 wasmtime JIT 执行 CPython WASM，
+CPU 密集度高。CI 环境应使用 `--features slow-tests -- --include-ignored` 确保全量覆盖。
 
 调试：
 

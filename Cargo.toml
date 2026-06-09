@@ -41,6 +41,9 @@ unicode-width = "0.2"
 wasmtime = { version = "28", features = ["async"] }
 wasmtime-wasi = "28"
 
+[features]
+slow-tests = []
+
 [profile.release]
 opt-level = "s"
 lto = true

@@ -286,6 +286,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    #[cfg_attr(not(feature = "slow-tests"), ignore)]
     #[test]
     fn sandbox_hello_world() {
         let wasm = Path::new("cpython-wasi/python.wasm");
@@ -308,6 +309,7 @@ mod tests {
         assert_eq!(code, Some(0), "stderr: {err}");
     }
 
+    #[cfg_attr(not(feature = "slow-tests"), ignore)]
     #[test]
     fn sandbox_stdlib_works() {
         let wasm = Path::new("cpython-wasi/python.wasm");
@@ -338,6 +340,7 @@ print("stdlib all ok")
         assert_eq!(code, Some(0), "stderr: {err}");
     }
 
+    #[cfg_attr(not(feature = "slow-tests"), ignore)]
     #[test]
     fn sandbox_package_import() {
         let wasm = Path::new("cpython-wasi/python.wasm");
@@ -361,6 +364,7 @@ print("stdlib all ok")
         assert_eq!(code, Some(0), "stderr: {err}");
     }
 
+    #[cfg_attr(not(feature = "slow-tests"), ignore)]
     #[test]
     fn sandbox_security_subprocess_blocked() {
         let wasm = Path::new("cpython-wasi/python.wasm");
@@ -385,6 +389,7 @@ print("stdlib all ok")
         assert_eq!(code, Some(0));
     }
 
+    #[cfg_attr(not(feature = "slow-tests"), ignore)]
     #[test]
     fn sandbox_relative_path_write() {
         let wasm = Path::new("cpython-wasi/python.wasm");
@@ -411,6 +416,7 @@ print("write done")"#,
         let _ = std::fs::remove_file("output/rel_test.txt");
     }
 
+    #[cfg_attr(not(feature = "slow-tests"), ignore)]
     #[test]
     fn sandbox_relative_path_read() {
         let wasm = Path::new("cpython-wasi/python.wasm");
@@ -438,6 +444,7 @@ print("write done")"#,
         let _ = std::fs::remove_file("output/rel_read_test.txt");
     }
     
+    #[cfg_attr(not(feature = "slow-tests"), ignore)]
     #[test]
     fn sandbox_write_file() {
         let wasm = Path::new("cpython-wasi/python.wasm");
@@ -477,6 +484,7 @@ print("write OK")"#,
         let _ = std::fs::remove_file(&test_file);
     }
 
+    #[cfg_attr(not(feature = "slow-tests"), ignore)]
     #[test]
     fn sandbox_read_file() {
         let wasm = Path::new("cpython-wasi/python.wasm");
@@ -509,6 +517,7 @@ print("write OK")"#,
         assert!(out.contains("hello world"), "stdout: {out}");
 }
 
+    #[cfg_attr(not(feature = "slow-tests"), ignore)]
     #[test]
     fn sandbox_timeout_triggered() {
         let wasm = Path::new("cpython-wasi/python.wasm");
@@ -530,6 +539,7 @@ print("write OK")"#,
         if !wasm.exists() { eprintln!("skip: python.wasm not found"); true } else { false }
     }
 
+    #[cfg_attr(not(feature = "slow-tests"), ignore)]
     #[test]
     fn sandbox_write_outside_allowed_dir_rejected() {
         let wasm = Path::new("cpython-wasi/python.wasm");
@@ -541,6 +551,7 @@ print("write OK")"#,
         assert_ne!(code, Some(0), "should NOT be allowed: {err}");
     }
 
+    #[cfg_attr(not(feature = "slow-tests"), ignore)]
     #[test]
     fn sandbox_read_outside_allowed_dir_rejected() {
         let wasm = Path::new("cpython-wasi/python.wasm");
@@ -552,6 +563,7 @@ print("write OK")"#,
         assert_ne!(code, Some(0), "should NOT be allowed: {err}");
     }
 
+    #[cfg_attr(not(feature = "slow-tests"), ignore)]
     #[test]
     fn sandbox_write_relative_chdir_to_allowed_dir() {
         let wasm = Path::new("cpython-wasi/python.wasm");
@@ -566,6 +578,7 @@ print("write OK")"#,
         let _ = std::fs::remove_file("output/chdir_test.txt");
     }
 
+    #[cfg_attr(not(feature = "slow-tests"), ignore)]
     #[test]
     fn sandbox_write_absolute_path_to_allowed_dir() {
         let wasm = Path::new("cpython-wasi/python.wasm");
@@ -581,6 +594,7 @@ print("write OK")"#,
         let _ = std::fs::remove_file("output/abs_test.txt");
     }
 
+    #[cfg_attr(not(feature = "slow-tests"), ignore)]
     #[test]
     fn sandbox_write_entire_root_with_write_dir_dot() {
         let wasm = Path::new("cpython-wasi/python.wasm");
@@ -595,6 +609,7 @@ print("write OK")"#,
         let _ = std::fs::remove_file("sandbox_root_test.txt");
     }
 
+    #[cfg_attr(not(feature = "slow-tests"), ignore)]
     #[test]
     fn sandbox_write_dot_allows_any_project_file() {
         let wasm = Path::new("cpython-wasi/python.wasm");
@@ -608,6 +623,7 @@ print("write OK")"#,
         let _ = std::fs::remove_file("src/tools/sandbox_root_probe.txt");
     }
 
+    #[cfg_attr(not(feature = "slow-tests"), ignore)]
     #[test]
     fn sandbox_traversal_outside_allowed_dir_rejected() {
         let wasm = Path::new("cpython-wasi/python.wasm");
@@ -619,6 +635,7 @@ print("write OK")"#,
         assert_ne!(code, Some(0), "should NOT allow path traversal");
     }
 
+    #[cfg_attr(not(feature = "slow-tests"), ignore)]
     #[test]
     fn sandbox_write_dir_read_only_rejected() {
         let wasm = Path::new("cpython-wasi/python.wasm");
@@ -630,6 +647,7 @@ print("write OK")"#,
         assert_ne!(code, Some(0), "should NOT allow write to read-only dir: {err}");
     }
 
+    #[cfg_attr(not(feature = "slow-tests"), ignore)]
     #[test]
     fn sandbox_multiple_write_dirs_all_accessible() {
         let wasm = Path::new("cpython-wasi/python.wasm");
@@ -644,6 +662,7 @@ print("write OK")"#,
         let _ = std::fs::remove_file("output/multi_a.txt"); let _ = std::fs::remove_file("docs/multi_b.txt");
     }
 
+    #[cfg_attr(not(feature = "slow-tests"), ignore)]
     #[test]
     fn sandbox_stdout_captured_correctly() {
         let wasm = Path::new("cpython-wasi/python.wasm"); if skip_no_wasm(&wasm) { return; }
@@ -656,6 +675,7 @@ print("write OK")"#,
         assert!(err.is_empty(), "stderr: {err}");
     }
 
+    #[cfg_attr(not(feature = "slow-tests"), ignore)]
     #[test]
     fn sandbox_empty_script_fails_gracefully() {
         let wasm = Path::new("cpython-wasi/python.wasm"); if skip_no_wasm(&wasm) { return; }
@@ -664,6 +684,7 @@ print("write OK")"#,
         assert_eq!(code, Some(0), "empty script should exit 0");
     }
 
+    #[cfg_attr(not(feature = "slow-tests"), ignore)]
     #[test]
     fn sandbox_exit_code_propagated() {
         let wasm = Path::new("cpython-wasi/python.wasm"); if skip_no_wasm(&wasm) { return; }
@@ -673,6 +694,7 @@ print("write OK")"#,
         assert!(code == Some(42) || code == None, "unexpected exit code: {code:?}");
     }
 
+    #[cfg_attr(not(feature = "slow-tests"), ignore)]
     #[test]
     fn sandbox_unicode_path_supported() {
         let wasm = Path::new("cpython-wasi/python.wasm"); if skip_no_wasm(&wasm) { return; }
@@ -685,6 +707,7 @@ print("write OK")"#,
         let _ = std::fs::remove_file("output/中文测试.txt");
     }
 
+    #[cfg_attr(not(feature = "slow-tests"), ignore)]
     #[test]
     fn sandbox_large_script_executes() {
         let wasm = Path::new("cpython-wasi/python.wasm"); if skip_no_wasm(&wasm) { return; }
@@ -697,6 +720,7 @@ print("write OK")"#,
         assert!(out.contains("4950"));
     }
 
+    #[cfg_attr(not(feature = "slow-tests"), ignore)]
     #[test]
     fn sandbox_multiple_stdout_writes_combined() {
         let wasm = Path::new("cpython-wasi/python.wasm"); if skip_no_wasm(&wasm) { return; }
@@ -707,6 +731,7 @@ print("write OK")"#,
         assert_eq!(code, Some(0)); assert_eq!(out.lines().count(), 5);
     }
 
+    #[cfg_attr(not(feature = "slow-tests"), ignore)]
     #[test]
     fn sandbox_stderr_captured_separately() {
         let wasm = Path::new("cpython-wasi/python.wasm"); if skip_no_wasm(&wasm) { return; }
