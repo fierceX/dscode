@@ -1,5 +1,6 @@
 use crate::tui::render::content::render_content;
 use crate::tui::render::detail::{render_detail_bar, render_detail_content};
+use crate::tui::render::file_picker::render_file_picker;
 use crate::tui::render::input::render_input;
 use crate::tui::render::status::render_status;
 use crate::tui::state::{TuiState, View};
@@ -10,6 +11,7 @@ use ratatui::{
 
 mod content;
 mod detail;
+mod file_picker;
 mod input;
 mod status;
 
@@ -65,6 +67,7 @@ pub(crate) fn render(f: &mut Frame, state: &mut TuiState) {
             state.viewport.content_y = chunks[0].y;
             render_content(f, chunks[0], state);
             render_input(f, chunks[1], &visible_input_lines);
+            render_file_picker(f, chunks[1], state);
 
             let row = cursor_row.saturating_sub(state.input.scroll_row);
             let col = lines_before.last().map_or(0, |line| {

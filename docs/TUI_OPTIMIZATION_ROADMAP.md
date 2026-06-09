@@ -1,6 +1,6 @@
 # TUI 实现说明与维护建议
 
-更新日期：2026-05-31
+更新日期：2026-06-09
 
 ## 定位
 
@@ -12,6 +12,7 @@ TUI 是 mink 的全屏终端交互模式，基于 `ratatui`。它不是 agent �
 |------|------|
 | `src/tui/mod.rs` | TUI 入口、事件循环、集成测试 |
 | `src/tui/display.rs` | `Display` 到 `TuiSignal` 的适配 |
+| `src/tui/file_picker.rs` | 输入区路径补全、父目录扫描和沙箱感知过滤 |
 | `src/tui/signal.rs` | `TuiSignal` reducer |
 | `src/tui/state.rs` | 消息、输入、视口、缓存、子代理状态 |
 | `src/tui/input.rs` | 键盘、鼠标、粘贴、历史和 slash command |
@@ -19,6 +20,7 @@ TUI 是 mink 的全屏终端交互模式，基于 `ratatui`。它不是 agent �
 | `src/tui/render.rs` / `src/tui/render/*` | 主布局、消息区、详情页、输入区、状态栏 |
 | `src/tui/markdown.rs` / `src/tui/markdown/*` | Markdown 子集渲染 |
 | `src/tui/replay.rs` | session 历史重放 |
+| `src/tui/sanitize.rs` | TUI 输入和展示文本的控制字符/ANSI 清理 |
 
 ## 行为边界
 
@@ -41,6 +43,7 @@ TUI 是 mink 的全屏终端交互模式，基于 `ratatui`。它不是 agent �
 | `/help` / `/skills` | 本地展示信息 |
 | 未知 slash command | 本地提示，不进入 LLM conversation |
 | 行首空格 + slash 文本 | 作为普通用户消息发送 |
+| `Tab` | 打开路径选择器，支持当前目录、相对路径和受限父目录补全 |
 | 点击折叠消息 | 展开或收起长内容 |
 | 点击子代理消息 | 打开详情页，查看 thinking/text |
 
@@ -61,13 +64,19 @@ TUI 是 mink 的全屏终端交互模式，基于 `ratatui`。它不是 agent �
 
 ```text
 cargo test tui
-50 passed
+70 passed
 
 cargo test
-333 passed, 6 ignored
+460 passed, 31 ignored
 ```
 
 TUI 相关测试覆盖输入、中断、slash command、Markdown、表格、diff、折叠、点击目标、子代理详情、状态栏和 replay。
+
+## 已记录低风险项
+
+- 文件选择器的扫描缓存只在 overlay 生命周期内生效，不监听文件系统变化；关闭并重新打开 overlay 会刷新。后续如果出现长时间打开期间文件频繁变化的场景，可增加 TTL 或显式刷新键。
+- 受限沙箱下，从父目录补全到允许 root 时只展示通向允许 root 的下一跳目录，不枚举同级不可访问路径。深层 allowed root 可能需要多次补全，这是安全优先的取舍。
+- 空 query 的扫描深度已降低，仍然是同步扫描。超大仓库下首次打开可能有短暂停顿；如后续实测明显影响输入响应，再考虑后台索引或异步扫描。
 
 ## 维护建议
 

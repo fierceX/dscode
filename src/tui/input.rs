@@ -1,6 +1,8 @@
 use crate::agent::orchestrator::OrchCmd;
 use crate::tui::command::{SlashCommand, parse_slash_command};
-use crate::tui::state::{ClickAction, MsgKind, MsgLine, TuiState, View, WorkState};
+use crate::tui::file_picker::FilePickerState;
+use crate::tui::sanitize::normalize_tui_input;
+use crate::tui::state::{ActiveOverlay, ClickAction, MsgKind, MsgLine, TuiState, View, WorkState};
 use crossterm::event::{Event, KeyCode, KeyModifiers, MouseEventKind};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -40,6 +42,10 @@ fn handle_key(
         return handle_ctrl_c(state);
     }
 
+    if handle_overlay_key(&key, state) {
+        return false;
+    }
+
     if matches!(state.view, View::SubAgentDetail { .. }) {
         match (key.modifiers, key.code) {
             (KeyModifiers::NONE, KeyCode::Esc) => {
@@ -77,6 +83,13 @@ fn handle_key(
     match (key.modifiers, key.code) {
         (KeyModifiers::CONTROL, KeyCode::Char('t')) => {
             state.viewport.show_borders = !state.viewport.show_borders;
+        }
+        (KeyModifiers::NONE, KeyCode::Tab) => {
+            state.overlay = Some(ActiveOverlay::FilePicker(FilePickerState::open(
+                &state.input.buf,
+                state.input.cursor,
+                &state.file_picker_policy,
+            )));
         }
         (KeyModifiers::NONE, KeyCode::Esc) => {
             state.quit = true;
@@ -158,7 +171,76 @@ fn handle_key(
         }
         _ => {}
     }
+    refresh_file_picker(state);
     false
+}
+
+fn handle_overlay_key(key: &crossterm::event::KeyEvent, state: &mut TuiState) -> bool {
+    let Some(ActiveOverlay::FilePicker(picker)) = state.overlay.as_mut() else {
+        return false;
+    };
+    match (key.modifiers, key.code) {
+        (KeyModifiers::NONE, KeyCode::Esc) => {
+            state.overlay = None;
+            true
+        }
+        (KeyModifiers::NONE, KeyCode::Up) => {
+            picker.move_selection(-1, 8);
+            true
+        }
+        (KeyModifiers::NONE, KeyCode::Down) => {
+            picker.move_selection(1, 8);
+            true
+        }
+        (KeyModifiers::NONE, KeyCode::PageUp) => {
+            picker.move_selection(-8, 8);
+            true
+        }
+        (KeyModifiers::NONE, KeyCode::PageDown) => {
+            picker.move_selection(8, 8);
+            true
+        }
+        (KeyModifiers::NONE, KeyCode::Enter) | (KeyModifiers::NONE, KeyCode::Tab) => {
+            accept_file_picker(state);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn accept_file_picker(state: &mut TuiState) {
+    let Some(ActiveOverlay::FilePicker(picker)) = state.overlay.take() else {
+        return;
+    };
+    let Some(path) = picker.selected_path() else {
+        return;
+    };
+    let start = picker.replace_start.min(state.input.buf.len());
+    let end = picker.replace_end.min(state.input.buf.len());
+    if start <= end
+        && state.input.buf.is_char_boundary(start)
+        && state.input.buf.is_char_boundary(end)
+    {
+        state.input.buf.replace_range(start..end, &path);
+        state.input.cursor = start + path.len();
+        if path.ends_with('/') {
+            state.overlay = Some(ActiveOverlay::FilePicker(FilePickerState::open(
+                &state.input.buf,
+                state.input.cursor,
+                &state.file_picker_policy,
+            )));
+        }
+    }
+}
+
+fn refresh_file_picker(state: &mut TuiState) {
+    if let Some(ActiveOverlay::FilePicker(picker)) = state.overlay.as_mut() {
+        picker.refresh_with_policy(
+            &state.input.buf,
+            state.input.cursor,
+            &state.file_picker_policy,
+        );
+    }
 }
 
 fn is_text_modifier(modifiers: KeyModifiers) -> bool {
@@ -455,14 +537,12 @@ pub(crate) fn handle_event(
         Event::Resize(..) => {}
         Event::Paste(content) => {
             state.input.clamp_cursor();
-            let to_insert: String = content
-                .chars()
-                .filter(|&ch| !ch.is_control() || ch == '\n' || ch == '\t')
-                .collect();
+            let to_insert = normalize_tui_input(&content);
             if !to_insert.is_empty() {
                 state.input.buf.insert_str(state.input.cursor, &to_insert);
                 state.input.cursor += to_insert.len();
             }
+            refresh_file_picker(state);
         }
         _ => {}
     }

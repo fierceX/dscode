@@ -1,3 +1,4 @@
+#[cfg(test)]
 use crate::tui::markdown::truncate_visual;
 use crate::tui::state::TuiState;
 use crate::tui::theme;
@@ -6,6 +7,7 @@ use crate::util::fmt_k;
 use ratatui::{
     Frame,
     layout::Rect,
+    style::Style,
     text::{Line, Span},
     widgets::Paragraph,
 };
@@ -16,94 +18,113 @@ pub(super) fn render_status(f: &mut Frame, area: Rect, state: &TuiState) {
 }
 
 pub(crate) fn build_status_spans(state: &TuiState, width: u16) -> Line<'static> {
-    let status = build_status_line(state, width);
-    let clipped = status.ends_with('…');
-    let work = state.work_state.label();
-    let work_marker = format!("[{work}]");
-
+    let items = visible_status_items(state, width);
     let mut spans = Vec::new();
-    let mut remaining = status.as_str();
-    if let Some(prefix) = remaining.strip_prefix(' ') {
+    for item in items {
         spans.push(Span::raw(" "));
-        remaining = prefix;
+        spans.push(Span::styled(item.text, item.style));
     }
-
-    if let Some(rest) = remaining.strip_prefix(&state.model) {
-        spans.push(Span::styled(state.model.clone(), theme::primary_bold()));
-        remaining = rest;
-    }
-
-    if !clipped && !state.cwd_label.is_empty() {
-        let path_marker = format!(" @{}", state.cwd_label);
-        if let Some(rest) = remaining.strip_prefix(&path_marker) {
-            spans.push(Span::styled(path_marker, theme::muted()));
-            remaining = rest;
-        }
-    }
-
-    if !clipped && let Some(before_work) = remaining.strip_suffix(&work_marker) {
-        if !before_work.is_empty() {
-            spans.push(Span::styled(before_work.to_string(), theme::muted()));
-        }
-        spans.push(Span::styled(
-            work_marker,
-            theme::work_state(state.work_state),
-        ));
-    } else if !remaining.is_empty() {
-        spans.push(Span::styled(remaining.to_string(), theme::muted()));
-    }
-
     Line::from(spans)
 }
 
+#[cfg(test)]
 pub(crate) fn build_status_line(state: &TuiState, width: u16) -> String {
-    let s = &state.stats;
-    let b = if s.belief > 0.0 {
-        format!(" B:{:.2}", s.belief)
-    } else {
-        String::new()
-    };
-    let ti = s.total_input_tokens + s.total_cache_read_tokens;
-    let work = state.work_state.label();
-    let cwd = if state.cwd_label.is_empty() {
-        String::new()
-    } else {
-        format!(" @{}", state.cwd_label)
-    };
-    let status = if width >= 100 {
-        format!(
-            " {}{cwd}{b} T:{} R:{} I:{}({}) O:{} C:{}({}) {} [{}]",
-            state.model,
-            StatsSnapshot::fmt_num(s.current_turn_count),
-            StatsSnapshot::fmt_num(s.agent_request_count),
-            fmt_k(ti),
-            s.cache_pct(),
-            fmt_k(s.total_output_tokens),
-            fmt_k(s.current_context_tokens),
-            s.ctx_pct(),
-            s.format_cost(),
-            work,
-        )
-    } else if width >= 64 {
-        format!(
-            " {}{cwd}{b} C:{}({}) I:{} O:{} {} [{}]",
-            state.model,
-            fmt_k(s.current_context_tokens),
-            s.ctx_pct(),
-            fmt_k(ti),
-            fmt_k(s.total_output_tokens),
-            s.format_cost(),
-            work,
-        )
-    } else {
-        format!(
-            " {}{b} C:{} {} [{}]",
-            state.model,
-            s.ctx_pct(),
-            s.format_cost(),
-            work,
-        )
-    };
+    let mut out = String::new();
+    for item in visible_status_items(state, width) {
+        out.push(' ');
+        out.push_str(&item.text);
+    }
+    truncate_visual(&out, width as usize)
+}
 
-    truncate_visual(&status, width as usize)
+#[derive(Clone)]
+struct StatusItem {
+    text: String,
+    style: Style,
+    priority: u8,
+}
+
+fn visible_status_items(state: &TuiState, width: u16) -> Vec<StatusItem> {
+    let mut items = build_status_items(state);
+    while status_width(&items) > width as usize {
+        let Some((idx, _)) = items
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, item)| item.priority)
+        else {
+            break;
+        };
+        if items[idx].priority == 0 {
+            break;
+        }
+        items.remove(idx);
+    }
+    items
+}
+
+fn build_status_items(state: &TuiState) -> Vec<StatusItem> {
+    let s = &state.stats;
+    let ti = s.total_input_tokens + s.total_cache_read_tokens;
+    let mut items = vec![StatusItem {
+        text: state.model.clone(),
+        style: theme::primary_bold(),
+        priority: 0,
+    }];
+    if !state.cwd_label.is_empty() {
+        items.push(StatusItem {
+            text: format!("@{}", state.cwd_label),
+            style: theme::muted(),
+            priority: 4,
+        });
+    }
+    if s.belief > 0.0 {
+        items.push(StatusItem {
+            text: format!("B:{:.2}", s.belief),
+            style: theme::muted(),
+            priority: 7,
+        });
+    }
+    items.push(StatusItem {
+        text: format!("T:{}", StatsSnapshot::fmt_num(s.current_turn_count)),
+        style: theme::muted(),
+        priority: 8,
+    });
+    items.push(StatusItem {
+        text: format!("R:{}", StatsSnapshot::fmt_num(s.agent_request_count)),
+        style: theme::muted(),
+        priority: 8,
+    });
+    items.push(StatusItem {
+        text: format!("I:{}({})", fmt_k(ti), s.cache_pct()),
+        style: theme::muted(),
+        priority: 5,
+    });
+    items.push(StatusItem {
+        text: format!("O:{}", fmt_k(s.total_output_tokens)),
+        style: theme::muted(),
+        priority: 5,
+    });
+    items.push(StatusItem {
+        text: format!("C:{}({})", fmt_k(s.current_context_tokens), s.ctx_pct()),
+        style: theme::muted(),
+        priority: 2,
+    });
+    items.push(StatusItem {
+        text: s.format_cost(),
+        style: theme::muted(),
+        priority: 3,
+    });
+    items.push(StatusItem {
+        text: format!("[{}]", state.work_state.label()),
+        style: theme::work_state(state.work_state),
+        priority: 1,
+    });
+    items
+}
+
+fn status_width(items: &[StatusItem]) -> usize {
+    items
+        .iter()
+        .map(|item| 1 + unicode_width::UnicodeWidthStr::width(item.text.as_str()))
+        .sum()
 }

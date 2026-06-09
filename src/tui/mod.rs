@@ -2,10 +2,12 @@
 
 mod command;
 mod display;
+mod file_picker;
 mod input;
 mod markdown;
 mod render;
 mod replay;
+mod sanitize;
 mod signal;
 mod state;
 mod theme;
@@ -14,6 +16,8 @@ pub use display::TuiDisplay;
 pub use signal::{SubAgentStreamKind, TuiSignal};
 
 use crate::agent::orchestrator::OrchCmd;
+use crate::config::SandboxConfig;
+use file_picker::FilePickerPolicy;
 use input::handle_event;
 use render::render;
 use replay::load_session;
@@ -30,6 +34,7 @@ pub fn run_tui(
     orch_tx: tokio::sync::mpsc::UnboundedSender<OrchCmd>,
     events_path: &Path,
     interrupt: Option<Arc<AtomicBool>>,
+    sandbox: &SandboxConfig,
 ) -> anyhow::Result<()> {
     let mut terminal = ratatui::init();
     crossterm::execute!(
@@ -49,7 +54,14 @@ pub fn run_tui(
         }
     }
     let _guard = RestoreGuard;
-    tui_main_loop(&mut terminal, sig_rx, orch_tx, events_path, interrupt)
+    tui_main_loop(
+        &mut terminal,
+        sig_rx,
+        orch_tx,
+        events_path,
+        interrupt,
+        sandbox,
+    )
 }
 
 fn tui_main_loop(
@@ -58,11 +70,14 @@ fn tui_main_loop(
     orch_tx: tokio::sync::mpsc::UnboundedSender<OrchCmd>,
     events_path: &Path,
     interrupt: Option<Arc<AtomicBool>>,
+    sandbox: &SandboxConfig,
 ) -> anyhow::Result<()> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let mut state = TuiState {
         lines: load_session(events_path),
         cwd_label: short_cwd_label(),
         interrupt,
+        file_picker_policy: FilePickerPolicy::from_sandbox(cwd, sandbox),
         ..Default::default()
     };
     let mut sig_rx = sig_rx;
@@ -109,6 +124,7 @@ fn tui_main_loop(
 mod tests {
     use super::*;
     use crate::tui::command::{SlashCommand, parse_slash_command};
+    use crate::tui::file_picker::{FilePickCandidate, FilePickerPolicy, FilePickerState};
     use crate::tui::input::{handle_ctrl_c, handle_event};
     use crate::tui::markdown::{
         InlineNode, MdBlock, TableAlign, TableRows, normalize_markdown_input, parse_blocks,
@@ -120,8 +136,8 @@ mod tests {
         split_at_visual_width, visible_lines,
     };
     use crate::tui::state::{
-        ClickAction, ClickTarget, CollapsePolicy, MsgKind, MsgLine, SubAgentDetail, TuiState, View,
-        WorkState,
+        ActiveOverlay, ClickAction, ClickTarget, CollapsePolicy, MsgKind, MsgLine, SubAgentDetail,
+        TuiState, View, WorkState,
     };
     use crate::ui::{Display, ToolResultDisplay};
     use crossterm::event::{
@@ -133,6 +149,7 @@ mod tests {
         style::{Color, Style},
         text::{Line, Span},
     };
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     #[test]
@@ -296,6 +313,28 @@ mod tests {
         assert!(state.lines[0].text.contains("running"));
         assert!(state.lines[0].cached_lines.is_none());
         assert!(state.cache.history_lines.is_none());
+    }
+
+    #[test]
+    fn sub_agent_terminal_status_clears_active_state() {
+        let mut state = TuiState::default();
+        state.apply(&TuiSignal::SubAgentStatus {
+            session_id: "sub_1".into(),
+            status: "launched".into(),
+            in_tokens: 0,
+            out_tokens: 0,
+        });
+
+        state.apply(&TuiSignal::SubAgentStatus {
+            session_id: "sub_1".into(),
+            status: "timed_out".into(),
+            in_tokens: 0,
+            out_tokens: 0,
+        });
+
+        assert!(state.sub_agents.active_sessions.is_empty());
+        assert_eq!(state.work_state, WorkState::WaitingModel);
+        assert!(state.lines[0].text.contains("timed_out"));
     }
 
     #[test]
@@ -891,7 +930,7 @@ mod tests {
         state
             .lines
             .push(MsgLine::new_tool_result("Bash".into(), "x".repeat(1000)));
-        assert!(!state.lines[0].collapsed);
+        assert!(state.lines[0].collapsed);
 
         let backend = TestBackend::new(40, 30);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -995,8 +1034,12 @@ mod tests {
                 .add_modifier
                 .contains(ratatui::style::Modifier::BOLD)
         );
-        assert_eq!(line.spans[2].content.as_ref(), " @mink-new");
-        assert_eq!(line.spans[2].style.fg, Some(Color::DarkGray));
+        let path_span = line
+            .spans
+            .iter()
+            .find(|span| span.content.as_ref() == "@mink-new")
+            .unwrap();
+        assert_eq!(path_span.style.fg, Some(Color::DarkGray));
         let work_span = line.spans.last().unwrap();
         assert_eq!(work_span.content.as_ref(), "[tool]");
         assert_eq!(work_span.style.fg, Some(Color::Yellow));
@@ -1187,6 +1230,360 @@ mod tests {
         ));
         assert_eq!(state.input.buf, "\nA");
         assert_eq!(state.input.cursor, 2);
+    }
+
+    #[test]
+    fn paste_normalizes_control_text_before_inserting() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = TuiState::default();
+
+        assert!(!handle_event(
+            Event::Paste("a\r\n\tb\x07c".into()),
+            &mut state,
+            &tx,
+        ));
+
+        assert_eq!(state.input.buf, "a\n    bc");
+        assert_eq!(state.input.cursor, state.input.buf.len());
+    }
+
+    #[test]
+    fn tab_opens_file_picker_overlay() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = TuiState::default();
+        state.input.buf = "src/tui/in".into();
+        state.input.cursor = state.input.buf.len();
+
+        assert!(!handle_event(
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            &mut state,
+            &tx,
+        ));
+
+        assert!(matches!(state.overlay, Some(ActiveOverlay::FilePicker(_))));
+    }
+
+    #[test]
+    fn file_picker_accept_replaces_current_path_token() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = TuiState::default();
+        state.input.buf = "Read @src/tui/in".into();
+        state.input.cursor = state.input.buf.len();
+        state.overlay = Some(ActiveOverlay::FilePicker(
+            FilePickerState::open_with_candidates(
+                &state.input.buf,
+                state.input.cursor,
+                vec![
+                    FilePickCandidate {
+                        path: "src/tui/input.rs".into(),
+                        is_dir: false,
+                    },
+                    FilePickCandidate {
+                        path: "src/tui/render/input.rs".into(),
+                        is_dir: false,
+                    },
+                ],
+            ),
+        ));
+
+        assert!(!handle_event(
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &mut state,
+            &tx,
+        ));
+
+        assert_eq!(state.input.buf, "Read @src/tui/input.rs");
+        assert_eq!(state.input.cursor, state.input.buf.len());
+        assert!(state.overlay.is_none());
+    }
+
+    #[test]
+    fn file_picker_accept_replaces_entire_current_path_token() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = TuiState::default();
+        state.input.buf = "Read src/tui/in_suffix".into();
+        state.input.cursor = "Read src/tui/in".len();
+        state.overlay = Some(ActiveOverlay::FilePicker(
+            FilePickerState::open_with_candidates(
+                &state.input.buf,
+                state.input.cursor,
+                vec![FilePickCandidate {
+                    path: "src/tui/input.rs".into(),
+                    is_dir: false,
+                }],
+            ),
+        ));
+
+        assert!(!handle_event(
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &mut state,
+            &tx,
+        ));
+
+        assert_eq!(state.input.buf, "Read src/tui/input.rs");
+        assert_eq!(state.input.cursor, state.input.buf.len());
+    }
+
+    #[test]
+    fn file_picker_accept_preserves_read_selector_suffix() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = TuiState::default();
+        state.input.buf = "Read src/tui/in:10-20".into();
+        state.input.cursor = "Read src/tui/in".len();
+        state.overlay = Some(ActiveOverlay::FilePicker(
+            FilePickerState::open_with_candidates(
+                &state.input.buf,
+                state.input.cursor,
+                vec![FilePickCandidate {
+                    path: "src/tui/input.rs".into(),
+                    is_dir: false,
+                }],
+            ),
+        ));
+
+        assert!(!handle_event(
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &mut state,
+            &tx,
+        ));
+
+        assert_eq!(state.input.buf, "Read src/tui/input.rs:10-20");
+        assert_eq!(state.input.cursor, "Read src/tui/input.rs".len());
+    }
+
+    #[test]
+    fn file_picker_accept_preserves_selector_when_cursor_is_after_selector() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = TuiState::default();
+        state.input.buf = "Read src/tui/in:raw".into();
+        state.input.cursor = state.input.buf.len();
+        state.overlay = Some(ActiveOverlay::FilePicker(
+            FilePickerState::open_with_candidates(
+                &state.input.buf,
+                state.input.cursor,
+                vec![FilePickCandidate {
+                    path: "src/tui/input.rs".into(),
+                    is_dir: false,
+                }],
+            ),
+        ));
+
+        assert!(!handle_event(
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &mut state,
+            &tx,
+        ));
+
+        assert_eq!(state.input.buf, "Read src/tui/input.rs:raw");
+        assert_eq!(state.input.cursor, "Read src/tui/input.rs".len());
+    }
+
+    #[test]
+    fn file_picker_accept_preserves_raw_range_selector() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = TuiState::default();
+        state.input.buf = "Read src/tui/in:raw:10-20".into();
+        state.input.cursor = "Read src/tui/in".len();
+        state.overlay = Some(ActiveOverlay::FilePicker(
+            FilePickerState::open_with_candidates(
+                &state.input.buf,
+                state.input.cursor,
+                vec![FilePickCandidate {
+                    path: "src/tui/input.rs".into(),
+                    is_dir: false,
+                }],
+            ),
+        ));
+
+        assert!(!handle_event(
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &mut state,
+            &tx,
+        ));
+
+        assert_eq!(state.input.buf, "Read src/tui/input.rs:raw:10-20");
+        assert_eq!(state.input.cursor, "Read src/tui/input.rs".len());
+    }
+
+    #[test]
+    fn file_picker_accept_does_not_treat_colon_filename_as_selector() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = TuiState::default();
+        state.input.buf = "Read notes/report:2026.md".into();
+        state.input.cursor = "Read notes/report".len();
+        state.overlay = Some(ActiveOverlay::FilePicker(
+            FilePickerState::open_with_candidates(
+                &state.input.buf,
+                state.input.cursor,
+                vec![FilePickCandidate {
+                    path: "notes/report-final.md".into(),
+                    is_dir: false,
+                }],
+            ),
+        ));
+
+        assert!(!handle_event(
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &mut state,
+            &tx,
+        ));
+
+        assert_eq!(state.input.buf, "Read notes/report-final.md");
+        assert_eq!(state.input.cursor, state.input.buf.len());
+    }
+
+    #[test]
+    fn file_picker_accept_does_not_treat_alphanumeric_suffix_as_selector() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = TuiState::default();
+        state.input.buf = "Read src/tui/in:10abc".into();
+        state.input.cursor = "Read src/tui/in".len();
+        state.overlay = Some(ActiveOverlay::FilePicker(
+            FilePickerState::open_with_candidates(
+                &state.input.buf,
+                state.input.cursor,
+                vec![FilePickCandidate {
+                    path: "src/tui/input.rs".into(),
+                    is_dir: false,
+                }],
+            ),
+        ));
+
+        assert!(!handle_event(
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &mut state,
+            &tx,
+        ));
+
+        assert_eq!(state.input.buf, "Read src/tui/input.rs");
+        assert_eq!(state.input.cursor, state.input.buf.len());
+    }
+
+    #[test]
+    fn file_picker_accept_does_not_treat_zero_line_as_selector() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = TuiState::default();
+        state.input.buf = "Read src/tui/in:0".into();
+        state.input.cursor = "Read src/tui/in".len();
+        state.overlay = Some(ActiveOverlay::FilePicker(
+            FilePickerState::open_with_candidates(
+                &state.input.buf,
+                state.input.cursor,
+                vec![FilePickCandidate {
+                    path: "src/tui/input.rs".into(),
+                    is_dir: false,
+                }],
+            ),
+        ));
+
+        assert!(!handle_event(
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &mut state,
+            &tx,
+        ));
+
+        assert_eq!(state.input.buf, "Read src/tui/input.rs");
+        assert_eq!(state.input.cursor, state.input.buf.len());
+    }
+
+    #[test]
+    fn file_picker_parent_prefix_scans_parent_directory() {
+        let root = unique_test_dir("parent-scan");
+        let cwd = root.join("workspace");
+        let shared = root.join("shared");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("lib.rs"), "fn main() {}\n").unwrap();
+        let policy = FilePickerPolicy::restricted_for_tests(cwd, vec![root.clone()], 3);
+
+        let picker = FilePickerState::open("../shared/l", "../shared/l".len(), &policy);
+
+        assert!(
+            picker
+                .items
+                .iter()
+                .any(|item| item.path == "../shared/lib.rs")
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn file_picker_parent_prefix_respects_depth_limit() {
+        let root = unique_test_dir("parent-depth");
+        let cwd = root.join("workspace");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let policy = FilePickerPolicy::restricted_for_tests(cwd, vec![root.clone()], 1);
+
+        let picker = FilePickerState::open("../../", "../../".len(), &policy);
+
+        assert!(picker.items.is_empty());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn file_picker_parent_prefix_respects_restricted_roots() {
+        let root = unique_test_dir("parent-restricted");
+        let cwd = root.join("workspace");
+        let shared = root.join("shared");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("lib.rs"), "fn main() {}\n").unwrap();
+        let policy = FilePickerPolicy::restricted_for_tests(cwd.clone(), vec![cwd], 3);
+
+        let picker = FilePickerState::open("../shared/l", "../shared/l".len(), &policy);
+
+        assert!(picker.items.is_empty());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn file_picker_refresh_rescans_when_parent_root_changes() {
+        let root = unique_test_dir("parent-refresh");
+        let cwd = root.join("workspace");
+        let shared = root.join("shared");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("lib.rs"), "fn main() {}\n").unwrap();
+        let policy = FilePickerPolicy::restricted_for_tests(cwd, vec![root.clone()], 3);
+        let mut picker = FilePickerState::open("", 0, &policy);
+
+        picker.refresh_with_policy("../shared/l", "../shared/l".len(), &policy);
+
+        assert!(
+            picker
+                .items
+                .iter()
+                .any(|item| item.path == "../shared/lib.rs")
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn file_picker_parent_prefix_allows_sandbox_sibling_root() {
+        let root = unique_test_dir("parent-allowed-sibling");
+        let cwd = root.join("workspace");
+        let shared = root.join("shared");
+        let other = root.join("other");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(shared.join("lib.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(other.join("secret.rs"), "fn main() {}\n").unwrap();
+        let policy = FilePickerPolicy::restricted_for_tests(cwd, vec![shared.clone()], 3);
+
+        let picker = FilePickerState::open("../", "../".len(), &policy);
+
+        assert!(picker.items.iter().any(|item| item.path == "../shared/"));
+        assert!(!picker.items.iter().any(|item| item.path == "../other/"));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    fn unique_test_dir(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("mink-tui-{name}-{}-{nanos}", std::process::id()))
     }
 
     #[test]

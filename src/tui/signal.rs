@@ -1,3 +1,4 @@
+use crate::tui::sanitize::sanitize_tui_text;
 use crate::tui::state::{MsgKind, MsgLine, SubAgentDetail, TuiState, WorkState};
 use crate::ui::StatsSnapshot;
 use std::sync::mpsc;
@@ -49,24 +50,26 @@ impl TuiState {
     pub(crate) fn apply(&mut self, sig: &TuiSignal) {
         match sig {
             TuiSignal::Thinking(c) => {
+                let c = sanitize_tui_text(c);
                 if !self.stream_line.is_empty() && self.stream_kind != MsgKind::StreamThinking {
                     self.stream_line.push('\n');
                     self.save_stream();
                 }
                 self.stream_kind = MsgKind::StreamThinking;
                 self.streaming = true;
-                self.stream_line.push_str(c);
+                self.stream_line.push_str(&c);
                 self.stream_revision = self.stream_revision.wrapping_add(1);
                 self.work_state = WorkState::StreamingThinking;
             }
             TuiSignal::Text(c) => {
+                let c = sanitize_tui_text(c);
                 if !self.stream_line.is_empty() && self.stream_kind != MsgKind::StreamText {
                     self.stream_line.push('\n');
                     self.save_stream();
                 }
                 self.stream_kind = MsgKind::StreamText;
                 self.streaming = true;
-                self.stream_line.push_str(c);
+                self.stream_line.push_str(&c);
                 self.stream_revision = self.stream_revision.wrapping_add(1);
                 self.work_state = WorkState::StreamingText;
             }
@@ -118,8 +121,12 @@ impl TuiState {
                     "[sub-agent {}] {} (in={}, out={})",
                     session_id, status, in_tokens, out_tokens
                 );
-                let launched = status == "launched" || status == "running";
-                let sub_detail = if launched {
+                let running = status == "launched" || status == "running";
+                let terminal = matches!(
+                    status.as_str(),
+                    "ok" | "failed" | "timed_out" | "cancelled" | "channel_closed"
+                );
+                let sub_detail = if running {
                     Some(SubAgentDetail {
                         thinking: String::new(),
                         text: String::new(),
@@ -127,15 +134,20 @@ impl TuiState {
                 } else {
                     None
                 };
-                if launched {
+                if running {
                     self.sub_agents.active_sessions.insert(session_id.clone());
                     self.work_state = WorkState::RunningSubAgent;
+                } else if terminal {
+                    self.sub_agents.active_sessions.remove(session_id);
+                    if self.sub_agents.active_sessions.is_empty() {
+                        self.work_state = WorkState::WaitingModel;
+                    }
                 }
                 if let Some(idx) = self.sub_agents.line_by_session.get(session_id).copied()
                     && let Some(line) = self.lines.get_mut(idx)
                 {
                     line.text = title;
-                    if launched && line.sub_detail.is_none() {
+                    if running && line.sub_detail.is_none() {
                         line.sub_detail = sub_detail;
                     }
                     line.invalidate_cache();
@@ -159,16 +171,14 @@ impl TuiState {
                     && let Some(line) = self.lines.get_mut(idx)
                     && let Some(ref mut detail) = line.sub_detail
                 {
+                    let content = sanitize_tui_text(content);
                     match kind {
-                        SubAgentStreamKind::Thinking => detail.thinking.push_str(content),
-                        SubAgentStreamKind::Text => detail.text.push_str(content),
+                        SubAgentStreamKind::Thinking => detail.thinking.push_str(&content),
+                        SubAgentStreamKind::Text => detail.text.push_str(&content),
                     }
-                    line.invalidate_cache();
                     changed = true;
                 }
-                if changed {
-                    self.invalidate_all_cache();
-                }
+                let _ = changed;
             }
             TuiSignal::SubAgentOutput {
                 session_id,
@@ -189,6 +199,8 @@ impl TuiState {
                     "[sub-agent {}] {} (in={}, out={})",
                     session_id, status, in_tokens, out_tokens
                 );
+                let thinking = sanitize_tui_text(thinking);
+                let text = sanitize_tui_text(text);
                 let mut found = false;
                 if let Some(idx) = self.sub_agents.line_by_session.get(session_id).copied()
                     && let Some(line) = self.lines.get_mut(idx)

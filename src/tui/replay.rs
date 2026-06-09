@@ -1,45 +1,71 @@
 use crate::session::store::first_line;
 use crate::tui::state::{MsgKind, MsgLine};
 use crate::util::truncate_str;
+use std::collections::VecDeque;
+use std::io::BufRead;
 use std::path::Path;
+
+const REPLAY_TURNS: usize = 10;
 
 pub(crate) fn load_session(events_path: &Path) -> Vec<MsgLine> {
     let mut lines: Vec<MsgLine> = Vec::new();
     if !events_path.exists() {
         return lines;
     }
-    let data = match std::fs::read_to_string(events_path) {
-        Ok(d) => d,
+    let file = match std::fs::File::open(events_path) {
+        Ok(file) => file,
         Err(_) => return lines,
     };
-    let events: Vec<serde_json::Value> = data
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| serde_json::from_str(l).ok())
-        .collect();
+    let events = load_recent_turn_events(file);
     if events.is_empty() {
         return lines;
     }
-    let mut turn_starts: Vec<usize> = Vec::new();
-    for (i, evt) in events.iter().enumerate() {
+
+    build_lines_from_events(&events, &mut lines);
+    lines
+}
+
+fn load_recent_turn_events(file: std::fs::File) -> Vec<serde_json::Value> {
+    let mut turns: VecDeque<Vec<serde_json::Value>> = VecDeque::new();
+    let mut current: Vec<serde_json::Value> = Vec::new();
+    let mut seen_turn = false;
+    for line in std::io::BufReader::new(file).lines() {
+        let Ok(line) = line else {
+            continue;
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(evt) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
         let t = evt
             .get("type")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
         if t == "user_input" || t == "user_message" {
-            turn_starts.push(i);
+            if seen_turn && !current.is_empty() {
+                turns.push_back(std::mem::take(&mut current));
+                while turns.len() > REPLAY_TURNS {
+                    turns.pop_front();
+                }
+            }
+            seen_turn = true;
+        }
+        if seen_turn {
+            current.push(evt);
         }
     }
-    if turn_starts.is_empty() {
-        return lines;
+    if seen_turn && !current.is_empty() {
+        turns.push_back(current);
+        while turns.len() > REPLAY_TURNS {
+            turns.pop_front();
+        }
     }
-    let keep = turn_starts.len().saturating_sub(10);
-    let start_idx = if keep < turn_starts.len() {
-        turn_starts[keep]
-    } else {
-        0
-    };
+    turns.into_iter().flatten().collect()
+}
 
+fn build_lines_from_events(events: &[serde_json::Value], lines: &mut Vec<MsgLine>) {
     let mut buf = String::new();
     let mut buf_kind: Option<MsgKind> = None;
 
@@ -50,7 +76,7 @@ pub(crate) fn load_session(events_path: &Path) -> Vec<MsgLine> {
         }
     };
 
-    for evt in &events[start_idx..] {
+    for evt in events {
         let t = evt
             .get("type")
             .and_then(serde_json::Value::as_str)
@@ -61,7 +87,7 @@ pub(crate) fn load_session(events_path: &Path) -> Vec<MsgLine> {
             .unwrap_or("");
         match t {
             "user_input" | "user_message" => {
-                flush_buf(&mut lines, &mut buf, &mut buf_kind);
+                flush_buf(lines, &mut buf, &mut buf_kind);
                 let preview = truncate_str(first_line(c), 77);
                 if !preview.is_empty() {
                     lines.push(MsgLine::new(format!("> {preview}"), MsgKind::Info));
@@ -70,7 +96,7 @@ pub(crate) fn load_session(events_path: &Path) -> Vec<MsgLine> {
             "thinking" => {
                 let target = MsgKind::StreamThinking;
                 if buf_kind != Some(target) {
-                    flush_buf(&mut lines, &mut buf, &mut buf_kind);
+                    flush_buf(lines, &mut buf, &mut buf_kind);
                     buf_kind = Some(target);
                 }
                 buf.push_str(c);
@@ -78,13 +104,13 @@ pub(crate) fn load_session(events_path: &Path) -> Vec<MsgLine> {
             "text" => {
                 let target = MsgKind::StreamText;
                 if buf_kind != Some(target) {
-                    flush_buf(&mut lines, &mut buf, &mut buf_kind);
+                    flush_buf(lines, &mut buf, &mut buf_kind);
                     buf_kind = Some(target);
                 }
                 buf.push_str(c);
             }
             "tool_call" => {
-                flush_buf(&mut lines, &mut buf, &mut buf_kind);
+                flush_buf(lines, &mut buf, &mut buf_kind);
                 let name = evt
                     .get("name")
                     .and_then(serde_json::Value::as_str)
@@ -98,10 +124,10 @@ pub(crate) fn load_session(events_path: &Path) -> Vec<MsgLine> {
                 lines.push(MsgLine::new(text, MsgKind::ToolCall));
             }
             "tool_result" => {
-                flush_buf(&mut lines, &mut buf, &mut buf_kind);
+                flush_buf(lines, &mut buf, &mut buf_kind);
             }
             "error" => {
-                flush_buf(&mut lines, &mut buf, &mut buf_kind);
+                flush_buf(lines, &mut buf, &mut buf_kind);
                 let msg = evt
                     .get("message")
                     .and_then(serde_json::Value::as_str)
@@ -111,8 +137,7 @@ pub(crate) fn load_session(events_path: &Path) -> Vec<MsgLine> {
             _ => {}
         }
     }
-    flush_buf(&mut lines, &mut buf, &mut buf_kind);
-    lines
+    flush_buf(lines, &mut buf, &mut buf_kind);
 }
 
 fn build_replay_tool_summary(name: &str, evt: &serde_json::Value) -> String {

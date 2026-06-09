@@ -1,3 +1,5 @@
+use crate::tui::file_picker::{FilePickerPolicy, FilePickerState};
+use crate::tui::sanitize::sanitize_tui_text;
 use crate::ui::StatsSnapshot;
 use ratatui::text::Line;
 use std::collections::{HashMap, HashSet};
@@ -78,6 +80,9 @@ pub(crate) enum CollapsePolicy {
 }
 
 impl CollapsePolicy {
+    const LARGE_AUTO_COLLAPSE_BYTES: usize = 4096;
+    const LARGE_AUTO_COLLAPSE_LINE_WIDTH: usize = 240;
+
     fn for_kind(kind: MsgKind) -> Self {
         match kind {
             MsgKind::StreamThinking => CollapsePolicy::Always,
@@ -92,7 +97,14 @@ impl CollapsePolicy {
         match self {
             CollapsePolicy::Never => false,
             CollapsePolicy::Always => true,
-            CollapsePolicy::Auto { threshold_lines } => text.lines().count() > threshold_lines,
+            CollapsePolicy::Auto { threshold_lines } => {
+                text.lines().count() > threshold_lines
+                    || text.len() > Self::LARGE_AUTO_COLLAPSE_BYTES
+                    || text.lines().any(|line| {
+                        unicode_width::UnicodeWidthStr::width(line)
+                            > Self::LARGE_AUTO_COLLAPSE_LINE_WIDTH
+                    })
+            }
         }
     }
 
@@ -111,6 +123,7 @@ impl MsgLine {
     }
 
     pub(crate) fn new(text: String, kind: MsgKind) -> Self {
+        let text = sanitize_tui_text(&text);
         let collapse_policy = CollapsePolicy::for_kind(kind);
         let collapsed = collapse_policy.initial_collapsed(&text);
         MsgLine {
@@ -266,6 +279,8 @@ pub(crate) struct TuiState {
     /// 中断当前任务（由 Ctrl+C 触发），None 表示无中断能力
     pub interrupt: Option<Arc<AtomicBool>>,
     pub view: View,
+    pub overlay: Option<ActiveOverlay>,
+    pub file_picker_policy: FilePickerPolicy,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -276,6 +291,11 @@ pub(crate) enum View {
         session_id: String,
         scroll: usize,
     },
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum ActiveOverlay {
+    FilePicker(FilePickerState),
 }
 
 impl Default for TuiState {
@@ -303,6 +323,8 @@ impl Default for TuiState {
             sub_agents: SubAgentState::default(),
             interrupt: None,
             view: View::Main,
+            overlay: None,
+            file_picker_policy: FilePickerPolicy::default(),
         }
     }
 }

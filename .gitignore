@@ -24,4 +24,5 @@ skill_x.md
 missions/
 experiments/*
 experiments/
-cpython-wasi/.minkrc
+cpython-wasi/
+.minkrc

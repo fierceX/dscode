@@ -284,6 +284,7 @@ async fn run(args: Vec<String>) -> Result<()> {
                 cmd_tx.clone(),
                 &spaths.events,
                 Some(ctx.interrupt.clone()),
+                &cfg.sandbox,
             )
         {
             eprintln!("TUI error: {e}");
