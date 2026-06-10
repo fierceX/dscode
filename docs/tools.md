@@ -51,6 +51,30 @@ ToolCallEvent
 
 当前版本还没有交互式审批 prompt；需要审批的调用会 fail closed，并返回工具错误。可用 `[tools.approval]` 为单个工具设置 `allow`、`deny` 或 `prompt`。
 
+### 工具白名单
+
+工具列表可通过两种方式过滤，减少 LLM 可见的工具数量以节省 token 并提升遵循率：
+
+1. **禁用开关**（CLI `--disable-bash` 等，或 SDK `options.disable_*`）：按类别禁用，如 Bash、Python、SubAgent、Web 工具。
+2. **白名单 `enabled_tools`**（`.minkrc` 或 `--config` 或 SDK `options.enabled_tools`）：精确指定允许的工具名称列表。未在列表中的工具对 LLM 不可见。`None` 或未设置表示全部启用（受禁用开关约束）。
+
+两种方式可同时使用：白名单先限定可见工具集，禁用开关进一步从中移除。
+
+### 按需编译（PythonSandbox）
+
+`PythonSandbox` 工具（wasmtime 沙箱）默认编译进二进制，但可在构建时按需裁剪：
+
+```bash
+# 最小二进制（不含 PythonSandbox）
+cargo build --release --no-default-features
+
+# 完整构建（含 PythonSandbox，默认）
+cargo build --release
+```
+
+`--no-default-features` 可减少二进制体积约 30-40MB。`python-sandbox` feature 也可与其他 feature 组合使用。
+
+
 ## `Read`
 
 读取文件内容或轻量资源。

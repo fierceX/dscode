@@ -351,6 +351,7 @@ fn system_prompt_contains_causal_reasoning() {
         plan_file: std::path::PathBuf::from("/tmp/_nonexistent_plan"),
         plan_draft_file: std::path::PathBuf::from("/tmp/_nonexistent_draft"),
         mission_file: None,
+        mission_content: None,
     };
     let prompt = builder.build_system_prompt().unwrap();
     assert!(

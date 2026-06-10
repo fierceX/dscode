@@ -10,6 +10,7 @@ pub struct SdkRequest {
     pub version: Option<u32>,
     pub prompt: String,
     pub session_id: Option<String>,
+    pub mission: Option<String>,
     pub options: SdkOptions,
 }
 
@@ -19,6 +20,7 @@ impl Default for SdkRequest {
             version: Some(PROTOCOL_VERSION),
             prompt: String::new(),
             session_id: None,
+            mission: None,
             options: SdkOptions::default(),
         }
     }
@@ -40,6 +42,7 @@ pub struct SdkOptions {
     pub llm_idle_timeout: Option<i32>,
     pub llm_wait_heartbeat: Option<i32>,
     pub verbose: Option<bool>,
+    pub enabled_tools: Option<Vec<String>>,
     pub session_id: Option<String>,
 }
 

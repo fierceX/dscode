@@ -10,6 +10,7 @@ use super::metadata::{ApprovalTier, ToolMetadata, ToolResultKind};
 use super::python;
 use super::search;
 use super::web;
+#[cfg(feature = "python-sandbox")]
 use super::sandbox_python;
 use crate::config::{ToolApprovalMode, ToolApprovalPolicy};
 use crate::context::{ToolConfig, ToolContext};
@@ -62,6 +63,7 @@ static TOOL_REGISTRY: LazyLock<Vec<Box<dyn ToolExec>>> = LazyLock::new(|| {
         Box::new(web::WebSearchTool),
         Box::new(web::WebFetchTool),
         Box::new(python::PythonTool),
+        #[cfg(feature = "python-sandbox")]
         Box::new(sandbox_python::PythonSandboxTool),
         Box::new(SubAgentTool),
     ]
@@ -797,6 +799,9 @@ mod tests {
             .collect();
 
         for name in &schema_names {
+            if name == "PythonSandbox" && cfg!(not(feature = "python-sandbox")) {
+                continue;
+            }
             assert!(
                 registry_names.contains(name),
                 "schema tool missing executor: {name}"
@@ -973,6 +978,7 @@ mod tests {
             max_search_files: 5000,
             max_search_results: 1000,
             tool_disable: crate::config::ToolDisableFlags::default(),
+            enabled_tools: None,
             tool_approval_mode: mode,
             tool_approval: overrides.into_iter().collect(),
             sandbox_python: crate::config::SandboxPythonConfig::default(),

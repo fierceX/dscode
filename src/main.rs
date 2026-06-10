@@ -463,6 +463,12 @@ fn apply_sdk_request_options(cfg: &mut mink::config::Config, req: &SdkRequest) {
     {
         cfg.session_id = session_id.to_string();
     }
+    if let Some(mission) = &req.mission {
+        cfg.mission_content = Some(mission.clone());
+    }
+    if let Some(tools) = &opts.enabled_tools {
+        cfg.enabled_tools = Some(tools.clone());
+    }
 }
 
 fn list_skills() {

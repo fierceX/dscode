@@ -10,6 +10,7 @@ pub struct Builder {
     pub plan_file: PathBuf,
     pub plan_draft_file: PathBuf,
     pub mission_file: Option<PathBuf>,
+    pub mission_content: Option<String>,
 }
 
 impl Builder {
@@ -216,15 +217,21 @@ impl Builder {
         };
         sections.push(wrap_section("output-language", &output_language, None));
 
-        // ═══ Mission override: load sections from MISSION.md ══════
-        if let Some(ref mission_path) = self.mission_file {
-            let mission_content = fs::read_to_string(mission_path).map_err(|e| {
+        // ═══ Mission override: load sections from MISSION.md (inline or file) ══════
+        let mission_raw: Option<String> = if let Some(ref inline) = self.mission_content {
+            Some(inline.clone())
+        } else if let Some(ref mission_path) = self.mission_file {
+            Some(fs::read_to_string(mission_path).map_err(|e| {
                 anyhow::anyhow!(
                     "failed to read mission file {}: {e}",
                     mission_path.display()
                 )
-            })?;
+            })?)
+        } else {
+            None
+        };
 
+        if let Some(ref mission_content) = mission_raw {
             // Collect all level-1 headings from the mission file
             let mission_headings = extract_all_headings(&mission_content);
 
@@ -450,6 +457,7 @@ mod tests {
             plan_file: PathBuf::from("/tmp/plan.md"),
             plan_draft_file: PathBuf::from("/tmp/plan.draft"),
             mission_file: None,
+            mission_content: None,
         }
     }
 

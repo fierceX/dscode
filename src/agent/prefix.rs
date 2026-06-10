@@ -3,33 +3,6 @@ use crate::session::prefix::ImmutablePrefix;
 use anyhow::Result;
 use std::sync::Arc;
 
-type ToolDisableCheck = fn(&crate::config::ToolDisableFlags) -> bool;
-
-/// Tool names that map to disable flags.
-const TOOL_DISABLE_MAP: &[(&str, ToolDisableCheck)] = &[
-    ("Bash", |f| f.disable_bash),
-    ("Python", |f| f.disable_python),
-    ("WebSearch", |f| f.disable_web),
-    ("WebFetch", |f| f.disable_web),
-    ("SubAgent", |f| f.disable_sub_agent),
-];
-
-/// Remove tool definitions from the JSON list that are disabled by config.
-fn filter_disabled_tools(
-    tools: Vec<serde_json::Value>,
-    flags: &crate::config::ToolDisableFlags,
-) -> Vec<serde_json::Value> {
-    tools
-        .into_iter()
-        .filter(|tool| {
-            let name = tool.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            !TOOL_DISABLE_MAP
-                .iter()
-                .any(|(n, check)| *n == name && check(flags))
-        })
-        .collect()
-}
-
 pub struct PrefixManager {
     ctx: Arc<AgentSharedContext>,
 }
@@ -66,15 +39,15 @@ impl PrefixManager {
                 plan_file: self.ctx.plan_path.clone(),
                 plan_draft_file: self.ctx.plan_draft_path.clone(),
                 mission_file: self.ctx.config.mission_file.clone(),
+                mission_content: self.ctx.config.mission_content.clone(),
             }
             .build_system_prompt()?;
             let tools_json =
                 serde_json::from_str::<Vec<serde_json::Value>>(crate::assets::TOOLS_JSON)
                     .unwrap_or_default();
 
-            // Filter out disabled tools at the source — the LLM won't even
-            // see them as available functions.
-            let tools_json = filter_disabled_tools(tools_json, &self.ctx.config.tool_disable);
+            // Filter tools: combine disable flags + enabled whitelist at config layer
+            let tools_json = self.ctx.tool_config.filter_tools_json(tools_json);
             *guard = Some(ImmutablePrefix::new(
                 system_prompt.clone(),
                 tools_json.clone(),

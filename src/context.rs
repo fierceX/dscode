@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::config::SandboxPythonConfig;
+use crate::config::{SandboxPythonConfig, TOOL_DISABLE_MAP};
 
 #[derive(Clone)]
 pub struct ToolConfig {
@@ -26,6 +26,8 @@ pub struct ToolConfig {
     pub max_search_results: usize,
     /// 工具禁用开关（运行时覆盖）
     pub tool_disable: ToolDisableFlags,
+    /// 工具白名单：仅启用列表中的工具。空/None 表示全部启用。
+    pub enabled_tools: Option<Vec<String>>,
     pub tool_approval_mode: ToolApprovalMode,
     pub tool_approval: BTreeMap<String, ToolApprovalPolicy>,
     /// CPython WASI 沙箱工具配置
@@ -42,10 +44,38 @@ impl ToolConfig {
             max_search_files: cfg.max_search_files,
             max_search_results: cfg.max_search_results,
             tool_disable: cfg.tool_disable.clone(),
+            enabled_tools: cfg.enabled_tools.clone(),
             tool_approval_mode: cfg.tool_approval_mode,
             tool_approval: cfg.tool_approval.clone(),
             sandbox_python: cfg.sandbox_python.clone(),
         }
+    }
+
+    /// Filter tool JSON definitions by combining disable flags and enabled whitelist.
+    pub fn filter_tools_json(&self, tools: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+        tools
+            .into_iter()
+            .filter(|tool| {
+                let name = match tool.get("name").and_then(|v| v.as_str()) {
+                    Some(n) => n,
+                    None => return false,
+                };
+                // Remove tools disabled by config flags
+                if TOOL_DISABLE_MAP
+                    .iter()
+                    .any(|(n, check)| *n == name && check(&self.tool_disable))
+                {
+                    return false;
+                }
+                // Apply enabled whitelist if configured
+                if let Some(whitelist) = self.enabled_tools.as_deref() {
+                    if !whitelist.iter().any(|n| n == name) {
+                        return false;
+                    }
+                }
+                true
+            })
+            .collect()
     }
 }
 

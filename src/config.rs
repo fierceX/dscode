@@ -87,6 +87,7 @@ pub struct MinkConfigFile {
     pub log_events: Option<bool>,
     pub output_format: Option<String>,
     pub approval_mode: Option<String>,
+    pub enabled_tools: Option<Vec<String>>,
     pub skills: Option<Vec<String>>,
     /// `[sandbox]` section — when enabled, mink re-execs itself inside a sandbox.
     #[serde(default)]
@@ -219,10 +220,14 @@ pub struct Config {
     pub sandbox_python: SandboxPythonConfig,
     /// 自定义系统提示词文件（MISSION.md）
     pub mission_file: Option<PathBuf>,
+    /// 内联 mission 内容（通过 SDK 协议传入，不写临时文件）
+    pub mission_content: Option<String>,
     /// 工具禁用开关（从 CLI 或 Agent JSONL 加载）
     /// 从 --config CLI 参数解析的 TOML 配置（最高优先级，在 apply_config_sources 中应用）
     pub cli_config: Option<MinkConfigFile>,
     pub tool_disable: ToolDisableFlags,
+    /// 工具白名单：仅启用列表中的工具。空/None 表示全部启用。
+    pub enabled_tools: Option<Vec<String>>,
     /// Tool approval mode.
     pub tool_approval_mode: ToolApprovalMode,
     /// Per-tool approval overrides keyed by tool name.
@@ -281,7 +286,9 @@ impl Default for Config {
             sandbox: SandboxConfig::default(),
             sandbox_python: SandboxPythonConfig::default(),
             mission_file: None,
+            mission_content: None,
             tool_disable: ToolDisableFlags::default(),
+            enabled_tools: None,
             cli_config: None,
             tool_approval_mode: ToolApprovalMode::Yolo,
             tool_approval: BTreeMap::new(),
@@ -425,10 +432,14 @@ fn require_nonnegative_i32_value(args: &[String], i: usize, name: &str) -> Resul
 }
 
 pub fn apply_config_file(cfg: &mut Config) {
-    // Priority: CLI > project .minkrc > user ~/.minkrc > env > default.
-    // CLI is inferred by comparing the already-parsed config to defaults.
     let defaults = Config::default();
     apply_env_defaults(cfg, &defaults);
+    // SDK 协议模式：所有配置已通过 --config TOML 传入，跳过文件 I/O
+    if cfg.agent_jsonl {
+        return;
+    }
+    // Priority: CLI > project .minkrc > user ~/.minkrc > env > default.
+    // CLI is inferred by comparing the already-parsed config to defaults.
     let cwd = std::env::current_dir().unwrap_or_default();
     let home = std::path::PathBuf::from(
         std::env::var("MINK_HOME")
@@ -591,6 +602,9 @@ fn apply_config_sources(
         }
         if let Some(ref v) = toml_cfg.skills {
             cfg.skills = v.clone();
+        }
+        if let Some(ref v) = toml_cfg.enabled_tools {
+            cfg.enabled_tools = Some(v.clone());
         }
         if !cli_tool_approval_mode && let Some(ref v) = toml_cfg.approval_mode {
             if let Ok(m) = ToolApprovalMode::parse(v) {
@@ -867,6 +881,16 @@ impl Default for ToolDisableFlags {
         }
     }
 }
+
+/// Tool name → disable flag check mapping. Shared by Config and ToolConfig for tool filtering.
+pub(crate) type ToolDisableCheck = fn(&ToolDisableFlags) -> bool;
+pub(crate) const TOOL_DISABLE_MAP: &[(&str, ToolDisableCheck)] = &[
+    ("Bash", |f| f.disable_bash),
+    ("Python", |f| f.disable_python),
+    ("WebSearch", |f| f.disable_web),
+    ("WebFetch", |f| f.disable_web),
+    ("SubAgent", |f| f.disable_sub_agent),
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]

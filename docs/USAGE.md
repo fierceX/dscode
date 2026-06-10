@@ -194,6 +194,7 @@ llm_wait_heartbeat = 30
 max_search_files = 5000
 max_search_results = 1000
 output_format = "stream-json"
+enabled_tools = ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]
 approval_mode = "write"
 skills = ["python", "debugging"]
 
@@ -228,6 +229,7 @@ context_compact_pct = 85                  # 压缩触发百分比
 log_events = true                         # 事件日志
 max_search_files = 5000                     # Glob/Grep 最大遍历文件数
 max_search_results = 1000                   # Grep 最大匹配结果行数
+enabled_tools = ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]  # 工具白名单
 
 [tools]
 approval_mode = "yolo"                    # yolo | write | always-ask
@@ -686,7 +688,7 @@ mink --mission ./my-task.mission.md --config 'skills=["debugging"]' -i
 # 文件方式
 SandboxConfig(mission_file="./my-task.mission.md")
 
-# 字符串方式
+# 内联方式（通过 SDK JSONL 直接传递，无临时文件开销）
 SandboxConfig(mission_content="# agent-identity\n...")
 
 # 关闭信号系统

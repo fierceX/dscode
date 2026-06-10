@@ -43,6 +43,9 @@ max_search_results = 1000                   # Grep 最大匹配结果行数
 # 也可通过 TOOL_RESULT_MAX_BYTES 和 FILE_WRITE_MAX_BYTES 环境变量设置
 
 # ── 工具审批 ─────────────────────────────────────────────────
+
+# ── 工具白名单 ─────────────────────────────────────────────
+# enabled_tools = ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]
 #[tools]
 #approval_mode = "yolo"                    # yolo / write / always-ask
 #

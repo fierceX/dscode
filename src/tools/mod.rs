@@ -4,6 +4,7 @@ pub mod metadata;
 pub mod hashline;
 pub mod python;
 pub mod runner;
+#[cfg(feature = "python-sandbox")]
 pub mod sandbox_python;
 pub mod search;
 pub mod snapshot;

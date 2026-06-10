@@ -196,6 +196,7 @@ Start directly with \"Task focus:\" — no preamble, no markdown, no code fences
             plan_file: self.plan_path.clone(),
             plan_draft_file: self.plan_draft_path.clone(),
             mission_file: None,
+            mission_content: None,
         }
         .build_system_prompt()?;
 

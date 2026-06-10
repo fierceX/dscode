@@ -119,8 +119,9 @@ class SandboxConfig:
         in the file maps to a prompt section.
     mission_content:
         Inline MISSION.md content (alternative to ``mission_file``).  When set,
-        the content is written to a temp file and passed to mink automatically.
-        Provide either ``mission_file`` or ``mission_content``, not both.
+        the content is passed directly via the SDK protocol JSONL request,
+        avoiding temporary file I/O.  Provide either ``mission_file`` or
+        ``mission_content``, not both.
     read_dirs:
         Directories the agent is allowed to read from.
         Relative paths are resolved against the current working directory.
@@ -134,6 +135,11 @@ class SandboxConfig:
         Whether the host Python tool is enabled.
     allow_network:
         Whether network access is allowed (LLM API requires this).
+    enabled_tools:
+        Tool whitelist: only these tools are visible to the LLM.
+        ``None`` (default) means all enabled tools are visible (subject to
+        ``allow_*`` flags).  Example: ``["Read", "Write", "Edit", "Grep",
+        "Glob", "Bash"]``.
     allow_sub_agent:
         Whether the SubAgent tool is enabled.
     enable_python_sandbox:
@@ -186,6 +192,7 @@ class SandboxConfig:
     bash_allow_commands: list[str] = field(default_factory=list)
     allow_python: bool = True
     allow_network: bool = True
+    enabled_tools: Optional[list[str]] = None  # 工具白名单，None=全部启用
     allow_sub_agent: bool = True
     # PythonSandbox tool (CPython WASI sandbox, default: disabled)
     enable_python_sandbox: bool = False
@@ -659,10 +666,14 @@ class AgentSession:
             options["llm_wait_heartbeat"] = self._config.llm_wait_heartbeat
         if self._config.verbose:
             options["verbose"] = True
+        if self._config.enabled_tools is not None:
+            options["enabled_tools"] = self._config.enabled_tools
         if extra_options:
             options.update(extra_options)
 
         req: dict[str, Any] = {"version": 1, "prompt": prompt}
+        if self._config.mission_content:
+            req["mission"] = self._config.mission_content
         if self._config.session_id:
             req["session_id"] = self._config.session_id
         if options:
@@ -700,44 +711,23 @@ class AgentSession:
         self._append_mission_flag(cmd)
         return cmd
 
-    def _mission_home_path(self) -> str:
-        """Return a per-run mission file path inside MINK_HOME."""
-        return os.path.join(self._home or _default_home(), f"_mission-{uuid.uuid4().hex}.md")
-
     def _append_mission_flag(self, cmd: list[str]) -> None:
-        """Append --mission <path> if configured.
-
-        When sandbox is active, the mission file is always placed under
-        MINK_HOME (guaranteed accessible inside all sandbox backends)
-        so that ``--mission`` resolves correctly inside the sandbox.
-        """
+        """Append --mission <path> if configured (file-based only; inline mission goes via request JSON)."""
         cfg = self._config
-        if not cfg.mission_file and not cfg.mission_content:
+        if not cfg.mission_file:
             return
 
         sandbox_active = cfg.sandbox_backend.strip().lower() != "off"
 
         if sandbox_active:
-            # Sandbox: copy/write to MINK_HOME for guaranteed accessibility
-            dest = self._mission_home_path()
+            # Sandbox: copy to MINK_HOME for guaranteed accessibility
+            dest = os.path.join(self._home or _default_home(), f"_mission-{uuid.uuid4().hex}.md")
             os.makedirs(os.path.dirname(dest), exist_ok=True)
-            if cfg.mission_file:
-                if os.path.abspath(cfg.mission_file) != os.path.abspath(dest):
-                    shutil.copy2(cfg.mission_file, dest)
-            elif cfg.mission_content:
-                with open(dest, "w", encoding="utf-8") as f:
-                    f.write(cfg.mission_content)
+            if os.path.abspath(cfg.mission_file) != os.path.abspath(dest):
+                shutil.copy2(cfg.mission_file, dest)
             cmd.extend(["--mission", dest])
         else:
-            # No sandbox: use original paths directly
-            if cfg.mission_file:
-                cmd.extend(["--mission", cfg.mission_file])
-            elif cfg.mission_content:
-                dest = self._mission_home_path()
-                os.makedirs(os.path.dirname(dest), exist_ok=True)
-                with open(dest, "w", encoding="utf-8") as f:
-                    f.write(cfg.mission_content)
-                cmd.extend(["--mission", dest])
+            cmd.extend(["--mission", cfg.mission_file])
 
     def _build_sandbox_cmd_inner(self) -> list[str]:
         """Launch mink directly — sandboxing is handled by Rust internally."""
