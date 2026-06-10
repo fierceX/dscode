@@ -1,119 +1,77 @@
-# mink configuration file
-# Place in ~/.minkrc (user-level) or <project>/.minkrc (project-level)
-# Priority: CLI args > project .minkrc > user ~/.minkrc > defaults
-
-# ── API ──────────────────────────────────────────────────────────────────
-
-# API key (also via DEEPSEEK_API_KEY env)
-# api_key = "sk-your-api-key"
-
-# API base URL (also via DEEPSEEK_BASE_URL env)
-# Default: https://api.deepseek.com/
-# base_url = "https://api.deepseek.com/"
-
-# ── Model ────────────────────────────────────────────────────────────────
-
-# Model tier: "flash" or "pro"
-# model = "flash"
-
-# Max output tokens per response
-# max_tokens = 81920
-
-# Max agent turns per session
-# max_turns = 40
-
-# Max context token limit (supports K/M/G suffix)
-# max_context = "1M"
-
-# ── Timeouts ─────────────────────────────────────────────────────────────
-
-# Tool execution timeout in seconds
-# tool_timeout = 600
-
-# Sub-agent execution timeout in seconds
-# sub_agent_timeout = 300
-
-# ── Behavior ─────────────────────────────────────────────────────────────
-
-# Context compaction trigger percentage (default: 85)
-# context_compact_pct = 85
-
-# Enable event logging (default: true)
-# log_events = true
-
-# ── OS Process Sandbox ──────────────────────────────────────────────────
-# When enabled, mink re-executes itself inside nsjail (Linux) /
-# sandbox-exec (macOS) / bubblewrap (fallback) for OS-level process
-# isolation.
+# mink 配置示例
 #
-# [sandbox]
-# enabled = false
-# backend = "auto"      # "auto" | "nsjail" | "bwrap" | "sandbox-exec" | "off"
+# 配置文件加载顺序（高优先级覆盖低）：
+#   1. CLI --config TOML 字符串
+#   2. <project>/.minkrc（项目级）
+#   3. ~/.minkrc（用户级）
+#   4. 环境变量
+#   5. 默认值
 #
-# # File-system whitelist (relative paths resolve against project root)
-# read_dirs = ["src", "tests", "docs"]
-# write_dirs = ["src"]
+# 所有字段可选，未设置的字段使用默认值或环境变量。
+
+# ── API ─────────────────────────────────────────────────────
+api_key = "sk-xxx"                          # API 密钥（也可用 DEEPSEEK_API_KEY 环境变量）
+base_url = "https://api.deepseek.com/v1"    # API 端点（也可用 DEEPSEEK_BASE_URL 环境变量）
+model = "flash"                             # 默认模型：flash / pro
+
+# ── LLM ──────────────────────────────────────────────────────
+max_tokens = 81920                          # 最大输出 token
+max_turns = 40                              # 最大对话轮次
+max_context = "1M"                          # 最大上下文 token（支持 K/M 后缀，如 500K, 1M）
+
+# ── 超时 ─────────────────────────────────────────────────────
+tool_timeout = 600                          # 工具超时（秒）
+sub_agent_timeout = 300                     # 子代理超时（秒）
+llm_first_event_timeout = 60               # 等待首个 LLM stream event 的秒数
+llm_idle_timeout = 90                       # LLM stream 空闲超时（秒）
+llm_wait_heartbeat = 30                     # 等待 LLM 响应时的提示间隔（秒，0=关闭）
+
+# ── 上下文压缩 ───────────────────────────────────────────────
+context_compact_pct = 85                    # 上下文使用率达到此百分比时触发压缩
+
+# ── 日志 ─────────────────────────────────────────────────────
+log_events = true                           # 是否记录 events.jsonl
+
+# ── 输出格式 ─────────────────────────────────────────────────
+# output_format = "human"                   # human / stream-json
+
+# ── 搜索工具限制 ─────────────────────────────────────────────
+max_search_files = 5000                     # Glob/Grep 最大遍历文件数
+max_search_results = 1000                   # Grep 最大匹配结果行数
+
+# ── 工具结果限制 ─────────────────────────────────────────────
+# 也可通过 TOOL_RESULT_MAX_BYTES 和 FILE_WRITE_MAX_BYTES 环境变量设置
+
+# ── 工具审批 ─────────────────────────────────────────────────
+#[tools]
+#approval_mode = "yolo"                    # yolo / write / always-ask
 #
-# # Tool restrictions
-# allow_bash = true
-# bash_allow_commands = ["ls", "cat", "cargo", "python", "rg", "diff"]
-# allow_python = true
-# allow_network = true
-# allow_sub_agent = true
-#
-# # Resource limits (Linux nsjail cgroup only)
-# max_memory_mb = 1024
-# max_pids = 64
-# timeout_secs = 600
+#[tools.approval]
+#Bash = "prompt"                           # allow / deny / prompt
 
-# ── CPython WASI Sandbox (PythonSandbox tool) ────────────────────────────
-# Runs Python code in a wasmtime + CPython WASI sandbox with WASI-level
-# isolation. No subprocess, no network, no C extensions.
-#
-# The python.wasm binary can be downloaded from:
-#   https://github.com/brettcannon/cpython-wasi-build/releases
-#
-# Download example:
-#   curl -sL "https://github.com/brettcannon/cpython-wasi-build/releases/download/v3.13.13/python-3.13.13-wasi_sdk-24.zip" -o python-wasi.zip
-#   unzip python-wasi.zip -d cpython-wasi
-#
-# Required directory structure:
-#   cpython-wasi/
-#   ├── python.wasm          # ~29MB
-#   ├── lib/python3.13/      # Standard library
-#   └── LICENSE
-#
-[sandbox_python]
-# Enable the PythonSandbox tool (default: disabled)
-enable = true
+# ── 技能 ─────────────────────────────────────────────────────
+#skills = ["debugging", "tdd"]
 
-# Path to python.wasm (relative to project root or absolute)
-wasm_path = "cpython-wasi/python.wasm"
+# ── 沙箱 ─────────────────────────────────────────────────────
+#[sandbox]
+#enabled = true
+#backend = "auto"                         # nsjail / bwrap / sandbox-exec / off
+#read_dirs = ["src"]
+#write_dirs = ["src"]
+#allow_bash = true
+#allow_python = true
+#allow_network = true
+#allow_sub_agent = true
+#max_memory_mb = 1024
+#max_pids = 64
+#timeout_secs = 600
 
-# Directory containing lib/python3.13/ (standard library)
-stdlib_dir = "cpython-wasi"
-
-# Timeout in seconds for each Python script execution (default: 30)
-timeout = 30
-
-# Directories allowed for read access (relative to project root or absolute)
-# Scripts can read files in these directories.
-read_dirs = ["./data"]
-
-# Directories allowed for write access (relative to project root or absolute)
-# Scripts can create and modify files in these directories.
-# Use ["./"] to grant write access to the entire project root.
-write_dirs = ["./output"]
-
-# Additional Python package directories mounted at /packages/ inside the sandbox
-# Pure Python packages can be loaded from here via PYTHONPATH.
-# package_dirs = ["./packages"]
-
-# ── Tool Approval ───────────────────────────────────────────────────────
-# [tools]
-# approval_mode = "yolo"     # "yolo" | "write" | "always-ask"
-#
-# # Per-tool override:
-# [tools.approval]
-# Edit = "prompt"
-# Bash = "deny"
+# ── PythonSandbox ───────────────────────────────────────────
+#[sandbox_python]
+#enable = false
+#wasm_path = "cpython-wasi/python.wasm"
+#stdlib_dir = "cpython-wasi"
+#timeout = 30
+#read_dirs = ["./data"]
+#write_dirs = ["./output"]
+#package_dirs = ["./packages"]

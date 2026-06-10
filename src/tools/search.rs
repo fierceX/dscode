@@ -1,11 +1,9 @@
 use anyhow::{Result, anyhow, bail};
 use std::path::{Path, PathBuf};
 
-const MAX_FILES: usize = 5000;
-const MAX_RESULTS: usize = 1000;
 const MAX_OUTPUT_BYTES: usize = 100_000;
 
-pub fn glob(pattern: &str, path: &str) -> Result<String> {
+pub fn glob(pattern: &str, path: &str, max_files: usize) -> Result<String> {
     if pattern.is_empty() {
         bail!("Error: no pattern provided");
     }
@@ -38,7 +36,7 @@ pub fn glob(pattern: &str, path: &str) -> Result<String> {
             continue;
         }
         files_seen += 1;
-        if files_seen > MAX_FILES {
+        if files_seen > max_files {
             truncated_walk = true;
             break;
         }
@@ -66,7 +64,7 @@ pub fn glob(pattern: &str, path: &str) -> Result<String> {
     }
     if truncated_walk {
         results.push(format!(
-            "... search truncated: scanned first {MAX_FILES} files; results may be incomplete"
+            "... search truncated: scanned first {max_files} files; results may be incomplete"
         ));
     }
     if walk_errors > 0 {
@@ -124,7 +122,7 @@ fn relative_match_path(path: &Path, base: &Path) -> String {
         .to_string()
 }
 
-pub fn grep(pattern: &str, path: &str, file_glob: &str, context: Option<usize>) -> Result<String> {
+pub fn grep(pattern: &str, path: &str, file_glob: &str, context: Option<usize>, max_files: usize, max_results: usize) -> Result<String> {
     if pattern.is_empty() {
         bail!("Error: no pattern provided");
     }
@@ -167,7 +165,7 @@ pub fn grep(pattern: &str, path: &str, file_glob: &str, context: Option<usize>) 
             continue;
         }
         files_seen += 1;
-        if files_seen > MAX_FILES {
+        if files_seen > max_files {
             truncated_walk = true;
             break;
         }
@@ -193,8 +191,8 @@ pub fn grep(pattern: &str, path: &str, file_glob: &str, context: Option<usize>) 
                 continue;
             }
 
-            if total_results >= MAX_RESULTS {
-                results.push(format!("... truncated at {MAX_RESULTS} results"));
+            if total_results >= max_results {
+                results.push(format!("... truncated at {max_results} results"));
                 truncated = true;
                 break;
             }
@@ -251,7 +249,7 @@ pub fn grep(pattern: &str, path: &str, file_glob: &str, context: Option<usize>) 
     }
     if truncated_walk {
         results.push(format!(
-            "... search truncated: scanned first {MAX_FILES} files; results may be incomplete"
+            "... search truncated: scanned first {max_files} files; results may be incomplete"
         ));
     }
     if walk_errors > 0 {
@@ -291,7 +289,7 @@ impl super::runner::ToolExec for GlobTool {
         }
         let args: Args = serde_json::from_value(input.clone())?;
         let root = resolve_search_root(&ctx.cwd, args.path.as_deref().unwrap_or("."));
-        glob(&args.pattern, &root.display().to_string()).map(super::runner::ToolOutcome::text)
+        glob(&args.pattern, &root.display().to_string(), ctx.tool_config.max_search_files).map(super::runner::ToolOutcome::text)
     }
 }
 
@@ -327,6 +325,8 @@ impl super::runner::ToolExec for GrepTool {
             &root.display().to_string(),
             args.glob.as_deref().unwrap_or(""),
             args.context,
+            ctx.tool_config.max_search_files,
+            ctx.tool_config.max_search_results,
         )
         .map(super::runner::ToolOutcome::text)
     }
@@ -357,26 +357,26 @@ mod tests {
 
     #[test]
     fn glob_empty_pattern_errors() {
-        assert!(glob("", ".").is_err());
+        assert!(glob("", ".", 5000).is_err());
     }
 
     #[test]
     fn glob_basic_matches() {
         // Should find Cargo.toml in the project root
-        let result = glob("Cargo.toml", ".").unwrap();
+        let result = glob("Cargo.toml", ".", 5000).unwrap();
         assert!(result.contains("Cargo.toml"));
     }
 
     #[test]
     fn glob_recursive_pattern() {
-        let result = glob("**/*.rs", "src/tools").unwrap();
+        let result = glob("**/*.rs", "src/tools", 5000).unwrap();
         assert!(result.contains("search.rs") || result.contains("bash.rs"));
         assert!(result.contains("runner.rs"));
     }
 
     #[test]
     fn glob_matches_rooted_pattern_from_cwd() {
-        let result = glob("src/**/*.rs", ".").unwrap();
+        let result = glob("src/**/*.rs", ".", 5000).unwrap();
 
         assert!(result.contains("src/tools/search.rs"));
         assert!(result.contains("src/main.rs"));
@@ -389,7 +389,7 @@ mod tests {
         fs::write(dir.join("src/main.rs"), "fn main() {}\n").unwrap();
         fs::write(dir.join("src/tools/search.rs"), "pub fn search() {}\n").unwrap();
 
-        let result = glob("src/**/*.rs", &dir.display().to_string()).unwrap();
+        let result = glob("src/**/*.rs", &dir.display().to_string(), 5000).unwrap();
 
         assert!(result.contains("src/main.rs"));
         assert!(result.contains("src/tools/search.rs"));
@@ -405,7 +405,7 @@ mod tests {
         fs::write(dir.join("docs/specs/api.docx"), "doc").unwrap();
         fs::write(dir.join("docs/specs/notes.txt"), "note").unwrap();
 
-        let result = glob("*.docx", &dir.display().to_string()).unwrap();
+        let result = glob("*.docx", &dir.display().to_string(), 5000).unwrap();
 
         assert!(result.contains("root.docx"));
         assert!(!result.contains("docs/specs/api.docx"));
@@ -420,7 +420,7 @@ mod tests {
         fs::create_dir_all(dir.join("src/bin")).unwrap();
         fs::write(dir.join("src/bin/main.rs"), "fn main() {}\n").unwrap();
 
-        let result = glob("**/*.*", &dir.display().to_string()).unwrap();
+        let result = glob("**/*.*", &dir.display().to_string(), 5000).unwrap();
 
         assert!(result.contains("src/bin/main.rs"));
 
@@ -432,7 +432,7 @@ mod tests {
         let dir = temp_dir("glob-empty");
         fs::create_dir_all(&dir).unwrap();
 
-        let result = glob("*.docx", &dir.display().to_string()).unwrap();
+        let result = glob("*.docx", &dir.display().to_string(), 5000).unwrap();
 
         assert!(result.contains("No files matched pattern '*.docx'"));
 
@@ -441,7 +441,7 @@ mod tests {
 
     #[test]
     fn grep_empty_pattern_errors() {
-        assert!(grep("", ".", "", None).is_err());
+        assert!(grep("", ".", "", None, 5000, 1000).is_err());
     }
 
     #[test]
@@ -450,7 +450,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("test.txt"), "hello world\nfoo bar\n").unwrap();
 
-        let result = grep("hello", &dir.display().to_string(), "", None).unwrap();
+        let result = grep("hello", &dir.display().to_string(), "", None, 5000, 1000).unwrap();
         assert!(result.contains("hello"));
         assert!(!result.contains("foo"));
 
@@ -463,7 +463,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("test.txt"), "line1\nline2\nmatch\nline4\nline5\n").unwrap();
 
-        let result = grep("match", &dir.display().to_string(), "", Some(1)).unwrap();
+        let result = grep("match", &dir.display().to_string(), "", Some(1), 5000, 1000).unwrap();
         assert!(result.contains("match"));
         assert!(result.contains("line2")); // context before
         assert!(result.contains("line4")); // context after
@@ -481,7 +481,7 @@ mod tests {
             .collect::<String>();
         fs::write(dir.join("large.txt"), content).unwrap();
 
-        let result = grep("match", &dir.display().to_string(), "", None).unwrap();
+        let result = grep("match", &dir.display().to_string(), "", None, 5000, 1000).unwrap();
         assert!(result.contains("truncated"));
 
         fs::remove_dir_all(&dir).ok();
@@ -494,7 +494,7 @@ mod tests {
         fs::write(dir.join("data.txt"), "secret\n").unwrap();
         fs::write(dir.join("data.md"), "secret\n").unwrap();
 
-        let result = grep("secret", &dir.display().to_string(), "*.txt", None).unwrap();
+        let result = grep("secret", &dir.display().to_string(), "*.txt", None, 5000, 1000).unwrap();
         assert!(result.contains("data.txt"));
         assert!(!result.contains("data.md"));
 
@@ -509,7 +509,7 @@ mod tests {
         fs::write(dir.join("nested/data.txt"), "secret\n").unwrap();
         fs::write(dir.join("nested/data.md"), "secret\n").unwrap();
 
-        let result = grep("secret", &dir.display().to_string(), "*.txt", None).unwrap();
+        let result = grep("secret", &dir.display().to_string(), "*.txt", None, 5000, 1000).unwrap();
 
         assert!(result.contains("root.txt"));
         assert!(!result.contains("nested/data.txt"));
@@ -525,7 +525,7 @@ mod tests {
         fs::write(dir.join("nested/data.txt"), "secret\n").unwrap();
         fs::write(dir.join("nested/data.md"), "secret\n").unwrap();
 
-        let result = grep("secret", &dir.display().to_string(), "**/*.txt", None).unwrap();
+        let result = grep("secret", &dir.display().to_string(), "**/*.txt", None, 5000, 1000).unwrap();
 
         assert!(result.contains("nested/data.txt"));
         assert!(!result.contains("nested/data.md"));
@@ -540,7 +540,7 @@ mod tests {
         fs::write(dir.join(".hidden.txt"), "hidden\n").unwrap();
         fs::write(dir.join("kept.txt"), "kept\n").unwrap();
 
-        let result = glob("*.txt", &dir.display().to_string()).unwrap();
+        let result = glob("*.txt", &dir.display().to_string(), 5000).unwrap();
 
         assert!(result.contains("kept.txt"));
         assert!(!result.contains(".hidden.txt"));

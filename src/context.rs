@@ -22,6 +22,8 @@ pub struct ToolConfig {
     pub sub_agent_timeout_secs: i32,
     pub tool_result_max_bytes: usize,
     pub file_write_max_bytes: usize,
+    pub max_search_files: usize,
+    pub max_search_results: usize,
     /// 工具禁用开关（运行时覆盖）
     pub tool_disable: ToolDisableFlags,
     pub tool_approval_mode: ToolApprovalMode,
@@ -37,6 +39,8 @@ impl ToolConfig {
             sub_agent_timeout_secs: cfg.sub_agent_timeout_secs,
             tool_result_max_bytes: cfg.tool_result_max_bytes,
             file_write_max_bytes: cfg.file_write_max_bytes,
+            max_search_files: cfg.max_search_files,
+            max_search_results: cfg.max_search_results,
             tool_disable: cfg.tool_disable.clone(),
             tool_approval_mode: cfg.tool_approval_mode,
             tool_approval: cfg.tool_approval.clone(),

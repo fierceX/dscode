@@ -215,6 +215,10 @@ open("/absolute/path/to/project/output/f.txt", "w")  # 绝对路径 ✅
 - 带路径分隔符的模式按相对路径匹配，例如 `src/*.rs` 只匹配 `src` 当前层，`src/**/*.rs` 匹配所有子层。
 - 没有匹配时返回明确的 no-match 提示，而不是静默空字符串。
 - 遍历达到上限或跳过不可读路径时，会在结果末尾追加诊断行，提示结果可能不完整。
+限制：
+- 最多遍历 `max_search_files`（默认 5000）个文件后截断，可通过 `.minkrc` 的 `max_search_files` 或环境变量 `MAX_SEARCH_FILES` 调整。
+- 输出超过 100KB 时截断，受 `tool_result_max_bytes` 保护。
+- 遍历跳过不可读路径时追加诊断行。
 
 ## `Grep`
 
@@ -232,6 +236,11 @@ open("/absolute/path/to/project/output/f.txt", "w")  # 绝对路径 ✅
 - `path` 为空或相对路径时基于当前会话 `cwd` 解析；`glob` 过滤同样使用 `globset` 语义。
 - `context` 往往足够定位目标；需要修改时优先 `Read` 目标范围拿到 `@PATH#TAG` 后使用 anchored `Edit.patch`。
 - 未匹配内容时返回明确的 no-match 提示；遍历达到上限或跳过不可读路径时，会追加诊断行。
+限制：
+- 最多遍历 `max_search_files`（默认 5000）个文件后截断。
+- 最多返回 `max_search_results`（默认 1000）行匹配结果后截断。
+- 可通过 `.minkrc` 的 `max_search_files`/`max_search_results` 或环境变量 `MAX_SEARCH_FILES`/`MAX_SEARCH_RESULTS` 调整。
+
 
 ## `TodoWrite`
 

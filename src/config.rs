@@ -76,6 +76,8 @@ pub struct MinkConfigFile {
     pub max_tokens: Option<i32>,
     pub max_turns: Option<i32>,
     pub max_context: Option<String>, // supports K/M suffix
+    pub max_search_files: Option<usize>,
+    pub max_search_results: Option<usize>,
     pub tool_timeout: Option<i32>,
     pub sub_agent_timeout: Option<i32>,
     pub llm_first_event_timeout: Option<i32>,
@@ -190,6 +192,8 @@ pub struct Config {
     pub llm_wait_heartbeat_secs: i32,
     pub tool_result_max_bytes: usize,
     pub file_write_max_bytes: usize,
+    pub max_search_files: usize,
+    pub max_search_results: usize,
     pub output_format: OutputFormat,
     pub verbose: bool,
     pub tui_mode: bool,
@@ -254,6 +258,8 @@ impl Default for Config {
             llm_wait_heartbeat_secs: 30,
             tool_result_max_bytes: 100_000,
             file_write_max_bytes: 1_048_576,
+            max_search_files: 5000,
+            max_search_results: 1000,
             output_format: OutputFormat::Human,
             verbose: false,
             tui_mode: false,
@@ -527,6 +533,12 @@ fn apply_config_sources(
         {
             cfg.max_context_tokens = v;
         }
+        if let Some(v) = toml_cfg.max_search_files {
+            cfg.max_search_files = v;
+        }
+        if let Some(v) = toml_cfg.max_search_results {
+            cfg.max_search_results = v;
+        }
         if !cli_tool_timeout && let Some(tool_timeout) = toml_cfg.tool_timeout {
             apply_positive_i32_config(&mut cfg.tool_timeout_secs, tool_timeout, "tool_timeout");
         }
@@ -699,6 +711,16 @@ pub fn apply_provider_defaults(cfg: &mut Config) -> Result<()> {
         && let Ok(n) = v.parse::<usize>()
     {
         cfg.file_write_max_bytes = n;
+    }
+    if let Ok(v) = std::env::var("MAX_SEARCH_FILES")
+        && let Ok(n) = v.parse::<usize>()
+    {
+        cfg.max_search_files = n;
+    }
+    if let Ok(v) = std::env::var("MAX_SEARCH_RESULTS")
+        && let Ok(n) = v.parse::<usize>()
+    {
+        cfg.max_search_results = n;
     }
     // API key: CLI/config > DEEPSEEK_API_KEY
     if cfg.api_key.is_empty() {

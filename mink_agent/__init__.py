@@ -207,6 +207,8 @@ class SandboxConfig:
     llm_wait_heartbeat: int = 30
     max_tokens: int = 81920
     max_turns: int = 40
+    max_search_files: int = 5000
+    max_search_results: int = 1000
     verbose: bool = False
 
     # Backend
@@ -750,6 +752,8 @@ class AgentSession:
         toml["llm_first_event_timeout"] = cfg.llm_first_event_timeout
         toml["llm_idle_timeout"] = cfg.llm_idle_timeout
         toml["llm_wait_heartbeat"] = cfg.llm_wait_heartbeat
+        toml["max_search_files"] = cfg.max_search_files
+        toml["max_search_results"] = cfg.max_search_results
         if cfg.verbose:
             toml["verbose"] = True
 

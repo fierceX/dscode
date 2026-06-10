@@ -191,6 +191,8 @@ sub_agent_timeout = 120
 llm_first_event_timeout = 60
 llm_idle_timeout = 90
 llm_wait_heartbeat = 30
+max_search_files = 5000
+max_search_results = 1000
 output_format = "stream-json"
 approval_mode = "write"
 skills = ["python", "debugging"]
@@ -224,6 +226,8 @@ llm_idle_timeout = 90                     # 模型 stream 空闲超时（秒）
 llm_wait_heartbeat = 30                   # 等待模型响应的提示间隔（秒，0=关闭）
 context_compact_pct = 85                  # 压缩触发百分比
 log_events = true                         # 事件日志
+max_search_files = 5000                     # Glob/Grep 最大遍历文件数
+max_search_results = 1000                   # Grep 最大匹配结果行数
 
 [tools]
 approval_mode = "yolo"                    # yolo | write | always-ask
@@ -370,6 +374,8 @@ mink --tui
 | `MINK_WEB_USER_AGENT` | Firefox-like UA | WebSearch/WebFetch 的 User-Agent 覆盖 |
 | `TOOL_RESULT_MAX_BYTES` | `100000` | 单条工具结果截断上限 |
 | `FILE_WRITE_MAX_BYTES` | `1048576` | Write/Edit 工具写入上限 |
+| `MAX_SEARCH_FILES` | `5000` | Glob/Grep 最大遍历文件数 |
+| `MAX_SEARCH_RESULTS` | `1000` | Grep 最大匹配结果行数 |
 | `LOG_EVENTS` | `true` | 设为 `0`/`false`/`no` 关闭 events.jsonl 记录 |
 | `MINK_SIGNAL_MODE` | `full` | 信号系统模式：`full` 启用信念跟踪、注入和恢复守卫；`off` 关闭信号提示词和运行时信号干预 |
 | `MINK_HOME` | `$HOME` | session 存储目录覆盖 |

@@ -970,6 +970,8 @@ mod tests {
             sub_agent_timeout_secs: 300,
             tool_result_max_bytes: 100_000,
             file_write_max_bytes: 1_048_576,
+            max_search_files: 5000,
+            max_search_results: 1000,
             tool_disable: crate::config::ToolDisableFlags::default(),
             tool_approval_mode: mode,
             tool_approval: overrides.into_iter().collect(),
