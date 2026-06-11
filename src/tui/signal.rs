@@ -1,7 +1,7 @@
 use crate::tui::notify::TaskNotificationKind;
 use crate::tui::sanitize::sanitize_tui_text;
 use crate::tui::state::{MsgKind, MsgLine, SubAgentDetail, TuiState, WorkState};
-use crate::ui::StatsSnapshot;
+use crate::ui::{StatsSnapshot, SubAgentStreamKind};
 use std::sync::mpsc;
 
 #[derive(Debug, Clone, Default)]
@@ -39,12 +39,6 @@ pub enum TuiSignal {
     },
     #[default]
     Shutdown,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum SubAgentStreamKind {
-    Thinking,
-    Text,
 }
 
 impl TuiState {

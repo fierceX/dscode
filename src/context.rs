@@ -6,7 +6,7 @@ use crate::session::prefix::ImmutablePrefix;
 use crate::session::stats::StatsTracker;
 use crate::session::store::ConversationStore;
 use crate::tools::snapshot::FileSnapshotStore;
-use crate::ui::Display;
+use crate::ui::{Display, SubAgentStreamSink};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -120,8 +120,8 @@ pub struct AgentSharedContext {
     pub compaction: Arc<CompactionEngine>,
     pub cancel: CancellationToken,
     pub display: Arc<dyn Display>,
-    /// TUI-only: mpsc sender for sub-agent streaming. Set in main.rs for TUI mode.
-    pub sub_stream_tx: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    /// Optional sink for live sub-agent streaming. TUI sets this to a channel-backed sink.
+    pub sub_stream_tx: Option<Arc<dyn SubAgentStreamSink>>,
     pub tool_config: ToolConfig,
     pub events_path: PathBuf,
     pub summary_path: PathBuf,

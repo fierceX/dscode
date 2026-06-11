@@ -10,18 +10,21 @@ use mink::sdk_protocol::{
 };
 use mink::session::compaction::CompactionEngine;
 use mink::session::paths;
-use mink::ui::Display;
 use mink::ui::engine::TerminalDisplay;
 use mink::ui::replay::replay_last_turns;
+use mink::ui::{Display, SubAgentStreamSink};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
+#[cfg(feature = "repl")]
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 
 #[tokio::main]
 async fn main() {
     std::panic::set_hook(Box::new(|info| {
+        #[cfg(feature = "tui")]
         let _ = crossterm::terminal::disable_raw_mode();
         eprintln!("{info}");
     }));
@@ -187,27 +190,40 @@ async fn run(args: Vec<String>) -> Result<()> {
     ));
 
     let cancel = CancellationToken::new();
-    let is_stream_json = cfg.output_format == mink::config::OutputFormat::StreamJson
-        || cfg.agent_jsonl;
+    let is_stream_json =
+        cfg.output_format == mink::config::OutputFormat::StreamJson || cfg.agent_jsonl;
 
     // TUI channels (if tui_mode). Created before display so signal_tx is available.
+    #[cfg(feature = "tui")]
     let tui_tx = if cfg.tui_mode {
         let (signal_tx, signal_rx) = std::sync::mpsc::channel::<mink::tui::TuiSignal>();
         Some((signal_tx, signal_rx))
     } else {
         None
     };
+    #[cfg(not(feature = "tui"))]
+    {
+        if cfg.tui_mode {
+            anyhow::bail!("this mink binary was built without the `tui` feature");
+        }
+    }
 
+    #[cfg(feature = "tui")]
     let display: Arc<dyn Display> = if let Some((ref tx, ..)) = tui_tx {
         Arc::new(mink::tui::TuiDisplay::new(tx.clone())) as Arc<dyn Display>
     } else {
         Arc::new(TerminalDisplay::new(is_interactive, is_stream_json))
     };
+    #[cfg(not(feature = "tui"))]
+    let display: Arc<dyn Display> = Arc::new(TerminalDisplay::new(is_interactive, is_stream_json));
 
     // TUI mode: store mpsc sender for sub-agent streaming
-    let sub_stream_tx: Option<Arc<dyn std::any::Any + Send + Sync>> = tui_tx
+    #[cfg(feature = "tui")]
+    let sub_stream_tx: Option<Arc<dyn SubAgentStreamSink>> = tui_tx
         .as_ref()
-        .map(|(tx, ..)| Arc::new(tx.clone()) as Arc<dyn std::any::Any + Send + Sync>);
+        .map(|(tx, ..)| Arc::new(tx.clone()) as Arc<dyn SubAgentStreamSink>);
+    #[cfg(not(feature = "tui"))]
+    let sub_stream_tx: Option<Arc<dyn SubAgentStreamSink>> = None;
 
     let ctx = Arc::new(AgentSharedContext {
         config: cfg.clone(),
@@ -279,6 +295,7 @@ async fn run(args: Vec<String>) -> Result<()> {
         });
         process_exit_code = exit_code_from_turn(result.status);
     } else if cfg.tui_mode {
+        #[cfg(feature = "tui")]
         if let Some((_, signal_rx)) = tui_tx
             && let Err(e) = mink::tui::run_tui(
                 signal_rx,
@@ -290,6 +307,8 @@ async fn run(args: Vec<String>) -> Result<()> {
         {
             eprintln!("TUI error: {e}");
         }
+        #[cfg(not(feature = "tui"))]
+        anyhow::bail!("this mink binary was built without the `tui` feature");
     } else if is_interactive {
         display.render_info("mink interactive mode (type 'exit' or Ctrl+D to quit)");
         if !new_session {
@@ -505,101 +524,112 @@ async fn run_interactive(
     home: &Path,
 ) -> Result<()> {
     let cancel_clone = cancel.clone();
+    #[cfg(feature = "repl")]
     let history_path = home.join(".mink/history");
-    if let Some(parent) = history_path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-
+    #[cfg(not(feature = "repl"))]
+    let _ = home;
     tokio::task::spawn_blocking(move || {
-        let mut rl = match rustyline::DefaultEditor::new() {
-            Ok(r) => r,
-            Err(_) => {
-                eprintln!("Failed to initialize readline. Running in simple mode.");
-                simple_stdin_loop(&cmd_tx, &cancel_clone);
-                return;
+        #[cfg(feature = "repl")]
+        {
+            if let Some(parent) = history_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
             }
-        };
+            let mut rl = match rustyline::DefaultEditor::new() {
+                Ok(r) => r,
+                Err(_) => {
+                    eprintln!("Failed to initialize readline. Running in simple mode.");
+                    simple_stdin_loop(&cmd_tx, &cancel_clone);
+                    return;
+                }
+            };
 
-        let _ = rl.load_history(&history_path);
-        let history_file = history_path.clone();
+            let _ = rl.load_history(&history_path);
+            let history_file = history_path.clone();
 
-        loop {
-            let line = match rl.readline("> ") {
-                Ok(s) => s.trim_end().to_string(),
-                Err(rustyline::error::ReadlineError::Eof) => break,
-                Err(rustyline::error::ReadlineError::Interrupted) => {
-                    interrupt.store(true, Ordering::SeqCst);
+            loop {
+                let line = match rl.readline("> ") {
+                    Ok(s) => s.trim_end().to_string(),
+                    Err(rustyline::error::ReadlineError::Eof) => break,
+                    Err(rustyline::error::ReadlineError::Interrupted) => {
+                        interrupt.store(true, Ordering::SeqCst);
+                        continue;
+                    }
+                    Err(_) => break,
+                };
+                if line.is_empty() {
                     continue;
                 }
-                Err(_) => break,
-            };
-            if line.is_empty() {
-                continue;
-            }
-            if line == "/help" {
-                println!("Commands:");
-                println!("  /flash        Switch to flash tier");
-                println!("  /pro          Switch to pro tier");
-                println!("  /compact      Force context compaction");
-                println!("  /skills       List available skills");
-                println!("  /help         Show this help");
-                println!("  Ctrl+C        Interrupt current task");
-                println!("  Ctrl+C again  Exit REPL");
-                println!("  exit / quit   Exit REPL");
-                continue;
-            }
-            if line == "/skills" {
-                list_skills();
-                continue;
-            }
-            if line == "/compact" {
-                let (done_tx, done_rx) = oneshot::channel();
-                if cmd_tx.send(OrchCmd::Compact { done: done_tx }).is_err() {
+                if line == "/help" {
+                    println!("Commands:");
+                    println!("  /flash        Switch to flash tier");
+                    println!("  /pro          Switch to pro tier");
+                    println!("  /compact      Force context compaction");
+                    println!("  /skills       List available skills");
+                    println!("  /help         Show this help");
+                    println!("  Ctrl+C        Interrupt current task");
+                    println!("  Ctrl+C again  Exit REPL");
+                    println!("  exit / quit   Exit REPL");
+                    continue;
+                }
+                if line == "/skills" {
+                    list_skills();
+                    continue;
+                }
+                if line == "/compact" {
+                    let (done_tx, done_rx) = oneshot::channel();
+                    if cmd_tx.send(OrchCmd::Compact { done: done_tx }).is_err() {
+                        break;
+                    }
+                    let _ = done_rx.blocking_recv();
+                    continue;
+                }
+                if line == "/flash" || line == "/pro" {
+                    let model = line.trim_start_matches('/');
+                    if cmd_tx.send(OrchCmd::SetModel(model.to_string())).is_err() {
+                        break;
+                    }
+                    continue;
+                }
+                if line == "exit" || line == "quit" {
                     break;
                 }
-                let _ = done_rx.blocking_recv();
-                continue;
-            }
-            if line == "/flash" || line == "/pro" {
-                let model = line.trim_start_matches('/');
-                if cmd_tx.send(OrchCmd::SetModel(model.to_string())).is_err() {
+                if cancel_clone.is_cancelled() {
                     break;
                 }
-                continue;
-            }
-            if line == "exit" || line == "quit" {
-                break;
-            }
-            if cancel_clone.is_cancelled() {
-                break;
-            }
-            let _ = rl.add_history_entry(&line);
-            let _ = rl.save_history(&history_file);
-            let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-            if cmd_tx
-                .send(OrchCmd::UserInput {
-                    input: line,
-                    done: done_tx,
-                })
-                .is_err()
-            {
-                break;
-            }
-            // 轮询等待完成，同时检查中断标志
-            let mut done_rx = done_rx;
-            loop {
-                if interrupt.load(Ordering::SeqCst) {
+                let _ = rl.add_history_entry(&line);
+                let _ = rl.save_history(&history_file);
+                let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+                if cmd_tx
+                    .send(OrchCmd::UserInput {
+                        input: line,
+                        done: done_tx,
+                    })
+                    .is_err()
+                {
                     break;
                 }
-                match done_rx.try_recv() {
-                    Ok(_) | Err(tokio::sync::oneshot::error::TryRecvError::Closed) => break,
-                    Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
-                        std::thread::sleep(std::time::Duration::from_millis(100));
+                // 轮询等待完成，同时检查中断标志
+                let mut done_rx = done_rx;
+                loop {
+                    if interrupt.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    match done_rx.try_recv() {
+                        Ok(_) | Err(tokio::sync::oneshot::error::TryRecvError::Closed) => break,
+                        Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                        }
                     }
                 }
             }
+            let _ = rl.save_history(&history_file);
         }
-        let _ = rl.save_history(&history_file);
+        #[cfg(not(feature = "repl"))]
+        {
+            let _ = interrupt;
+            eprintln!("Readline support is disabled; running in simple stdin mode.");
+            simple_stdin_loop(&cmd_tx, &cancel_clone);
+        }
     })
     .await?;
 
@@ -695,7 +725,15 @@ fn truncate_chars(value: &str, max: usize) -> String {
 }
 
 fn print_usage() {
-    println!("Usage: mink [options] [prompt]");
+    let program = std::env::args()
+        .next()
+        .and_then(|arg| {
+            std::path::Path::new(&arg)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "mink".to_string());
+    println!("Usage: {program} [options] [prompt]");
     println!();
     println!("Options:");
     println!("  -m, --model TIER        Model tier: flash | pro (default: flash)");
@@ -708,6 +746,7 @@ fn print_usage() {
     println!("  --list-skills           List available skills");
     println!("  -v, --verbose           Verbose mode");
     println!("  -i, --interactive       Interactive mode (REPL)");
+    #[cfg(feature = "tui")]
     println!("  --tui                   TUI mode");
     println!("  --print                 Stream JSON events to stdout");
     println!("  --agent-jsonl           Agent JSONL protocol");

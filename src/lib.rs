@@ -22,6 +22,7 @@ pub mod tools;
 
 pub mod agent;
 pub mod sandbox;
+#[cfg(feature = "tui")]
 pub mod tui;
 pub mod ui;
 pub mod util;

@@ -170,10 +170,18 @@ impl Default for SandboxPythonConfig {
 
 impl SandboxPythonConfig {
     pub fn from_file(cfg: Option<&SandboxPythonConfigFile>) -> Self {
-        let Some(cfg) = cfg else { return Self::default() };
+        let Some(cfg) = cfg else {
+            return Self::default();
+        };
         Self {
-            wasm_path: cfg.wasm_path.clone().unwrap_or_else(|| "cpython-wasi/python.wasm".into()),
-            stdlib_dir: cfg.stdlib_dir.clone().unwrap_or_else(|| "cpython-wasi".into()),
+            wasm_path: cfg
+                .wasm_path
+                .clone()
+                .unwrap_or_else(|| "cpython-wasi/python.wasm".into()),
+            stdlib_dir: cfg
+                .stdlib_dir
+                .clone()
+                .unwrap_or_else(|| "cpython-wasi".into()),
             timeout: cfg.timeout.unwrap_or(30),
             read_dirs: cfg.read_dirs.clone().unwrap_or_default(),
             write_dirs: cfg.write_dirs.clone().unwrap_or_default(),
@@ -454,8 +462,19 @@ pub fn apply_config_file(cfg: &mut Config) {
     let user_cfg = read_config_file(&home.join(".minkrc"));
     let project_cfg = read_config_file(&cwd.join(".minkrc"));
     let cli_cfg = cfg.cli_config.take();
-    apply_config_sources(cfg, &defaults, user_cfg.as_ref(), project_cfg.as_ref(), cli_cfg.as_ref());
-    apply_sandbox_config(cfg, user_cfg.as_ref(), project_cfg.as_ref(), cli_cfg.as_ref());
+    apply_config_sources(
+        cfg,
+        &defaults,
+        user_cfg.as_ref(),
+        project_cfg.as_ref(),
+        cli_cfg.as_ref(),
+    );
+    apply_sandbox_config(
+        cfg,
+        user_cfg.as_ref(),
+        project_cfg.as_ref(),
+        cli_cfg.as_ref(),
+    );
     cfg.cli_config = cli_cfg;
 }
 
@@ -524,7 +543,8 @@ fn apply_config_sources(
         || cfg.llm_wait_heartbeat_secs != defaults.llm_wait_heartbeat_secs;
     let cli_tool_approval_mode = cfg.cli_overrides.tool_approval_mode
         || cfg.tool_approval_mode != defaults.tool_approval_mode;
-    let cli_output_format = cfg.cli_overrides.output_format || cfg.output_format != defaults.output_format;
+    let cli_output_format =
+        cfg.cli_overrides.output_format || cfg.output_format != defaults.output_format;
 
     for toml_cfg in [user_cfg, project_cfg, cli_cfg].into_iter().flatten() {
         if !cli_model && let Some(model) = &toml_cfg.model {
@@ -894,6 +914,7 @@ pub(crate) const TOOL_DISABLE_MAP: &[(&str, ToolDisableCheck)] = &[
     ("WebSearch", |f| f.disable_web),
     ("WebFetch", |f| f.disable_web),
     ("SubAgent", |f| f.disable_sub_agent),
+    ("PythonSandbox", |f| f.disable_python_sandbox),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
@@ -1024,7 +1045,7 @@ mod tests {
         let toml = "llm_first_event_timeout = 7\nllm_idle_timeout = 8\nllm_wait_heartbeat = 9";
         let mut cfg = parse_args(vec!["--config".into(), toml.into()]).unwrap();
         let defaults = Config::default();
-                let cli = cfg.cli_config.take();
+        let cli = cfg.cli_config.take();
         apply_config_sources(&mut cfg, &defaults, None, None, cli.as_ref());
         cfg.cli_config = cli;
         assert_eq!(cfg.llm_first_event_timeout_secs, 7);
@@ -1036,7 +1057,7 @@ mod tests {
     fn config_llm_timeout_via_toml() {
         let mut cfg = parse_args(vec!["--config".into(), "llm_wait_heartbeat = 0".into()]).unwrap();
         let defaults = Config::default();
-                let cli = cfg.cli_config.take();
+        let cli = cfg.cli_config.take();
         apply_config_sources(&mut cfg, &defaults, None, None, cli.as_ref());
         cfg.cli_config = cli;
         assert_eq!(cfg.llm_wait_heartbeat_secs, 0);
@@ -1204,7 +1225,7 @@ Read = "allow"
         ])
         .unwrap();
         let defaults = Config::default();
-                let cli = cfg.cli_config.take();
+        let cli = cfg.cli_config.take();
         apply_config_sources(&mut cfg, &defaults, None, None, cli.as_ref());
         cfg.cli_config = cli;
         assert_eq!(cfg.max_turns, 50);

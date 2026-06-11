@@ -45,6 +45,19 @@ impl PrefixManager {
             let tools_json =
                 serde_json::from_str::<Vec<serde_json::Value>>(crate::assets::TOOLS_JSON)
                     .unwrap_or_default();
+            let available_tools: std::collections::BTreeSet<&'static str> =
+                crate::tools::runner::tool_registry()
+                    .iter()
+                    .map(|tool| tool.metadata().name)
+                    .collect();
+            let tools_json = tools_json
+                .into_iter()
+                .filter(|tool| {
+                    tool.get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|name| available_tools.contains(name))
+                })
+                .collect();
 
             // Filter tools: combine disable flags + enabled whitelist at config layer
             let tools_json = self.ctx.tool_config.filter_tools_json(tools_json);

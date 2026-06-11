@@ -1,7 +1,7 @@
 pub mod bash;
 pub mod file;
-pub mod metadata;
 pub mod hashline;
+pub mod metadata;
 pub mod python;
 pub mod runner;
 #[cfg(feature = "python-sandbox")]

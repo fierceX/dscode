@@ -13,8 +13,9 @@ mod signal;
 mod state;
 mod theme;
 
+pub use crate::ui::SubAgentStreamKind;
 pub use display::TuiDisplay;
-pub use signal::{SubAgentStreamKind, TuiSignal};
+pub use signal::TuiSignal;
 
 use crate::agent::orchestrator::OrchCmd;
 use crate::config::SandboxConfig;

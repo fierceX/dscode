@@ -1,9 +1,9 @@
 """
 mink SDK — Python wrapper for agent execution (optionally sandboxed).
 
-Sandboxing is handled entirely by the Rust ``mink`` binary internally.
+Sandboxing is handled entirely by the Rust ``mink-core`` binary internally.
 The Python layer does NOT construct sandbox commands — it just launches
-``mink --agent-jsonl`` and passes sandbox configuration via the
+``mink-core --agent-jsonl`` and passes sandbox configuration via the
 ``MINK_LIMITS`` environment variable.
 
 * **Linux**: nsjail / bubblewrap (auto-detected, Rust re-exec).
@@ -73,13 +73,13 @@ class AgentStreamEvent:
 # ── Helpers ──────────────────────────────────────────────────────────
 
 def _find_binary() -> str:
-    """Locate the bundled ``mink`` binary.
+    """Locate the bundled ``mink-core`` binary.
 
     Resolution order:
     1. ``MINK_BINARY`` environment override.
-    2. Package-internal ``_binary/mink`` (bundled wheel).
-    3. ``mink`` on ``PATH``.
-    4. ``./mink`` in the current working directory.
+    2. Package-internal ``_binary/mink-core`` (bundled wheel).
+    3. ``mink-core`` on ``PATH``.
+    4. ``./mink-core`` in the current working directory.
     """
     override = os.environ.get("MINK_BINARY")
     if override:
@@ -90,9 +90,9 @@ def _find_binary() -> str:
             raise PermissionError(f"MINK_BINARY is not executable: {override}")
         return override_path
 
-    # 1. Bundled binary inside the package
+    # Bundled binary inside the package
     try:
-        ref = _resources.files("mink_agent") / "_binary" / "mink"
+        ref = _resources.files("mink_agent") / "_binary" / "mink-core"
         if ref.is_file():
             bin_path = str(ref)
             os.chmod(bin_path, 0o755)
@@ -100,20 +100,20 @@ def _find_binary() -> str:
     except (TypeError, AttributeError, OSError):
         pass
 
-    # 2. On PATH
-    which = shutil.which("mink")
+    # On PATH
+    which = shutil.which("mink-core")
     if which:
         return which
 
-    # 3. CWD fallback
-    cwd_bin = os.path.join(os.getcwd(), "mink")
+    # CWD fallback
+    cwd_bin = os.path.join(os.getcwd(), "mink-core")
     if os.path.isfile(cwd_bin):
         return cwd_bin
 
     raise FileNotFoundError(
-        "mink binary not found. "
-        "Install mink-sdk from the correct platform wheel "
-        "or place the mink binary on PATH."
+        "mink-core binary not found. "
+        "Install mink-agent from the correct platform wheel "
+        "or place the mink-core binary on PATH."
     )
 
 
@@ -264,7 +264,7 @@ class SandboxConfig:
 class AgentSession:
     """A single-shot sandboxed agent session.
 
-    Each call to :meth:`run` launches a sandboxed ``mink`` process,
+    Each call to :meth:`run` launches a sandboxed ``mink-core`` process,
     executes the prompt, collects results, and cleans up.
     """
 
@@ -482,7 +482,7 @@ class AgentSession:
         request: str,
         env: dict[str, str],
     ) -> Iterator[dict[str, Any]]:
-        """Run the mink process with the given command and yield JSONL events."""
+        """Run the mink-core process with the given command and yield JSONL events."""
         try:
             popen_kwargs: dict[str, Any] = {
                 "args": cmd,
@@ -498,8 +498,8 @@ class AgentSession:
             proc = subprocess.Popen(**popen_kwargs)
         except FileNotFoundError as e:
             raise RuntimeError(
-                f"mink binary not found ({e}). "
-                f"Ensure mink is installed and available."
+                f"mink-core binary not found ({e}). "
+                f"Ensure mink-core is installed and available."
             ) from e
 
         self._proc = proc
@@ -786,7 +786,7 @@ class AgentSession:
         return json.dumps(req) + "\n"
 
     def _validate_request_config(self) -> None:
-        """Validate SDK-side options before launching mink."""
+        """Validate SDK-side options before launching mink-core."""
         cfg = self._config
         if cfg.model and cfg.model not in (
             "flash",
@@ -811,7 +811,7 @@ class AgentSession:
             raise ValueError("llm_wait_heartbeat must be zero or greater")
 
     def _build_sandbox_cmd(self) -> list[str]:
-        """Build the full command line: sandbox wrapper + mink binary."""
+        """Build the full command line: sandbox wrapper + mink-core binary."""
         cmd = self._build_sandbox_cmd_inner()
         self._append_mission_flag(cmd)
         return cmd
@@ -835,7 +835,7 @@ class AgentSession:
             cmd.extend(["--mission", cfg.mission_file])
 
     def _build_sandbox_cmd_inner(self) -> list[str]:
-        """Launch mink directly — sandboxing is handled by Rust internally."""
+        """Launch mink-core directly — sandboxing is handled by Rust internally."""
         cmd = [self._binary, "--agent-jsonl"]
         cfg = self._config
 

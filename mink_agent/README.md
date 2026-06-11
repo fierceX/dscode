@@ -2,7 +2,7 @@
 
 ## 简介
 
-mink-agent 是 [mink](https://github.com/xialuyu/mink) 的 Python 封装。`mink` 二进制内置在 pip 包中，无需额外安装。
+mink-agent 是 [mink](https://github.com/xialuyu/mink) 的 Python 封装。SDK 专用的 `mink-core` 二进制内置在 pip 包中，无需额外安装。
 
 ```bash
 pip install mink-agent
@@ -46,7 +46,7 @@ print(result["text"])
 
 ### `run(prompt, *, extra_options=None, on_event=None) -> dict`
 
-执行一个提示词并返回聚合结果。每次调用都会启动一个新的 `mink --agent-jsonl` 进程；持续交互通过相同的 `mink_home + session_id` 复用磁盘 session，而不是复用同一个进程。同一个 `AgentSession` 实例不支持并发调用；并发任务应创建多个实例或由外层应用排队。
+执行一个提示词并返回聚合结果。每次调用都会启动一个新的 `mink-core --agent-jsonl` 进程；持续交互通过相同的 `mink_home + session_id` 复用磁盘 session，而不是复用同一个进程。同一个 `AgentSession` 实例不支持并发调用；并发任务应创建多个实例或由外层应用排队。
 
 默认情况下 `run()` 会消费 Rust 侧输出的过程事件并聚合 `text`、`thinking`、工具调用和最终状态。传入 `on_event` 时，每个归一化后的 `AgentStreamEvent` 会同步回调给调用方，适合在不直接迭代 stream 的场景里做 UI 增量更新。
 
@@ -152,7 +152,20 @@ print(result["text"])
 | `signal_mode` | `None`（实际默认 `full`） | 信号系统模式覆盖：`"full"` 启用信念跟踪、注入和恢复守卫；`"off"` 关闭信号提示词和运行时信号干预；`None` 继承 `MINK_SIGNAL_MODE` |
 | `stream_events` | `True` | 是否让 Rust 侧输出过程事件；设为 `False` 时仅输出最终 `final`，适合非流式长任务 |
 
-本地调试可以通过 `MINK_BINARY=/path/to/mink` 覆盖 SDK 使用的二进制。未设置时优先使用 wheel 内置二进制，然后查找 `PATH`。
+本地调试可以通过 `MINK_BINARY=/path/to/mink-core` 覆盖 SDK 使用的二进制。未设置时优先使用 wheel 内置二进制，然后查找 `PATH`。
+
+默认发布的 SDK wheel 使用精简 `mink-core`，不包含 `PythonSandbox` 工具。需要该工具时可手动构建：
+
+```bash
+cargo build --release --no-default-features --features "sdk python-sandbox" --bin mink-core
+MINK_BINARY=./target/release/mink-core python your_script.py
+```
+
+或构建带 `PythonSandbox` 的 wheel：
+
+```bash
+MINK_SDK_FEATURES="sdk python-sandbox" python scripts/build_wheel.py
+```
 
 ### 沙箱后端
 
@@ -160,7 +173,7 @@ print(result["text"])
 |------|--------|------|
 | `sandbox_backend` | `"auto"` | 传递给 Rust 内部 (`MINK_LIMITS`)：`"auto"` / `"nsjail"` / `"bwrap"` / `"sandbox-exec"` / `"off"` |
 
-沙箱由 Rust ``mink`` 二进制内部处理。Python SDK 不构造任何沙箱命令。
+沙箱由 Rust ``mink-core`` 二进制内部处理。Python SDK 不构造任何沙箱命令。
 
 ### API 配置
 
@@ -172,7 +185,7 @@ print(result["text"])
 
 ## 沙箱行为说明
 
-沙箱由 Rust ``mink`` 二进制内部通过 ``reexec_in_sandbox()`` 处理。
+沙箱由 Rust ``mink-core`` 二进制内部通过 ``reexec_in_sandbox()`` 处理。
 
 - **macOS**：使用 ``sandbox-exec``，写入限制 + 应用层读取限制。
 - **Linux**：自动检测 ``nsjail`` → ``bubblewrap``，文件系统隔离 + 命名空间隔离。

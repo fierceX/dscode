@@ -14,9 +14,9 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 use wasmtime::{Config, Engine, Linker, Module, Store};
+use wasmtime_wasi::pipe::MemoryOutputPipe;
 use wasmtime_wasi::preview1::{self, WasiP1Ctx};
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
-use wasmtime_wasi::pipe::MemoryOutputPipe;
 
 fn resolve_abs(dir: &str, cwd: &Path) -> PathBuf {
     let p = Path::new(dir);
@@ -38,30 +38,33 @@ fn execute_in_sandbox(
     timeout_secs: u64,
     interrupt: Option<&AtomicBool>,
 ) -> Result<(String, String, Option<i32>)> {
-    let wasm_bytes = std::fs::read(wasm_path)
-        .map_err(|e| anyhow::anyhow!("读取 python.wasm 失败: {e}"))?;
+    let wasm_bytes =
+        std::fs::read(wasm_path).map_err(|e| anyhow::anyhow!("读取 python.wasm 失败: {e}"))?;
 
     let engine_config = Config::new();
     let engine = Engine::new(&engine_config)?;
     let module = Module::new(&engine, &wasm_bytes)?;
 
     // ── WASI 上下文 ──
-    let max_output: usize = 100_000;  // 最大捕获字节数，与 tool_result_max_bytes 一致
+    let max_output: usize = 100_000; // 最大捕获字节数，与 tool_result_max_bytes 一致
     let stdout_pipe = MemoryOutputPipe::new(max_output);
     let stderr_pipe = MemoryOutputPipe::new(max_output);
     let mut builder = WasiCtxBuilder::new();
-    builder.stdout(stdout_pipe.clone()).stderr(stderr_pipe.clone());
+    builder
+        .stdout(stdout_pipe.clone())
+        .stderr(stderr_pipe.clone());
     let cwd = std::env::current_dir()?;
 
     // 注入 os.chdir，使 Python 相对路径解析指向项目根
     let cwd_str = cwd.to_string_lossy();
-    let script = format!(
-        "import os; os.chdir(r\"{cwd}\")\n{script}",
-        cwd = cwd_str
-    );
+    let script = format!("import os; os.chdir(r\"{cwd}\")\n{script}", cwd = cwd_str);
 
     // 通过 -c 传递代码
-    let wasm_argv = vec!["python.wasm".to_string(), "-c".to_string(), script.to_string()];
+    let wasm_argv = vec![
+        "python.wasm".to_string(),
+        "-c".to_string(),
+        script.to_string(),
+    ];
     builder.args(&wasm_argv.iter().map(|s| s.as_str()).collect::<Vec<_>>());
 
     builder.env("PWD", &cwd.to_string_lossy().to_string());
@@ -77,13 +80,23 @@ fn execute_in_sandbox(
     for dir in write_dirs {
         let abs = resolve_abs(dir, &cwd);
         if abs.exists() || abs.parent().map_or(false, |parent| parent.exists()) {
-            builder.preopened_dir(&abs, &abs.to_string_lossy(), DirPerms::all(), FilePerms::all())?;
+            builder.preopened_dir(
+                &abs,
+                &abs.to_string_lossy(),
+                DirPerms::all(),
+                FilePerms::all(),
+            )?;
         }
     }
     for dir in read_dirs {
         let abs = resolve_abs(dir, &cwd);
         if abs.exists() {
-            builder.preopened_dir(&abs, &abs.to_string_lossy(), DirPerms::READ, FilePerms::READ)?;
+            builder.preopened_dir(
+                &abs,
+                &abs.to_string_lossy(),
+                DirPerms::READ,
+                FilePerms::READ,
+            )?;
         }
     }
     // preopen CWD 到绝对路径（只读），但若 CWD 已在 write_dirs 中则跳过（写权限优先）
@@ -92,7 +105,12 @@ fn execute_in_sandbox(
         abs == cwd
     });
     if !cwd_is_writable {
-        builder.preopened_dir(&cwd, &cwd.to_string_lossy(), DirPerms::READ, FilePerms::READ)?;
+        builder.preopened_dir(
+            &cwd,
+            &cwd.to_string_lossy(),
+            DirPerms::READ,
+            FilePerms::READ,
+        )?;
     }
 
     // 包目录
@@ -161,20 +179,44 @@ fn execute_in_sandbox(
         Some(Err(trap)) => {
             let msg = trap.to_string();
             if msg.contains("proc_exit") {
-                let code = msg.split("proc_exit(").nth(1)
+                let code = msg
+                    .split("proc_exit(")
+                    .nth(1)
                     .and_then(|s| s.split(')').next())
                     .and_then(|s| s.parse::<i32>().ok());
                 Ok((stdout, stderr, code))
             } else if msg.contains("fuel") && msg.contains("exhausted") {
-                let timed_out_msg = format!("[... Python sandbox timed out after {} seconds ...]", timeout_secs);
-                Ok((stdout, if stderr.is_empty() { timed_out_msg } else { format!("{stderr}\n{timed_out_msg}") }, Some(124)))
+                let timed_out_msg = format!(
+                    "[... Python sandbox timed out after {} seconds ...]",
+                    timeout_secs
+                );
+                Ok((
+                    stdout,
+                    if stderr.is_empty() {
+                        timed_out_msg
+                    } else {
+                        format!("{stderr}\n{timed_out_msg}")
+                    },
+                    Some(124),
+                ))
             } else {
                 Ok((stdout, stderr, Some(1)))
             }
         }
         None => {
-            let cancelled_msg = format!("[... Python sandbox cancelled after {} seconds ...]", timeout_secs);
-            Ok((stdout, if stderr.is_empty() { cancelled_msg } else { format!("{stderr}\n{cancelled_msg}") }, Some(124)))
+            let cancelled_msg = format!(
+                "[... Python sandbox cancelled after {} seconds ...]",
+                timeout_secs
+            );
+            Ok((
+                stdout,
+                if stderr.is_empty() {
+                    cancelled_msg
+                } else {
+                    format!("{stderr}\n{cancelled_msg}")
+                },
+                Some(124),
+            ))
         }
     }
 }
@@ -266,7 +308,9 @@ impl super::runner::ToolExec for PythonSandboxTool {
         }
         if let Some(code) = exit_code {
             if code != 0 {
-                content.push_str(&format!("\n\nPython sandbox script exited with code {code}."));
+                content.push_str(&format!(
+                    "\n\nPython sandbox script exited with code {code}."
+                ));
             }
         }
 
@@ -326,17 +370,8 @@ assert math.isclose(math.pi, 3.14159, rel_tol=1e-3)
 assert re.match(r"\d+", "123abc").group() == "123"
 print("stdlib all ok")
 "#;
-        let (out, err, code) = execute_in_sandbox(
-            script,
-            wasm,
-            stdlib,
-            &[],
-            &[],
-            &[],
-            10,
-            None,
-        )
-        .unwrap();
+        let (out, err, code) =
+            execute_in_sandbox(script, wasm, stdlib, &[], &[], &[], 10, None).unwrap();
         assert_eq!(code, Some(0), "stderr: {err}");
     }
 
@@ -443,7 +478,7 @@ print("write done")"#,
         assert!(out.contains("relative read ok"), "stdout: {out}");
         let _ = std::fs::remove_file("output/rel_read_test.txt");
     }
-    
+
     #[cfg_attr(not(feature = "slow-tests"), ignore)]
     #[test]
     fn sandbox_write_file() {
@@ -459,7 +494,12 @@ print("write done")"#,
         let _ = std::fs::remove_file(&test_file);
 
         // 使用 resolve_abs 确保路径与预开放的 guest 路径一致（处理 /var → /private/var 等）
-        let canon_path = resolve_abs(&test_dir.to_string_lossy(), &std::env::current_dir().unwrap()).to_string_lossy().to_string();
+        let canon_path = resolve_abs(
+            &test_dir.to_string_lossy(),
+            &std::env::current_dir().unwrap(),
+        )
+        .to_string_lossy()
+        .to_string();
         let script = format!(
             r#"open(r"{p}/written.txt", "w").write("hello from sandbox")
 print("write OK")"#,
@@ -478,7 +518,11 @@ print("write OK")"#,
         .unwrap();
         assert_eq!(code, Some(0), "stderr: {err}");
         assert!(out.contains("write OK"), "stdout: {out}");
-        assert!(test_file.exists(), "file not written: {}", test_file.display());
+        assert!(
+            test_file.exists(),
+            "file not written: {}",
+            test_file.display()
+        );
         let content = std::fs::read_to_string(&test_file).unwrap();
         assert_eq!(content, "hello from sandbox");
         let _ = std::fs::remove_file(&test_file);
@@ -500,22 +544,15 @@ print("write OK")"#,
 
         let read_path = test_dir.to_string_lossy().to_string();
         // 使用 resolve_abs 确保路径与预开放的 guest 路径一致（处理 /var → /private/var 等）
-        let canon_read_path = resolve_abs(&read_path, &std::env::current_dir().unwrap()).to_string_lossy().to_string();
+        let canon_read_path = resolve_abs(&read_path, &std::env::current_dir().unwrap())
+            .to_string_lossy()
+            .to_string();
         let script = format!("print(open(r\"{p}/data.txt\").read())", p = canon_read_path);
-        let (out, err, code) = execute_in_sandbox(
-            &script,
-            wasm,
-            stdlib,
-            &[read_path],
-            &[],
-            &[],
-            10,
-            None,
-        )
-        .unwrap();
+        let (out, err, code) =
+            execute_in_sandbox(&script, wasm, stdlib, &[read_path], &[], &[], 10, None).unwrap();
         assert_eq!(code, Some(0), "stderr: {err}");
         assert!(out.contains("hello world"), "stdout: {out}");
-}
+    }
 
     #[cfg_attr(not(feature = "slow-tests"), ignore)]
     #[test]
@@ -527,7 +564,14 @@ print("write OK")"#,
         }
         let stdlib = Path::new("cpython-wasi");
         let (out, err, code) = execute_in_sandbox(
-            "import time; time.sleep(100)", wasm, stdlib, &[], &[], &[], 2, None,
+            "import time; time.sleep(100)",
+            wasm,
+            stdlib,
+            &[],
+            &[],
+            &[],
+            2,
+            None,
         )
         .unwrap();
         eprintln!("timeout test: code={code:?}, out={out}, err={err}");
@@ -536,18 +580,33 @@ print("write OK")"#,
     // ── 路径权限边界测试 ──
 
     fn skip_no_wasm(wasm: &Path) -> bool {
-        if !wasm.exists() { eprintln!("skip: python.wasm not found"); true } else { false }
+        if !wasm.exists() {
+            eprintln!("skip: python.wasm not found");
+            true
+        } else {
+            false
+        }
     }
 
     #[cfg_attr(not(feature = "slow-tests"), ignore)]
     #[test]
     fn sandbox_write_outside_allowed_dir_rejected() {
         let wasm = Path::new("cpython-wasi/python.wasm");
-        if skip_no_wasm(&wasm) { return; }
+        if skip_no_wasm(&wasm) {
+            return;
+        }
         let stdlib = Path::new("cpython-wasi");
         let (out, err, code) = execute_in_sandbox(
-            "open('/etc/pwned.txt', 'w')", wasm, stdlib, &[], &[], &[], 10, None,
-        ).unwrap();
+            "open('/etc/pwned.txt', 'w')",
+            wasm,
+            stdlib,
+            &[],
+            &[],
+            &[],
+            10,
+            None,
+        )
+        .unwrap();
         assert_ne!(code, Some(0), "should NOT be allowed: {err}");
     }
 
@@ -555,11 +614,13 @@ print("write OK")"#,
     #[test]
     fn sandbox_read_outside_allowed_dir_rejected() {
         let wasm = Path::new("cpython-wasi/python.wasm");
-        if skip_no_wasm(&wasm) { return; }
+        if skip_no_wasm(&wasm) {
+            return;
+        }
         let stdlib = Path::new("cpython-wasi");
-        let (out, err, code) = execute_in_sandbox(
-            "open('/etc/passwd')", wasm, stdlib, &[], &[], &[], 10, None,
-        ).unwrap();
+        let (out, err, code) =
+            execute_in_sandbox("open('/etc/passwd')", wasm, stdlib, &[], &[], &[], 10, None)
+                .unwrap();
         assert_ne!(code, Some(0), "should NOT be allowed: {err}");
     }
 
@@ -567,12 +628,22 @@ print("write OK")"#,
     #[test]
     fn sandbox_write_relative_chdir_to_allowed_dir() {
         let wasm = Path::new("cpython-wasi/python.wasm");
-        if skip_no_wasm(&wasm) { return; }
+        if skip_no_wasm(&wasm) {
+            return;
+        }
         let stdlib = Path::new("cpython-wasi");
         _ = std::fs::create_dir_all("output");
         let (out, err, code) = execute_in_sandbox(
-            "open('./output/chdir_test.txt', 'w').write('ok')", wasm, stdlib, &[], &["./output".to_string()], &[], 10, None,
-        ).unwrap();
+            "open('./output/chdir_test.txt', 'w').write('ok')",
+            wasm,
+            stdlib,
+            &[],
+            &["./output".to_string()],
+            &[],
+            10,
+            None,
+        )
+        .unwrap();
         assert_eq!(code, Some(0), "stderr: {err}");
         assert!(std::path::Path::new("output/chdir_test.txt").exists());
         let _ = std::fs::remove_file("output/chdir_test.txt");
@@ -582,13 +653,26 @@ print("write OK")"#,
     #[test]
     fn sandbox_write_absolute_path_to_allowed_dir() {
         let wasm = Path::new("cpython-wasi/python.wasm");
-        if skip_no_wasm(&wasm) { return; }
+        if skip_no_wasm(&wasm) {
+            return;
+        }
         let stdlib = Path::new("cpython-wasi");
         _ = std::fs::create_dir_all("output");
-        let cwd = std::env::current_dir().unwrap().to_string_lossy().to_string();
+        let cwd = std::env::current_dir()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         let (out, err, code) = execute_in_sandbox(
-            &format!("open(r'{cwd}/output/abs_test.txt', 'w').write('ok')"), wasm, stdlib, &[], &["./output".to_string()], &[], 10, None,
-        ).unwrap();
+            &format!("open(r'{cwd}/output/abs_test.txt', 'w').write('ok')"),
+            wasm,
+            stdlib,
+            &[],
+            &["./output".to_string()],
+            &[],
+            10,
+            None,
+        )
+        .unwrap();
         assert_eq!(code, Some(0), "stderr: {err}");
         assert!(std::path::Path::new("output/abs_test.txt").exists());
         let _ = std::fs::remove_file("output/abs_test.txt");
@@ -598,12 +682,22 @@ print("write OK")"#,
     #[test]
     fn sandbox_write_entire_root_with_write_dir_dot() {
         let wasm = Path::new("cpython-wasi/python.wasm");
-        if skip_no_wasm(&wasm) { return; }
+        if skip_no_wasm(&wasm) {
+            return;
+        }
         let stdlib = Path::new("cpython-wasi");
         // write_dirs = ["./"] 使整个项目根可写
         let (out, err, code) = execute_in_sandbox(
-            "open('./sandbox_root_test.txt', 'w').write('root write')", wasm, stdlib, &[], &["./".to_string()], &[], 10, None,
-        ).unwrap();
+            "open('./sandbox_root_test.txt', 'w').write('root write')",
+            wasm,
+            stdlib,
+            &[],
+            &["./".to_string()],
+            &[],
+            10,
+            None,
+        )
+        .unwrap();
         assert_eq!(code, Some(0), "stderr: {err}");
         assert!(std::path::Path::new("sandbox_root_test.txt").exists());
         let _ = std::fs::remove_file("sandbox_root_test.txt");
@@ -613,11 +707,21 @@ print("write OK")"#,
     #[test]
     fn sandbox_write_dot_allows_any_project_file() {
         let wasm = Path::new("cpython-wasi/python.wasm");
-        if skip_no_wasm(&wasm) { return; }
+        if skip_no_wasm(&wasm) {
+            return;
+        }
         let stdlib = Path::new("cpython-wasi");
         let (out, err, code) = execute_in_sandbox(
-            "open('src/tools/sandbox_root_probe.txt', 'w').write('probe')", wasm, stdlib, &[], &["./".to_string()], &[], 10, None,
-        ).unwrap();
+            "open('src/tools/sandbox_root_probe.txt', 'w').write('probe')",
+            wasm,
+            stdlib,
+            &[],
+            &["./".to_string()],
+            &[],
+            10,
+            None,
+        )
+        .unwrap();
         assert_eq!(code, Some(0), "stderr: {err}");
         assert!(std::path::Path::new("src/tools/sandbox_root_probe.txt").exists());
         let _ = std::fs::remove_file("src/tools/sandbox_root_probe.txt");
@@ -627,11 +731,21 @@ print("write OK")"#,
     #[test]
     fn sandbox_traversal_outside_allowed_dir_rejected() {
         let wasm = Path::new("cpython-wasi/python.wasm");
-        if skip_no_wasm(&wasm) { return; }
+        if skip_no_wasm(&wasm) {
+            return;
+        }
         let stdlib = Path::new("cpython-wasi");
         let (out, err, code) = execute_in_sandbox(
-            "open('./output/../../../etc/pwned.txt', 'w')", wasm, stdlib, &[], &["./output".to_string()], &[], 10, None,
-        ).unwrap();
+            "open('./output/../../../etc/pwned.txt', 'w')",
+            wasm,
+            stdlib,
+            &[],
+            &["./output".to_string()],
+            &[],
+            10,
+            None,
+        )
+        .unwrap();
         assert_ne!(code, Some(0), "should NOT allow path traversal");
     }
 
@@ -639,69 +753,135 @@ print("write OK")"#,
     #[test]
     fn sandbox_write_dir_read_only_rejected() {
         let wasm = Path::new("cpython-wasi/python.wasm");
-        if skip_no_wasm(&wasm) { return; }
+        if skip_no_wasm(&wasm) {
+            return;
+        }
         let stdlib = Path::new("cpython-wasi");
         let (out, err, code) = execute_in_sandbox(
-            "open('./data/write_test.txt', 'w')", wasm, stdlib, &["./data".to_string()], &[], &[], 10, None,
-        ).unwrap();
-        assert_ne!(code, Some(0), "should NOT allow write to read-only dir: {err}");
+            "open('./data/write_test.txt', 'w')",
+            wasm,
+            stdlib,
+            &["./data".to_string()],
+            &[],
+            &[],
+            10,
+            None,
+        )
+        .unwrap();
+        assert_ne!(
+            code,
+            Some(0),
+            "should NOT allow write to read-only dir: {err}"
+        );
     }
 
     #[cfg_attr(not(feature = "slow-tests"), ignore)]
     #[test]
     fn sandbox_multiple_write_dirs_all_accessible() {
         let wasm = Path::new("cpython-wasi/python.wasm");
-        if skip_no_wasm(&wasm) { return; }
+        if skip_no_wasm(&wasm) {
+            return;
+        }
         let stdlib = Path::new("cpython-wasi");
-        _ = std::fs::create_dir_all("output"); _ = std::fs::create_dir_all("docs");
+        _ = std::fs::create_dir_all("output");
+        _ = std::fs::create_dir_all("docs");
         let (out, err, code) = execute_in_sandbox(
             "open('./output/multi_a.txt', 'w').write('a'); open('./docs/multi_b.txt', 'w').write('b')",
             wasm, stdlib, &[], &["./output".to_string(), "./docs".to_string()], &[], 10, None,
         ).unwrap();
-        assert_eq!(code, Some(0), "stderr: {err}"); assert!(std::path::Path::new("output/multi_a.txt").exists()); assert!(std::path::Path::new("docs/multi_b.txt").exists());
-        let _ = std::fs::remove_file("output/multi_a.txt"); let _ = std::fs::remove_file("docs/multi_b.txt");
+        assert_eq!(code, Some(0), "stderr: {err}");
+        assert!(std::path::Path::new("output/multi_a.txt").exists());
+        assert!(std::path::Path::new("docs/multi_b.txt").exists());
+        let _ = std::fs::remove_file("output/multi_a.txt");
+        let _ = std::fs::remove_file("docs/multi_b.txt");
     }
 
     #[cfg_attr(not(feature = "slow-tests"), ignore)]
     #[test]
     fn sandbox_stdout_captured_correctly() {
-        let wasm = Path::new("cpython-wasi/python.wasm"); if skip_no_wasm(&wasm) { return; }
+        let wasm = Path::new("cpython-wasi/python.wasm");
+        if skip_no_wasm(&wasm) {
+            return;
+        }
         let stdlib = Path::new("cpython-wasi");
         let (out, err, code) = execute_in_sandbox(
-            "print('line1'); print('line2'); print('line3')", wasm, stdlib, &[], &[], &[], 10, None,
-        ).unwrap();
-        assert_eq!(code, Some(0)); assert_eq!(out.lines().count(), 3, "stdout: {out:?}");
-        assert!(out.contains("line1")); assert!(out.contains("line2")); assert!(out.contains("line3"));
+            "print('line1'); print('line2'); print('line3')",
+            wasm,
+            stdlib,
+            &[],
+            &[],
+            &[],
+            10,
+            None,
+        )
+        .unwrap();
+        assert_eq!(code, Some(0));
+        assert_eq!(out.lines().count(), 3, "stdout: {out:?}");
+        assert!(out.contains("line1"));
+        assert!(out.contains("line2"));
+        assert!(out.contains("line3"));
         assert!(err.is_empty(), "stderr: {err}");
     }
 
     #[cfg_attr(not(feature = "slow-tests"), ignore)]
     #[test]
     fn sandbox_empty_script_fails_gracefully() {
-        let wasm = Path::new("cpython-wasi/python.wasm"); if skip_no_wasm(&wasm) { return; }
+        let wasm = Path::new("cpython-wasi/python.wasm");
+        if skip_no_wasm(&wasm) {
+            return;
+        }
         let stdlib = Path::new("cpython-wasi");
-        let (out, err, code) = execute_in_sandbox("", wasm, stdlib, &[], &[], &[], 10, None).unwrap();
+        let (out, err, code) =
+            execute_in_sandbox("", wasm, stdlib, &[], &[], &[], 10, None).unwrap();
         assert_eq!(code, Some(0), "empty script should exit 0");
     }
 
     #[cfg_attr(not(feature = "slow-tests"), ignore)]
     #[test]
     fn sandbox_exit_code_propagated() {
-        let wasm = Path::new("cpython-wasi/python.wasm"); if skip_no_wasm(&wasm) { return; }
+        let wasm = Path::new("cpython-wasi/python.wasm");
+        if skip_no_wasm(&wasm) {
+            return;
+        }
         let stdlib = Path::new("cpython-wasi");
-        let (out, err, code) = execute_in_sandbox("import sys; sys.exit(42)", wasm, stdlib, &[], &[], &[], 10, None).unwrap();
+        let (out, err, code) = execute_in_sandbox(
+            "import sys; sys.exit(42)",
+            wasm,
+            stdlib,
+            &[],
+            &[],
+            &[],
+            10,
+            None,
+        )
+        .unwrap();
         // proc_exit 退出码提取当前不稳定，接受 None（退出但无法读取码）或 Some(42)
-        assert!(code == Some(42) || code == None, "unexpected exit code: {code:?}");
+        assert!(
+            code == Some(42) || code == None,
+            "unexpected exit code: {code:?}"
+        );
     }
 
     #[cfg_attr(not(feature = "slow-tests"), ignore)]
     #[test]
     fn sandbox_unicode_path_supported() {
-        let wasm = Path::new("cpython-wasi/python.wasm"); if skip_no_wasm(&wasm) { return; }
-        let stdlib = Path::new("cpython-wasi"); _ = std::fs::create_dir_all("output");
+        let wasm = Path::new("cpython-wasi/python.wasm");
+        if skip_no_wasm(&wasm) {
+            return;
+        }
+        let stdlib = Path::new("cpython-wasi");
+        _ = std::fs::create_dir_all("output");
         let (out, err, code) = execute_in_sandbox(
-            "open('./output/中文测试.txt', 'w').write('unicode')", wasm, stdlib, &[], &["./output".to_string()], &[], 10, None,
-        ).unwrap();
+            "open('./output/中文测试.txt', 'w').write('unicode')",
+            wasm,
+            stdlib,
+            &[],
+            &["./output".to_string()],
+            &[],
+            10,
+            None,
+        )
+        .unwrap();
         assert_eq!(code, Some(0), "stderr: {err}");
         assert!(std::path::Path::new("output/中文测试.txt").exists());
         let _ = std::fs::remove_file("output/中文测试.txt");
@@ -710,12 +890,26 @@ print("write OK")"#,
     #[cfg_attr(not(feature = "slow-tests"), ignore)]
     #[test]
     fn sandbox_large_script_executes() {
-        let wasm = Path::new("cpython-wasi/python.wasm"); if skip_no_wasm(&wasm) { return; }
+        let wasm = Path::new("cpython-wasi/python.wasm");
+        if skip_no_wasm(&wasm) {
+            return;
+        }
         let stdlib = Path::new("cpython-wasi");
-        let expr = (0..100).map(|i| format!("{i}")).collect::<Vec<_>>().join("+");
+        let expr = (0..100)
+            .map(|i| format!("{i}"))
+            .collect::<Vec<_>>()
+            .join("+");
         let (out, err, code) = execute_in_sandbox(
-            &format!("print({expr})"), wasm, stdlib, &[], &[], &[], 10, None,
-        ).unwrap();
+            &format!("print({expr})"),
+            wasm,
+            stdlib,
+            &[],
+            &[],
+            &[],
+            10,
+            None,
+        )
+        .unwrap();
         assert_eq!(code, Some(0), "stderr: {err}");
         assert!(out.contains("4950"));
     }
@@ -723,22 +917,45 @@ print("write OK")"#,
     #[cfg_attr(not(feature = "slow-tests"), ignore)]
     #[test]
     fn sandbox_multiple_stdout_writes_combined() {
-        let wasm = Path::new("cpython-wasi/python.wasm"); if skip_no_wasm(&wasm) { return; }
+        let wasm = Path::new("cpython-wasi/python.wasm");
+        if skip_no_wasm(&wasm) {
+            return;
+        }
         let stdlib = Path::new("cpython-wasi");
         let (out, err, code) = execute_in_sandbox(
-            "import sys\nfor i in range(5): sys.stdout.write(f'x{i}\\n')", wasm, stdlib, &[], &[], &[], 10, None,
-        ).unwrap();
-        assert_eq!(code, Some(0)); assert_eq!(out.lines().count(), 5);
+            "import sys\nfor i in range(5): sys.stdout.write(f'x{i}\\n')",
+            wasm,
+            stdlib,
+            &[],
+            &[],
+            &[],
+            10,
+            None,
+        )
+        .unwrap();
+        assert_eq!(code, Some(0));
+        assert_eq!(out.lines().count(), 5);
     }
 
     #[cfg_attr(not(feature = "slow-tests"), ignore)]
     #[test]
     fn sandbox_stderr_captured_separately() {
-        let wasm = Path::new("cpython-wasi/python.wasm"); if skip_no_wasm(&wasm) { return; }
+        let wasm = Path::new("cpython-wasi/python.wasm");
+        if skip_no_wasm(&wasm) {
+            return;
+        }
         let stdlib = Path::new("cpython-wasi");
         let (out, err, code) = execute_in_sandbox(
-            "import sys; sys.stderr.write('err msg\\n'); print('out msg')", wasm, stdlib, &[], &[], &[], 10, None,
-        ).unwrap();
+            "import sys; sys.stderr.write('err msg\\n'); print('out msg')",
+            wasm,
+            stdlib,
+            &[],
+            &[],
+            &[],
+            10,
+            None,
+        )
+        .unwrap();
         assert_eq!(code, Some(0));
         assert!(out.contains("out msg"));
     }

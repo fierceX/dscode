@@ -25,10 +25,7 @@ enum BlockTarget {
 
 #[derive(Debug)]
 enum Token {
-    Header {
-        path: String,
-        tag: String,
-    },
+    Header { path: String, tag: String },
     OpBlock(BlockTarget),
     PayloadLiteral(String),
     Raw(String),
@@ -122,21 +119,13 @@ fn parse_line_range(s: &str) -> Option<(usize, usize)> {
     let dots = s.find("..")?;
     let start: usize = s[..dots].trim().parse().ok()?;
     let end: usize = s[dots + 2..].trim().parse().ok()?;
-    if start >= 1 {
-        Some((start, end))
-    } else {
-        None
-    }
+    if start >= 1 { Some((start, end)) } else { None }
 }
 
 /// 解析单个行号 "N"
 fn parse_single_line(s: &str) -> Option<(usize, usize)> {
     let n: usize = s.trim().parse().ok()?;
-    if n >= 1 {
-        Some((n, n))
-    } else {
-        None
-    }
+    if n >= 1 { Some((n, n)) } else { None }
 }
 
 // ── Executor 状态机 ───────────────────────────────────────────────────────
@@ -178,8 +167,8 @@ impl Executor {
             }
             Token::OpBlock(target) => {
                 // 校验范围合法性
-                if let BlockTarget::Replace { start, end }
-                | BlockTarget::Delete { start, end } = &target
+                if let BlockTarget::Replace { start, end } | BlockTarget::Delete { start, end } =
+                    &target
                 {
                     if end < start {
                         bail!(
@@ -302,17 +291,15 @@ impl Executor {
                 if pending.body.is_empty() {
                     bail!("Error: line {header_line}: insert hunk requires at least one body row");
                 }
-                self.hunks.push(PatchHunk::InsertHead {
-                    body: pending.body,
-                });
+                self.hunks
+                    .push(PatchHunk::InsertHead { body: pending.body });
             }
             BlockTarget::InsertTail => {
                 if pending.body.is_empty() {
                     bail!("Error: line {header_line}: insert hunk requires at least one body row");
                 }
-                self.hunks.push(PatchHunk::InsertTail {
-                    body: pending.body,
-                });
+                self.hunks
+                    .push(PatchHunk::InsertTail { body: pending.body });
             }
         }
         Ok(())
@@ -349,16 +336,12 @@ pub(crate) fn parse_patch(input: &str) -> Result<(super::file::ParsedPatch, Vec<
 
     executor.end()?;
 
-    let path = executor.path.ok_or_else(|| {
-        anyhow::anyhow!(
-            "Error: patch must begin with @PATH#TAG"
-        )
-    })?;
-    let tag = executor.tag.ok_or_else(|| {
-        anyhow::anyhow!(
-            "Error: patch header must be @PATH#TAG"
-        )
-    })?;
+    let path = executor
+        .path
+        .ok_or_else(|| anyhow::anyhow!("Error: patch must begin with @PATH#TAG"))?;
+    let tag = executor
+        .tag
+        .ok_or_else(|| anyhow::anyhow!("Error: patch header must be @PATH#TAG"))?;
 
     let parsed = super::file::ParsedPatch {
         path,
@@ -388,7 +371,14 @@ mod tests {
         assert_eq!(p.path, "a.rs");
         assert_eq!(p.tag, "0A");
         assert_eq!(p.hunks.len(), 1);
-        assert!(matches!(&p.hunks[0], PatchHunk::Replace { start: 2, end: 2, .. }));
+        assert!(matches!(
+            &p.hunks[0],
+            PatchHunk::Replace {
+                start: 2,
+                end: 2,
+                ..
+            }
+        ));
         assert!(w.is_empty());
     }
 
@@ -396,13 +386,21 @@ mod tests {
     fn replace_range() {
         let (p, w) = parse_success("@a.rs#0A\nreplace 2..4:\n+new2\n+new3");
         assert_eq!(p.hunks.len(), 1);
-        assert!(matches!(&p.hunks[0], PatchHunk::Replace { start: 2, end: 4, .. }));
+        assert!(matches!(
+            &p.hunks[0],
+            PatchHunk::Replace {
+                start: 2,
+                end: 4,
+                ..
+            }
+        ));
         assert!(w.is_empty());
     }
 
     #[test]
     fn delete_single() {
-        let (p, w) = parse_success("@f#FF\nreplace 1:\n+hello\n\ndelete 3..5\n\nreplace 7:\n+world");
+        let (p, w) =
+            parse_success("@f#FF\nreplace 1:\n+hello\n\ndelete 3..5\n\nreplace 7:\n+world");
         assert_eq!(p.hunks.len(), 3);
         assert!(w.is_empty());
     }

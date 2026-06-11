@@ -3,7 +3,7 @@ use crate::context::AgentSharedContext;
 use crate::llm::client::{AsyncLlClient, LlmClient};
 use crate::session::stats::Stats;
 use crate::session::store::ConversationStore;
-use crate::ui::Display;
+use crate::ui::{Display, SubAgentStreamKind, SubAgentStreamSink};
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
 
@@ -19,16 +19,16 @@ pub struct SubAgentResult {
 /// CaptureDisplay silently buffers sub-agent output instead of forwarding to the parent TUI.
 /// This prevents sub-agent thinking/text from polluting the main conversation view.
 struct CaptureDisplay {
-    tx: std::sync::mpsc::Sender<crate::tui::TuiSignal>,
+    stream_sink: Option<Arc<dyn SubAgentStreamSink>>,
     session_id: String,
     thinking: Mutex<String>,
     text: Mutex<String>,
 }
 
 impl CaptureDisplay {
-    fn new(tx: std::sync::mpsc::Sender<crate::tui::TuiSignal>, session_id: &str) -> Self {
+    fn new(stream_sink: Option<Arc<dyn SubAgentStreamSink>>, session_id: &str) -> Self {
         Self {
-            tx,
+            stream_sink,
             session_id: session_id.to_string(),
             thinking: Mutex::new(String::new()),
             text: Mutex::new(String::new()),
@@ -45,19 +45,15 @@ impl CaptureDisplay {
 impl Display for CaptureDisplay {
     fn render_thinking(&self, c: &str) {
         self.thinking.lock().unwrap().push_str(c);
-        let _ = self.tx.send(crate::tui::TuiSignal::SubAgentStream {
-            session_id: self.session_id.clone(),
-            kind: crate::tui::SubAgentStreamKind::Thinking,
-            content: c.to_string(),
-        });
+        if let Some(sink) = &self.stream_sink {
+            sink.render_sub_agent_stream(&self.session_id, SubAgentStreamKind::Thinking, c);
+        }
     }
     fn render_text(&self, c: &str) {
         self.text.lock().unwrap().push_str(c);
-        let _ = self.tx.send(crate::tui::TuiSignal::SubAgentStream {
-            session_id: self.session_id.clone(),
-            kind: crate::tui::SubAgentStreamKind::Text,
-            content: c.to_string(),
-        });
+        if let Some(sink) = &self.stream_sink {
+            sink.render_sub_agent_stream(&self.session_id, SubAgentStreamKind::Text, c);
+        }
     }
     fn render_tool_call(&self, _n: &str, _s: &str) {}
     fn render_tool_result(&self, _n: &str, _c: &str) {}
@@ -135,17 +131,9 @@ impl SubAgentExecutor {
             reqwest::Client::new(),
         ));
 
-        // 用 CaptureDisplay 拦截子代理输出，并实时转发到父 TUI
-        let tui_tx = parent_ctx.sub_stream_tx.as_ref().and_then(|a| {
-            a.downcast_ref::<std::sync::mpsc::Sender<crate::tui::TuiSignal>>()
-                .cloned()
-        });
+        // Capture child output; optionally forward live chunks to UI implementations.
         let capture = Arc::new(CaptureDisplay::new(
-            tui_tx.unwrap_or_else(|| {
-                // REPL mode: create a dummy channel
-                let (tx, _rx) = std::sync::mpsc::channel();
-                tx
-            }),
+            parent_ctx.sub_stream_tx.clone(),
             &session_id,
         ));
         let parent_display = parent_ctx.display.clone();

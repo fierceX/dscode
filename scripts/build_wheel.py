@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a platform-specific wheel for mink-sdk.
+"""Build a platform-specific wheel for mink-agent.
 
 Usage:
     python scripts/build_wheel.py              # full build (Rust + wheel)
@@ -10,17 +10,35 @@ tagged wheel (e.g. ``macosx_11_0_arm64``, ``manylinux_2_35_x86_64``).
 
 Environment variables:
   MINK_SDK_SKIP_BUILD=1   Skip Rust build, wheel only
+  MINK_SDK_FEATURES="sdk python-sandbox"
+                          Cargo features for mink-core (default: sdk)
   GLIBC_VERSION=2_35      Override manylinux glibc version (Linux only, default: 2_31)
   PLATFORM_TAG=musllinux_1_2_x86_64   Fully override the platform tag (Linux only)
 """
 
 import os
 import platform
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent.parent
+BINARY_NAME = "mink-core"
+SDK_FEATURES = os.environ.get("MINK_SDK_FEATURES", "sdk")
+
+
+def cargo_args() -> list[str]:
+    return [
+        "cargo",
+        "build",
+        "--release",
+        "--no-default-features",
+        "--features",
+        SDK_FEATURES,
+        "--bin",
+        BINARY_NAME,
+    ]
 
 
 def get_platform_tag() -> str:
@@ -54,11 +72,17 @@ def main() -> None:
     tag = get_platform_tag()
     print(f":: Platform tag: {tag}", flush=True)
 
+    dist_dir = HERE / "dist"
+    dist_dir.mkdir(exist_ok=True)
+    for wheel in dist_dir.glob("*.whl"):
+        wheel.unlink()
+    shutil.rmtree(HERE / "build", ignore_errors=True)
+
     # Optionally build Rust binary
     if not os.environ.get("MINK_SDK_SKIP_BUILD"):
-        print(":: Building Rust binary...", flush=True)
+        print(f":: Building Rust binary (features: {SDK_FEATURES})...", flush=True)
         subprocess.run(
-            ["cargo", "build", "--release"],
+            cargo_args(),
             cwd=HERE, check=True,
         )
 
@@ -70,10 +94,11 @@ def main() -> None:
         sys.executable, "-m", "build", "--wheel",
         f"-C--build-option=--plat-name={tag}",
     ]
-    subprocess.run(cmd, cwd=HERE, check=True)
+    build_env = os.environ.copy()
+    build_env["MINK_SDK_SKIP_BUILD"] = "1"
+    subprocess.run(cmd, cwd=HERE, env=build_env, check=True)
 
     # Show result
-    dist_dir = HERE / "dist"
     wheels = list(dist_dir.glob("*.whl"))
     print(f":: Built: {', '.join(str(w) for w in wheels)}", flush=True)
 

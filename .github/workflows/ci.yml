@@ -133,11 +133,11 @@ jobs:
       - name: Build Rust binary (release)
         run: |
           if [ "${{ matrix.target }}" = "x86_64-unknown-linux-musl" ]; then
-            cargo zigbuild --release --target x86_64-unknown-linux-musl
+            cargo zigbuild --release --target x86_64-unknown-linux-musl --no-default-features --features sdk --bin mink-core
             mkdir -p target/release
-            cp target/${{ matrix.target }}/release/mink target/release/mink
+            cp target/${{ matrix.target }}/release/mink-core target/release/mink-core
           else
-            cargo build --release
+            cargo build --release --no-default-features --features sdk --bin mink-core
           fi
         env:
           CARGO_TERM_COLOR: always
@@ -157,7 +157,7 @@ jobs:
           with zipfile.ZipFile(whl) as z:
               names = z.namelist()
               print('\n'.join(names))
-              assert any('_binary/mink' in n for n in names), 'missing binary'
+              assert any('_binary/mink-core' in n for n in names), 'missing binary'
         shell: python
 
       - uses: actions/upload-artifact@v4

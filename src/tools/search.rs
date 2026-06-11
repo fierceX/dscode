@@ -122,7 +122,14 @@ fn relative_match_path(path: &Path, base: &Path) -> String {
         .to_string()
 }
 
-pub fn grep(pattern: &str, path: &str, file_glob: &str, context: Option<usize>, max_files: usize, max_results: usize) -> Result<String> {
+pub fn grep(
+    pattern: &str,
+    path: &str,
+    file_glob: &str,
+    context: Option<usize>,
+    max_files: usize,
+    max_results: usize,
+) -> Result<String> {
     if pattern.is_empty() {
         bail!("Error: no pattern provided");
     }
@@ -289,7 +296,12 @@ impl super::runner::ToolExec for GlobTool {
         }
         let args: Args = serde_json::from_value(input.clone())?;
         let root = resolve_search_root(&ctx.cwd, args.path.as_deref().unwrap_or("."));
-        glob(&args.pattern, &root.display().to_string(), ctx.tool_config.max_search_files).map(super::runner::ToolOutcome::text)
+        glob(
+            &args.pattern,
+            &root.display().to_string(),
+            ctx.tool_config.max_search_files,
+        )
+        .map(super::runner::ToolOutcome::text)
     }
 }
 
@@ -494,7 +506,15 @@ mod tests {
         fs::write(dir.join("data.txt"), "secret\n").unwrap();
         fs::write(dir.join("data.md"), "secret\n").unwrap();
 
-        let result = grep("secret", &dir.display().to_string(), "*.txt", None, 5000, 1000).unwrap();
+        let result = grep(
+            "secret",
+            &dir.display().to_string(),
+            "*.txt",
+            None,
+            5000,
+            1000,
+        )
+        .unwrap();
         assert!(result.contains("data.txt"));
         assert!(!result.contains("data.md"));
 
@@ -509,7 +529,15 @@ mod tests {
         fs::write(dir.join("nested/data.txt"), "secret\n").unwrap();
         fs::write(dir.join("nested/data.md"), "secret\n").unwrap();
 
-        let result = grep("secret", &dir.display().to_string(), "*.txt", None, 5000, 1000).unwrap();
+        let result = grep(
+            "secret",
+            &dir.display().to_string(),
+            "*.txt",
+            None,
+            5000,
+            1000,
+        )
+        .unwrap();
 
         assert!(result.contains("root.txt"));
         assert!(!result.contains("nested/data.txt"));
@@ -525,7 +553,15 @@ mod tests {
         fs::write(dir.join("nested/data.txt"), "secret\n").unwrap();
         fs::write(dir.join("nested/data.md"), "secret\n").unwrap();
 
-        let result = grep("secret", &dir.display().to_string(), "**/*.txt", None, 5000, 1000).unwrap();
+        let result = grep(
+            "secret",
+            &dir.display().to_string(),
+            "**/*.txt",
+            None,
+            5000,
+            1000,
+        )
+        .unwrap();
 
         assert!(result.contains("nested/data.txt"));
         assert!(!result.contains("nested/data.md"));

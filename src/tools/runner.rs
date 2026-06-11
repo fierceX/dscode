@@ -8,10 +8,10 @@ use super::bash;
 use super::file;
 use super::metadata::{ApprovalTier, ToolMetadata, ToolResultKind};
 use super::python;
-use super::search;
-use super::web;
 #[cfg(feature = "python-sandbox")]
 use super::sandbox_python;
+use super::search;
+use super::web;
 use crate::config::{ToolApprovalMode, ToolApprovalPolicy};
 use crate::context::{ToolConfig, ToolContext};
 use crate::guard::storm::{StormBreaker, StormDecision};

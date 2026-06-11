@@ -545,7 +545,7 @@ mod tests {
         assert!(prompt.contains("Guessing is lying"));
         assert!(prompt.contains("3 consecutive tool calls"));
     }
-    
+
     #[test]
     fn build_system_prompt_includes_tool_usage() {
         let prompt = test_builder().build_system_prompt().unwrap();

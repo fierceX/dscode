@@ -1,5 +1,7 @@
 use crate::tui::signal::TuiSignal;
-use crate::ui::{Display, StatsSnapshot, ToolResultDisplay};
+use crate::ui::{
+    Display, StatsSnapshot, SubAgentStreamKind, SubAgentStreamSink, ToolResultDisplay,
+};
 use std::sync::mpsc;
 
 pub struct TuiDisplay {
@@ -90,4 +92,14 @@ impl Display for TuiDisplay {
     fn render_prompt(&self) {}
 
     fn render_clear_line(&self) {}
+}
+
+impl SubAgentStreamSink for mpsc::Sender<TuiSignal> {
+    fn render_sub_agent_stream(&self, session_id: &str, kind: SubAgentStreamKind, content: &str) {
+        let _ = self.send(TuiSignal::SubAgentStream {
+            session_id: session_id.into(),
+            kind,
+            content: content.into(),
+        });
+    }
 }
