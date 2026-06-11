@@ -165,7 +165,7 @@ prompt 为空且 stdin 是终端时自动进入交互模式。非终端 stdin �
 | `-i` / `--interactive` | auto | REPL 交互模式 |
 | `--tui` | — | TUI 全屏模式 |
 | `--print` | — | ndjson 结构化输出，最后输出 `type=final` |
-| `--agent-jsonl` | — | Agent JSONL 协议（stdin 读 versioned request，stdout 输出事件流和最终 `final`，隐式启用 stream-json） |
+| `--agent-jsonl` | — | Agent JSONL 协议（stdin 读 versioned request，stdout 输出事件流和最终 `final`；request 可用 `options.stream_events=false` 关闭过程事件，仅保留 `final`） |
 | `--api-key KEY` | env | 覆盖 API Key |
 | `--base-url URL` | 默认端点 | 覆盖 API 端点 |
 | `--disable-bash` | `false` | 禁用 Bash 工具 |
@@ -205,6 +205,8 @@ read_dirs = ["./data"]
 ```
 
 等价于旧版独立的 CLI 参数。也支持设置 `model`、`api_key`、`base_url`，但推荐使用独立参数以便 SDK 控制。
+
+`--agent-jsonl` 模式不会读取用户级/项目级 `.minkrc`，以避免 SDK 调用产生额外文件 I/O；但仍会应用同一命令行传入的 `--config <toml>`。因此 SDK 可以通过 `--config` 精确传入 `max_search_files`、`max_search_results`、`enabled_tools` 等 per-call 配置。
 ---
 
 ## 配置文件
@@ -384,6 +386,8 @@ mink --tui
 | `MINK_LIMITS` | — | JSON 格式 sandbox 限制配置，启用时覆盖 `[sandbox]` |
 
 ---
+
+搜索相关上限分为多层：`MAX_SEARCH_FILES` 控制 Glob/Grep 最多遍历的文件数，`MAX_SEARCH_RESULTS` 控制 Grep 最多返回的匹配行数；搜索工具自身还有 100KB 输出保护，最终工具结果还会受 `TOOL_RESULT_MAX_BYTES` 保护。看到 `scanned first N files` 表示文件遍历上限触发，看到 `truncated at N results` 表示匹配结果数上限触发，看到 `output > 100000 bytes` 或 artifact 提示则表示输出字节数保护触发。
 
 ## 会话管理
 

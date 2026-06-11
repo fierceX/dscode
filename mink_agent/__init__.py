@@ -37,15 +37,37 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator, Optional
+from typing import Any, Callable, Iterator, Optional
 
 _CAPTURE_LIMIT_BYTES = 1_000_000
-_STDOUT_QUEUE_MAX_LINES = 1024
-
 # ── Exceptions ───────────────────────────────────────────────────────
 
 class AgentError(RuntimeError):
     """Raised when the agent process fails."""
+
+
+@dataclass
+class AgentStreamEvent:
+    """Normalized stream event for UI/server integrations.
+
+    The raw Rust protocol currently emits ``thinking`` and ``text`` events.
+    This wrapper maps them to explicit delta event names while preserving the
+    original payload in ``raw``.
+    """
+
+    type: str
+    channel: Optional[str] = None
+    content: str = ""
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        data = dict(self.raw)
+        data["type"] = self.type
+        if self.channel is not None:
+            data["channel"] = self.channel
+        if self.content:
+            data["content"] = self.content
+        return data
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -217,6 +239,7 @@ class SandboxConfig:
     max_search_files: int = 5000
     max_search_results: int = 1000
     verbose: bool = False
+    stream_events: bool = True
 
     # Backend
     sandbox_backend: str = "auto"
@@ -254,7 +277,13 @@ class AgentSession:
 
     # ── Public API ────────────────────────────────────────────────
 
-    def run(self, prompt: str, *, extra_options: Optional[dict] = None) -> dict[str, Any]:
+    def run(
+        self,
+        prompt: str,
+        *,
+        extra_options: Optional[dict] = None,
+        on_event: Optional[Callable[[dict[str, Any]], None]] = None,
+    ) -> dict[str, Any]:
         """Execute a prompt in the sandbox and return the result.
 
         Returns a dict with keys:
@@ -273,12 +302,14 @@ class AgentSession:
         events: list[dict] = []
         final: Optional[dict] = None
 
-        for event in self.stream(prompt, extra_options=extra_options):
+        for event in self.raw_stream(prompt, extra_options=extra_options):
+            if on_event is not None:
+                on_event(event)
             events.append(event)
             event_type = event.get("type", "")
-            if event_type == "text":
+            if event_type in ("text", "answer_delta"):
                 text_parts.append(event.get("content", ""))
-            elif event_type == "thinking":
+            elif event_type in ("thinking", "thinking_delta"):
                 thinking_parts.append(event.get("content", ""))
             elif event_type == "tool_call":
                 tool_calls.append(event)
@@ -288,6 +319,14 @@ class AgentSession:
                 final = event
 
         final = final or {}
+        if (not text_parts and not thinking_parts) and final.get("conversation_path"):
+            loaded_text, loaded_thinking = self._load_last_assistant_output(
+                str(final.get("conversation_path"))
+            )
+            if loaded_text:
+                text_parts.append(loaded_text)
+            if loaded_thinking:
+                thinking_parts.append(loaded_thinking)
         status = final.get("status")
         stderr_text = final.get("stderr", "")
         error_message = final.get("error")
@@ -322,7 +361,21 @@ class AgentSession:
         *,
         extra_options: Optional[dict] = None,
     ) -> Iterator[dict[str, Any]]:
-        """Execute a prompt and yield protocol events as dictionaries."""
+        """Execute a prompt and yield raw protocol events as dictionaries.
+
+        This method is kept for backward compatibility. New integrations that
+        need explicit answer/thinking separation should prefer
+        :meth:`stream_events`.
+        """
+        yield from self.raw_stream(prompt, extra_options=extra_options)
+
+    def raw_stream(
+        self,
+        prompt: str,
+        *,
+        extra_options: Optional[dict] = None,
+    ) -> Iterator[dict[str, Any]]:
+        """Execute a prompt and yield raw Rust JSONL protocol events."""
         if not self._run_lock.acquire(blocking=False):
             raise RuntimeError("AgentSession does not support concurrent runs")
         try:
@@ -333,6 +386,16 @@ class AgentSession:
             yield from self._stream_process(cmd, request, env)
         finally:
             self._run_lock.release()
+
+    def stream_events(
+        self,
+        prompt: str,
+        *,
+        extra_options: Optional[dict] = None,
+    ) -> Iterator[AgentStreamEvent]:
+        """Execute a prompt and yield normalized stream events."""
+        for event in self.raw_stream(prompt, extra_options=extra_options):
+            yield self._normalize_event(event)
 
     def close(self) -> None:
         """Terminate the agent process if still running.
@@ -352,6 +415,66 @@ class AgentSession:
         self._proc = None
 
     # ── Internals ──────────────────────────────────────────────────
+
+    @staticmethod
+    def _normalize_event(event: dict[str, Any]) -> AgentStreamEvent:
+        event_type = event.get("type", "")
+        content = event.get("content", "") or ""
+        if event_type == "thinking":
+            return AgentStreamEvent(
+                type="thinking_delta",
+                channel="thinking",
+                content=content,
+                raw=event,
+            )
+        if event_type == "text":
+            return AgentStreamEvent(
+                type="answer_delta",
+                channel="answer",
+                content=content,
+                raw=event,
+            )
+        return AgentStreamEvent(
+            type=event_type,
+            channel=event.get("channel"),
+            content=content,
+            raw=event,
+        )
+
+    @staticmethod
+    def _load_last_assistant_output(conversation_path: str) -> tuple[str, str]:
+        text = ""
+        thinking = ""
+        try:
+            with open(conversation_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    try:
+                        msg = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if msg.get("role") != "assistant":
+                        continue
+                    msg_text = ""
+                    msg_thinking = ""
+                    content = msg.get("content", [])
+                    if isinstance(content, list):
+                        for item in content:
+                            if not isinstance(item, dict):
+                                continue
+                            if item.get("type") == "text":
+                                msg_text += item.get("text", "") or ""
+                            elif item.get("type") == "thinking":
+                                msg_thinking += item.get("thinking", "") or ""
+                    elif isinstance(content, str):
+                        msg_text = content
+                    if msg_text or msg_thinking:
+                        text = msg_text
+                        thinking = msg_thinking
+        except OSError:
+            pass
+        return text, thinking
 
     def _stream_process(
         self,
@@ -383,8 +506,7 @@ class AgentSession:
         stderr_parts: list[str] = []
         stderr_bytes = 0
         stderr_truncated = False
-        stdout_dropped_lines = 0
-        stdout_queue: queue.Queue[Optional[str]] = queue.Queue(maxsize=_STDOUT_QUEUE_MAX_LINES)
+        stdout_queue: queue.SimpleQueue = queue.SimpleQueue()
 
         def append_stderr(chunk: str) -> None:
             nonlocal stderr_bytes, stderr_truncated
@@ -402,23 +524,6 @@ class AgentSession:
             stderr_bytes = _CAPTURE_LIMIT_BYTES
             stderr_truncated = True
 
-        def enqueue_stdout(line: Optional[str]) -> None:
-            nonlocal stdout_dropped_lines
-            try:
-                stdout_queue.put_nowait(line)
-                return
-            except queue.Full:
-                pass
-            try:
-                stdout_queue.get_nowait()
-                stdout_dropped_lines += 1
-            except queue.Empty:
-                pass
-            try:
-                stdout_queue.put_nowait(line)
-            except queue.Full:
-                stdout_dropped_lines += 1
-
         def drain_stderr() -> None:
             if proc.stderr is None:
                 return
@@ -430,15 +535,15 @@ class AgentSession:
 
         def drain_stdout() -> None:
             if proc.stdout is None:
-                enqueue_stdout(None)
+                stdout_queue.put(None)
                 return
             try:
                 for line in proc.stdout:
-                    enqueue_stdout(line)
+                    stdout_queue.put(line)
             except OSError:
                 pass
             finally:
-                enqueue_stdout(None)
+                stdout_queue.put(None)
 
         stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
         stdout_thread = threading.Thread(target=drain_stdout, daemon=True)
@@ -528,8 +633,6 @@ class AgentSession:
                 }
             final_event["exit_code"] = proc.returncode
             final_event["stderr"] = stderr_text
-            if stdout_dropped_lines:
-                final_event["stdout_dropped_lines"] = stdout_dropped_lines
             if post_final_exit_timeout:
                 final_event["status"] = "failed"
                 final_event["error"] = (
@@ -666,6 +769,8 @@ class AgentSession:
             options["llm_wait_heartbeat"] = self._config.llm_wait_heartbeat
         if self._config.verbose:
             options["verbose"] = True
+        if not self._config.stream_events:
+            options["stream_events"] = False
         if self._config.enabled_tools is not None:
             options["enabled_tools"] = self._config.enabled_tools
         if extra_options:

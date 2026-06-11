@@ -20,6 +20,7 @@ config = SandboxConfig(
     read_dirs=["/path/to/project/src"],           # agent 可读取的目录
     write_dirs=["/path/to/project/src"],          # agent 可写入的目录
     signal_mode="full",                           # 可选："full" 启用信号系统，"off" 关闭
+    stream_events=True,                            # 可选：是否输出过程事件
 )
 
 session = AgentSession(config)
@@ -43,9 +44,13 @@ print(result["text"])
 
 ## AgentSession API
 
-### `run(prompt, *, extra_options=None) -> dict`
+### `run(prompt, *, extra_options=None, on_event=None) -> dict`
 
 执行一个提示词并返回聚合结果。每次调用都会启动一个新的 `mink --agent-jsonl` 进程；持续交互通过相同的 `mink_home + session_id` 复用磁盘 session，而不是复用同一个进程。同一个 `AgentSession` 实例不支持并发调用；并发任务应创建多个实例或由外层应用排队。
+
+默认情况下 `run()` 会消费 Rust 侧输出的过程事件并聚合 `text`、`thinking`、工具调用和最终状态。传入 `on_event` 时，每个归一化后的 `AgentStreamEvent` 会同步回调给调用方，适合在不直接迭代 stream 的场景里做 UI 增量更新。
+
+如果 `SandboxConfig.stream_events=False`，SDK 会在 Agent JSONL request 的 `options` 中传入 `stream_events=false`。Rust 侧不会向 stdout 输出 `thinking`、`text`、`tool_call`、`tool_result` 等过程事件，只输出最终 `final`；`run()` 会从 session `conversation.jsonl` 回读最后一条 assistant 消息，尽量补齐最终 `text` / `thinking`。这个模式用于不需要流式展示的长程任务，可减少 stdout 事件处理开销。
 
 | 返回字段 | 类型 | 说明 |
 |---------|------|------|
@@ -70,7 +75,25 @@ print(result["text"])
 
 ### `stream(prompt, *, extra_options=None) -> Iterator[dict]`
 
-执行一个提示词并逐条产出 Agent JSONL 协议事件。普通事件会即时返回；最终事件为 `{"type": "final", ...}`，其中包含 `status`、session 路径和 stderr。
+兼容旧版本的流式接口，逐条产出原始 dict 事件。新代码优先使用 `stream_events()`。
+
+### `raw_stream(prompt, *, extra_options=None) -> Iterator[dict]`
+
+执行一个提示词并逐条产出 Rust Agent JSONL 协议的原始 dict 事件。普通事件会即时返回；最终事件为 `{"type": "final", ...}`，其中包含 `status`、session 路径和 stderr。
+
+### `stream_events(prompt, *, extra_options=None) -> Iterator[AgentStreamEvent]`
+
+执行一个提示词并逐条产出归一化事件对象。`AgentStreamEvent.type` 常见值：
+
+| 类型 | 说明 |
+|------|------|
+| `thinking_delta` | 中间思考增量 |
+| `answer_delta` | 最终回答文本增量 |
+| `tool_call` | 工具调用开始 |
+| `tool_result` | 工具调用结果 |
+| `final` | 本次调用完成，包含状态和 session 路径 |
+
+事件对象可通过 `event.to_dict()` 转回 dict。QA/聊天类前端建议使用 `thinking_delta` 和 `answer_delta` 分离展示中间思考和最终回答。
 
 ### `close()`
 
@@ -116,6 +139,8 @@ print(result["text"])
 | `llm_wait_heartbeat` | `30` | 等待模型响应的提示间隔；设为 `0` 关闭提示 |
 | `max_tokens` | `81920` | 输出 token 上限 |
 | `max_turns` | `40` | 最大循环轮数 |
+| `max_search_files` | `5000` | Glob/Grep 最大遍历文件数 |
+| `max_search_results` | `1000` | Grep 最大匹配结果行数 |
 | `max_memory_mb` | `1024` | 内存限制（仅 nsjail cgroup） |
 | `max_pids` | `64` | 进程数限制（仅 nsjail cgroup） |
 
@@ -125,6 +150,7 @@ print(result["text"])
 |------|--------|------|
 | `verbose` | `False` | 启用详细日志输出 |
 | `signal_mode` | `None`（实际默认 `full`） | 信号系统模式覆盖：`"full"` 启用信念跟踪、注入和恢复守卫；`"off"` 关闭信号提示词和运行时信号干预；`None` 继承 `MINK_SIGNAL_MODE` |
+| `stream_events` | `True` | 是否让 Rust 侧输出过程事件；设为 `False` 时仅输出最终 `final`，适合非流式长任务 |
 
 本地调试可以通过 `MINK_BINARY=/path/to/mink` 覆盖 SDK 使用的二进制。未设置时优先使用 wheel 内置二进制，然后查找 `PATH`。
 

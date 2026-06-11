@@ -241,7 +241,7 @@ open("/absolute/path/to/project/output/f.txt", "w")  # 绝对路径 ✅
 - 遍历达到上限或跳过不可读路径时，会在结果末尾追加诊断行，提示结果可能不完整。
 限制：
 - 最多遍历 `max_search_files`（默认 5000）个文件后截断，可通过 `.minkrc` 的 `max_search_files` 或环境变量 `MAX_SEARCH_FILES` 调整。
-- 输出超过 100KB 时截断，受 `tool_result_max_bytes` 保护。
+- 输出超过 100KB 时搜索工具会先截断；最终工具结果还会受 `tool_result_max_bytes` 保护，超长内容可能落到 `artifact://<id>`。
 - 遍历跳过不可读路径时追加诊断行。
 
 ## `Grep`
@@ -264,6 +264,14 @@ open("/absolute/path/to/project/output/f.txt", "w")  # 绝对路径 ✅
 - 最多遍历 `max_search_files`（默认 5000）个文件后截断。
 - 最多返回 `max_search_results`（默认 1000）行匹配结果后截断。
 - 可通过 `.minkrc` 的 `max_search_files`/`max_search_results` 或环境变量 `MAX_SEARCH_FILES`/`MAX_SEARCH_RESULTS` 调整。
+- 输出超过 100KB 时搜索工具会先截断；最终工具结果还会受 `tool_result_max_bytes` 保护，超长内容可能落到 `artifact://<id>`。
+
+截断提示含义：
+
+- `scanned first N files`：触发 `max_search_files` 文件遍历上限。
+- `truncated at N results`：触发 `max_search_results` 匹配结果数上限。
+- `output > 100000 bytes`：触发搜索工具内部输出字节上限，和文件数/结果数上限无关。
+- `[Full output: artifact://...]`：触发统一工具结果保护，完整输出已写入 session artifact。
 
 
 ## `TodoWrite`

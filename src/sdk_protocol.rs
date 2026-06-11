@@ -44,6 +44,7 @@ pub struct SdkOptions {
     pub verbose: Option<bool>,
     pub enabled_tools: Option<Vec<String>>,
     pub session_id: Option<String>,
+    pub stream_events: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

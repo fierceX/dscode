@@ -12,7 +12,8 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use crate::config::{SandboxPythonConfig, TOOL_DISABLE_MAP};
 
@@ -186,10 +187,17 @@ impl AgentSharedContext {
                 }
             }
         }
-        if self.config.output_format == OutputFormat::StreamJson
-            && let Err(e) = writeln!(std::io::stdout(), "{line}")
-        {
-            self.warn_event_log_once(&format!("failed to write stream-json event: {e}"));
+        if self.config.output_format == OutputFormat::StreamJson {
+            let mut stdout = std::io::stdout().lock();
+            let write_result = writeln!(stdout, "{line}");
+            let flush_result = if write_result.is_ok() && should_flush_stream_event(&value) {
+                stdout.flush()
+            } else {
+                Ok(())
+            };
+            if let Err(e) = write_result.and(flush_result) {
+                self.warn_event_log_once(&format!("failed to write stream-json event: {e}"));
+            }
         }
     }
 
@@ -203,5 +211,38 @@ impl AgentSharedContext {
         if !self.event_log_warned.swap(true, Ordering::SeqCst) {
             let _ = writeln!(std::io::stderr(), "[mink] Warning: {message}");
         }
+    }
+}
+
+fn should_flush_stream_event(value: &Value) -> bool {
+    const FLUSH_INTERVAL: Duration = Duration::from_millis(80);
+    static LAST_FLUSH: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+
+    let event_type = value.get("type").and_then(Value::as_str).unwrap_or("");
+    let force = matches!(
+        event_type,
+        "final"
+            | "tool_call"
+            | "tool_result"
+            | "stop"
+            | "error"
+            | "retry"
+            | "turn_error"
+            | "llm_wait"
+    );
+
+    let now = Instant::now();
+    let lock = LAST_FLUSH.get_or_init(|| Mutex::new(None));
+    let mut last = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let due = match *last {
+        Some(prev) => now.duration_since(prev) >= FLUSH_INTERVAL,
+        None => true,
+    };
+    let stream_delta = matches!(event_type, "text");
+    if force || (stream_delta && due) {
+        *last = Some(now);
+        true
+    } else {
+        false
     }
 }

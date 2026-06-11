@@ -436,6 +436,10 @@ pub fn apply_config_file(cfg: &mut Config) {
     apply_env_defaults(cfg, &defaults);
     // SDK 协议模式：所有配置已通过 --config TOML 传入，跳过文件 I/O
     if cfg.agent_jsonl {
+        let cli_cfg = cfg.cli_config.take();
+        apply_config_sources(cfg, &defaults, None, None, cli_cfg.as_ref());
+        apply_sandbox_config(cfg, None, None, cli_cfg.as_ref());
+        cfg.cli_config = cli_cfg;
         return;
     }
     // Priority: CLI > project .minkrc > user ~/.minkrc > env > default.
@@ -975,6 +979,16 @@ mod tests {
         let cfg = parse_args(vec!["--agent-jsonl".into()]).unwrap();
         assert!(cfg.agent_jsonl);
         assert_eq!(cfg.output_format, OutputFormat::StreamJson);
+    }
+
+    #[test]
+    fn agent_jsonl_applies_cli_config_without_file_io() {
+        let toml = "max_search_files = 15000\nmax_search_results = 10000";
+        let mut cfg =
+            parse_args(vec!["--agent-jsonl".into(), "--config".into(), toml.into()]).unwrap();
+        apply_config_file(&mut cfg);
+        assert_eq!(cfg.max_search_files, 15000);
+        assert_eq!(cfg.max_search_results, 10000);
     }
 
     #[test]

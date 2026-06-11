@@ -187,7 +187,8 @@ async fn run(args: Vec<String>) -> Result<()> {
     ));
 
     let cancel = CancellationToken::new();
-    let is_stream_json = cfg.output_format == mink::config::OutputFormat::StreamJson;
+    let is_stream_json = cfg.output_format == mink::config::OutputFormat::StreamJson
+        || cfg.agent_jsonl;
 
     // TUI channels (if tui_mode). Created before display so signal_tx is available.
     let tui_tx = if cfg.tui_mode {
@@ -454,6 +455,9 @@ fn apply_sdk_request_options(cfg: &mut mink::config::Config, req: &SdkRequest) {
     }
     if let Some(verbose) = opts.verbose {
         cfg.verbose = verbose;
+    }
+    if opts.stream_events == Some(false) {
+        cfg.output_format = mink::config::OutputFormat::Human;
     }
     if let Some(session_id) = req
         .session_id
