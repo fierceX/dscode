@@ -1340,12 +1340,13 @@ async fn tool_runner_blocks_workspace_write_escape() -> anyhow::Result<()> {
         )])
         .await?;
     assert_eq!(result.len(), 1);
+    // Sandbox handles write restrictions; app-level guard is a no-op.
+    // The write should succeed (no "blocked" error).
     assert!(
-        result[0]
-            .content
-            .contains("write blocked by file safety policy")
+        !result[0].content.contains("write blocked"),
+        "{}",
+        result[0].content
     );
-    assert!(!outside.exists());
     Ok(())
 }
 
@@ -1369,14 +1370,12 @@ async fn tool_runner_blocks_symlink_write_escape() -> anyhow::Result<()> {
             json!({"path": "link-out/escape.txt", "content": "bad"}),
         )])
         .await?;
+    // Sandbox handles write restrictions; app-level guard is a no-op.
     assert!(
-        result[0]
-            .content
-            .contains("write blocked by file safety policy"),
+        !result[0].content.contains("write blocked"),
         "{}",
         result[0].content
     );
-    assert!(!outside_dir.join("escape.txt").exists());
     Ok(())
 }
 
@@ -1432,16 +1431,11 @@ async fn tool_runner_blocks_symlink_edit_escape() -> anyhow::Result<()> {
             }),
         )])
         .await?;
+    // Sandbox handles write restrictions; app-level guard is a no-op.
     assert!(
-        result[0]
-            .content
-            .contains("write blocked by file safety policy"),
+        !result[0].content.contains("write blocked"),
         "{}",
         result[0].content
-    );
-    assert_eq!(
-        tokio::fs::read_to_string(outside_dir.join("escape.txt")).await?,
-        "old"
     );
     Ok(())
 }

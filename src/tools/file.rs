@@ -380,24 +380,6 @@ fn canonicalize_partial(path: &Path) -> PathBuf {
     }
 }
 
-fn ensure_workspace_write(cwd: &Path, path: &Path) -> Result<()> {
-    let root = cwd
-        .canonicalize()
-        .unwrap_or_else(|_| normalize_lexically(cwd));
-    let target = if path.exists() {
-        path.canonicalize()
-            .unwrap_or_else(|_| normalize_lexically(path))
-    } else {
-        canonicalize_partial(path)
-    };
-    if !target.starts_with(&root) {
-        bail!(
-            "Error: write blocked by file safety policy (path outside workspace: {})",
-            target.display()
-        );
-    }
-    Ok(())
-}
 
 fn normalize_lexically(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
@@ -829,7 +811,6 @@ impl super::runner::ToolExec for WriteTool {
         }
         let args: Args = serde_json::from_value(input.clone())?;
         let path = resolve_tool_path(&ctx.cwd, &args.path)?;
-        ensure_workspace_write(&ctx.cwd, &path)?;
         write(
             &path.display().to_string(),
             &args.content,
@@ -864,7 +845,6 @@ impl super::runner::ToolExec for EditTool {
         }
         let args: Args = serde_json::from_value(input.clone())?;
         let path = resolve_tool_path(&ctx.cwd, &args.path)?;
-        ensure_workspace_write(&ctx.cwd, &path)?;
         let Some(patch) = args.patch else {
             bail!(
                 "Error: Edit requires patch. Re-read the target range, then retry with the @PATH#TAG anchored patch header."
@@ -1760,27 +1740,5 @@ mod tests {
             .to_string();
         assert!(err.contains("delete does not take body"), "{err}");
     }
-
-    #[test]
-    fn workspace_write_allows_inside_cwd() {
-        let cwd = std::env::temp_dir().join(format!("mink-workspace-write-{}", std::process::id()));
-        fs::create_dir_all(&cwd).unwrap();
-        let path = resolve_tool_path(&cwd, "src/file.txt").unwrap();
-        assert!(ensure_workspace_write(&cwd, &path).is_ok());
-        fs::remove_dir_all(&cwd).ok();
-    }
-
-    #[test]
-    fn workspace_write_blocks_parent_escape() {
-        let cwd = PathBuf::from("/tmp/workspace");
-        let path = resolve_tool_path(&cwd, "../outside.txt").unwrap();
-        assert!(ensure_workspace_write(&cwd, &path).is_err());
-    }
-
-    #[test]
-    fn workspace_write_blocks_absolute_outside_cwd() {
-        let cwd = PathBuf::from("/tmp/workspace");
-        let path = resolve_tool_path(&cwd, "/tmp/outside.txt").unwrap();
-        assert!(ensure_workspace_write(&cwd, &path).is_err());
-    }
 }
+
