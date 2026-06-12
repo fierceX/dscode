@@ -3,7 +3,7 @@
 //! 将 LLM 输出的 anchored patch 文本解析为 `ParsedPatch`，
 //! 兼容 mink 现有的 `PatchHunk` 类型。
 //!
-//! 与旧 `parse_anchored_patch` 的关键区别：
+//! 相比早期内联 parser 的关键区别：
 //! - 遇到非 `+` 前缀的 body 行（如 markdown 表格 `|`），作为 body 行接受（附带警告）
 //! - 空白行在 hunk body 中被跳过而非终止 body 收集
 //! - 两阶段设计：Tokenizer 逐行分类 → Executor 状态机

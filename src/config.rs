@@ -423,24 +423,6 @@ fn require_value(args: &[String], i: usize) -> Result<String> {
     Ok(args[i + 1].clone())
 }
 
-#[allow(dead_code)]
-fn require_positive_i32_value(args: &[String], i: usize, name: &str) -> Result<i32> {
-    let value: i32 = require_value(args, i)?.parse()?;
-    if value <= 0 {
-        bail!("{name} must be greater than 0");
-    }
-    Ok(value)
-}
-
-#[allow(dead_code)]
-fn require_nonnegative_i32_value(args: &[String], i: usize, name: &str) -> Result<i32> {
-    let value: i32 = require_value(args, i)?.parse()?;
-    if value < 0 {
-        bail!("{name} must be zero or greater");
-    }
-    Ok(value)
-}
-
 pub fn apply_config_file(cfg: &mut Config) {
     let defaults = Config::default();
     apply_env_defaults(cfg, &defaults);

@@ -351,36 +351,6 @@ fn resolve_tool_path(cwd: &Path, raw: &str) -> Result<PathBuf> {
     Ok(normalize_lexically(&joined))
 }
 
-/// Canonicalize a path that may not exist yet, by walking up
-/// the directory tree to find the longest existing ancestor,
-/// canonicalizing that, then appending remaining components.
-#[allow(dead_code)]
-fn canonicalize_partial(path: &Path) -> PathBuf {
-    let normalized = normalize_lexically(path);
-    let mut existing = PathBuf::new();
-    let mut pending: Vec<std::path::Component> = vec![];
-    for component in normalized.components() {
-        let candidate = existing.join(component.as_os_str());
-        if candidate.exists() {
-            existing = candidate;
-            pending.clear();
-        } else {
-            pending.push(component);
-        }
-    }
-    if existing.as_os_str().is_empty() {
-        // Nothing in the path exists; return normalized as-is
-        return normalized;
-    }
-    let existing_canonical = existing.canonicalize().unwrap_or(existing);
-    let suffix: PathBuf = pending.iter().map(|c| c.as_os_str()).collect();
-    if suffix.as_os_str().is_empty() {
-        existing_canonical
-    } else {
-        existing_canonical.join(suffix)
-    }
-}
-
 fn normalize_lexically(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for component in path.components() {
@@ -975,154 +945,6 @@ pub(crate) struct ParsedPatch {
     pub(crate) path: String,
     pub(crate) tag: String,
     pub(crate) hunks: Vec<PatchHunk>,
-}
-
-#[allow(dead_code)]
-fn parse_anchored_patch(input: &str) -> Result<ParsedPatch> {
-    let mut lines = input.lines().enumerate().peekable();
-    let Some((_, header)) = lines.find(|(_, line)| !line.trim().is_empty()) else {
-        bail!("Error: patch is empty");
-    };
-    let header = header.trim();
-    let Some(rest) = header.strip_prefix('@') else {
-        bail!("Error: patch must begin with @PATH#TAG");
-    };
-    let Some((path, tag)) = rest.rsplit_once('#') else {
-        bail!("Error: patch header must be @PATH#TAG");
-    };
-    if path.is_empty() || tag.is_empty() {
-        bail!("Error: patch header must be @PATH#TAG");
-    }
-
-    let mut hunks = Vec::new();
-    while let Some((line_no, line)) = lines.next() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Some(range) = trimmed.strip_prefix("replace ") {
-            let range = range.strip_suffix(':').ok_or_else(|| {
-                anyhow!(
-                    "Error: line {}: replace hunk must end with ':'",
-                    line_no + 1
-                )
-            })?;
-            let (start, end) = parse_patch_range(range)?;
-            let body = collect_patch_body(&mut lines, line_no + 1, "replace")?;
-            hunks.push(PatchHunk::Replace { start, end, body });
-        } else if let Some(range) = trimmed.strip_prefix("delete ") {
-            let (start, end) = parse_patch_range(range.trim_end_matches(':'))?;
-            if matches!(lines.peek(), Some((_, next)) if next.starts_with('+')) {
-                bail!(
-                    "Error: line {}: delete does not take body rows",
-                    line_no + 1
-                );
-            }
-            hunks.push(PatchHunk::Delete { start, end });
-        } else if let Some(target) = trimmed.strip_prefix("insert ") {
-            let target = target.strip_suffix(':').ok_or_else(|| {
-                anyhow!("Error: line {}: insert hunk must end with ':'", line_no + 1)
-            })?;
-            let body = collect_patch_body(&mut lines, line_no + 1, "insert")?;
-            match target {
-                "head" => hunks.push(PatchHunk::InsertHead { body }),
-                "tail" => hunks.push(PatchHunk::InsertTail { body }),
-                _ if target.starts_with("before ") => {
-                    let line = parse_positive_usize(target.trim_start_matches("before "), target)?;
-                    hunks.push(PatchHunk::InsertBefore { line, body });
-                }
-                _ if target.starts_with("after ") => {
-                    let line = parse_positive_usize(target.trim_start_matches("after "), target)?;
-                    hunks.push(PatchHunk::InsertAfter { line, body });
-                }
-                _ => bail!(
-                    "Error: line {}: invalid insert target '{target}'",
-                    line_no + 1
-                ),
-            }
-        } else if line.starts_with('+') {
-            bail!(
-                "Error: line {}: payload line has no preceding hunk header",
-                line_no + 1
-            );
-        } else {
-            bail!(
-                "Error: line {}: invalid patch hunk '{}'",
-                line_no + 1,
-                trimmed
-            );
-        }
-    }
-
-    if hunks.is_empty() {
-        bail!("Error: patch contains no edit hunks");
-    }
-
-    Ok(ParsedPatch {
-        path: path.to_string(),
-        tag: tag.to_string(),
-        hunks,
-    })
-}
-
-#[allow(dead_code)]
-fn collect_patch_body<'a, I>(
-    lines: &mut std::iter::Peekable<I>,
-    header_line: usize,
-    kind: &str,
-) -> Result<Vec<String>>
-where
-    I: Iterator<Item = (usize, &'a str)>,
-{
-    let mut body = Vec::new();
-    while let Some((_, next)) = lines.peek() {
-        if !next.starts_with('+') {
-            break;
-        }
-        let (_, row) = lines.next().unwrap();
-        body.push(row.strip_prefix('+').unwrap_or(row).to_string());
-    }
-    if body.is_empty() {
-        if let Some((_, next)) = lines.peek() {
-            let trimmed = next.trim();
-            if !trimmed.is_empty() && !trimmed.starts_with('+') {
-                let preview = &trimmed[..trimmed.len().min(60)];
-                bail!(
-                    "Error: line {header_line}: body starts with non-`+` line '{preview}...'. Body rows are ONLY new lines prefixed with `+`. Do NOT include original lines (the N..M range already identifies them)."
-                );
-            }
-        }
-        bail!("Error: line {header_line}: {kind} hunk requires at least one +TEXT body row");
-    }
-    Ok(body)
-}
-
-#[allow(dead_code)]
-fn parse_patch_range(raw: &str) -> Result<(usize, usize)> {
-    let raw = raw.trim();
-    if let Some((start, end)) = raw.split_once("..") {
-        let start = parse_positive_usize(start, raw)?;
-        let end = parse_positive_usize(end, raw)?;
-        if end < start {
-            bail!("Error: range {raw} ends before it starts");
-        }
-        Ok((start, end))
-    } else {
-        let line = parse_positive_usize(raw, raw)?;
-        Ok((line, line))
-    }
-}
-
-#[allow(dead_code)]
-fn parse_positive_usize(raw: &str, context: &str) -> Result<usize> {
-    let value = raw
-        .trim()
-        .parse::<usize>()
-        .map_err(|_| anyhow!("Error: invalid line number in '{context}'"))?;
-    if value == 0 {
-        bail!("Error: line numbers are 1-indexed; got 0");
-    }
-    Ok(value)
 }
 
 fn validate_patch_hunks(
@@ -1739,7 +1561,7 @@ mod tests {
 
     #[test]
     fn anchored_patch_rejects_delete_body() {
-        let err = parse_anchored_patch("@a#0001\ndelete 1\n+bad")
+        let err = crate::tools::hashline::parse_patch("@a#0001\ndelete 1\n+bad")
             .unwrap_err()
             .to_string();
         assert!(err.contains("delete does not take body"), "{err}");
