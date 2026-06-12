@@ -1,5 +1,36 @@
 # Changelog
 
+## v0.1.8 (2026-06-12)
+
+### Features
+
+- **搜索参数可配置** — Glob/Grep 最大文件/结果数通过 `max_search_files`/`max_search_results` 参数控制
+- **Agent 启动路径优化** — `--agent-jsonl` 跳过 `.minkrc` 文件 I/O；Mission 内容通过 stdin JSONL 直接传递，消除临时文件
+- **按需裁剪** — `wasmtime`/`wasmtime-wasi` 通过 `python-sandbox` feature-gate 按需编译，`--no-default-features` 可缩小二进制体积
+- **工具白名单 `enabled_tools`** — 按任务类型裁剪 system prompt 中暴露的工具列表
+
+### SDK
+
+- **SDK 二进制拆分** — Python SDK 打包 no-TUI `mink-core` 替代完整 `mink` 二进制，降低分发体积
+- **SDK streaming 控制** — 新增 `stream_events`/`verbose` 参数，`AgentStreamEvent` 归一化事件协议，`raw_stream()` 公开为公共 API
+- `max_search_files`/`max_search_results` 通过 `SandboxConfig` 暴露
+
+### Refactor
+
+- **工具过滤统一到配置层** — 合并 `filter_disabled_tools` + `filter_enabled_tools` 为 `ToolConfig::filter_tools_json` 单一路径
+- **`TOOL_DISABLE_MAP` 从 `prefix.rs` 移到 `config.rs`**
+- **PythonSandbox 重构** — CPython WASI 沙箱逻辑重构（`src/tools/sandbox_python.rs`）
+
+### Config
+
+- 新增 `max_search_files`（默认 5000）、`max_search_results`（默认 1000）配置项，支持环境变量覆盖
+- `.minkrc.example` 重构，分组对齐 Python SDK 配置风格
+
+### Fixes
+
+- **PythonSandbox** — 修复路径权限、`os.chdir` 注入、WASI 文件系统隔离等问题
+- **SDK** — 修复 wheel 构建中二进制路径和包名不一致问题
+
 ## v0.1.7 (2026-06-09)
 
 ### Features
