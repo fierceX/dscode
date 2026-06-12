@@ -1,0 +1,459 @@
+use crate::config::{
+    Config, OutputFormat, SandboxConfig, SandboxPythonConfig, ToolApprovalMode, ToolApprovalPolicy,
+    ToolDisableFlags,
+};
+use crate::runtime::{AgentRuntimeConfig, EventSink, SessionPolicy};
+use crate::ui::{Display, SubAgentStreamSink};
+use anyhow::Result;
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+/// Ergonomic builder for embedding mink from Rust.
+///
+/// `AgentOptions` is a convenience layer only. It owns a complete [`Config`]
+/// and converts losslessly into [`AgentRuntimeConfig`], so callers can either
+/// use the typed setters below or mutate the underlying config directly through
+/// [`AgentOptions::config_mut`]. This keeps the public Rust API compact without
+/// creating a second, reduced configuration model.
+pub struct AgentOptions {
+    config: Config,
+    home: PathBuf,
+    cwd: PathBuf,
+    session: SessionPolicy,
+    session_overridden: bool,
+    first_prompt: Option<String>,
+    display: Option<Arc<dyn Display>>,
+    event_sink: Option<Arc<dyn EventSink>>,
+    sub_stream_tx: Option<Arc<dyn SubAgentStreamSink>>,
+}
+
+impl AgentOptions {
+    /// Create options from default mink configuration and explicit home/cwd.
+    ///
+    /// Provider defaults, config files, and environment merging are not applied
+    /// here. CLI callers should keep using the CLI adapter; embedded callers
+    /// that want those effects can call the existing config helpers before
+    /// constructing options with [`AgentOptions::from_config`].
+    pub fn new(home: impl Into<PathBuf>, cwd: impl Into<PathBuf>) -> Self {
+        Self::from_config(Config::default(), home, cwd)
+    }
+
+    /// Create options from a complete mink [`Config`].
+    pub fn from_config(config: Config, home: impl Into<PathBuf>, cwd: impl Into<PathBuf>) -> Self {
+        let first_prompt = (!config.prompt.trim().is_empty()).then(|| config.prompt.clone());
+        let session = session_policy_from_config(&config);
+        Self {
+            config,
+            home: home.into(),
+            cwd: cwd.into(),
+            session,
+            session_overridden: false,
+            first_prompt,
+            display: None,
+            event_sink: None,
+            sub_stream_tx: None,
+        }
+    }
+
+    /// Inspect the complete underlying mink config.
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
+    /// Mutate any config field that does not have a dedicated convenience
+    /// setter. This is the supported escape hatch for full Config coverage.
+    pub fn config_mut(&mut self) -> &mut Config {
+        &mut self.config
+    }
+
+    pub fn with_config(mut self, config: Config) -> Self {
+        self.first_prompt = (!config.prompt.trim().is_empty()).then(|| config.prompt.clone());
+        if !self.session_overridden {
+            self.session = session_policy_from_config(&config);
+        }
+        self.config = config;
+        self
+    }
+
+    pub fn with_home(mut self, home: impl Into<PathBuf>) -> Self {
+        self.home = home.into();
+        self
+    }
+
+    pub fn with_cwd(mut self, cwd: impl Into<PathBuf>) -> Self {
+        self.cwd = cwd.into();
+        self
+    }
+
+    pub fn with_session(mut self, session: SessionPolicy) -> Self {
+        self.session = session;
+        self.session_overridden = true;
+        self
+    }
+
+    pub fn with_display(mut self, display: Arc<dyn Display>) -> Self {
+        self.display = Some(display);
+        self
+    }
+
+    pub fn with_event_sink(mut self, event_sink: Arc<dyn EventSink>) -> Self {
+        self.event_sink = Some(event_sink);
+        self
+    }
+
+    pub fn with_sub_stream_tx(mut self, sub_stream_tx: Arc<dyn SubAgentStreamSink>) -> Self {
+        self.sub_stream_tx = Some(sub_stream_tx);
+        self
+    }
+
+    /// Set the metadata first prompt without changing turn execution input.
+    pub fn with_first_prompt(mut self, first_prompt: impl Into<String>) -> Self {
+        self.first_prompt = Some(first_prompt.into());
+        self
+    }
+
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.config.model = model.into();
+        self
+    }
+
+    pub fn with_api_key(mut self, api_key: impl Into<String>) -> Self {
+        self.config.api_key = api_key.into();
+        self
+    }
+
+    pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.config.base_url = base_url.into();
+        self
+    }
+
+    pub fn with_max_tokens(mut self, max_tokens: i32) -> Self {
+        self.config.max_tokens = max_tokens;
+        self
+    }
+
+    pub fn with_max_turns(mut self, max_turns: i32) -> Self {
+        self.config.max_turns = max_turns;
+        self
+    }
+
+    pub fn with_max_context_tokens(mut self, max_context_tokens: usize) -> Self {
+        self.config.max_context_tokens = max_context_tokens;
+        self
+    }
+
+    pub fn with_context_compact_pct(mut self, pct: u8) -> Self {
+        self.config.context_compact_pct = pct;
+        self
+    }
+
+    pub fn with_tool_timeout_secs(mut self, secs: i32) -> Self {
+        self.config.tool_timeout_secs = secs;
+        self
+    }
+
+    pub fn with_sub_agent_timeout_secs(mut self, secs: i32) -> Self {
+        self.config.sub_agent_timeout_secs = secs;
+        self
+    }
+
+    pub fn with_llm_timeouts(
+        mut self,
+        first_event_secs: i32,
+        idle_secs: i32,
+        wait_heartbeat_secs: i32,
+    ) -> Self {
+        self.config.llm_first_event_timeout_secs = first_event_secs;
+        self.config.llm_idle_timeout_secs = idle_secs;
+        self.config.llm_wait_heartbeat_secs = wait_heartbeat_secs;
+        self
+    }
+
+    pub fn with_tool_result_max_bytes(mut self, bytes: usize) -> Self {
+        self.config.tool_result_max_bytes = bytes;
+        self
+    }
+
+    pub fn with_file_write_max_bytes(mut self, bytes: usize) -> Self {
+        self.config.file_write_max_bytes = bytes;
+        self
+    }
+
+    pub fn with_search_limits(mut self, max_files: usize, max_results: usize) -> Self {
+        self.config.max_search_files = max_files;
+        self.config.max_search_results = max_results;
+        self
+    }
+
+    pub fn with_output_format(mut self, output_format: OutputFormat) -> Self {
+        self.config.output_format = output_format;
+        self
+    }
+
+    pub fn with_verbose(mut self, verbose: bool) -> Self {
+        self.config.verbose = verbose;
+        self
+    }
+
+    pub fn with_log_events(mut self, log_events: bool) -> Self {
+        self.config.log_events = log_events;
+        self
+    }
+
+    pub fn with_skills(mut self, skills: impl Into<Vec<String>>) -> Self {
+        self.config.skills = skills.into();
+        self
+    }
+
+    pub fn with_mission_file(mut self, mission_file: impl Into<PathBuf>) -> Self {
+        self.config.mission_file = Some(mission_file.into());
+        self
+    }
+
+    pub fn with_mission_content(mut self, mission_content: impl Into<String>) -> Self {
+        self.config.mission_content = Some(mission_content.into());
+        self
+    }
+
+    pub fn with_sandbox(mut self, sandbox: SandboxConfig) -> Self {
+        self.config.sandbox = sandbox;
+        self
+    }
+
+    pub fn with_sandbox_python(mut self, sandbox_python: SandboxPythonConfig) -> Self {
+        self.config.sandbox_python = sandbox_python;
+        self
+    }
+
+    pub fn with_tool_disable(mut self, tool_disable: ToolDisableFlags) -> Self {
+        self.config.tool_disable = tool_disable;
+        self
+    }
+
+    pub fn disable_bash(mut self, disabled: bool) -> Self {
+        self.config.tool_disable.disable_bash = disabled;
+        self
+    }
+
+    pub fn disable_python(mut self, disabled: bool) -> Self {
+        self.config.tool_disable.disable_python = disabled;
+        self
+    }
+
+    pub fn disable_sub_agent(mut self, disabled: bool) -> Self {
+        self.config.tool_disable.disable_sub_agent = disabled;
+        self
+    }
+
+    pub fn disable_web(mut self, disabled: bool) -> Self {
+        self.config.tool_disable.disable_web = disabled;
+        self
+    }
+
+    pub fn enable_python_sandbox(mut self, enabled: bool) -> Self {
+        self.config.tool_disable.disable_python_sandbox = !enabled;
+        self
+    }
+
+    pub fn with_enabled_tools(mut self, tools: impl Into<Vec<String>>) -> Self {
+        self.config.enabled_tools = Some(tools.into());
+        self
+    }
+
+    pub fn with_all_tools_enabled(mut self) -> Self {
+        self.config.enabled_tools = None;
+        self
+    }
+
+    pub fn with_tool_approval_mode(mut self, mode: ToolApprovalMode) -> Self {
+        self.config.tool_approval_mode = mode;
+        self
+    }
+
+    pub fn with_tool_approval(mut self, approval: BTreeMap<String, ToolApprovalPolicy>) -> Self {
+        self.config.tool_approval = approval;
+        self
+    }
+
+    pub fn with_tool_approval_policy(
+        mut self,
+        tool_name: impl Into<String>,
+        policy: ToolApprovalPolicy,
+    ) -> Self {
+        self.config.tool_approval.insert(tool_name.into(), policy);
+        self
+    }
+
+    pub fn into_runtime_config(mut self) -> AgentRuntimeConfig {
+        if !self.session_overridden {
+            self.session = session_policy_from_config(&self.config);
+        }
+        let runtime_config = AgentRuntimeConfig {
+            config: self.config,
+            home: self.home,
+            cwd: self.cwd,
+            session: self.session,
+            first_prompt: self.first_prompt,
+            display: self.display,
+            event_sink: self.event_sink,
+            sub_stream_tx: self.sub_stream_tx,
+            #[cfg(test)]
+            llm_override: None,
+        };
+        runtime_config
+    }
+}
+
+fn session_policy_from_config(config: &Config) -> SessionPolicy {
+    if !config.session_id.trim().is_empty() {
+        SessionPolicy::UseOrCreate(config.session_id.trim().to_string())
+    } else if config.continue_session {
+        SessionPolicy::ContinueLatest
+    } else {
+        SessionPolicy::New
+    }
+}
+
+impl TryFrom<AgentOptions> for AgentRuntimeConfig {
+    type Error = anyhow::Error;
+
+    fn try_from(options: AgentOptions) -> Result<Self> {
+        Ok(options.into_runtime_config())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn options_convert_to_runtime_config_without_losing_config_fields() {
+        let runtime_config = AgentOptions::new("/tmp/mink-home", "/tmp/project")
+            .with_model("pro")
+            .with_api_key("test-key")
+            .with_base_url("https://example.invalid/v1")
+            .with_session(SessionPolicy::UseOrCreate("work".to_string()))
+            .with_max_tokens(123)
+            .with_max_turns(7)
+            .with_max_context_tokens(456)
+            .with_context_compact_pct(70)
+            .with_tool_timeout_secs(10)
+            .with_sub_agent_timeout_secs(11)
+            .with_llm_timeouts(12, 13, 14)
+            .with_tool_result_max_bytes(15)
+            .with_file_write_max_bytes(16)
+            .with_search_limits(17, 18)
+            .with_output_format(OutputFormat::StreamJson)
+            .with_verbose(true)
+            .with_log_events(false)
+            .with_skills(vec!["rust".to_string()])
+            .with_mission_content("mission")
+            .disable_bash(true)
+            .disable_python(true)
+            .disable_sub_agent(true)
+            .disable_web(true)
+            .enable_python_sandbox(true)
+            .with_enabled_tools(vec!["Read".to_string(), "Bash".to_string()])
+            .with_tool_approval_mode(ToolApprovalMode::Write)
+            .with_tool_approval_policy("Bash", ToolApprovalPolicy::Prompt)
+            .with_first_prompt("hello")
+            .into_runtime_config();
+
+        assert_eq!(runtime_config.home, PathBuf::from("/tmp/mink-home"));
+        assert_eq!(runtime_config.cwd, PathBuf::from("/tmp/project"));
+        assert!(matches!(
+            runtime_config.session,
+            SessionPolicy::UseOrCreate(ref value) if value == "work"
+        ));
+        assert_eq!(runtime_config.first_prompt.as_deref(), Some("hello"));
+
+        let cfg = runtime_config.config;
+        assert_eq!(cfg.model, "pro");
+        assert_eq!(cfg.api_key, "test-key");
+        assert_eq!(cfg.base_url, "https://example.invalid/v1");
+        assert_eq!(cfg.max_tokens, 123);
+        assert_eq!(cfg.max_turns, 7);
+        assert_eq!(cfg.max_context_tokens, 456);
+        assert_eq!(cfg.context_compact_pct, 70);
+        assert_eq!(cfg.tool_timeout_secs, 10);
+        assert_eq!(cfg.sub_agent_timeout_secs, 11);
+        assert_eq!(cfg.llm_first_event_timeout_secs, 12);
+        assert_eq!(cfg.llm_idle_timeout_secs, 13);
+        assert_eq!(cfg.llm_wait_heartbeat_secs, 14);
+        assert_eq!(cfg.tool_result_max_bytes, 15);
+        assert_eq!(cfg.file_write_max_bytes, 16);
+        assert_eq!(cfg.max_search_files, 17);
+        assert_eq!(cfg.max_search_results, 18);
+        assert_eq!(cfg.output_format, OutputFormat::StreamJson);
+        assert!(cfg.verbose);
+        assert!(!cfg.log_events);
+        assert_eq!(cfg.skills, vec!["rust"]);
+        assert_eq!(cfg.mission_content.as_deref(), Some("mission"));
+        assert!(cfg.tool_disable.disable_bash);
+        assert!(cfg.tool_disable.disable_python);
+        assert!(cfg.tool_disable.disable_sub_agent);
+        assert!(cfg.tool_disable.disable_web);
+        assert!(!cfg.tool_disable.disable_python_sandbox);
+        assert_eq!(
+            cfg.enabled_tools,
+            Some(vec!["Read".to_string(), "Bash".to_string()])
+        );
+        assert_eq!(cfg.tool_approval_mode, ToolApprovalMode::Write);
+        assert_eq!(cfg.tool_approval["Bash"], ToolApprovalPolicy::Prompt);
+    }
+
+    #[test]
+    fn options_config_mut_is_lossless_escape_hatch() {
+        let mut options = AgentOptions::new("/tmp/mink-home", "/tmp/project");
+        options.config_mut().prompt = "from config mut".to_string();
+        options.config_mut().agent_jsonl = true;
+        options.config_mut().session_id = "via-config-mut".to_string();
+        let runtime_config = options.into_runtime_config();
+
+        assert_eq!(runtime_config.config.prompt, "from config mut");
+        assert!(runtime_config.config.agent_jsonl);
+        assert!(matches!(
+            runtime_config.session,
+            SessionPolicy::UseOrCreate(ref value) if value == "via-config-mut"
+        ));
+    }
+
+    #[test]
+    fn options_from_config_preserves_session_selection_semantics() {
+        let cfg = Config {
+            session_id: "existing-or-alias".to_string(),
+            ..Config::default()
+        };
+        let runtime_config =
+            AgentOptions::from_config(cfg, "/tmp/mink-home", "/tmp/project").into_runtime_config();
+        assert!(matches!(
+            runtime_config.session,
+            SessionPolicy::UseOrCreate(ref value) if value == "existing-or-alias"
+        ));
+
+        let cfg = Config {
+            continue_session: true,
+            ..Config::default()
+        };
+        let runtime_config =
+            AgentOptions::from_config(cfg, "/tmp/mink-home", "/tmp/project").into_runtime_config();
+        assert!(matches!(
+            runtime_config.session,
+            SessionPolicy::ContinueLatest
+        ));
+    }
+
+    #[test]
+    fn options_explicit_session_overrides_config_session_fields() {
+        let cfg = Config {
+            session_id: "from-config".to_string(),
+            ..Config::default()
+        };
+        let runtime_config = AgentOptions::from_config(cfg, "/tmp/mink-home", "/tmp/project")
+            .with_session(SessionPolicy::New)
+            .into_runtime_config();
+
+        assert!(matches!(runtime_config.session, SessionPolicy::New));
+    }
+}

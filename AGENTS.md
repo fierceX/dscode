@@ -2,11 +2,12 @@
 
 ## 项目概览
 
-mink 是一个 Rust 实现的轻量 AI coding agent，专为 DeepSeek/OpenAI-compatible API 优化。项目目标是单二进制、低运行时依赖、终端优先。
+mink 是一个 Rust 实现的轻量 AI coding agent，专为 DeepSeek/OpenAI-compatible API 优化。项目目标是单二进制、低运行时依赖、终端优先，同时可作为 Rust 库嵌入任何 Rust 项目（`mink::runtime`）。
 
 核心能力：
 
 - LLM 流式请求 -> 工具执行 -> 决策的内循环
+- **Rust 库 API**：`AgentRuntime::start() → run_turn() / stream_turn() → shutdown()`，无需子进程
 - 信号驱动的信念系统：自动错误检测、注入修正、恢复首步守卫，可用 `MINK_SIGNAL_MODE=off` 关闭
 - 上下文自适应压缩：三级 Tier，尽量保持 prefix-cache 命中
 - 维修流水线：Scavenge 回收、Truncation 修复、StormBreaker 重复调用抑制
@@ -226,7 +227,9 @@ DecisionEngine.decide()
 
 | 文件 | 职责 |
 |------|------|
-| `main.rs` | CLI 参数解析、配置合并、Session 创建、启动 REPL/TUI/print 模式 |
+| `cli.rs` | **mink / mink-core 共用 CLI adapter**，参数解析、配置合并、sandbox re-exec、模式分发 |
+| `main.rs` | `mink` binary thin wrapper → `cli::main_entry()` |
+| `bin/mink-core.rs` | `mink-core` SDK binary thin wrapper → `cli::main_entry()` |
 | `config.rs` | Config 结构体、CLI/env/配置文件合并、API key 和 sandbox 配置 |
 | `context.rs` | AgentSharedContext + ToolContext |
 | `assets.rs` | 嵌入 tools.json、内置 skills |
@@ -236,6 +239,17 @@ DecisionEngine.decide()
 | `sandbox/` | 沙箱自举和平台实现 |
 | `util.rs` | 通用工具函数 |
 
+### Rust 库门面 (`mink::runtime`)
+
+| 文件 | 职责 |
+|------|------|
+| `runtime/mod.rs` | 公共 API 导出：`AgentRuntime`、`AgentEventStream`、`AgentOptions` 等 |
+| `runtime/builder.rs` | `build_runtime()` — 构造 runtime，与 CLI 共用同一核心 |
+| `runtime/handle.rs` | `AgentRuntime` — `start()`, `run_turn()`, `stream_turn()`, `shutdown()` |
+| `runtime/options.rs` | `AgentOptions` ergonomic builder |
+| `runtime/events.rs` | `AgentEvent` / `EventSink` / `EventDisplay` adapter |
+| `runtime/sdk_adapter.rs` | SDK option/status/exit code 映射，CLI/SDK 去重 |
+| `examples/web_api.rs` | Hidden-worker web API demo：axum + 进程沙箱 + 异步任务队列 |
 ### Agent 核心
 
 | 文件 | 职责 |

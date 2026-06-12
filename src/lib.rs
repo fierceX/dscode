@@ -1,10 +1,12 @@
 // Core modules (unchanged)
 pub mod assets;
+pub mod cli;
 pub mod config;
 pub mod errors;
 pub mod events;
 pub mod prompt;
 pub mod protocol;
+pub mod runtime;
 pub mod safety;
 pub mod sdk_protocol;
 pub mod sse;

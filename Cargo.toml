@@ -45,6 +45,11 @@ ratatui = { version = "0.30", optional = true }
 unicode-width = "0.2"
 wasmtime = { version = "28", features = ["async"], optional = true }
 wasmtime-wasi = { version = "28", optional = true }
+axum = { version = "0.7", optional = true }
+
+[[example]]
+name = "web_api"
+required-features = ["web-api"]
 
 [features]
 default = ["python-sandbox", "repl", "tui"]
@@ -52,8 +57,8 @@ python-sandbox = ["dep:wasmtime", "dep:wasmtime-wasi"]
 repl = ["dep:rustyline"]
 tui = ["dep:crossterm", "dep:ratatui"]
 sdk = []
+web-api = ["dep:axum"]
 slow-tests = []
-
 [profile.release]
 opt-level = "s"
 lto = true

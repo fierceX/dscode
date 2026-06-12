@@ -1,6 +1,6 @@
 # 架构说明
 
-更新日期：2026-06-03
+更新日期：2026-06-12
 
 ## 项目定位
 
@@ -9,6 +9,7 @@ mink 是一个 Rust 实现的轻量 AI coding agent，面向 DeepSeek / OpenAI-c
 核心目标：
 
 - 单二进制分发，终端优先，REPL / TUI / stream-json 三种使用形态
+起可作为 Rust 库嵌入** — `mink::runtime` 提供同进程调用
 - Session 是一等公民，使用 JSONL 追加持久化，支持恢复、重放和压缩
 - LLM 流式输出、工具执行、信号检测、决策恢复构成闭环
 - 工具边界明确：超时、输出大小、写入大小、副作用和禁用开关都可控
@@ -35,9 +36,10 @@ mink 是一个 Rust 实现的轻量 AI coding agent，面向 DeepSeek / OpenAI-c
 ## 运行时分层
 
 ```text
-main.rs
-  │  CLI 参数解析 -> 配置合并 -> sandbox re-exec -> Session 初始化
+cli.rs                              ← mink / mink-core 共用 CLI adapter
+  │  CLI 参数解析 -> 配置合并 -> sandbox re-exec
   │  根据模式启动 one-shot / REPL / TUI / stream-json / Agent JSONL
+  │  内部调用 runtime::build_runtime() 构造 AgentRuntime
   ▼
 OrchActor (agent/orchestrator.rs)
   │  接收用户输入、模型切换、手动 compact 命令
@@ -166,7 +168,9 @@ ToolRunResult
 
 | 文件 | 职责 |
 |------|------|
-| `main.rs` | CLI 入口、sandbox re-exec、session 初始化、模式分发 |
+| `cli.rs` | **mink / mink-core 共用 CLI adapter**，参数解析、配置合并、sandbox re-exec、模式分发 |
+| `main.rs` | `mink` binary thin wrapper → `cli::main_entry()` |
+| `bin/mink-core.rs` | `mink-core` binary thin wrapper → `cli::main_entry()` |
 | `config.rs` | `Config`、CLI 解析、`.minkrc` 合并、环境变量默认值、sandbox 配置 |
 | `context.rs` | `AgentSharedContext` 和工具层 `ToolContext` |
 | `assets.rs` | 编译期嵌入的 `tools.json` 和 skill 索引 |
@@ -177,6 +181,18 @@ ToolRunResult
 | `events.rs` | typed event log 类型 |
 | `errors.rs` | error 分类和用户提示 |
 | `util.rs` | 截断等通用工具 |
+
+### Rust 库门面
+
+| 文件 | 职责 |
+|------|------|
+| `runtime/mod.rs` | `mink::runtime` 公共 API 导出 |
+| `runtime/builder.rs` | `build_runtime()` — 从 `AgentRuntimeConfig` 构造完整 runtime |
+| `runtime/config.rs` | `AgentRuntimeConfig` / `SessionPolicy` / `SessionInfo` |
+| `runtime/handle.rs` | `AgentRuntime` — `start()`, `run_turn()`, `stream_turn()`, `shutdown()` |
+| `runtime/options.rs` | `AgentOptions` ergonomic builder |
+| `runtime/events.rs` | `AgentEvent` 枚举 / `EventSink` trait / `EventDisplay` adapter |
+| `runtime/sdk_adapter.rs` | SDK option 映射、status/exit code 映射、`SdkFinal` 组装 |
 
 ### Agent 核心
 

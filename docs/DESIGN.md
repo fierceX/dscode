@@ -904,3 +904,54 @@ pub enum Event {
 | 同轮最多压缩一次 | `turn.rs:106,128` | 多次无用压缩 |
 | ImmutablePrefix 只能通过 `invalidate_prefix` 变更 | `turn.rs:68-69` | 缓存偏移不可检测 |
 | store 写操作不将缓存设为 None | `store.rs` | 读盘性能下降 |
+
+## 主题十五：Rust 库 API 设计
+
+### 为什么是 Rust 库
+
+`mink-core --agent-jsonl` 通过 stdin/stdout 子进程调用已经可用，但：
+
+- 进程启动成本（~100ms cold start）
+- JSON 序列化/反序列化开销
+- 无法共享内存中的 session store
+- 无法订阅实时 typed event
+
+`mink::runtime` 解决这些问题：**同一套 OrchActor / TurnExecutor / ToolRunner 核心，但无进程边界**。
+
+### 三入口共用核心
+
+```text
+mink CLI ──────────┐
+mink-core SDK ─────┤
+Rust crate ────────┘
+         │
+    cli::main_entry()
+         │
+    runtime::build_runtime()
+         │
+    OrchActor::run()
+```
+
+三个入口通过 `cli.rs` 和 `runtime::builder` 调用同一核心，不允许分叉逻辑。
+
+### API 分层
+
+| 层 | 类型 | 定位 |
+|----|------|------|
+| **lossless** | `AgentRuntimeConfig` + 完整 `Config` | 不丢失任何配置项 |
+| **ergonomic** | `AgentOptions` builder | 常用字段快捷方法，`config_mut()` 逃生口 |
+| **stream** | `AgentEventStream` | per-turn 实时事件，`recv()` + `outcome()` |
+
+### 关键设计决策
+
+| 决策 | 理由 |
+|------|------|
+| `EventSink` 为同步 trait | 避免 async sink 引入背压复杂度，下游自行 channel |
+| `TurnOutcome` 聚合 text/thinking | 调用方不订阅事件也能拿到结果 |
+| `shutdown()` 5s grace period | 防止 orchestrator 死锁时无限等待 |
+| `stream_turn()` panic 防并发 | `swap(true)` 原子操作，零开销 |
+| llm_override 仅 `#[cfg(test)]` | 不暴露生产 mock 能力 |
+
+### 隐藏 worker 模式
+
+通过 `--internal-mink-worker` 分支 + `sandbox::reexec_in_sandbox()` 实现进程级沙箱。沙箱配置走 argv，任务数据走 stdin（re-exec 后读），和 mink CLI 流程完全一致。

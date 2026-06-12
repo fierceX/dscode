@@ -56,6 +56,42 @@ make build
 
 ---
 
+## Rust Library
+
+`mink` 可作为 Rust 库嵌入任何 Rust 项目：
+
+```rust
+use mink::runtime::{AgentOptions, AgentRuntime, AgentEvent};
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let rt = AgentRuntime::start_with_options(
+        AgentOptions::new("/tmp/mink-home", ".")?
+            .with_api_key(std::env::var("DEEPSEEK_API_KEY")?)
+            .with_model("flash"),
+    ).await?;
+
+    // 阻塞式 turn — 直接拿到 text/thinking
+    let outcome = rt.run_turn("hello").await?;
+    println!("{}", outcome.text);
+
+    // 流式 turn — 实时事件
+    let mut stream = rt.stream_turn("explain");
+    while let Some(ev) = stream.recv().await {
+        if let AgentEvent::Text { content } = ev { print!("{content}"); }
+        if let AgentEvent::Final { .. } = ev { break; }
+    }
+    let outcome = stream.outcome().await?;
+
+    rt.shutdown().await?;
+    Ok(())
+}
+```
+
+完整 API 参考 `examples/web_api.rs`（hidden worker 模式，含进程级沙箱）。
+
+---
+
 ## Python SDK
 
 通过 pip 安装使用：
