@@ -66,7 +66,7 @@ use mink::runtime::{AgentOptions, AgentRuntime, AgentEvent};
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let rt = AgentRuntime::start_with_options(
-        AgentOptions::new("/tmp/mink-home", ".")?
+        AgentOptions::new("/tmp/mink-home", ".")
             .with_api_key(std::env::var("DEEPSEEK_API_KEY")?)
             .with_model("flash"),
     ).await?;
@@ -76,10 +76,13 @@ async fn main() -> anyhow::Result<()> {
     println!("{}", outcome.text);
 
     // 流式 turn — 实时事件
-    let mut stream = rt.stream_turn("explain");
+    let mut stream = rt.try_stream_turn("explain")?;
     while let Some(ev) = stream.recv().await {
-        if let AgentEvent::Text { content } = ev { print!("{content}"); }
-        if let AgentEvent::Final { .. } = ev { break; }
+        match ev {
+            AgentEvent::Text { content } => print!("{content}"),
+            AgentEvent::Final { .. } => break,
+            _ => {}
+        }
     }
     let outcome = stream.outcome().await?;
 
@@ -88,7 +91,9 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-完整 API 参考 `examples/web_api.rs`（hidden worker 模式，含进程级沙箱）。
+同进程 `AgentRuntime` 不会自动 sandbox 当前进程。需要完整进程级沙箱时，推荐参考 `examples/web_api.rs` 的 hidden worker 模式：业务服务 spawn 自身 worker 子进程，worker 先 re-exec 进沙箱，再调用 `mink::runtime`。
+
+库使用方应优先从 `mink::runtime`、`mink::config`、`mink::sandbox` 和 `mink::sdk_protocol` 导入类型。其他公开模块目前主要服务于现有二进制和过渡期测试，不建议作为稳定 API 依赖。
 
 ---
 

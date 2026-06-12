@@ -423,6 +423,7 @@ fn require_value(args: &[String], i: usize) -> Result<String> {
     Ok(args[i + 1].clone())
 }
 
+#[allow(dead_code)]
 fn require_positive_i32_value(args: &[String], i: usize, name: &str) -> Result<i32> {
     let value: i32 = require_value(args, i)?.parse()?;
     if value <= 0 {
@@ -431,6 +432,7 @@ fn require_positive_i32_value(args: &[String], i: usize, name: &str) -> Result<i
     Ok(value)
 }
 
+#[allow(dead_code)]
 fn require_nonnegative_i32_value(args: &[String], i: usize, name: &str) -> Result<i32> {
     let value: i32 = require_value(args, i)?.parse()?;
     if value < 0 {

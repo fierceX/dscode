@@ -59,20 +59,24 @@ pub trait EventSink: Send + Sync {
 }
 
 pub(crate) struct EventDisplay {
-    sink: Arc<dyn EventSink>,
+    sink: Option<Arc<dyn EventSink>>,
     delegate: Option<Arc<dyn Display>>,
     turn_tx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<AgentEvent>>>,
 }
 
 impl EventDisplay {
-    pub(crate) fn new(sink: Arc<dyn EventSink>, delegate: Option<Arc<dyn Display>>) -> Self {
-        Self { sink, delegate, turn_tx: std::sync::Mutex::new(None) }
+    pub(crate) fn new(
+        sink: Option<Arc<dyn EventSink>>,
+        delegate: Option<Arc<dyn Display>>,
+    ) -> Self {
+        Self {
+            sink,
+            delegate,
+            turn_tx: std::sync::Mutex::new(None),
+        }
     }
 
-    pub(crate) fn set_turn_channel(
-        &self,
-        tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>,
-    ) {
+    pub(crate) fn set_turn_channel(&self, tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>) {
         *self.turn_tx.lock().unwrap() = Some(tx);
     }
 
@@ -84,7 +88,9 @@ impl EventDisplay {
         if let Some(ref tx) = *self.turn_tx.lock().unwrap() {
             let _ = tx.send(event.clone());
         }
-        self.sink.on_event(event);
+        if let Some(sink) = &self.sink {
+            sink.on_event(event);
+        }
     }
 }
 
@@ -260,7 +266,7 @@ mod tests {
     #[test]
     fn event_display_maps_display_calls() {
         let sink = Arc::new(RecordingSink::default());
-        let display = EventDisplay::new(sink.clone(), None);
+        let display = EventDisplay::new(Some(sink.clone()), None);
 
         display.render_text("hello");
         display.render_tool_result_detail(&ToolResultDisplay {
@@ -298,7 +304,7 @@ mod tests {
     #[test]
     fn all_display_methods_have_event_variants() {
         let sink = Arc::new(RecordingSink::default());
-        let display = EventDisplay::new(sink.clone(), None);
+        let display = EventDisplay::new(Some(sink.clone()), None);
 
         display.render_thinking("think");
         display.render_text("answer");
@@ -344,10 +350,19 @@ mod tests {
             "ToolResult render_tool_result_detail"
         );
         assert!(matches!(&events[5], AgentEvent::Stop), "Stop");
-        assert!(matches!(&events[6], AgentEvent::Error { message } if message == "something broke"), "Error");
+        assert!(
+            matches!(&events[6], AgentEvent::Error { message } if message == "something broke"),
+            "Error"
+        );
         assert!(matches!(&events[7], AgentEvent::Retry), "Retry");
-        assert!(matches!(&events[8], AgentEvent::Info { message } if message == "compressing..."), "Info");
-        assert!(matches!(&events[9], AgentEvent::TitleUpdate { model, .. } if model == "pro"), "TitleUpdate");
+        assert!(
+            matches!(&events[8], AgentEvent::Info { message } if message == "compressing..."),
+            "Info"
+        );
+        assert!(
+            matches!(&events[9], AgentEvent::TitleUpdate { model, .. } if model == "pro"),
+            "TitleUpdate"
+        );
         assert!(
             matches!(&events[10], AgentEvent::SubAgentStatus { session_id, status, .. }
                 if session_id == "sub-1" && status == "running"),
@@ -361,5 +376,4 @@ mod tests {
         assert!(matches!(&events[12], AgentEvent::Prompt), "Prompt");
         assert!(matches!(&events[13], AgentEvent::ClearLine), "ClearLine");
     }
-
 }

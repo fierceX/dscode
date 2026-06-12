@@ -147,7 +147,7 @@ fn execute_in_sandbox(
     use std::sync::mpsc;
     let (tx, rx) = mpsc::channel();
     // 将 store 移入线程，线程负责执行并发送结果
-    let handle = std::thread::spawn(move || {
+    let _handle = std::thread::spawn(move || {
         let result = start.call(&mut store, ());
         let _ = tx.send(result);
     });
@@ -328,7 +328,6 @@ impl super::runner::ToolExec for PythonSandboxTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[cfg_attr(not(feature = "slow-tests"), ignore)]
     #[test]
@@ -339,7 +338,7 @@ mod tests {
             return;
         }
         let stdlib = Path::new("cpython-wasi");
-        let (out, err, code) = execute_in_sandbox(
+        let (_out, err, code) = execute_in_sandbox(
             "print('hello from sandbox')",
             wasm,
             stdlib,
@@ -370,7 +369,7 @@ assert math.isclose(math.pi, 3.14159, rel_tol=1e-3)
 assert re.match(r"\d+", "123abc").group() == "123"
 print("stdlib all ok")
 "#;
-        let (out, err, code) =
+        let (_out, err, code) =
             execute_in_sandbox(script, wasm, stdlib, &[], &[], &[], 10, None).unwrap();
         assert_eq!(code, Some(0), "stderr: {err}");
     }
@@ -385,7 +384,7 @@ print("stdlib all ok")
         }
         let stdlib = Path::new("cpython-wasi");
         // 测试从 sandbox-poc/packages 加载 mink_ext 包
-        let (out, err, code) = execute_in_sandbox(
+        let (_out, err, code) = execute_in_sandbox(
             "from mink_ext.utils import count_words; print(count_words('hello world'))",
             wasm,
             stdlib,
@@ -408,7 +407,7 @@ print("stdlib all ok")
             return;
         }
         let stdlib = Path::new("cpython-wasi");
-        let (out, err, code) = execute_in_sandbox(
+        let (_out, _err, code) = execute_in_sandbox(
             "import subprocess; print(subprocess.__name__)",
             wasm,
             stdlib,
@@ -434,7 +433,7 @@ print("stdlib all ok")
         }
         let stdlib = Path::new("cpython-wasi");
         // 通过 os.chdir 注入，相对路径已指向项目根
-        let (out, err, code) = execute_in_sandbox(
+        let (_out, err, code) = execute_in_sandbox(
             r#"open("./output/rel_test.txt", "w").write("relative path ok")
 print("write done")"#,
             wasm,
@@ -596,7 +595,7 @@ print("write OK")"#,
             return;
         }
         let stdlib = Path::new("cpython-wasi");
-        let (out, err, code) = execute_in_sandbox(
+        let (_out, err, code) = execute_in_sandbox(
             "open('/etc/pwned.txt', 'w')",
             wasm,
             stdlib,
@@ -618,7 +617,7 @@ print("write OK")"#,
             return;
         }
         let stdlib = Path::new("cpython-wasi");
-        let (out, err, code) =
+        let (_out, err, code) =
             execute_in_sandbox("open('/etc/passwd')", wasm, stdlib, &[], &[], &[], 10, None)
                 .unwrap();
         assert_ne!(code, Some(0), "should NOT be allowed: {err}");
@@ -633,7 +632,7 @@ print("write OK")"#,
         }
         let stdlib = Path::new("cpython-wasi");
         _ = std::fs::create_dir_all("output");
-        let (out, err, code) = execute_in_sandbox(
+        let (_out, err, code) = execute_in_sandbox(
             "open('./output/chdir_test.txt', 'w').write('ok')",
             wasm,
             stdlib,
@@ -662,7 +661,7 @@ print("write OK")"#,
             .unwrap()
             .to_string_lossy()
             .to_string();
-        let (out, err, code) = execute_in_sandbox(
+        let (_out, err, code) = execute_in_sandbox(
             &format!("open(r'{cwd}/output/abs_test.txt', 'w').write('ok')"),
             wasm,
             stdlib,
@@ -687,7 +686,7 @@ print("write OK")"#,
         }
         let stdlib = Path::new("cpython-wasi");
         // write_dirs = ["./"] 使整个项目根可写
-        let (out, err, code) = execute_in_sandbox(
+        let (_out, err, code) = execute_in_sandbox(
             "open('./sandbox_root_test.txt', 'w').write('root write')",
             wasm,
             stdlib,
@@ -711,7 +710,7 @@ print("write OK")"#,
             return;
         }
         let stdlib = Path::new("cpython-wasi");
-        let (out, err, code) = execute_in_sandbox(
+        let (_out, err, code) = execute_in_sandbox(
             "open('src/tools/sandbox_root_probe.txt', 'w').write('probe')",
             wasm,
             stdlib,
@@ -735,7 +734,7 @@ print("write OK")"#,
             return;
         }
         let stdlib = Path::new("cpython-wasi");
-        let (out, err, code) = execute_in_sandbox(
+        let (_out, _err, code) = execute_in_sandbox(
             "open('./output/../../../etc/pwned.txt', 'w')",
             wasm,
             stdlib,
@@ -757,7 +756,7 @@ print("write OK")"#,
             return;
         }
         let stdlib = Path::new("cpython-wasi");
-        let (out, err, code) = execute_in_sandbox(
+        let (_out, err, code) = execute_in_sandbox(
             "open('./data/write_test.txt', 'w')",
             wasm,
             stdlib,
@@ -785,7 +784,7 @@ print("write OK")"#,
         let stdlib = Path::new("cpython-wasi");
         _ = std::fs::create_dir_all("output");
         _ = std::fs::create_dir_all("docs");
-        let (out, err, code) = execute_in_sandbox(
+        let (_out, err, code) = execute_in_sandbox(
             "open('./output/multi_a.txt', 'w').write('a'); open('./docs/multi_b.txt', 'w').write('b')",
             wasm, stdlib, &[], &["./output".to_string(), "./docs".to_string()], &[], 10, None,
         ).unwrap();
@@ -831,7 +830,7 @@ print("write OK")"#,
             return;
         }
         let stdlib = Path::new("cpython-wasi");
-        let (out, err, code) =
+        let (_out, _err, code) =
             execute_in_sandbox("", wasm, stdlib, &[], &[], &[], 10, None).unwrap();
         assert_eq!(code, Some(0), "empty script should exit 0");
     }
@@ -844,7 +843,7 @@ print("write OK")"#,
             return;
         }
         let stdlib = Path::new("cpython-wasi");
-        let (out, err, code) = execute_in_sandbox(
+        let (_out, _err, code) = execute_in_sandbox(
             "import sys; sys.exit(42)",
             wasm,
             stdlib,
@@ -871,7 +870,7 @@ print("write OK")"#,
         }
         let stdlib = Path::new("cpython-wasi");
         _ = std::fs::create_dir_all("output");
-        let (out, err, code) = execute_in_sandbox(
+        let (_out, err, code) = execute_in_sandbox(
             "open('./output/中文测试.txt', 'w').write('unicode')",
             wasm,
             stdlib,
@@ -922,7 +921,7 @@ print("write OK")"#,
             return;
         }
         let stdlib = Path::new("cpython-wasi");
-        let (out, err, code) = execute_in_sandbox(
+        let (out, _err, code) = execute_in_sandbox(
             "import sys\nfor i in range(5): sys.stdout.write(f'x{i}\\n')",
             wasm,
             stdlib,
@@ -945,7 +944,7 @@ print("write OK")"#,
             return;
         }
         let stdlib = Path::new("cpython-wasi");
-        let (out, err, code) = execute_in_sandbox(
+        let (out, _err, code) = execute_in_sandbox(
             "import sys; sys.stderr.write('err msg\\n'); print('out msg')",
             wasm,
             stdlib,

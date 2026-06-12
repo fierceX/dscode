@@ -949,9 +949,9 @@ Rust crate ────────┘
 | `EventSink` 为同步 trait | 避免 async sink 引入背压复杂度，下游自行 channel |
 | `TurnOutcome` 聚合 text/thinking | 调用方不订阅事件也能拿到结果 |
 | `shutdown()` 5s grace period | 防止 orchestrator 死锁时无限等待 |
-| `stream_turn()` panic 防并发 | `swap(true)` 原子操作，零开销 |
+| `try_stream_turn()` 返回并发错误，`stream_turn()` 保持 panic 兼容 | 服务端可优雅处理并发冲突，旧 API 行为不变 |
 | llm_override 仅 `#[cfg(test)]` | 不暴露生产 mock 能力 |
 
 ### 隐藏 worker 模式
 
-通过 `--internal-mink-worker` 分支 + `sandbox::reexec_in_sandbox()` 实现进程级沙箱。沙箱配置走 argv，任务数据走 stdin（re-exec 后读），和 mink CLI 流程完全一致。
+私有化业务服务可以通过自身隐藏 worker 分支 + `sandbox::reexec_in_sandbox()` 实现进程级沙箱。沙箱配置走 argv，任务数据走 stdin（re-exec 后读），和 mink CLI 流程完全一致。该隐藏分支属于业务服务实现细节，不要求 `mink` / `mink-core` 暴露新的公开 CLI。

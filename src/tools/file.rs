@@ -354,6 +354,7 @@ fn resolve_tool_path(cwd: &Path, raw: &str) -> Result<PathBuf> {
 /// Canonicalize a path that may not exist yet, by walking up
 /// the directory tree to find the longest existing ancestor,
 /// canonicalizing that, then appending remaining components.
+#[allow(dead_code)]
 fn canonicalize_partial(path: &Path) -> PathBuf {
     let normalized = normalize_lexically(path);
     let mut existing = PathBuf::new();
@@ -379,7 +380,6 @@ fn canonicalize_partial(path: &Path) -> PathBuf {
         existing_canonical.join(suffix)
     }
 }
-
 
 fn normalize_lexically(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
@@ -977,6 +977,7 @@ pub(crate) struct ParsedPatch {
     pub(crate) hunks: Vec<PatchHunk>,
 }
 
+#[allow(dead_code)]
 fn parse_anchored_patch(input: &str) -> Result<ParsedPatch> {
     let mut lines = input.lines().enumerate().peekable();
     let Some((_, header)) = lines.find(|(_, line)| !line.trim().is_empty()) else {
@@ -1064,6 +1065,7 @@ fn parse_anchored_patch(input: &str) -> Result<ParsedPatch> {
     })
 }
 
+#[allow(dead_code)]
 fn collect_patch_body<'a, I>(
     lines: &mut std::iter::Peekable<I>,
     header_line: usize,
@@ -1095,6 +1097,7 @@ where
     Ok(body)
 }
 
+#[allow(dead_code)]
 fn parse_patch_range(raw: &str) -> Result<(usize, usize)> {
     let raw = raw.trim();
     if let Some((start, end)) = raw.split_once("..") {
@@ -1110,6 +1113,7 @@ fn parse_patch_range(raw: &str) -> Result<(usize, usize)> {
     }
 }
 
+#[allow(dead_code)]
 fn parse_positive_usize(raw: &str, context: &str) -> Result<usize> {
     let value = raw
         .trim()
@@ -1741,4 +1745,3 @@ mod tests {
         assert!(err.contains("delete does not take body"), "{err}");
     }
 }
-

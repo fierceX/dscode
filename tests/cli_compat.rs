@@ -36,6 +36,8 @@ fn mink_core_help_uses_mink_core_binary_name() {
 fn mink_core_agent_jsonl_parse_failure_keeps_final_schema() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_mink-core"))
         .arg("--agent-jsonl")
+        .env_remove("DEEPSEEK_API_KEY")
+        .env_remove("DEEPSEEK_BASE_URL")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -75,5 +77,40 @@ fn mink_core_agent_jsonl_parse_failure_keeps_final_schema() {
             .as_str()
             .unwrap()
             .contains("missing required field prompt")
+    );
+}
+
+#[cfg(feature = "sdk")]
+#[test]
+fn mink_core_agent_jsonl_valid_request_without_api_key_fails_before_runtime() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_mink-core"))
+        .arg("--agent-jsonl")
+        .env_remove("DEEPSEEK_API_KEY")
+        .env_remove("DEEPSEEK_BASE_URL")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn mink-core --agent-jsonl");
+
+    {
+        use std::io::Write;
+        child
+            .stdin
+            .as_mut()
+            .expect("stdin")
+            .write_all(br#"{"version":1,"prompt":"hello"}"#)
+            .expect("write sdk request");
+    }
+
+    let output = child.wait_with_output().expect("wait mink-core");
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stdout).trim().is_empty(),
+        "valid config failure should not emit parse final JSON"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("no API key"),
+        "stderr should contain the provider defaults error"
     );
 }

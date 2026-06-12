@@ -223,7 +223,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn unrestricted_scripts_execute() {
         // 限制已移除：这些脚本现在应该正常执行
         let (out, _, code) = execute_script("import subprocess; print('ok')", None).unwrap();

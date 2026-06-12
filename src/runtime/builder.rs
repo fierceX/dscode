@@ -1,8 +1,10 @@
-use crate::agent::orchestrator::{new_orchestrator, OrchActor};
+#[cfg(test)]
+use crate::agent::orchestrator::OrchActor;
+use crate::agent::orchestrator::new_orchestrator;
 use crate::cancel::CancellationToken;
 use crate::config::api_url;
 use crate::context::{AgentSharedContext, ToolConfig};
-use crate::runtime::config::{AgentRuntimeConfig, NoopDisplay, SessionInfo, SessionPolicy};
+use crate::runtime::config::{AgentRuntimeConfig, SessionInfo, SessionPolicy};
 use crate::runtime::events::EventDisplay;
 use crate::runtime::handle::AgentRuntime;
 use crate::session::compaction::CompactionEngine;
@@ -12,6 +14,7 @@ use crate::tools::snapshot::FileSnapshotStore;
 use anyhow::{Result, bail};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
+#[cfg(test)]
 use tokio::sync::mpsc;
 
 pub async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRuntime> {
@@ -27,7 +30,6 @@ pub async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRuntime> {
         #[cfg(test)]
         llm_override,
     } = config;
-
 
     let (sid, session_ref, session_alias) = resolve_session(&home, &cwd, session).await?;
     config.session_id = sid.clone();
@@ -72,21 +74,8 @@ pub async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRuntime> {
     ));
 
     let cancel = CancellationToken::new();
-    let mut event_display: Option<Arc<EventDisplay>> = None;
-    let display: Arc<dyn crate::ui::Display> = match (event_sink.clone(), display) {
-        (Some(sink), Some(delegate)) => {
-            let ed = Arc::new(EventDisplay::new(sink, Some(delegate)));
-            event_display = Some(ed.clone());
-            ed
-        }
-        (Some(sink), None) => {
-            let ed = Arc::new(EventDisplay::new(sink, None));
-            event_display = Some(ed.clone());
-            ed
-        }
-        (None, Some(display)) => display,
-        (None, None) => Arc::new(NoopDisplay),
-    };
+    let event_display = Arc::new(EventDisplay::new(event_sink.clone(), display));
+    let display: Arc<dyn crate::ui::Display> = event_display.clone();
     let ctx = Arc::new(AgentSharedContext {
         config: config.clone(),
         cwd: cwd.clone(),
@@ -403,6 +392,92 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(cwd).await;
     }
 
+    #[tokio::test]
+    async fn stream_turn_without_event_sink_emits_text_and_final_events() {
+        let home = unique_temp_dir("mock-stream-home");
+        let cwd = unique_temp_dir("mock-stream-cwd");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+
+        let runtime = build_runtime(runtime_config_with_mock(&home, &cwd, mock_llm_hello()))
+            .await
+            .unwrap();
+
+        let mut stream = runtime.stream_turn("say hello");
+        let mut saw_text = false;
+        let mut saw_final = false;
+        while let Some(event) =
+            tokio::time::timeout(tokio::time::Duration::from_secs(2), stream.recv())
+                .await
+                .expect("stream event timed out")
+        {
+            match event {
+                AgentEvent::Text { content } if content == "Hello, world!" => {
+                    saw_text = true;
+                }
+                AgentEvent::Final { outcome } => {
+                    assert_eq!(outcome.status, crate::agent::orchestrator::TurnStatus::Ok);
+                    saw_final = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(saw_text, "expected streaming Text event without EventSink");
+        assert!(saw_final, "expected streaming Final event");
+        let outcome = stream.outcome().await.unwrap();
+        assert_eq!(outcome.status, crate::agent::orchestrator::TurnStatus::Ok);
+
+        runtime.shutdown().await.unwrap();
+        let _ = tokio::fs::remove_dir_all(home).await;
+        let _ = tokio::fs::remove_dir_all(cwd).await;
+    }
+
+    #[tokio::test]
+    async fn stream_outcome_succeeds_without_draining_events() {
+        let home = unique_temp_dir("mock-stream-outcome-home");
+        let cwd = unique_temp_dir("mock-stream-outcome-cwd");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+
+        let runtime = build_runtime(runtime_config_with_mock(&home, &cwd, mock_llm_hello()))
+            .await
+            .unwrap();
+
+        let stream = runtime.stream_turn("say hello");
+        let outcome = stream.outcome().await.unwrap();
+        assert_eq!(outcome.status, crate::agent::orchestrator::TurnStatus::Ok);
+        assert!(outcome.text.contains("Hello, world!"));
+
+        runtime.shutdown().await.unwrap();
+        let _ = tokio::fs::remove_dir_all(home).await;
+        let _ = tokio::fs::remove_dir_all(cwd).await;
+    }
+
+    #[tokio::test]
+    async fn try_stream_turn_reports_concurrent_turn_as_error() {
+        let home = unique_temp_dir("mock-stream-concurrent-home");
+        let cwd = unique_temp_dir("mock-stream-concurrent-cwd");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+
+        let runtime = build_runtime(runtime_config_with_mock(&home, &cwd, mock_llm_hello()))
+            .await
+            .unwrap();
+
+        let stream = runtime.try_stream_turn("say hello").unwrap();
+        let err = match runtime.try_stream_turn("second stream") {
+            Ok(_) => panic!("concurrent stream should fail"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("stream_turn already in progress"));
+
+        let outcome = stream.outcome().await.unwrap();
+        assert_eq!(outcome.status, crate::agent::orchestrator::TurnStatus::Ok);
+
+        runtime.shutdown().await.unwrap();
+        let _ = tokio::fs::remove_dir_all(home).await;
+        let _ = tokio::fs::remove_dir_all(cwd).await;
+    }
+
     /// Run three consecutive turns with a mock LLM to verify the runtime
     /// can handle successive completions without state corruption.
     #[tokio::test]
@@ -526,10 +601,7 @@ mod tests {
 
         // Next turn must still run successfully.
         let outcome2 = runtime.run_turn("recovery turn").await.unwrap();
-        assert_eq!(
-            outcome2.status,
-            crate::agent::orchestrator::TurnStatus::Ok
-        );
+        assert_eq!(outcome2.status, crate::agent::orchestrator::TurnStatus::Ok);
 
         runtime.shutdown().await.unwrap();
         let _ = tokio::fs::remove_dir_all(home).await;
@@ -615,13 +687,13 @@ mod tests {
         runtime.shutdown().await.unwrap();
 
         let events = sink.events.lock().unwrap();
-        let has_tool_call = events.iter().any(|e| matches!(e, AgentEvent::ToolCall { .. }));
+        let has_tool_call = events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::ToolCall { .. }));
         let has_tool_result = events
             .iter()
             .any(|e| matches!(e, AgentEvent::ToolResult { .. }));
-        let has_final = events
-            .iter()
-            .any(|e| matches!(e, AgentEvent::Final { .. }));
+        let has_final = events.iter().any(|e| matches!(e, AgentEvent::Final { .. }));
 
         assert!(has_tool_call, "expected ToolCall event");
         assert!(has_tool_result, "expected ToolResult event");
@@ -631,5 +703,39 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(cwd).await;
     }
 
-}
+    #[tokio::test]
+    async fn stream_turn_without_event_sink_emits_tool_events() {
+        let home = unique_temp_dir("mock-tool-stream-home");
+        let cwd = unique_temp_dir("mock-tool-stream-cwd");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
 
+        let runtime = build_runtime(runtime_config_with_mock(&home, &cwd, mock_llm_tool_use()))
+            .await
+            .unwrap();
+
+        let mut stream = runtime.stream_turn("run echo hello");
+        let mut saw_tool_call = false;
+        let mut saw_tool_result = false;
+        while let Some(event) =
+            tokio::time::timeout(tokio::time::Duration::from_secs(2), stream.recv())
+                .await
+                .expect("stream event timed out")
+        {
+            match event {
+                AgentEvent::ToolCall { .. } => saw_tool_call = true,
+                AgentEvent::ToolResult { .. } => saw_tool_result = true,
+                AgentEvent::Final { .. } => break,
+                _ => {}
+            }
+        }
+
+        let outcome = stream.outcome().await.unwrap();
+        assert_eq!(outcome.status, crate::agent::orchestrator::TurnStatus::Ok);
+        assert!(saw_tool_call, "expected streaming ToolCall event");
+        assert!(saw_tool_result, "expected streaming ToolResult event");
+
+        runtime.shutdown().await.unwrap();
+        let _ = tokio::fs::remove_dir_all(home).await;
+        let _ = tokio::fs::remove_dir_all(cwd).await;
+    }
+}

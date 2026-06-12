@@ -23,6 +23,7 @@ pub struct AgentOptions {
     session: SessionPolicy,
     session_overridden: bool,
     first_prompt: Option<String>,
+    first_prompt_overridden: bool,
     display: Option<Arc<dyn Display>>,
     event_sink: Option<Arc<dyn EventSink>>,
     sub_stream_tx: Option<Arc<dyn SubAgentStreamSink>>,
@@ -41,7 +42,7 @@ impl AgentOptions {
 
     /// Create options from a complete mink [`Config`].
     pub fn from_config(config: Config, home: impl Into<PathBuf>, cwd: impl Into<PathBuf>) -> Self {
-        let first_prompt = (!config.prompt.trim().is_empty()).then(|| config.prompt.clone());
+        let first_prompt = first_prompt_from_config(&config);
         let session = session_policy_from_config(&config);
         Self {
             config,
@@ -50,6 +51,7 @@ impl AgentOptions {
             session,
             session_overridden: false,
             first_prompt,
+            first_prompt_overridden: false,
             display: None,
             event_sink: None,
             sub_stream_tx: None,
@@ -68,7 +70,9 @@ impl AgentOptions {
     }
 
     pub fn with_config(mut self, config: Config) -> Self {
-        self.first_prompt = (!config.prompt.trim().is_empty()).then(|| config.prompt.clone());
+        if !self.first_prompt_overridden {
+            self.first_prompt = first_prompt_from_config(&config);
+        }
         if !self.session_overridden {
             self.session = session_policy_from_config(&config);
         }
@@ -110,6 +114,7 @@ impl AgentOptions {
     /// Set the metadata first prompt without changing turn execution input.
     pub fn with_first_prompt(mut self, first_prompt: impl Into<String>) -> Self {
         self.first_prompt = Some(first_prompt.into());
+        self.first_prompt_overridden = true;
         self
     }
 
@@ -216,6 +221,11 @@ impl AgentOptions {
         self
     }
 
+    /// Set sandbox configuration on the embedded runtime config.
+    ///
+    /// This does not sandbox the current process. Full process isolation still
+    /// requires an executable boundary: call `sandbox::reexec_in_sandbox()` from
+    /// a CLI/SDK process or a private hidden worker before starting the runtime.
     pub fn with_sandbox(mut self, sandbox: SandboxConfig) -> Self {
         self.config.sandbox = sandbox;
         self
@@ -289,6 +299,9 @@ impl AgentOptions {
         if !self.session_overridden {
             self.session = session_policy_from_config(&self.config);
         }
+        if !self.first_prompt_overridden {
+            self.first_prompt = first_prompt_from_config(&self.config);
+        }
         let runtime_config = AgentRuntimeConfig {
             config: self.config,
             home: self.home,
@@ -313,6 +326,10 @@ fn session_policy_from_config(config: &Config) -> SessionPolicy {
     } else {
         SessionPolicy::New
     }
+}
+
+fn first_prompt_from_config(config: &Config) -> Option<String> {
+    (!config.prompt.trim().is_empty()).then(|| config.prompt.clone())
 }
 
 impl TryFrom<AgentOptions> for AgentRuntimeConfig {
@@ -412,11 +429,29 @@ mod tests {
         let runtime_config = options.into_runtime_config();
 
         assert_eq!(runtime_config.config.prompt, "from config mut");
+        assert_eq!(
+            runtime_config.first_prompt.as_deref(),
+            Some("from config mut")
+        );
         assert!(runtime_config.config.agent_jsonl);
         assert!(matches!(
             runtime_config.session,
             SessionPolicy::UseOrCreate(ref value) if value == "via-config-mut"
         ));
+    }
+
+    #[test]
+    fn options_explicit_first_prompt_overrides_config_prompt() {
+        let mut options =
+            AgentOptions::new("/tmp/mink-home", "/tmp/project").with_first_prompt("metadata only");
+        options.config_mut().prompt = "turn prompt".to_string();
+        let runtime_config = options.into_runtime_config();
+
+        assert_eq!(runtime_config.config.prompt, "turn prompt");
+        assert_eq!(
+            runtime_config.first_prompt.as_deref(),
+            Some("metadata only")
+        );
     }
 
     #[test]

@@ -61,27 +61,16 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
 
     apply_config_file(&mut cfg);
 
-    // In agent-jsonl mode, skip the API key bail so that parse failures
-    // (e.g. missing required fields) can return a final JSON error event
-    // before requiring credentials. The key is checked later on execution.
-    if cfg.agent_jsonl {
-        let _ = apply_provider_defaults(&mut cfg);
-    } else {
+    if !cfg.agent_jsonl {
         apply_provider_defaults(&mut cfg)?;
-    }
-
-    // ═══ Self-sandboxing: re-exec into nsjail/bwrap/sandbox-exec ═══
-    // This must happen BEFORE any stdin reading (Agent JSONL) so that
-    // the sandboxed child process inherits the original stdin pipe
-    // with its data still intact.
-    if cfg.sandbox.is_active() {
-        let current_exe = std::env::current_exe().unwrap_or_default();
-        let args: Vec<String> = std::env::args().collect();
-        crate::sandbox::reexec_in_sandbox(&cfg.sandbox, &current_exe, &args);
+        reexec_if_sandbox(&cfg);
     }
 
     // ═══ SDK protocol mode: early stdin parsing (before context creation) ═══
     let sdk_request: Option<SdkRequest> = if cfg.agent_jsonl {
+        // Self-sandboxing must happen before reading SDK stdin so the
+        // sandboxed child process inherits the original pipe with data intact.
+        reexec_if_sandbox(&cfg);
         let mut input = String::new();
         tokio::io::AsyncReadExt::read_to_string(&mut tokio::io::stdin(), &mut input).await?;
         let req = match parse_agent_jsonl_request(&input) {
@@ -109,6 +98,9 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
         None
     };
 
+    if cfg.agent_jsonl {
+        apply_provider_defaults(&mut cfg)?;
+    }
 
     let prompt_for_title = sdk_request
         .as_ref()
@@ -245,6 +237,14 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
     Ok(CliExit {
         code: process_exit_code,
     })
+}
+
+fn reexec_if_sandbox(cfg: &crate::config::Config) {
+    if cfg.sandbox.is_active() {
+        let current_exe = std::env::current_exe().unwrap_or_default();
+        let args: Vec<String> = std::env::args().collect();
+        crate::sandbox::reexec_in_sandbox(&cfg.sandbox, &current_exe, &args);
+    }
 }
 
 fn emit_stream_json_final_if_needed(

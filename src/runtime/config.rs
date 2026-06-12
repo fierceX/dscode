@@ -1,9 +1,9 @@
 use crate::config::Config;
-use crate::runtime::EventSink;
-use crate::session::paths::Paths;
-use crate::ui::{Display, StatsSnapshot, SubAgentStreamSink};
 #[cfg(test)]
 use crate::llm::client::LlmClient;
+use crate::runtime::EventSink;
+use crate::session::paths::Paths;
+use crate::ui::{Display, SubAgentStreamSink};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -136,29 +136,4 @@ impl SessionInfo {
             plan_draft_path: paths.plan_draft.clone(),
         }
     }
-}
-
-#[derive(Default)]
-pub(crate) struct NoopDisplay;
-
-impl Display for NoopDisplay {
-    fn render_thinking(&self, _content: &str) {}
-    fn render_text(&self, _content: &str) {}
-    fn render_tool_call(&self, _name: &str, _summary: &str) {}
-    fn render_tool_result(&self, _tool_name: &str, _content_preview: &str) {}
-    fn render_stop(&self) {}
-    fn render_error(&self, _message: &str) {}
-    fn render_retry(&self) {}
-    fn render_info(&self, _msg: &str) {}
-    fn render_title_update(&self, _model: &str, _stats: &StatsSnapshot) {}
-    fn render_sub_agent_status(
-        &self,
-        _session_id: &str,
-        _status: &str,
-        _in_tokens: u64,
-        _out_tokens: u64,
-    ) {
-    }
-    fn render_prompt(&self) {}
-    fn render_clear_line(&self) {}
 }

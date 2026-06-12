@@ -4,7 +4,7 @@ use crate::context::AgentSharedContext;
 use crate::runtime::config::SessionInfo;
 use crate::runtime::events::EventDisplay;
 use crate::runtime::{AgentEvent, EventSink};
-use anyhow::Result;
+use anyhow::{Result, bail};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{mpsc, oneshot};
@@ -46,7 +46,7 @@ impl TurnOutcome {
 /// yields `None`, call [`AgentEventStream::outcome`] to finalize.
 pub struct AgentEventStream {
     pub rx: tokio::sync::mpsc::UnboundedReceiver<AgentEvent>,
-    pub handle: JoinHandle<()>,
+    pub handle: JoinHandle<TurnOutcome>,
 }
 
 impl AgentEventStream {
@@ -55,15 +55,7 @@ impl AgentEventStream {
     }
 
     pub async fn outcome(self) -> Result<TurnOutcome> {
-        self.handle.await?;
-        let mut last_final: Option<TurnOutcome> = None;
-        let mut rx = self.rx;
-        while let Ok(event) = rx.try_recv() {
-            if let AgentEvent::Final { outcome } = event {
-                last_final = Some(outcome);
-            }
-        }
-        last_final.ok_or_else(|| anyhow::anyhow!("turn stream ended without Final event"))
+        Ok(self.handle.await?)
     }
 }
 
@@ -74,7 +66,7 @@ pub struct AgentRuntime {
     pub(crate) orch_handle: JoinHandle<()>,
     pub(crate) session: SessionInfo,
     pub(crate) event_sink: Option<Arc<dyn EventSink>>,
-    pub(crate) event_display: Option<Arc<EventDisplay>>,
+    pub(crate) event_display: Arc<EventDisplay>,
     pub(crate) stream_in_progress: Arc<AtomicBool>,
 }
 
@@ -115,15 +107,25 @@ impl AgentRuntime {
 
     /// Execute a turn and stream events as they happen.
     ///
+    /// Prefer [`AgentRuntime::try_stream_turn`] in service code that needs to
+    /// report concurrent-turn conflicts as ordinary errors.
+    ///
     /// # Panics
     ///
     /// Panics if another `stream_turn()` is already in progress.
     pub fn stream_turn(&self, input: impl Into<String>) -> AgentEventStream {
-        if self
-            .stream_in_progress
-            .swap(true, Ordering::SeqCst)
-        {
-            panic!("stream_turn already in progress");
+        self.try_stream_turn(input)
+            .expect("stream_turn already in progress")
+    }
+
+    /// Execute a turn and stream events as they happen.
+    ///
+    /// This is the non-panicking form of [`AgentRuntime::stream_turn`]. It
+    /// returns an error when another streaming turn is already active on the
+    /// same runtime.
+    pub fn try_stream_turn(&self, input: impl Into<String>) -> Result<AgentEventStream> {
+        if self.stream_in_progress.swap(true, Ordering::SeqCst) {
+            bail!("stream_turn already in progress");
         }
         let flag = self.stream_in_progress.clone();
         let (tx, rx) = mpsc::unbounded_channel();
@@ -132,10 +134,9 @@ impl AgentRuntime {
         let session = self.session.clone();
         let store = self.ctx.store.clone();
         let event_display = self.event_display.clone();
+        let event_sink = self.event_sink.clone();
 
-        if let Some(ref ed) = event_display {
-            ed.set_turn_channel(tx.clone());
-        }
+        event_display.set_turn_channel(tx.clone());
 
         let handle = tokio::spawn(async move {
             let (done_tx, done_rx) = oneshot::channel();
@@ -143,27 +144,31 @@ impl AgentRuntime {
                 input,
                 done: done_tx,
             });
-            let result = done_rx.await.unwrap_or_else(|e| {
-                TurnRunResult::failed(format!("orchestrator: {e}"))
-            });
+            let result = done_rx
+                .await
+                .unwrap_or_else(|e| TurnRunResult::failed(format!("orchestrator: {e}")));
 
             let (text, thinking) = match store.lines().await {
                 Ok(messages) => extract_text_thinking(&messages),
                 Err(_) => (String::new(), String::new()),
             };
 
-            if let Some(ref ed) = event_display {
-                ed.clear_turn_channel();
-            }
+            event_display.clear_turn_channel();
 
-            let _ = tx.send(AgentEvent::Final {
-                outcome: TurnOutcome::from_run_result(result, session, text, thinking),
-            });
+            let outcome = TurnOutcome::from_run_result(result, session, text, thinking);
+            let final_event = AgentEvent::Final {
+                outcome: outcome.clone(),
+            };
+            if let Some(sink) = event_sink {
+                sink.on_event(final_event.clone());
+            }
+            let _ = tx.send(final_event);
 
             flag.store(false, Ordering::SeqCst);
+            outcome
         });
 
-        AgentEventStream { rx, handle }
+        Ok(AgentEventStream { rx, handle })
     }
 
     pub async fn compact(&self) -> Result<()> {
@@ -220,7 +225,11 @@ fn extract_text_thinking(messages: &[serde_json::Value]) -> (String, String) {
             for item in content {
                 match item.get("type").and_then(|v| v.as_str()) {
                     Some("text") => {
-                        text = item.get("text").and_then(|v| v.as_str()).unwrap_or("").into();
+                        text = item
+                            .get("text")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .into();
                     }
                     Some("thinking") => {
                         thinking = item
