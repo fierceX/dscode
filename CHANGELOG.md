@@ -1,5 +1,48 @@
 # Changelog
 
+## v0.1.9 (2026-06-14)
+
+### Features
+
+- **Rust 库 API** — 新增 `mink::runtime` 公共模块，暴露 `AgentRuntime`、`AgentEventStream`、`AgentOptions` 等核心类型
+  - `run_turn()` / `stream_turn()` / `shutdown()` 完整生命周期
+  - 8 个 mock LLM 集成测试、14 种 Display→AgentEvent 覆盖测试
+- **Hidden-worker Web API 示例** — `examples/web_api.rs`，axum + 进程沙箱 + 异步任务队列
+
+### SDK & Protocol
+
+- **Session 布局支持** — 引入显式 `SessionLayout`，支持 project-scoped / home-scoped / isolated 三种路径策略
+  - CLI 和 bare `mink-core` 保持原 project-scoped 行为
+  - Python SDK 默认为 home-scoped
+  - Rust `AgentOptions` 默认 isolation session root
+- **工具过滤覆盖率提升** — `ToolConfig::filter_tools_json` 单一路径
+- **SDK JSONL success 兼容性测试** — `final_from_outcome` 字段契约
+
+### Refactor
+
+- **Workspace 拆分** — 将 Rust runtime 移入可发布的 `mink-core` crate，UI 层移入 `mink-cli` crate
+  - 根 manifest 转为 workspace，二进制名和 CLI 行为不变
+  - `mink-core` 可通过 crates.io 独立发布（无终端 UI 依赖）
+  - `crates/mink-cli` 拥有 `mink` 和 `mink-core` 二进制目标
+- **运行时边界精炼** — Runtime 上下文构造在主 runtime 和子代理间共享，单次 CLI 执行走 `AgentRuntime::run_turn`
+- **清理过时代码** — 删除 `ensure_workspace_write`（沙箱已处理文件限制）、移除 3 个关联测试、删除遗留辅助代码
+
+### Fixes
+
+- macOS 沙箱写入白名单修复：支持自定义 `MINK_HOME`，无需放通整个 `HOME`
+- 沙箱路径规范化修正（sandbox-exec subpath rules）
+- Session 恢复/继续时路径解析修复
+
+### Docs
+
+- `AGENTS.md`、`ARCHITECTURE.md`、`DESIGN.md`、`README.md` 更新
+- 更新 Python SDK 文档，记录 SessionLayout 语义和包发布说明
+
+### CI & Build
+
+- 新增 workspace 构建矩阵（`make feature-matrix`）
+- Python wheel 构建器更新为 `-p mink-cli --bin mink-core`
+- 新增 `sdk-bin` feature 控制 SDK 二进制目标
 ## v0.1.8 (2026-06-12)
 
 ### Features
