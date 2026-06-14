@@ -339,6 +339,11 @@ async fn run_hidden_worker() -> Result<(), String> {
         wa.home, wa.cwd, wa.read_dirs, wa.write_dirs,
     );
 
+    // Keep the process sandbox and embedded runtime on the same home root.
+    unsafe {
+        std::env::set_var("MINK_HOME", &wa.home);
+    }
+
     // 2. Sandbox re-exec — stdin not yet read, pipe data intact.
     let sandbox = SandboxConfig {
         enabled: true,

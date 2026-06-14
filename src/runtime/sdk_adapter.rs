@@ -161,6 +161,7 @@ mod tests {
                     "verbose": true,
                     "enabled_tools": ["Read", "Bash"],
                     "session_id": "inner",
+                    "session_layout": "home",
                     "stream_events": false
                 }
             }"#,
@@ -189,6 +190,10 @@ mod tests {
         assert_eq!(
             cfg.enabled_tools,
             Some(vec!["Read".to_string(), "Bash".to_string()])
+        );
+        assert_eq!(
+            req.options.session_layout,
+            Some(crate::runtime::SessionLayout::HomeScoped)
         );
         assert!(cfg.cli_overrides.model);
         assert!(cfg.cli_overrides.max_tokens);

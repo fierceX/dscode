@@ -2,6 +2,7 @@ use crate::cancel::CancellationToken;
 use crate::config::{Config, OutputFormat, ToolApprovalMode, ToolApprovalPolicy, ToolDisableFlags};
 use crate::session::artifacts::ArtifactManager;
 use crate::session::compaction::CompactionEngine;
+use crate::session::paths::SessionLayout;
 use crate::session::prefix::ImmutablePrefix;
 use crate::session::stats::StatsTracker;
 use crate::session::store::ConversationStore;
@@ -112,6 +113,7 @@ pub struct AgentSharedContext {
     pub config: Config,
     pub cwd: PathBuf,
     pub home: PathBuf,
+    pub session_layout: SessionLayout,
     pub api_url: String,
     pub store: Arc<ConversationStore>,
     pub artifacts: Arc<ArtifactManager>,

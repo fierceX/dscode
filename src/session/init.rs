@@ -2,7 +2,7 @@
 //! 被 main.rs 和 sub_executor.rs 共用，消除重复代码。
 
 use crate::session::artifacts::ArtifactManager;
-use crate::session::paths::{ensure_dir, paths_for};
+use crate::session::paths::{SessionLayout, ensure_dir, paths_for_layout};
 use crate::session::stats::StatsTracker;
 use crate::session::store::ConversationStore;
 use std::sync::Arc;
@@ -18,7 +18,25 @@ pub async fn init_session_base(
     Arc<StatsTracker>,
     Arc<ArtifactManager>,
 )> {
-    let paths = paths_for(home, cwd, session_id);
+    init_session_base_with_layout(home, cwd, session_id, SessionLayout::ProjectScoped).await
+}
+
+/// Initialize session files with an explicit filesystem layout.
+///
+/// This is the layout-aware variant used by embedded runtimes. Keeping the
+/// setup here prevents the store, event log, stats, and artifacts from
+/// accidentally being initialized under different session roots.
+pub async fn init_session_base_with_layout(
+    home: &std::path::Path,
+    cwd: &std::path::Path,
+    session_id: &str,
+    layout: SessionLayout,
+) -> anyhow::Result<(
+    Arc<ConversationStore>,
+    Arc<StatsTracker>,
+    Arc<ArtifactManager>,
+)> {
+    let paths = paths_for_layout(home, cwd, session_id, layout);
     ensure_dir(&paths.session_dir).await?;
     ensure_dir(&paths.artifacts).await?;
 

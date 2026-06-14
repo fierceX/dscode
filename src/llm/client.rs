@@ -442,6 +442,7 @@ mod tests {
             config: cfg.clone(),
             cwd,
             home,
+            session_layout: crate::session::paths::SessionLayout::ProjectScoped,
             api_url: api_url.to_string(),
             store,
             artifacts,

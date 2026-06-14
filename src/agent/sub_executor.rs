@@ -94,14 +94,23 @@ impl SubAgentExecutor {
         fork: bool,
         cancel: crate::cancel::CancellationToken,
     ) -> Result<Self> {
-        let paths =
-            crate::session::paths::paths_for(&parent_ctx.home, &parent_ctx.cwd, &session_id);
+        let paths = crate::session::paths::paths_for_layout(
+            &parent_ctx.home,
+            &parent_ctx.cwd,
+            &session_id,
+            parent_ctx.session_layout,
+        );
         crate::session::paths::ensure_dir(&paths.session_dir).await?;
 
         // 共享初始化：创建文件、store、stats
         let (child_store, child_stats, child_artifacts) =
-            crate::session::init::init_session_base(&parent_ctx.home, &parent_ctx.cwd, &session_id)
-                .await?;
+            crate::session::init::init_session_base_with_layout(
+                &parent_ctx.home,
+                &parent_ctx.cwd,
+                &session_id,
+                parent_ctx.session_layout,
+            )
+            .await?;
 
         if fork {
             // Copy parent conversation, summary, plan to child session (ignore errors)
@@ -142,6 +151,7 @@ impl SubAgentExecutor {
             config: parent_ctx.config.clone(),
             cwd: parent_ctx.cwd.clone(),
             home: parent_ctx.home.clone(),
+            session_layout: parent_ctx.session_layout,
             api_url: parent_ctx.api_url.clone(),
             store: child_store.clone(),
             artifacts: child_artifacts,

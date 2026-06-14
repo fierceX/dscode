@@ -105,7 +105,8 @@ print(result["text"])
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `mink_home` | `~/.mink/` | 会话存储目录。也可通过 `MINK_HOME` 环境变量设置 |
+| `mink_home` | 用户 home 目录 | 传给 Rust 的 `MINK_HOME` 根目录。也可通过 `MINK_HOME` 环境变量设置 |
+| `session_layout` | `"home"` | session 路径布局。Python SDK 默认写入 `mink_home/.mink/sessions/<session_id>`；可设为 `"project"` 使用 CLI 兼容布局，`"direct"` 写入 `mink_home/<session_id>`，或 `"isolated"` 直接使用 `mink_home` 作为当前 session 目录 |
 | `mission_file` | `None` | 自定义系统提示词文件路径（MISSION.md） |
 | `mission_content` | `None` | 自定义系统提示词内容（字符串），与 `mission_file` 二选一 |
 | `cwd` | 当前目录 | agent 的工作目录 |
@@ -212,7 +213,7 @@ MINK_SDK_FEATURES="sdk python-sandbox" python scripts/build_wheel.py
     ],
     "status": "ok",
     "session_id": "20260606-101500-abcd",
-    "events_path": "/Users/me/.mink/projects/-path-to-project/20260606-101500-abcd/events.jsonl",
+    "events_path": "/Users/me/.mink/sessions/20260606-101500-abcd/events.jsonl",
     "exit_code": 0,
     "error": None,
     "stderr": ""

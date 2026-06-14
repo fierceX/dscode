@@ -391,7 +391,28 @@ mink --tui
 
 ## 会话管理
 
+### Session layout
+
+`MINK_HOME` 是 session 持久化的 home 根目录，默认是 `$HOME`。不同入口使用不同 layout 推导最终
+session 目录：
+
+| Layout | `home` 含义 | 最终 session 目录 | 默认入口 |
+|--------|-------------|-------------------|----------|
+| `project` | 用户/服务根目录 | `home/.mink/projects/<project_key(cwd)>/<session_id>/` | CLI、裸 `mink-core --agent-jsonl` |
+| `home` | 用户/服务根目录 | `home/.mink/sessions/<session_id>/` | Python SDK |
+| `direct` | mink session 集合根目录 | `home/<session_id>/` | 显式配置 |
+| `isolated` | 当前 session 根目录 | `home/` | Rust `AgentOptions` |
+
+选择建议：
+
+- 终端用户和 CLI 自动使用 `project`，同一个 `MINK_HOME` 下按项目隔离。
+- Python SDK 默认 `home`，适合一个 SDK home 管理多个独立 session。
+- Rust API 服务如果已经为每个任务创建了独立目录，例如 `default/<task_id>/.mink_home/`，用 `isolated`。
+- 如果服务有一个共享 mink 根目录，例如 `/var/lib/my-service/mink/`，并希望 mink 自己按 session 分目录，用 `direct`。
+
 ### 目录结构
+
+CLI 的历史目录结构是 `project` layout：
 
 ```
 ~/.mink/
@@ -423,7 +444,9 @@ mink -m flash --continue -i
 mink --list-sessions
 ```
 
-`session_id` 仍是稳定内部目录名，默认使用时间戳和随机后缀。`--session my-fix` 会先按 alias、完整 id、id 前缀和 title 匹配已有 session；匹配不到时创建新的时间戳 session，并把 `my-fix` 写入 `session.json` 的 alias。带空格或特殊字符的名称会规范化为安全 alias，例如 `feature x` 会保存并解析为 `feature-x`。如果某个 `session.json` 损坏，列表和解析会回退到目录名与 `summary.txt`，不会阻断其他 session。`--list-sessions` 优先展示 alias/title，同时保留内部 id。
+`session_id` 是稳定内部 ID，默认使用时间戳和随机后缀。除 `isolated` 外，它通常也是最终目录名；
+`isolated` 中 `home` 自身就是 session 目录，`session_id` 仍写入 `session.json` 并出现在事件/SDK final 中。
+`--session my-fix` 会先按 alias、完整 id、id 前缀和 title 匹配已有 session；匹配不到时创建新的时间戳 session，并把 `my-fix` 写入 `session.json` 的 alias。带空格或特殊字符的名称会规范化为安全 alias，例如 `feature x` 会保存并解析为 `feature-x`。如果某个 `session.json` 损坏，列表和解析会回退到目录名与 `summary.txt`，不会阻断其他 session。`--list-sessions` 优先展示 alias/title，同时保留内部 id。
 
 `--continue` 自动选择最近修改的 session。恢复时会 replay 最近 10 轮 LLM 响应事件，在交互式终端重新渲染历史对话。
 

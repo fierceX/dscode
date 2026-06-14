@@ -150,6 +150,12 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
         AgentRuntimeConfig::from_config(cfg.clone(), home.clone(), cwd.clone())
             .with_display(display.clone())
             .with_first_prompt(prompt_for_title);
+    if let Some(layout) = sdk_request
+        .as_ref()
+        .and_then(|request| request.options.session_layout)
+    {
+        runtime_config = runtime_config.with_session_layout(layout);
+    }
     if let Some(sub_stream_tx) = sub_stream_tx {
         runtime_config = runtime_config.with_sub_stream_tx(sub_stream_tx);
     }

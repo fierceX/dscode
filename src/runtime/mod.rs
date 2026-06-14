@@ -5,6 +5,7 @@ mod handle;
 mod options;
 mod sdk_adapter;
 
+pub use crate::session::paths::SessionLayout;
 /// Build a full mink runtime from configuration.
 ///
 /// This is the library entry point used by the `mink` and `mink-core` binaries.

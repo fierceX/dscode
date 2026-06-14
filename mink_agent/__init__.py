@@ -119,9 +119,14 @@ def _find_binary() -> str:
 
 def _default_home() -> str:
     """Return the default ``MINK_HOME`` path."""
-    base = os.path.join(Path.home(), ".mink")
+    base = str(Path.home())
     os.makedirs(base, exist_ok=True)
     return base
+
+
+def _state_dir(home: str) -> str:
+    """Return mink's state directory under a Rust-style MINK_HOME root."""
+    return os.path.join(home, ".mink")
 
 
 # ── SandboxConfig ────────────────────────────────────────────────────
@@ -133,8 +138,9 @@ class SandboxConfig:
     Parameters
     ----------
     mink_home:
-        Session storage directory.  Defaults to ``~/.mink/``.
-        Also read from the ``MINK_HOME`` environment variable.
+        Home root passed to Rust as ``MINK_HOME``. Defaults to the user's home
+        directory, so SDK sessions use ``~/.mink/sessions`` by default. Also
+        read from the ``MINK_HOME`` environment variable.
     mission_file:
         Path to a MISSION.md file.  When set, replaces the default system
         prompt sections with those defined in the file.  Each ``# heading``
@@ -198,6 +204,10 @@ class SandboxConfig:
         if unset, mink defaults to ``"full"``.
     cwd:
         Working directory for the agent (default: current working directory).
+    session_layout:
+        Session storage layout passed to ``mink-core``. ``"home"`` is the SDK
+        default and stores sessions under ``mink_home/.mink/sessions``;
+        ``"isolated"`` uses ``mink_home`` itself as the session directory.
     """
 
     # Paths
@@ -251,6 +261,7 @@ class SandboxConfig:
 
     # Session
     session_id: str = ""
+    session_layout: str = "home"
 
     # Signal system
     signal_mode: Optional[str] = None
@@ -741,7 +752,7 @@ class AgentSession:
     def _build_request(self, prompt: str, extra_options: Optional[dict]) -> str:
         """Build the Agent JSONL request string."""
         self._validate_request_config()
-        options: dict[str, bool | str | int] = {}
+        options: dict[str, Any] = {}
         if not self._config.allow_bash:
             options["disable_bash"] = True
         if not self._config.allow_sub_agent:
@@ -773,6 +784,8 @@ class AgentSession:
             options["stream_events"] = False
         if self._config.enabled_tools is not None:
             options["enabled_tools"] = self._config.enabled_tools
+        if self._config.session_layout:
+            options["session_layout"] = self._config.session_layout
         if extra_options:
             options.update(extra_options)
 
@@ -809,6 +822,8 @@ class AgentSession:
                 raise ValueError(f"{name} must be greater than 0")
         if cfg.llm_wait_heartbeat < 0:
             raise ValueError("llm_wait_heartbeat must be zero or greater")
+        if cfg.session_layout not in ("project", "home", "direct", "isolated"):
+            raise ValueError("session_layout must be 'project', 'home', 'direct', or 'isolated'")
 
     def _build_sandbox_cmd(self) -> list[str]:
         """Build the full command line: sandbox wrapper + mink-core binary."""
@@ -825,8 +840,11 @@ class AgentSession:
         sandbox_active = cfg.sandbox_backend.strip().lower() != "off"
 
         if sandbox_active:
-            # Sandbox: copy to MINK_HOME for guaranteed accessibility
-            dest = os.path.join(self._home or _default_home(), f"_mission-{uuid.uuid4().hex}.md")
+            # Sandbox: copy under MINK_HOME/.mink for guaranteed accessibility.
+            dest = os.path.join(
+                _state_dir(self._home or _default_home()),
+                f"_mission-{uuid.uuid4().hex}.md",
+            )
             os.makedirs(os.path.dirname(dest), exist_ok=True)
             if os.path.abspath(cfg.mission_file) != os.path.abspath(dest):
                 shutil.copy2(cfg.mission_file, dest)

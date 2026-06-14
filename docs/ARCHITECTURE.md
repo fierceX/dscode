@@ -270,6 +270,25 @@ pub struct ToolResultDisplay<'a> {
 
 ## Session 结构
 
+Session 文件固定包含 conversation、events、metadata、summary、plan、stats 和 artifacts；差异只在
+session 根目录如何由 `home`、`cwd`、`session_id` 推导。当前有四种 layout：
+
+| Layout | `home` 含义 | session 目录 |
+|--------|-------------|--------------|
+| `project` / `ProjectScoped` | 用户或服务根目录 | `home/.mink/projects/<project_key(cwd)>/<session_id>/` |
+| `home` / `HomeScoped` | 用户或服务根目录 | `home/.mink/sessions/<session_id>/` |
+| `direct` / `Direct` | mink session 集合根目录 | `home/<session_id>/` |
+| `isolated` / `Isolated` | 当前 session 根目录 | `home/` |
+
+默认入口：
+
+- `mink` 和裸 `mink-core --agent-jsonl` 使用 `project`，保持历史 CLI 行为。
+- Python SDK 默认使用 `home`，适合同一个 SDK home 下管理多个 session。
+- Rust 嵌入式 `AgentOptions` 默认使用 `isolated`，适合外层服务已经按任务/session 创建独立目录。
+- `direct` 适合服务持有一个共享 mink 根目录，但仍希望 mink 按 `session_id` 分目录。
+
+以 `project` layout 为例：
+
 ```text
 ~/.mink/projects/<project_key>/<session_id>/
 ├── conversation.jsonl
@@ -284,7 +303,9 @@ pub struct ToolResultDisplay<'a> {
     └── <tool>-0001.txt
 ```
 
-`MINK_HOME` 可覆盖默认 home。`session_id` 是稳定内部目录名；`session.json` 保存用户可读的 alias、title、cwd 和时间戳。`--session NAME` 会按 alias、完整 id、id 前缀和 title 解析已有 session，匹配不到时创建新的时间戳 session 并把 NAME 规范化为安全 alias。列表和解析路径对损坏的 `session.json` 采用 legacy fallback，不让单个坏 metadata 阻断恢复。`--continue` 会选择最近修改的 session。
+`MINK_HOME` 可覆盖 CLI/SDK 的 home 根。`session_id` 是稳定内部 ID；除 `isolated` 外，它通常也是最终目录名。
+`isolated` 中 `home` 自身就是 session 目录，`session_id` 仍写入 `session.json` 并用于事件、SDK final 和恢复引用。
+`session.json` 保存用户可读的 alias、title、cwd 和时间戳。`--session NAME` 会按 alias、完整 id、id 前缀和 title解析已有 session，匹配不到时创建新的时间戳 session 并把 NAME 规范化为安全 alias。列表和解析路径对损坏的 `session.json` 采用 legacy fallback，不让单个坏 metadata 阻断恢复。`--continue` 会选择当前 layout 下最近修改的 session。
 
 ---
 

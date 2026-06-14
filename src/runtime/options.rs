@@ -3,6 +3,7 @@ use crate::config::{
     ToolDisableFlags,
 };
 use crate::runtime::{AgentRuntimeConfig, EventSink, SessionPolicy};
+use crate::session::paths::SessionLayout;
 use crate::ui::{Display, SubAgentStreamSink};
 use anyhow::Result;
 use std::collections::BTreeMap;
@@ -21,6 +22,7 @@ pub struct AgentOptions {
     home: PathBuf,
     cwd: PathBuf,
     session: SessionPolicy,
+    session_layout: SessionLayout,
     session_overridden: bool,
     first_prompt: Option<String>,
     first_prompt_overridden: bool,
@@ -31,6 +33,14 @@ pub struct AgentOptions {
 
 impl AgentOptions {
     /// Create options from default mink configuration and explicit home/cwd.
+    ///
+    /// `AgentOptions` defaults to [`SessionLayout::Isolated`]: the supplied
+    /// `home` is treated as the concrete session directory. Use
+    /// [`AgentOptions::with_direct_sessions`] when `home` is a shared root that
+    /// should contain one child directory per `session_id`, or
+    /// [`AgentOptions::with_home_scoped_sessions`] /
+    /// [`AgentOptions::with_project_scoped_sessions`] for SDK/CLI-compatible
+    /// layouts.
     ///
     /// Provider defaults, config files, and environment merging are not applied
     /// here. CLI callers should keep using the CLI adapter; embedded callers
@@ -49,6 +59,7 @@ impl AgentOptions {
             home: home.into(),
             cwd: cwd.into(),
             session,
+            session_layout: SessionLayout::Isolated,
             session_overridden: false,
             first_prompt,
             first_prompt_overridden: false,
@@ -94,6 +105,30 @@ impl AgentOptions {
         self.session = session;
         self.session_overridden = true;
         self
+    }
+
+    pub fn with_session_layout(mut self, layout: SessionLayout) -> Self {
+        self.session_layout = layout;
+        self
+    }
+
+    pub fn with_project_scoped_sessions(self) -> Self {
+        self.with_session_layout(SessionLayout::ProjectScoped)
+    }
+
+    /// Store sessions under `home/.mink/sessions/<session_id>`.
+    pub fn with_home_scoped_sessions(self) -> Self {
+        self.with_session_layout(SessionLayout::HomeScoped)
+    }
+
+    /// Store sessions under `home/<session_id>`.
+    pub fn with_direct_sessions(self) -> Self {
+        self.with_session_layout(SessionLayout::Direct)
+    }
+
+    /// Treat `home` itself as the current session directory.
+    pub fn with_isolated_sessions(self) -> Self {
+        self.with_session_layout(SessionLayout::Isolated)
     }
 
     pub fn with_display(mut self, display: Arc<dyn Display>) -> Self {
@@ -307,6 +342,7 @@ impl AgentOptions {
             home: self.home,
             cwd: self.cwd,
             session: self.session,
+            session_layout: self.session_layout,
             first_prompt: self.first_prompt,
             display: self.display,
             event_sink: self.event_sink,
@@ -379,6 +415,7 @@ mod tests {
 
         assert_eq!(runtime_config.home, PathBuf::from("/tmp/mink-home"));
         assert_eq!(runtime_config.cwd, PathBuf::from("/tmp/project"));
+        assert_eq!(runtime_config.session_layout, SessionLayout::Isolated);
         assert!(matches!(
             runtime_config.session,
             SessionPolicy::UseOrCreate(ref value) if value == "work"
@@ -490,5 +527,23 @@ mod tests {
             .into_runtime_config();
 
         assert!(matches!(runtime_config.session, SessionPolicy::New));
+    }
+
+    #[test]
+    fn options_can_override_session_layout() {
+        let runtime_config = AgentOptions::new("/tmp/mink-home", "/tmp/project")
+            .with_home_scoped_sessions()
+            .into_runtime_config();
+        assert_eq!(runtime_config.session_layout, SessionLayout::HomeScoped);
+
+        let runtime_config = AgentOptions::new("/tmp/mink-home", "/tmp/project")
+            .with_project_scoped_sessions()
+            .into_runtime_config();
+        assert_eq!(runtime_config.session_layout, SessionLayout::ProjectScoped);
+
+        let runtime_config = AgentOptions::new("/tmp/mink-home", "/tmp/project")
+            .with_direct_sessions()
+            .into_runtime_config();
+        assert_eq!(runtime_config.session_layout, SessionLayout::Direct);
     }
 }

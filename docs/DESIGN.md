@@ -652,6 +652,19 @@ OpenAI API 只在最后一个 chunk（标记为 `[DONE]`）中提供完整的 us
 
 每个 session 有独立的目录：
 
+| Layout | `home` 含义 | session 目录 |
+|--------|-------------|--------------|
+| `project` | 用户或服务根目录 | `home/.mink/projects/<project_key(cwd)>/<session_id>/` |
+| `home` | 用户或服务根目录 | `home/.mink/sessions/<session_id>/` |
+| `direct` | mink session 集合根目录 | `home/<session_id>/` |
+| `isolated` | 当前 session 根目录 | `home/` |
+
+CLI 默认使用 `project`，Python SDK 默认使用 `home`，Rust 嵌入式 `AgentOptions` 默认使用 `isolated`。
+`direct` 用于一个共享 mink 根目录下保存多个 session。`isolated` 用于外层服务已经按任务/session
+创建独立目录的场景，此时不再追加 `session_id` 子目录。
+
+以 `project` layout 为例：
+
 ```
 ~/.mink/projects/<project_key>/<session_id>/
 ├── conversation.jsonl   ← 对话消息（逐行追加 JSON）
@@ -667,6 +680,8 @@ OpenAI API 只在最后一个 chunk（标记为 `[DONE]`）中提供完整的 us
 ```
 
 `project_key` 是当前工作目录路径经过安全转义后的字符串，确保不同项目间的 session 隔离。
+`session_id` 是稳定内部 ID；除 `isolated` 外通常也是目录名。`isolated` 的目录名由外层服务决定，
+但 `session_id` 仍写入 `session.json` 并用于事件、SDK final 和恢复引用。
 
 ### JSONL 约束
 

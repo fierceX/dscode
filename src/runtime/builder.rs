@@ -23,6 +23,7 @@ pub async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRuntime> {
         home,
         cwd,
         session,
+        session_layout,
         first_prompt,
         display,
         event_sink,
@@ -31,14 +32,16 @@ pub async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRuntime> {
         llm_override,
     } = config;
 
-    let (sid, session_ref, session_alias) = resolve_session(&home, &cwd, session).await?;
+    let (sid, session_ref, session_alias) =
+        resolve_session(&home, &cwd, session, session_layout).await?;
     config.session_id = sid.clone();
 
-    let spaths = paths::paths_for(&home, &cwd, &sid);
+    let spaths = paths::paths_for_layout(&home, &cwd, &sid, session_layout);
     let new_session = !spaths.events.exists();
 
     let (store, stats, artifacts) =
-        crate::session::init::init_session_base(&home, &cwd, &sid).await?;
+        crate::session::init::init_session_base_with_layout(&home, &cwd, &sid, session_layout)
+            .await?;
     crate::session::metadata::ensure_metadata(
         &spaths,
         &cwd,
@@ -80,6 +83,7 @@ pub async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRuntime> {
         config: config.clone(),
         cwd: cwd.clone(),
         home: home.clone(),
+        session_layout,
         api_url: api_url_str,
         store,
         artifacts,
@@ -141,6 +145,7 @@ async fn resolve_session(
     home: &std::path::Path,
     cwd: &std::path::Path,
     policy: SessionPolicy,
+    layout: paths::SessionLayout,
 ) -> Result<(String, String, Option<String>)> {
     match policy {
         SessionPolicy::New => {
@@ -148,7 +153,9 @@ async fn resolve_session(
             Ok((sid.clone(), sid, None))
         }
         SessionPolicy::ContinueLatest => {
-            let sid = paths::continue_session(home, cwd).await.unwrap_or_default();
+            let sid = paths::continue_session_with_layout(home, cwd, layout)
+                .await
+                .unwrap_or_default();
             if sid.is_empty() {
                 let sid = paths::chrono_session_id();
                 Ok((sid.clone(), sid, None))
@@ -161,8 +168,10 @@ async fn resolve_session(
             if trimmed.is_empty() {
                 bail!("invalid empty session reference");
             }
-            if let Some(resolved) =
-                crate::session::metadata::resolve_session_reference(home, cwd, trimmed).await?
+            if let Some(resolved) = crate::session::metadata::resolve_session_reference_with_layout(
+                home, cwd, trimmed, layout,
+            )
+            .await?
             {
                 Ok((resolved, trimmed.to_string(), None))
             } else {
@@ -175,16 +184,23 @@ async fn resolve_session(
                 let sid = paths::chrono_session_id();
                 return Ok((sid.clone(), sid, None));
             }
-            if let Some(resolved) =
-                crate::session::metadata::resolve_session_reference(home, cwd, trimmed).await?
+            if let Some(resolved) = crate::session::metadata::resolve_session_reference_with_layout(
+                home, cwd, trimmed, layout,
+            )
+            .await?
             {
                 Ok((resolved, trimmed.to_string(), None))
             } else {
                 let alias = sanitize_alias(trimmed);
-                if alias.is_none() {
+                let Some(alias) = alias else {
                     bail!("invalid session name: {trimmed}");
-                }
-                Ok((paths::chrono_session_id(), trimmed.to_string(), alias))
+                };
+                let sid = if layout == paths::SessionLayout::ProjectScoped {
+                    paths::chrono_session_id()
+                } else {
+                    alias.clone()
+                };
+                Ok((sid, trimmed.to_string(), Some(alias)))
             }
         }
     }
@@ -238,6 +254,95 @@ mod tests {
         runtime.shutdown().await.unwrap();
         let _ = tokio::fs::remove_dir_all(session.home).await;
         let _ = tokio::fs::remove_dir_all(session.cwd).await;
+    }
+
+    #[tokio::test]
+    async fn build_runtime_respects_direct_session_layout() {
+        let home = unique_temp_dir("direct-home");
+        let cwd = unique_temp_dir("direct-cwd");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+        let cfg = Config {
+            session_id: "service-session".into(),
+            ..Config::default()
+        };
+        let runtime_config = AgentRuntimeConfig::from_config(cfg, home.clone(), cwd.clone())
+            .with_session_layout(paths::SessionLayout::Direct);
+
+        let runtime = build_runtime(runtime_config).await.unwrap();
+        let session = runtime.session_info().clone();
+
+        assert_eq!(session.session_id, "service-session");
+        assert_eq!(
+            session.conversation_path,
+            home.join("service-session/conversation.jsonl")
+        );
+        assert!(
+            !session
+                .conversation_path
+                .starts_with(home.join(".mink/projects"))
+        );
+
+        runtime.shutdown().await.unwrap();
+        let _ = tokio::fs::remove_dir_all(home).await;
+        let _ = tokio::fs::remove_dir_all(cwd).await;
+    }
+
+    #[tokio::test]
+    async fn build_runtime_respects_home_scoped_session_layout() {
+        let home = unique_temp_dir("home-scoped-home");
+        let cwd = unique_temp_dir("home-scoped-cwd");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+        let cfg = Config {
+            session_id: "sdk-session".into(),
+            ..Config::default()
+        };
+        let runtime_config = AgentRuntimeConfig::from_config(cfg, home.clone(), cwd.clone())
+            .with_session_layout(paths::SessionLayout::HomeScoped);
+
+        let runtime = build_runtime(runtime_config).await.unwrap();
+        let session = runtime.session_info().clone();
+
+        assert_eq!(session.session_id, "sdk-session");
+        assert_eq!(
+            session.conversation_path,
+            home.join(".mink/sessions/sdk-session/conversation.jsonl")
+        );
+        assert!(session.conversation_path.exists());
+
+        runtime.shutdown().await.unwrap();
+        let _ = tokio::fs::remove_dir_all(home).await;
+        let _ = tokio::fs::remove_dir_all(cwd).await;
+    }
+
+    #[tokio::test]
+    async fn build_runtime_respects_isolated_session_layout() {
+        let home = unique_temp_dir("isolated-home");
+        let cwd = unique_temp_dir("isolated-cwd");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+        let runtime_config =
+            AgentRuntimeConfig::from_config(Config::default(), home.clone(), cwd.clone())
+                .with_session_layout(paths::SessionLayout::Isolated);
+
+        let runtime = build_runtime(runtime_config).await.unwrap();
+        let session = runtime.session_info().clone();
+
+        assert!(!session.session_id.is_empty());
+        assert_eq!(session.conversation_path, home.join("conversation.jsonl"));
+        assert_eq!(session.events_path, home.join("events.jsonl"));
+        assert!(
+            !session
+                .conversation_path
+                .starts_with(home.join(&session.session_id))
+        );
+
+        let metadata: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(home.join("session.json")).unwrap())
+                .unwrap();
+        assert_eq!(metadata["id"], session.session_id);
+
+        runtime.shutdown().await.unwrap();
+        let _ = tokio::fs::remove_dir_all(home).await;
+        let _ = tokio::fs::remove_dir_all(cwd).await;
     }
 
     #[derive(Default)]

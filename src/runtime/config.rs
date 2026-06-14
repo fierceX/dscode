@@ -3,6 +3,7 @@ use crate::config::Config;
 use crate::llm::client::LlmClient;
 use crate::runtime::EventSink;
 use crate::session::paths::Paths;
+use crate::session::paths::SessionLayout;
 use crate::ui::{Display, SubAgentStreamSink};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -18,6 +19,7 @@ pub struct AgentRuntimeConfig {
     pub home: PathBuf,
     pub cwd: PathBuf,
     pub session: SessionPolicy,
+    pub session_layout: SessionLayout,
     pub first_prompt: Option<String>,
     pub display: Option<Arc<dyn Display>>,
     pub event_sink: Option<Arc<dyn EventSink>>,
@@ -50,6 +52,7 @@ impl AgentRuntimeConfig {
             home,
             cwd,
             session,
+            session_layout: SessionLayout::ProjectScoped,
             first_prompt,
             display: None,
             event_sink: None,
@@ -78,13 +81,23 @@ impl AgentRuntimeConfig {
         self.first_prompt = first_prompt;
         self
     }
+
+    pub fn with_session_layout(mut self, layout: SessionLayout) -> Self {
+        self.session_layout = layout;
+        self
+    }
 }
 
 /// Session selection policy for embedded callers.
 ///
-/// `UseOrCreate` matches the historical `--session NAME` behavior: resolve an
-/// existing reference when possible, otherwise create a new session with that
-/// alias. `Resume` is stricter and fails if the reference does not exist.
+/// `UseOrCreate` resolves an existing reference when possible. In the
+/// historical project-scoped CLI layout, a missing reference creates a fresh
+/// timestamped session and stores the reference as its alias. In `Direct` and
+/// `HomeScoped` layouts, a missing reference becomes the sanitized concrete
+/// session directory so services can address sessions predictably. In
+/// `Isolated`, the supplied home is already the session directory; the resolved
+/// id is still written to metadata and events, but no child directory is
+/// appended. `Resume` is stricter and fails if the reference does not exist.
 #[derive(Debug, Clone)]
 pub enum SessionPolicy {
     New,
@@ -135,5 +148,21 @@ impl SessionInfo {
             plan_path: paths.plan.clone(),
             plan_draft_path: paths.plan_draft.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_config_defaults_to_project_scoped_sessions() {
+        let runtime_config = AgentRuntimeConfig::from_config(
+            Config::default(),
+            PathBuf::from("/tmp/mink-home"),
+            PathBuf::from("/tmp/project"),
+        );
+
+        assert_eq!(runtime_config.session_layout, SessionLayout::ProjectScoped);
     }
 }

@@ -181,6 +181,7 @@ async fn harness_with_config(
         config: cfg.clone(),
         cwd: cwd.clone(),
         home,
+        session_layout: paths::SessionLayout::ProjectScoped,
         api_url: crate::config::api_url(&cfg),
         store,
         artifacts,

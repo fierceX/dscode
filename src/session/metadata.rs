@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::session::paths::{Paths, paths_for, project_key};
+use crate::session::paths::{Paths, SessionLayout, paths_for_layout, session_base_dir};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SessionMetadata {
@@ -46,11 +46,7 @@ pub async fn ensure_metadata(paths: &Paths, cwd: &Path, seed: SessionSeed) -> Re
     };
 
     if metadata.id.is_empty() {
-        metadata.id = paths
-            .session_dir
-            .file_name()
-            .map(|name| name.to_string_lossy().to_string())
-            .unwrap_or_default();
+        metadata.id = paths.session_id.clone();
     }
     if metadata.cwd.is_empty() {
         metadata.cwd = cwd.display().to_string();
@@ -77,11 +73,20 @@ pub async fn resolve_session_reference(
     cwd: &Path,
     reference: &str,
 ) -> Result<Option<String>> {
+    resolve_session_reference_with_layout(home, cwd, reference, SessionLayout::ProjectScoped).await
+}
+
+pub async fn resolve_session_reference_with_layout(
+    home: &Path,
+    cwd: &Path,
+    reference: &str,
+    layout: SessionLayout,
+) -> Result<Option<String>> {
     let reference = reference.trim();
     if reference.is_empty() {
         return Ok(None);
     }
-    let records = list_project_sessions(home, cwd).await?;
+    let records = list_sessions_with_layout(home, cwd, layout).await?;
     if records.is_empty() {
         return Ok(None);
     }
@@ -162,7 +167,38 @@ pub async fn resolve_session_reference(
 }
 
 pub async fn list_project_sessions(home: &Path, cwd: &Path) -> Result<Vec<SessionRecord>> {
-    let dir = home.join(".mink/projects").join(project_key(cwd));
+    list_sessions_with_layout(home, cwd, SessionLayout::ProjectScoped).await
+}
+
+pub async fn list_sessions_with_layout(
+    home: &Path,
+    cwd: &Path,
+    layout: SessionLayout,
+) -> Result<Vec<SessionRecord>> {
+    if layout == SessionLayout::Isolated {
+        if !home.exists() {
+            return Ok(Vec::new());
+        }
+        let paths = paths_for_layout(home, cwd, "isolated", layout);
+        let metadata = match read_metadata(&paths.metadata).await {
+            Ok(Some(metadata)) => metadata,
+            Ok(None) | Err(_) => fallback_metadata("isolated", cwd, &paths),
+        };
+        let id = if metadata.id.is_empty() {
+            "isolated".to_string()
+        } else {
+            metadata.id.clone()
+        };
+        let modified = session_activity_mod_time(&paths.session_dir).await?;
+        return Ok(vec![SessionRecord {
+            id,
+            path: paths.session_dir.clone(),
+            metadata,
+            modified,
+        }]);
+    }
+
+    let dir = session_base_dir(home, cwd, layout);
     if !dir.exists() {
         return Ok(Vec::new());
     }
@@ -174,7 +210,7 @@ pub async fn list_project_sessions(home: &Path, cwd: &Path) -> Result<Vec<Sessio
             continue;
         }
         let id = entry.file_name().to_string_lossy().to_string();
-        let session_paths = paths_for(home, cwd, &id);
+        let session_paths = paths_for_layout(home, cwd, &id, layout);
         let metadata = match read_metadata(&session_paths.metadata).await {
             Ok(Some(metadata)) => metadata,
             Ok(None) | Err(_) => fallback_metadata(&id, cwd, &session_paths),
@@ -192,11 +228,7 @@ pub async fn list_project_sessions(home: &Path, cwd: &Path) -> Result<Vec<Sessio
 
 fn new_metadata(paths: &Paths, cwd: &Path, now: &str) -> SessionMetadata {
     SessionMetadata {
-        id: paths
-            .session_dir
-            .file_name()
-            .map(|name| name.to_string_lossy().to_string())
-            .unwrap_or_default(),
+        id: paths.session_id.clone(),
         alias: None,
         title: None,
         created_at: now.to_string(),
@@ -304,6 +336,7 @@ pub fn title_from_prompt(prompt: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::paths::paths_for;
 
     fn temp_home(name: &str) -> PathBuf {
         let dir =

@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::Path;
 
+use crate::session::paths::SessionLayout;
+
 pub const PROTOCOL_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -44,6 +46,7 @@ pub struct SdkOptions {
     pub verbose: Option<bool>,
     pub enabled_tools: Option<Vec<String>>,
     pub session_id: Option<String>,
+    pub session_layout: Option<SessionLayout>,
     pub stream_events: Option<bool>,
 }
 
@@ -188,6 +191,29 @@ mod tests {
         assert_eq!(req.version, Some(PROTOCOL_VERSION));
         assert_eq!(req.prompt, "hi");
         assert!(!req.options.disable_bash);
+        assert_eq!(req.options.session_layout, None);
+    }
+
+    #[test]
+    fn sdk_request_accepts_session_layout() {
+        let req =
+            parse_agent_jsonl_request(r#"{"prompt":"hi","options":{"session_layout":"home"}}"#)
+                .unwrap();
+        assert_eq!(req.options.session_layout, Some(SessionLayout::HomeScoped));
+
+        let req =
+            parse_agent_jsonl_request(r#"{"prompt":"hi","options":{"session_layout":"isolated"}}"#)
+                .unwrap();
+        assert_eq!(req.options.session_layout, Some(SessionLayout::Isolated));
+    }
+
+    #[test]
+    fn sdk_request_rejects_unknown_session_layout() {
+        let err = parse_agent_jsonl_request(
+            r#"{"prompt":"hi","options":{"session_layout":"workspace"}}"#,
+        )
+        .unwrap_err();
+        assert!(err.contains("workspace"));
     }
 
     #[test]
