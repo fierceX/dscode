@@ -1,5 +1,5 @@
 use std::process::Command;
-#[cfg(feature = "sdk")]
+#[cfg(any(feature = "sdk-bin", feature = "sdk"))]
 use std::process::Stdio;
 
 #[test]
@@ -17,7 +17,7 @@ fn mink_help_uses_mink_binary_name() {
     assert!(stdout.contains("--tui"));
 }
 
-#[cfg(feature = "sdk")]
+#[cfg(any(feature = "sdk-bin", feature = "sdk"))]
 #[test]
 fn mink_core_help_uses_mink_core_binary_name() {
     let output = Command::new(env!("CARGO_BIN_EXE_mink-core"))
@@ -31,7 +31,7 @@ fn mink_core_help_uses_mink_core_binary_name() {
     assert!(stdout.contains("--agent-jsonl"));
 }
 
-#[cfg(feature = "sdk")]
+#[cfg(any(feature = "sdk-bin", feature = "sdk"))]
 #[test]
 fn mink_core_agent_jsonl_parse_failure_keeps_final_schema() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_mink-core"))
@@ -80,7 +80,7 @@ fn mink_core_agent_jsonl_parse_failure_keeps_final_schema() {
     );
 }
 
-#[cfg(feature = "sdk")]
+#[cfg(any(feature = "sdk-bin", feature = "sdk"))]
 #[test]
 fn mink_core_agent_jsonl_valid_request_without_api_key_fails_before_runtime() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_mink-core"))

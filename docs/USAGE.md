@@ -389,6 +389,20 @@ mink --tui
 
 搜索相关上限分为多层：`MAX_SEARCH_FILES` 控制 Glob/Grep 最多遍历的文件数，`MAX_SEARCH_RESULTS` 控制 Grep 最多返回的匹配行数；搜索工具自身还有 100KB 输出保护，最终工具结果还会受 `TOOL_RESULT_MAX_BYTES` 保护。看到 `scanned first N files` 表示文件遍历上限触发，看到 `truncated at N results` 表示匹配结果数上限触发，看到 `output > 100000 bytes` 或 artifact 提示则表示输出字节数保护触发。
 
+## Rust 库嵌入
+
+Rust 发布包名为 `mink-core`，库 crate 名为 `mink`。服务端嵌入时推荐关闭默认 CLI feature，
+只启用 runtime：
+
+```toml
+[dependencies]
+mink = { package = "mink-core", version = "0.1.8", default-features = false, features = ["runtime"] }
+```
+
+稳定入口优先使用 `mink::prelude`、`mink::runtime`、`mink::config`、`mink::sandbox` 和
+`mink::sdk_protocol`。默认 feature 仍面向 `mink` CLI，包含完整终端能力；SDK 精简二进制使用
+`cargo build -p mink-cli --no-default-features --features sdk-bin --bin mink-core` 构建。
+
 ## 会话管理
 
 ### Session layout

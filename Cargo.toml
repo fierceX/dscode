@@ -1,29 +1,18 @@
-[package]
-name = "mink-agent"
+[workspace]
+members = [
+    "crates/mink-core",
+    "crates/mink-cli",
+]
+resolver = "2"
+
+[workspace.package]
 version = "0.1.8"
 edition = "2024"
-description = "A lightweight AI coding agent with signal-driven belief system"
 license = "MIT"
 repository = "https://github.com/fierceX/mink"
 homepage = "https://github.com/fierceX/mink"
-readme = "README.md"
-keywords = ["ai", "coding-agent", "deepseek", "terminal", "agent"]
-categories = ["command-line-utilities", "development-tools"]
 
-[lib]
-name = "mink"
-path = "src/lib.rs"
-
-[[bin]]
-name = "mink"
-path = "src/main.rs"
-
-[[bin]]
-name = "mink-core"
-path = "src/bin/mink-core.rs"
-required-features = ["sdk"]
-
-[dependencies]
+[workspace.dependencies]
 anyhow = "1"
 async-trait = "0.1"
 futures = "0.3"
@@ -36,29 +25,17 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 similar = "2"
-rustyline = { version = "14", optional = true }
-crossterm = { version = "0.29", optional = true }
+rustyline = "14"
+crossterm = "0.29"
 time = { version = "0.3.47", features = ["formatting", "macros"] }
 toml = "0.8"
 tokio = { version = "1", features = ["full"] }
-ratatui = { version = "0.30", optional = true }
+ratatui = "0.30"
 unicode-width = "0.2"
-wasmtime = { version = "28", features = ["async"], optional = true }
-wasmtime-wasi = { version = "28", optional = true }
-axum = { version = "0.7", optional = true }
+wasmtime = { version = "28", features = ["async"] }
+wasmtime-wasi = "28"
+axum = "0.7"
 
-[[example]]
-name = "web_api"
-required-features = ["web-api"]
-
-[features]
-default = ["python-sandbox", "repl", "tui"]
-python-sandbox = ["dep:wasmtime", "dep:wasmtime-wasi"]
-repl = ["dep:rustyline"]
-tui = ["dep:crossterm", "dep:ratatui"]
-sdk = []
-web-api = ["dep:axum"]
-slow-tests = []
 [profile.release]
 opt-level = "s"
 lto = true

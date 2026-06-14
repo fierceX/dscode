@@ -65,14 +65,18 @@ ToolCallEvent
 `PythonSandbox` 工具（wasmtime 沙箱）默认编译进二进制，但可在构建时按需裁剪：
 
 ```bash
-# 最小二进制（不含 PythonSandbox）
-cargo build --release --no-default-features
+# 最小 mink 二进制（不含 TUI/REPL/PythonSandbox）
+cargo build -p mink-cli --release --no-default-features
+
+# SDK 精简二进制 mink-core（不含 TUI/REPL/PythonSandbox）
+cargo build -p mink-cli --release --no-default-features --features sdk-bin --bin mink-core
 
 # 完整构建（含 PythonSandbox，默认）
 cargo build --release
 ```
 
-`--no-default-features` 可减少二进制体积约 30-40MB。`python-sandbox` feature 也可与其他 feature 组合使用。
+`--no-default-features` 可减少二进制体积约 30-40MB。`python-sandbox` feature 也可与
+`runtime` 或 `sdk-bin` 组合使用。
 
 
 ## `Read`

@@ -390,8 +390,8 @@ mod tests {
     fn glob_matches_rooted_pattern_from_cwd() {
         let result = glob("src/**/*.rs", ".", 5000).unwrap();
 
-        assert!(result.contains("src/tools/search.rs"));
-        assert!(result.contains("src/main.rs"));
+        assert!(result.contains("src/tools/search.rs"), "{result}");
+        assert!(result.contains("src/lib.rs"), "{result}");
     }
 
     #[test]

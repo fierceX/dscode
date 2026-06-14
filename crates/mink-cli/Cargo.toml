@@ -1,0 +1,37 @@
+[package]
+name = "mink-cli"
+version.workspace = true
+edition.workspace = true
+description = "CLI binaries for the mink AI coding agent"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+
+[[bin]]
+name = "mink"
+path = "src/main.rs"
+
+[[bin]]
+name = "mink-core"
+path = "src/bin/mink-core.rs"
+required-features = ["sdk-bin"]
+
+[dependencies]
+mink = { package = "mink-core", path = "../mink-core", default-features = false }
+tokio.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[features]
+default = ["full-cli"]
+runtime = ["mink/runtime"]
+cli = ["mink/cli"]
+repl = ["mink/repl"]
+tui = ["mink/tui"]
+python-sandbox = ["mink/python-sandbox"]
+full-cli = ["mink/full-cli"]
+sdk-bin = ["mink/sdk-bin"]
+sdk = ["sdk-bin"]
+slow-tests = ["mink/slow-tests"]

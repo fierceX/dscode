@@ -10,8 +10,8 @@ tagged wheel (e.g. ``macosx_11_0_arm64``, ``manylinux_2_35_x86_64``).
 
 Environment variables:
   MINK_SDK_SKIP_BUILD=1   Skip Rust build, wheel only
-  MINK_SDK_FEATURES="sdk python-sandbox"
-                          Cargo features for mink-core (default: sdk)
+  MINK_SDK_FEATURES="sdk-bin python-sandbox"
+                          Cargo features for mink-core (default: sdk-bin)
   GLIBC_VERSION=2_35      Override manylinux glibc version (Linux only, default: 2_31)
   PLATFORM_TAG=musllinux_1_2_x86_64   Fully override the platform tag (Linux only)
 """
@@ -25,13 +25,15 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent.parent
 BINARY_NAME = "mink-core"
-SDK_FEATURES = os.environ.get("MINK_SDK_FEATURES", "sdk")
+SDK_FEATURES = os.environ.get("MINK_SDK_FEATURES", "sdk-bin")
 
 
 def cargo_args() -> list[str]:
     return [
         "cargo",
         "build",
+        "-p",
+        "mink-cli",
         "--release",
         "--no-default-features",
         "--features",

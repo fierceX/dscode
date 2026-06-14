@@ -9,7 +9,7 @@ mink 是一个 Rust 实现的轻量 AI coding agent，面向 DeepSeek / OpenAI-c
 核心目标：
 
 - 单二进制分发，终端优先，REPL / TUI / stream-json 三种使用形态
-起可作为 Rust 库嵌入** — `mink::runtime` 提供同进程调用
+- 可作为 Rust 库嵌入：Rust 发布包名为 `mink-core`，库 crate 名为 `mink`，`mink::runtime` / `mink::prelude` 提供同进程调用
 - Session 是一等公民，使用 JSONL 追加持久化，支持恢复、重放和压缩
 - LLM 流式输出、工具执行、信号检测、决策恢复构成闭环
 - 工具边界明确：超时、输出大小、写入大小、副作用和禁用开关都可控
@@ -36,7 +36,10 @@ mink 是一个 Rust 实现的轻量 AI coding agent，面向 DeepSeek / OpenAI-c
 ## 运行时分层
 
 ```text
-cli.rs                              ← mink / mink-core 共用 CLI adapter
+crates/mink-cli/src/main.rs         ← mink binary thin wrapper
+crates/mink-cli/src/bin/mink-core.rs← mink-core binary thin wrapper
+  │
+crates/mink-core/src/cli.rs         ← mink / mink-core 共用 CLI adapter（过渡期）
   │  CLI 参数解析 -> 配置合并 -> sandbox re-exec
   │  根据模式启动 one-shot / REPL / TUI / stream-json / Agent JSONL
   │  内部调用 runtime::build_runtime() 构造 AgentRuntime
@@ -168,9 +171,9 @@ ToolRunResult
 
 | 文件 | 职责 |
 |------|------|
-| `cli.rs` | **mink / mink-core 共用 CLI adapter**，参数解析、配置合并、sandbox re-exec、模式分发 |
-| `main.rs` | `mink` binary thin wrapper → `cli::main_entry()` |
-| `bin/mink-core.rs` | `mink-core` binary thin wrapper → `cli::main_entry()` |
+| `crates/mink-core/src/cli.rs` | **mink / mink-core 共用 CLI adapter**，参数解析、配置合并、sandbox re-exec、模式分发；workspace 拆分第一阶段仍保留在 core 包内 |
+| `crates/mink-cli/src/main.rs` | `mink` binary thin wrapper → `mink::cli::main_entry()` |
+| `crates/mink-cli/src/bin/mink-core.rs` | `mink-core` binary thin wrapper → `mink::cli::main_entry()` |
 | `config.rs` | `Config`、CLI 解析、`.minkrc` 合并、环境变量默认值、sandbox 配置 |
 | `context.rs` | `AgentSharedContext` 和工具层 `ToolContext` |
 | `assets.rs` | 编译期嵌入的 `tools.json` 和 skill 索引 |
@@ -186,7 +189,7 @@ ToolRunResult
 
 | 文件 | 职责 |
 |------|------|
-| `runtime/mod.rs` | `mink::runtime` 公共 API 导出 |
+| `runtime/mod.rs` | `mink::runtime` 公共 API 导出，供 `mink::prelude` facade 复用 |
 | `runtime/builder.rs` | `build_runtime()` — 从 `AgentRuntimeConfig` 构造完整 runtime |
 | `runtime/config.rs` | `AgentRuntimeConfig` / `SessionPolicy` / `SessionInfo` |
 | `runtime/handle.rs` | `AgentRuntime` — `start()`, `run_turn()`, `try_stream_turn()`, `stream_turn()`, `shutdown()` |

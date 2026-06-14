@@ -27,7 +27,7 @@
 //! ## Usage
 //!
 //! ```bash
-//! DEEPSEEK_API_KEY=sk-xxx cargo run --example web_api --features web-api
+//! DEEPSEEK_API_KEY=sk-xxx cargo run -p mink-core --example web_api --features web-api
 //!
 //! curl -X POST localhost:3000/task -H 'Content-Type: application/json' \
 //!   -d '{"prompt":"Explain Rust ownership"}'

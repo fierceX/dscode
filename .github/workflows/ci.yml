@@ -133,11 +133,11 @@ jobs:
       - name: Build Rust binary (release)
         run: |
           if [ "${{ matrix.target }}" = "x86_64-unknown-linux-musl" ]; then
-            cargo zigbuild --release --target x86_64-unknown-linux-musl --no-default-features --features sdk --bin mink-core
+            cargo zigbuild -p mink-cli --release --target x86_64-unknown-linux-musl --no-default-features --features sdk-bin --bin mink-core
             mkdir -p target/release
             cp target/${{ matrix.target }}/release/mink-core target/release/mink-core
           else
-            cargo build --release --no-default-features --features sdk --bin mink-core
+            cargo build -p mink-cli --release --no-default-features --features sdk-bin --bin mink-core
           fi
         env:
           CARGO_TERM_COLOR: always
@@ -183,7 +183,10 @@ jobs:
       - name: Publish to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish --registry crates-io || echo "crate already published, skipping"
+        run: |
+          cargo package -p mink-core --list
+          cargo package -p mink-core --registry crates-io
+          cargo publish -p mink-core --registry crates-io || echo "crate already published, skipping"
 
       - name: Download binary artifacts
         uses: actions/download-artifact@v4

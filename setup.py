@@ -18,13 +18,15 @@ HERE = Path(__file__).parent.resolve()
 BINARY_NAME = "mink-core"
 BINARY_SRC = HERE / "target" / "release" / BINARY_NAME
 BINARY_DST = HERE / "mink_agent" / "_binary"
-SDK_FEATURES = os.environ.get("MINK_SDK_FEATURES", "sdk")
+SDK_FEATURES = os.environ.get("MINK_SDK_FEATURES", "sdk-bin")
 
 
 def _cargo_args() -> list[str]:
     return [
         "cargo",
         "build",
+        "-p",
+        "mink-cli",
         "--release",
         "--no-default-features",
         "--features",

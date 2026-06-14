@@ -158,14 +158,14 @@ print(result["text"])
 默认发布的 SDK wheel 使用精简 `mink-core`，不包含 `PythonSandbox` 工具。需要该工具时可手动构建：
 
 ```bash
-cargo build --release --no-default-features --features "sdk python-sandbox" --bin mink-core
+cargo build -p mink-cli --release --no-default-features --features "sdk-bin python-sandbox" --bin mink-core
 MINK_BINARY=./target/release/mink-core python your_script.py
 ```
 
 或构建带 `PythonSandbox` 的 wheel：
 
 ```bash
-MINK_SDK_FEATURES="sdk python-sandbox" python scripts/build_wheel.py
+MINK_SDK_FEATURES="sdk-bin python-sandbox" python scripts/build_wheel.py
 ```
 
 ### 沙箱后端
@@ -191,7 +191,7 @@ MINK_SDK_FEATURES="sdk python-sandbox" python scripts/build_wheel.py
 - **macOS**：使用 ``sandbox-exec``，写入限制 + 应用层读取限制。
 - **Linux**：自动检测 ``nsjail`` → ``bubblewrap``，文件系统隔离 + 命名空间隔离。
 
-详细策略见 Rust 代码 ``src/sandbox/``。
+详细策略见 Rust 代码 ``crates/mink-core/src/sandbox/``。
 
 ## 返回结果示例
 

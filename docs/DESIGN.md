@@ -931,14 +931,21 @@ pub enum Event {
 - 无法共享内存中的 session store
 - 无法订阅实时 typed event
 
-`mink::runtime` 解决这些问题：**同一套 OrchActor / TurnExecutor / ToolRunner 核心，但无进程边界**。
+Rust 发布包名为 `mink-core`，库 crate 名为 `mink`。服务端依赖时推荐关闭默认 CLI feature，
+只启用嵌入式 runtime：
+
+```toml
+mink = { package = "mink-core", version = "0.1.8", default-features = false, features = ["runtime"] }
+```
+
+`mink::runtime` / `mink::prelude` 解决这些问题：**同一套 OrchActor / TurnExecutor / ToolRunner 核心，但无进程边界**。
 
 ### 三入口共用核心
 
 ```text
 mink CLI ──────────┐
 mink-core SDK ─────┤
-Rust crate ────────┘
+Rust crate mink ───┘
          │
     cli::main_entry()
          │
