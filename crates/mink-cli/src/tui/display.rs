@@ -8,7 +8,17 @@ pub struct TuiDisplay {
     tx: mpsc::Sender<TuiSignal>,
 }
 
+pub struct TuiSubAgentStreamSink {
+    tx: mpsc::Sender<TuiSignal>,
+}
+
 impl TuiDisplay {
+    pub fn new(tx: mpsc::Sender<TuiSignal>) -> Self {
+        Self { tx }
+    }
+}
+
+impl TuiSubAgentStreamSink {
     pub fn new(tx: mpsc::Sender<TuiSignal>) -> Self {
         Self { tx }
     }
@@ -94,9 +104,9 @@ impl Display for TuiDisplay {
     fn render_clear_line(&self) {}
 }
 
-impl SubAgentStreamSink for mpsc::Sender<TuiSignal> {
+impl SubAgentStreamSink for TuiSubAgentStreamSink {
     fn render_sub_agent_stream(&self, session_id: &str, kind: SubAgentStreamKind, content: &str) {
-        let _ = self.send(TuiSignal::SubAgentStream {
+        let _ = self.tx.send(TuiSignal::SubAgentStream {
             session_id: session_id.into(),
             kind,
             content: content.into(),

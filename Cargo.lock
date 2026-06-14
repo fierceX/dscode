@@ -1755,9 +1755,16 @@ checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 name = "mink-cli"
 version = "0.1.8"
 dependencies = [
+ "anyhow",
+ "crossterm",
+ "ignore",
  "mink-core",
+ "ratatui",
+ "rustyline",
  "serde_json",
+ "time",
  "tokio",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]
@@ -1767,16 +1774,13 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
- "crossterm",
  "futures",
  "globset",
  "ignore",
  "libc",
  "once_cell",
- "ratatui",
  "regex",
  "reqwest",
- "rustyline",
  "serde",
  "serde_json",
  "similar",

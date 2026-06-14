@@ -36,12 +36,9 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 similar.workspace = true
-rustyline = { workspace = true, optional = true }
-crossterm = { workspace = true, optional = true }
 time.workspace = true
 toml.workspace = true
 tokio.workspace = true
-ratatui = { workspace = true, optional = true }
 unicode-width.workspace = true
 wasmtime = { workspace = true, optional = true }
 wasmtime-wasi = { workspace = true, optional = true }
@@ -55,11 +52,5 @@ required-features = ["web-api"]
 default = ["runtime"]
 runtime = []
 python-sandbox = ["dep:wasmtime", "dep:wasmtime-wasi"]
-cli = ["runtime", "repl"]
-repl = ["runtime", "dep:rustyline"]
-tui = ["dep:crossterm", "dep:ratatui"]
-full-cli = ["cli", "tui", "python-sandbox"]
-sdk-bin = ["runtime"]
-sdk = ["sdk-bin"]
 web-api = ["runtime", "dep:axum"]
 slow-tests = []

@@ -30,8 +30,6 @@ pub mod prelude {
 #[doc(hidden)]
 pub mod assets;
 #[doc(hidden)]
-pub mod cli;
-#[doc(hidden)]
 pub mod errors;
 #[doc(hidden)]
 pub mod events;
@@ -64,9 +62,6 @@ pub mod tools;
 
 #[doc(hidden)]
 pub mod agent;
-#[cfg(feature = "tui")]
-#[doc(hidden)]
-pub mod tui;
 #[doc(hidden)]
 pub mod util;
 

@@ -1,8 +1,8 @@
 #[tokio::main]
 async fn main() {
-    mink::cli::install_panic_hook();
+    mink_cli::cli::install_panic_hook();
     let args: Vec<String> = std::env::args().skip(1).collect();
-    match mink::cli::main_entry(args).await {
+    match mink_cli::cli::main_entry(args).await {
         Ok(exit) => {
             if exit.code != 0 {
                 std::process::exit(exit.code);

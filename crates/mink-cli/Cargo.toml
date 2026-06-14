@@ -18,20 +18,25 @@ path = "src/bin/mink-core.rs"
 required-features = ["sdk-bin"]
 
 [dependencies]
+anyhow.workspace = true
+crossterm = { workspace = true, optional = true }
+ignore = { workspace = true, optional = true }
 mink = { package = "mink-core", path = "../mink-core", default-features = false }
-tokio.workspace = true
-
-[dev-dependencies]
+ratatui = { workspace = true, optional = true }
+rustyline = { workspace = true, optional = true }
 serde_json.workspace = true
+time.workspace = true
+tokio.workspace = true
+unicode-width = { workspace = true, optional = true }
 
 [features]
 default = ["full-cli"]
 runtime = ["mink/runtime"]
-cli = ["mink/cli"]
-repl = ["mink/repl"]
-tui = ["mink/tui"]
+cli = ["runtime", "repl"]
+repl = ["runtime", "dep:rustyline"]
+tui = ["runtime", "dep:crossterm", "dep:ignore", "dep:ratatui", "dep:unicode-width"]
 python-sandbox = ["mink/python-sandbox"]
-full-cli = ["mink/full-cli"]
-sdk-bin = ["mink/sdk-bin"]
+full-cli = ["cli", "tui", "python-sandbox"]
+sdk-bin = ["runtime"]
 sdk = ["sdk-bin"]
 slow-tests = ["mink/slow-tests"]

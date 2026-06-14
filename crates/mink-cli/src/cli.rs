@@ -140,9 +140,9 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
 
     // TUI mode: store mpsc sender for sub-agent streaming
     #[cfg(feature = "tui")]
-    let sub_stream_tx: Option<Arc<dyn SubAgentStreamSink>> = tui_tx
-        .as_ref()
-        .map(|(tx, ..)| Arc::new(tx.clone()) as Arc<dyn SubAgentStreamSink>);
+    let sub_stream_tx: Option<Arc<dyn SubAgentStreamSink>> = tui_tx.as_ref().map(|(tx, ..)| {
+        Arc::new(crate::tui::TuiSubAgentStreamSink::new(tx.clone())) as Arc<dyn SubAgentStreamSink>
+    });
     #[cfg(not(feature = "tui"))]
     let sub_stream_tx: Option<Arc<dyn SubAgentStreamSink>> = None;
 

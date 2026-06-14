@@ -10,7 +10,7 @@ const PROCESS_OUTPUT_CAPTURE_LIMIT: usize = 1_000_000;
 
 /// Truncate a string to at most `n` bytes on a UTF-8 character boundary,
 /// appending "..." if truncation occurred.
-pub(crate) fn truncate_str(s: &str, n: usize) -> String {
+pub fn truncate_str(s: &str, n: usize) -> String {
     if s.len() <= n {
         return s.to_string();
     }
@@ -23,7 +23,7 @@ pub(crate) fn truncate_str(s: &str, n: usize) -> String {
 
 /// Format a token count for display.
 /// Examples: 0 → "0", 500 → "500", 1234 → "1.2K", 1234567 → "1.23M"
-pub(crate) fn fmt_k(n: u64) -> String {
+pub fn fmt_k(n: u64) -> String {
     if n < 1000 {
         return n.to_string();
     }

@@ -1,9 +1,9 @@
-pub mod engine;
-pub mod replay;
-
-/// Display abstracts terminal rendering. Two implementations:
-/// - TerminalDisplay (REPL) — synchronous writes to stdout/stderr
-/// - TuiDisplay (future) — event-driven TUI via mpsc channel
+/// Display abstracts agent output from any concrete terminal implementation.
+///
+/// `mink-core` owns only this protocol-level contract so embedded Rust services
+/// can drive the runtime without depending on REPL/TUI crates. Concrete terminal
+/// implementations such as `TerminalDisplay` and `TuiDisplay` live in
+/// `mink-cli`.
 pub struct ToolResultDisplay<'a> {
     pub tool_name: &'a str,
     pub content_preview: &'a str,

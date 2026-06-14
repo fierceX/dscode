@@ -1,6 +1,6 @@
 # 架构说明
 
-更新日期：2026-06-12
+更新日期：2026-06-14
 
 ## 项目定位
 
@@ -38,11 +38,11 @@ mink 是一个 Rust 实现的轻量 AI coding agent，面向 DeepSeek / OpenAI-c
 ```text
 crates/mink-cli/src/main.rs         ← mink binary thin wrapper
 crates/mink-cli/src/bin/mink-core.rs← mink-core binary thin wrapper
+crates/mink-cli/src/cli.rs          ← mink / mink-core 共用 CLI adapter
   │
-crates/mink-core/src/cli.rs         ← mink / mink-core 共用 CLI adapter（过渡期）
   │  CLI 参数解析 -> 配置合并 -> sandbox re-exec
   │  根据模式启动 one-shot / REPL / TUI / stream-json / Agent JSONL
-  │  内部调用 runtime::build_runtime() 构造 AgentRuntime
+  │  调用 mink::runtime 构造 AgentRuntime
   ▼
 OrchActor (agent/orchestrator.rs)
   │  接收用户输入、模型切换、手动 compact 命令
@@ -90,10 +90,10 @@ TurnExecutor (agent/turn.rs)
 └───────────────────────┘
          │
 ┌─────── UI 层 ─────────┐
-│ ui/mod.rs             │ Display trait、ToolResultDisplay、StatsSnapshot
-│ ui/engine.rs          │ REPL / human 输出
-│ ui/replay.rs          │ REPL session 重放
-│ tui/                  │ ratatui 全屏 UI
+│ crates/mink-core/src/ui/mod.rs │ Display trait、ToolResultDisplay、StatsSnapshot
+│ crates/mink-cli/src/ui/engine.rs │ REPL / human 输出
+│ crates/mink-cli/src/ui/replay.rs │ REPL session 重放
+│ crates/mink-cli/src/tui/         │ ratatui 全屏 UI
 └───────────────────────┘
 ```
 
@@ -171,9 +171,9 @@ ToolRunResult
 
 | 文件 | 职责 |
 |------|------|
-| `crates/mink-core/src/cli.rs` | **mink / mink-core 共用 CLI adapter**，参数解析、配置合并、sandbox re-exec、模式分发；workspace 拆分第一阶段仍保留在 core 包内 |
-| `crates/mink-cli/src/main.rs` | `mink` binary thin wrapper → `mink::cli::main_entry()` |
-| `crates/mink-cli/src/bin/mink-core.rs` | `mink-core` binary thin wrapper → `mink::cli::main_entry()` |
+| `crates/mink-cli/src/cli.rs` | **mink / mink-core 共用 CLI adapter**，参数解析、配置合并、sandbox re-exec、模式分发；调用 `mink::runtime`，但 REPL/TUI 实现归属 CLI crate |
+| `crates/mink-cli/src/main.rs` | `mink` binary thin wrapper → `mink_cli::cli::main_entry()` |
+| `crates/mink-cli/src/bin/mink-core.rs` | `mink-core` binary thin wrapper → `mink_cli::cli::main_entry()` |
 | `config.rs` | `Config`、CLI 解析、`.minkrc` 合并、环境变量默认值、sandbox 配置 |
 | `context.rs` | `AgentSharedContext` 和工具层 `ToolContext` |
 | `assets.rs` | 编译期嵌入的 `tools.json` 和 skill 索引 |

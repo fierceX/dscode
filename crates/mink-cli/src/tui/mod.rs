@@ -14,7 +14,7 @@ mod state;
 mod theme;
 
 pub use crate::ui::SubAgentStreamKind;
-pub use display::TuiDisplay;
+pub use display::{TuiDisplay, TuiSubAgentStreamSink};
 pub use signal::TuiSignal;
 
 use crate::agent::orchestrator::OrchCmd;
