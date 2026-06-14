@@ -1787,7 +1787,6 @@ dependencies = [
  "time",
  "tokio",
  "toml",
- "unicode-width 0.2.2",
  "wasmtime",
  "wasmtime-wasi",
 ]

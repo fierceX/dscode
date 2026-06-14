@@ -1,5 +1,9 @@
 # 设计文档
 
+本文记录 mink 的设计取舍和关键不变式，不作为用户手册或工具协议参考。用户入口、配置和
+运行方式见 [USAGE.md](USAGE.md)；工具参数与边界见 [tools.md](tools.md)；模块分层见
+[ARCHITECTURE.md](ARCHITECTURE.md)。
+
 ## 主题一：Agent 主循环
 
 ### 单轮执行契约
@@ -7,7 +11,7 @@
 `TurnExecutor::execute()` 是 agent 的核心循环，接收一个用户输入，执行零到多轮 LLM 调用，返回最终决策。一轮定义为一个 LLM 请求→响应→工具执行→继续/停止判断的完整周期。
 
 ```rust
-// src/agent/turn.rs
+// crates/mink-core/src/agent/turn.rs
 pub async fn execute(&mut self, user_input: &str)
     -> Result<(TurnDecision, Vec<TurnEffect>)>
 ```
@@ -778,7 +782,8 @@ pub fn apply_provider_defaults(cfg: &mut Config) -> Result<()> {
 "2M"    → 2000000
 ```
 
-用于 `--max-context`、`--max-tokens` 等参数。
+用于 `max_context`、`max_tokens` 等配置字段。CLI 中低频配置通过 `--config <toml>` 或
+`.minkrc` 传入。
 
 ### 环境变量分类
 
@@ -931,8 +936,8 @@ pub enum Event {
 - 无法共享内存中的 session store
 - 无法订阅实时 typed event
 
-Rust 发布包名为 `mink-core`，库 crate 名为 `mink`。服务端依赖时推荐关闭默认 CLI feature，
-只启用嵌入式 runtime：
+Rust 发布包名为 `mink-core`，库 crate 名为 `mink`。`mink-core` 发布包不包含 REPL/TUI
+实现；终端二进制和 UI 实现由 workspace 中的 `mink-cli` 包持有。服务端依赖时推荐只启用嵌入式 runtime：
 
 ```toml
 mink = { package = "mink-core", version = "0.1.8", default-features = false, features = ["runtime"] }
@@ -947,14 +952,15 @@ mink CLI ──────────┐
 mink-core SDK ─────┤
 Rust crate mink ───┘
          │
-    cli::main_entry()
+    mink-cli::cli::main_entry()
          │
     runtime::build_runtime()
          │
     OrchActor::run()
 ```
 
-三个入口通过 `cli.rs` 和 `runtime::builder` 调用同一核心，不允许分叉逻辑。
+两个二进制入口通过 `crates/mink-cli/src/cli.rs` 调用 `mink::runtime`，Rust 库调用方直接使用
+`mink::runtime` / `mink::prelude`。三者最终都进入同一 `runtime::builder` 和 orchestrator 核心，不允许分叉逻辑。
 
 ### API 分层
 

@@ -65,8 +65,8 @@ fn try_reexec(config: &SandboxConfig, exe: &Path, args: &[String]) -> Result<(),
         if config.backend == "nsjail" || config.backend == "auto" {
             match platform_linux::try_nsjail(config, exe, args) {
                 Ok(cmd) => {
-                    exec_cmd(&cmd);
-                    return Err("nsjail exec failed".into());
+                    exec_cmd(&cmd)?;
+                    return Err("nsjail exec returned unexpectedly".into());
                 }
                 Err(e) => {
                     if config.backend == "nsjail" {
@@ -81,8 +81,8 @@ fn try_reexec(config: &SandboxConfig, exe: &Path, args: &[String]) -> Result<(),
         if config.backend == "bwrap" || config.backend == "auto" {
             match platform_linux::try_bwrap(config, exe, args) {
                 Ok(cmd) => {
-                    exec_cmd(&cmd);
-                    return Err("bwrap exec failed".into());
+                    exec_cmd(&cmd)?;
+                    return Err("bwrap exec returned unexpectedly".into());
                 }
                 Err(e) => {
                     return Err(format!("bwrap: {e}"));
@@ -97,8 +97,8 @@ fn try_reexec(config: &SandboxConfig, exe: &Path, args: &[String]) -> Result<(),
     {
         match platform_macos::try_sandbox_exec(config, exe, args) {
             Ok(cmd) => {
-                exec_cmd(&cmd);
-                Err("sandbox-exec failed".into())
+                exec_cmd(&cmd)?;
+                Err("sandbox-exec returned unexpectedly".into())
             }
             Err(e) => Err(e),
         }
@@ -112,9 +112,10 @@ fn try_reexec(config: &SandboxConfig, exe: &Path, args: &[String]) -> Result<(),
 
 /// Replace the current process with the given command.
 /// Does NOT return on success.
-fn exec_cmd(cmd: &[String]) {
-    let (prog, args) = cmd.split_first().expect("empty sandbox command");
+fn exec_cmd(cmd: &[String]) -> Result<(), String> {
+    let (prog, args) = cmd
+        .split_first()
+        .ok_or_else(|| "empty sandbox command".to_string())?;
     let err = Command::new(prog).args(args).exec();
-    // `exec()` only returns on error
-    panic!("exec({prog}) failed: {err}");
+    Err(format!("exec({prog}) failed: {err}"))
 }

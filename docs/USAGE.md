@@ -1,5 +1,9 @@
 # 使用手册
 
+本文面向 mink 使用者，覆盖 CLI、Rust 嵌入、Python SDK 相关的运行方式、配置、沙箱、
+session、技能和常见工作流。内置工具的完整参数、结果格式和边界行为见
+[工具参考](tools.md)；架构和内部模块职责见 [ARCHITECTURE.md](ARCHITECTURE.md)。
+
 ## 快速开始
 
 ```bash
@@ -391,8 +395,9 @@ mink --tui
 
 ## Rust 库嵌入
 
-Rust 发布包名为 `mink-core`，库 crate 名为 `mink`。服务端嵌入时推荐关闭默认 CLI feature，
-只启用 runtime：
+Rust 发布包名为 `mink-core`，库 crate 名为 `mink`。`mink-core` 发布包只包含可嵌入 runtime
+和 `Display` 协议层；终端 REPL/TUI 实现、`mink` / `mink-core` 二进制入口都在 `mink-cli`
+workspace 包中。服务端嵌入时推荐只启用 runtime：
 
 ```toml
 [dependencies]
@@ -400,7 +405,7 @@ mink = { package = "mink-core", version = "0.1.8", default-features = false, fea
 ```
 
 稳定入口优先使用 `mink::prelude`、`mink::runtime`、`mink::config`、`mink::sandbox` 和
-`mink::sdk_protocol`。默认 feature 仍面向 `mink` CLI，包含完整终端能力；SDK 精简二进制使用
+`mink::sdk_protocol`。完整终端二进制使用 `mink-cli` 默认 feature 构建；SDK 精简二进制使用
 `cargo build -p mink-cli --no-default-features --features sdk-bin --bin mink-core` 构建。
 
 ## 会话管理
@@ -540,7 +545,7 @@ max_context = "1M"         # 1M 上下文窗口
 ```
 
 ```bash
-mink -m flash --max-context 1M -i
+mink -m flash --config 'max_context="1M"' -i
 ```
 
 ---
@@ -574,6 +579,9 @@ mink -m flash --max-context 1M -i
 
 ## 工具
 
+本节只列出用户需要理解的工具能力和常用参数。工具调度模型、审批策略、资源 URL、
+artifact、输出截断和每个工具的完整协议以 [工具参考](tools.md) 为准。
+
 | 工具 | 用途 | 关键参数 |
 |------|------|---------|
 | `Read` | 读文件或轻量资源，支持 selector 和 `artifact://` / `skill://` / `session://` | `path` |
@@ -591,7 +599,7 @@ mink -m flash --max-context 1M -i
 | `WebSearch` | 网络搜索 | `query` |
 | `WebFetch` | 网页获取 | `url` |
 
-详见 [tools.md](tools.md)。
+完整工具说明见 [tools.md](tools.md)。
 
 ### Read selector 与资源 URL
 
@@ -717,6 +725,7 @@ MISSION.md 使用一级标题（`# heading-name`）映射到系统提示词的�
 ```bash
 # 加载自定义提示词
 mink --mission ./my-task.mission.md -i
+```
 
 ```bash
 # 结合技能使用（通过 --config）
@@ -818,7 +827,7 @@ curl -H "Authorization: Bearer $DEEPSEEK_API_KEY" https://api.deepseek.com/v1/mo
 mink -m flash -v "hello"
 
 # 扩大上下文窗口避免溢出
-mink -m flash --max-context 1M -i
+mink -m flash --config 'max_context="1M"' -i
 
 # 查看 session 列表
 mink --list-sessions

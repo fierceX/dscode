@@ -85,34 +85,47 @@ impl SubAgentCoordinator {
                     session_id: session_id.clone(),
                     cancel: cancel.clone(),
                 });
-                std::thread::spawn(move || {
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        let permit_rt = tokio::runtime::Builder::new_current_thread()
-                            .enable_time()
-                            .build()
-                            .expect("sub-agent semaphore runtime");
-                        let _permit = permit_rt
-                            .block_on(sub_semaphore.acquire_owned())
-                            .expect("sub-agent semaphore never closed");
-                        runner(ctx, sid, prompt, fork, cancel)
-                    }));
-                    let sa = match result {
-                        Ok(sa) => sa,
-                        Err(panic_info) => {
-                            let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
-                                s.to_string()
-                            } else if let Some(s) = panic_info.downcast_ref::<String>() {
-                                s.clone()
-                            } else {
-                                "sub-agent thread panicked".to_string()
-                            };
-                            SubAgentResult {
-                                status: "failed".into(),
-                                thinking: String::new(),
-                                text: format!("Sub-agent thread panicked: {msg}"),
-                                usage: Default::default(),
-                            }
+                tokio::spawn(async move {
+                    let permit = match sub_semaphore.acquire_owned().await {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            let _ = tx.send((
+                                sub_idx,
+                                session_id,
+                                SubAgentResult {
+                                    status: "failed".into(),
+                                    thinking: String::new(),
+                                    text: "Sub-agent semaphore closed.".into(),
+                                    usage: Default::default(),
+                                },
+                            ));
+                            return;
                         }
+                    };
+                    let sa = match tokio::task::spawn_blocking(move || {
+                        let _permit = permit;
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            runner(ctx, sid, prompt, fork, cancel)
+                        }))
+                    })
+                    .await
+                    {
+                        Ok(Ok(sa)) => sa,
+                        Ok(Err(panic_info)) => SubAgentResult {
+                            status: "failed".into(),
+                            thinking: String::new(),
+                            text: format!(
+                                "Sub-agent thread panicked: {}",
+                                panic_message(panic_info)
+                            ),
+                            usage: Default::default(),
+                        },
+                        Err(e) => SubAgentResult {
+                            status: "failed".into(),
+                            thinking: String::new(),
+                            text: format!("Sub-agent task failed: {e}"),
+                            usage: Default::default(),
+                        },
                     };
                     let _ = tx.send((sub_idx, session_id, sa));
                 });
@@ -131,7 +144,7 @@ impl SubAgentCoordinator {
         mut sub_result_rx: tokio::sync::mpsc::UnboundedReceiver<(usize, String, SubAgentResult)>,
         launches: Vec<SubAgentLaunch>,
     ) -> Vec<ToolRunResult> {
-        let timeout = self.ctx.tool_config.sub_agent_timeout_secs;
+        let timeout = self.ctx.tool_config.sub_agent_timeout_secs.max(0);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout as u64);
         let mut sub_completed = 0usize;
         let sub_expected = launches.len();
@@ -258,4 +271,14 @@ fn default_sub_agent_runner() -> SubAgentRunner {
             }
         })
     })
+}
+
+fn panic_message(panic_info: Box<dyn std::any::Any + Send + 'static>) -> String {
+    if let Some(s) = panic_info.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = panic_info.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "sub-agent thread panicked".to_string()
+    }
 }

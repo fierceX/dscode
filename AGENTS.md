@@ -25,7 +25,7 @@ mink 是一个 Rust 实现的轻量 AI coding agent，专为 DeepSeek/OpenAI-com
 
 ### REPL 模式（`-i`）
 
-基于 `rustyline` 的行编辑和 `TerminalDisplay`（`src/ui/engine.rs`）的同步渲染。
+基于 `rustyline` 的行编辑和 `TerminalDisplay`（`crates/mink-cli/src/ui/engine.rs`）的同步渲染。
 
 工作方式：读取用户输入 -> 发送到编排器 -> `TerminalDisplay` 直接写 stdout/stderr。
 
@@ -40,9 +40,9 @@ mink 是一个 Rust 实现的轻量 AI coding agent，专为 DeepSeek/OpenAI-com
 
 ### TUI 模式（`--tui`）
 
-基于 `ratatui` 的事件驱动全屏界面。入口是 `run_tui()`（`src/tui/mod.rs`）。
+基于 `ratatui` 的事件驱动全屏界面。入口是 `run_tui()`（`crates/mink-cli/src/tui/mod.rs`）。
 
-工作方式：编排器通过 `Display` trait 输出事件，`TuiDisplay`（`src/tui/display.rs`）转为 `TuiSignal`，TUI 主循环消费 mpsc channel 并渲染。
+工作方式：编排器通过 `Display` trait 输出事件，`TuiDisplay`（`crates/mink-cli/src/tui/display.rs`）转为 `TuiSignal`，TUI 主循环消费 mpsc channel 并渲染。
 
 核心能力：状态栏、消息列表、多行输入、Ctrl+C 中断、slash command、Markdown 子集渲染、长工具结果折叠、子代理详情和鼠标点击。
 
@@ -59,7 +59,7 @@ TUI 特有操作和行为：
 
 ## Display 抽象
 
-两种终端模式实现同一个 `Display` trait（`src/ui/mod.rs`）。
+两种终端模式实现同一个 `Display` trait（`crates/mink-core/src/ui/mod.rs`）。
 
 ```rust
 pub struct ToolResultDisplay<'a> {
@@ -152,10 +152,10 @@ TurnExecutor (agent/turn.rs)
 └───────────────────────┘
          │
 ┌─────── UI 层 ─────────┐
-│ ui/mod.rs             │ Display trait + StatsSnapshot
-│ ui/engine.rs          │ REPL 同步渲染
-│ tui/                  │ TUI 事件、状态、输入、渲染
-│ ui/replay.rs          │ REPL session 重放
+│ crates/mink-core/src/ui/mod.rs │ Display trait + StatsSnapshot
+│ crates/mink-cli/src/ui/engine.rs │ REPL 同步渲染
+│ crates/mink-cli/src/tui/         │ TUI 事件、状态、输入、渲染
+│ crates/mink-cli/src/ui/replay.rs │ REPL session 重放
 └───────────────────────┘
 ```
 
@@ -227,9 +227,9 @@ DecisionEngine.decide()
 
 | 文件 | 职责 |
 |------|------|
-| `cli.rs` | **mink / mink-core 共用 CLI adapter**，参数解析、配置合并、sandbox re-exec、模式分发 |
-| `main.rs` | `mink` binary thin wrapper → `cli::main_entry()` |
-| `bin/mink-core.rs` | `mink-core` SDK binary thin wrapper → `cli::main_entry()` |
+| `crates/mink-cli/src/cli.rs` | **mink / mink-core 共用 CLI adapter**，参数解析、配置合并、sandbox re-exec、模式分发 |
+| `crates/mink-cli/src/main.rs` | `mink` binary thin wrapper → `mink_cli::cli::main_entry()` |
+| `crates/mink-cli/src/bin/mink-core.rs` | `mink-core` SDK binary thin wrapper → `mink_cli::cli::main_entry()` |
 | `config.rs` | Config 结构体、CLI/env/配置文件合并、API key 和 sandbox 配置 |
 | `context.rs` | AgentSharedContext + ToolContext |
 | `assets.rs` | 嵌入 tools.json、内置 skills |
@@ -243,13 +243,13 @@ DecisionEngine.decide()
 
 | 文件 | 职责 |
 |------|------|
-| `runtime/mod.rs` | 公共 API 导出：`AgentRuntime`、`AgentEventStream`、`AgentOptions` 等 |
-| `runtime/builder.rs` | `build_runtime()` — 构造 runtime，与 CLI 共用同一核心 |
-| `runtime/handle.rs` | `AgentRuntime` — `start()`, `run_turn()`, `stream_turn()`, `shutdown()` |
-| `runtime/options.rs` | `AgentOptions` ergonomic builder |
-| `runtime/events.rs` | `AgentEvent` / `EventSink` / `EventDisplay` adapter |
-| `runtime/sdk_adapter.rs` | SDK option/status/exit code 映射，CLI/SDK 去重 |
-| `examples/web_api.rs` | Hidden-worker web API demo：axum + 进程沙箱 + 异步任务队列 |
+| `crates/mink-core/src/runtime/mod.rs` | 公共 API 导出：`AgentRuntime`、`AgentEventStream`、`AgentOptions` 等 |
+| `crates/mink-core/src/runtime/builder.rs` | `build_runtime()` — 构造 runtime，与 CLI 共用同一核心 |
+| `crates/mink-core/src/runtime/handle.rs` | `AgentRuntime` — `start()`, `run_turn()`, `stream_turn()`, `shutdown()` |
+| `crates/mink-core/src/runtime/options.rs` | `AgentOptions` ergonomic builder |
+| `crates/mink-core/src/runtime/events.rs` | `AgentEvent` / `EventSink` / `EventDisplay` adapter |
+| `crates/mink-core/src/runtime/sdk_adapter.rs` | SDK option/status/exit code 映射，CLI/SDK 去重 |
+| `crates/mink-core/examples/web_api.rs` | Hidden-worker web API demo：axum + 进程沙箱 + 异步任务队列 |
 ### Agent 核心
 
 | 文件 | 职责 |
@@ -315,15 +315,15 @@ Anchored patch 只修改 snapshot 覆盖且未漂移的行。tag 缺失、行 ha
 
 | 文件 | 职责 |
 |------|------|
-| `ui/mod.rs` | Display trait、ToolResultDisplay、StatsSnapshot |
-| `ui/engine.rs` | REPL 同步渲染 |
-| `ui/replay.rs` | REPL session 重放 |
-| `tui/mod.rs` | TUI 入口和事件循环 |
-| `tui/display.rs` | Display 到 TuiSignal 的适配 |
-| `tui/state.rs` | TUI 消息、输入、视口、缓存、子代理状态 |
-| `tui/input.rs` | TUI 输入、快捷键、鼠标、slash command |
-| `tui/render/*` | TUI 内容区、详情页、输入区、状态栏渲染 |
-| `tui/markdown/*` | TUI Markdown 子集渲染 |
+| `crates/mink-core/src/ui/mod.rs` | Display trait、ToolResultDisplay、StatsSnapshot |
+| `crates/mink-cli/src/ui/engine.rs` | REPL 同步渲染 |
+| `crates/mink-cli/src/ui/replay.rs` | REPL session 重放 |
+| `crates/mink-cli/src/tui/mod.rs` | TUI 入口和事件循环 |
+| `crates/mink-cli/src/tui/display.rs` | Display 到 TuiSignal 的适配 |
+| `crates/mink-cli/src/tui/state.rs` | TUI 消息、输入、视口、缓存、子代理状态 |
+| `crates/mink-cli/src/tui/input.rs` | TUI 输入、快捷键、鼠标、slash command |
+| `crates/mink-cli/src/tui/render/*` | TUI 内容区、详情页、输入区、状态栏渲染 |
+| `crates/mink-cli/src/tui/markdown/*` | TUI Markdown 子集渲染 |
 
 ### Session 与协议
 
@@ -383,7 +383,7 @@ Anchored patch 只修改 snapshot 覆盖且未漂移的行。tag 缺失、行 ha
 cargo build
 cargo build --release
 cargo test              # 日常测试（跳过重型测试，~5 秒）
-cargo test tui          # 仅 TUI 模块测试
+cargo test -p mink-cli --all-features tui  # 仅 TUI 模块测试
 cargo clippy --all-targets
 make build
 make check
@@ -394,9 +394,10 @@ cargo test --features slow-tests -- --include-ignored
 
 # 仅运行重型测试（CPython WASI 沙箱）
 cargo test --features slow-tests -- --include-ignored tools::sandbox_python
+make feature-matrix     # workspace 拆分和 SDK 精简构建矩阵
 ```
 
-`src/tools/sandbox_python.rs` 的 25 个测试默认跳过。它们通过 wasmtime JIT 执行 CPython WASM，
+`crates/mink-core/src/tools/sandbox_python.rs` 的 25 个测试默认跳过。它们通过 wasmtime JIT 执行 CPython WASM，
 CPU 密集度高。CI 环境应使用 `--features slow-tests -- --include-ignored` 确保全量覆盖。
 
 调试：

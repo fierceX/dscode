@@ -70,6 +70,27 @@ pub struct AgentRuntime {
     pub(crate) stream_in_progress: Arc<AtomicBool>,
 }
 
+struct StreamTurnGuard {
+    event_display: Arc<EventDisplay>,
+    flag: Arc<AtomicBool>,
+}
+
+impl StreamTurnGuard {
+    fn new(event_display: Arc<EventDisplay>, flag: Arc<AtomicBool>) -> Self {
+        Self {
+            event_display,
+            flag,
+        }
+    }
+}
+
+impl Drop for StreamTurnGuard {
+    fn drop(&mut self) {
+        self.event_display.clear_turn_channel();
+        self.flag.store(false, Ordering::SeqCst);
+    }
+}
+
 impl AgentRuntime {
     pub async fn start(config: crate::runtime::AgentRuntimeConfig) -> Result<Self> {
         crate::runtime::build_runtime(config).await
@@ -139,21 +160,22 @@ impl AgentRuntime {
         event_display.set_turn_channel(tx.clone());
 
         let handle = tokio::spawn(async move {
+            let _guard = StreamTurnGuard::new(event_display.clone(), flag);
             let (done_tx, done_rx) = oneshot::channel();
-            let _ = cmd_tx.send(OrchCmd::UserInput {
+            let result = match cmd_tx.send(OrchCmd::UserInput {
                 input,
                 done: done_tx,
-            });
-            let result = done_rx
-                .await
-                .unwrap_or_else(|e| TurnRunResult::failed(format!("orchestrator: {e}")));
+            }) {
+                Ok(()) => done_rx
+                    .await
+                    .unwrap_or_else(|e| TurnRunResult::failed(format!("orchestrator: {e}"))),
+                Err(e) => TurnRunResult::failed(format!("orchestrator command failed: {e}")),
+            };
 
             let (text, thinking) = match store.lines().await {
                 Ok(messages) => extract_text_thinking(&messages),
                 Err(_) => (String::new(), String::new()),
             };
-
-            event_display.clear_turn_channel();
 
             let outcome = TurnOutcome::from_run_result(result, session, text, thinking);
             let final_event = AgentEvent::Final {
@@ -163,8 +185,6 @@ impl AgentRuntime {
                 sink.on_event(final_event.clone());
             }
             let _ = tx.send(final_event);
-
-            flag.store(false, Ordering::SeqCst);
             outcome
         });
 

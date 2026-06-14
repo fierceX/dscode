@@ -1,4 +1,4 @@
-.PHONY: build check test clippy regression-mock regression-client regression-api regression-all coverage coverage-core coverage-with-ignored clean \
+.PHONY: build check test clippy feature-matrix regression-mock regression-client regression-api regression-all coverage coverage-core coverage-with-ignored clean \
         pip-build pip-wheel pip-install pip-publish pip-clean
 
 CORE_COVERAGE_IGNORE := (main\.rs|tui/|ui/|tools/(web|search|runner|bash|file)\.rs|llm/(client|transport)\.rs|sse/toolcall\.rs|session/compaction\.rs|config\.rs|prompt\.rs|assets\.rs|context\.rs|errors\.rs|events\.rs|session/(paths|init)\.rs|util\.rs|test_mock\.rs|regression\.rs|agent/(orchestrator|prefix|compactor|sub_coordinator|sub_executor)\.rs)
@@ -14,6 +14,17 @@ test: check
 
 clippy:
 	cargo clippy --all-targets --all-features -- -D warnings
+
+feature-matrix:
+	cargo check -p mink-core --no-default-features --features runtime
+	cargo check -p mink-cli --no-default-features --features sdk-bin --bin mink-core
+	cargo check -p mink-cli --no-default-features --features "sdk-bin python-sandbox" --bin mink-core
+	cargo test -p mink-cli --all-features
+	@cargo tree -p mink-core --no-default-features --features runtime -e normal > /tmp/mink-core-runtime-tree.txt; \
+	if grep -E 'ratatui|crossterm|rustyline|unicode-width' /tmp/mink-core-runtime-tree.txt; then \
+		echo "mink-core runtime dependency tree must not include terminal UI/rendering crates"; \
+		exit 1; \
+	fi
 
 regression-mock:
 	cargo test regression:: -- --nocapture

@@ -1,9 +1,9 @@
-pub use mink::{
-    agent, cancel, config, runtime, sandbox, sdk_protocol, session, skills, ui as core_ui, util,
+pub(crate) use mink::{
+    agent, cancel, config, runtime, sandbox, sdk_protocol, session, skills, util,
 };
 
 pub mod cli;
-pub mod ui;
+pub(crate) mod ui;
 
 #[cfg(feature = "tui")]
-pub mod tui;
+pub(crate) mod tui;

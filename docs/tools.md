@@ -1,6 +1,10 @@
 # 内置工具
 
-更新日期：2026-06-06
+更新日期：2026-06-14
+
+本文是 mink 内置工具的协议参考，面向需要理解工具参数、执行模型、结果通道、资源 URL、
+审批和构建裁剪的使用者与开发者。CLI 参数、session、沙箱、技能和常见工作流见
+[使用手册](USAGE.md)；模块分层和内部数据流见 [ARCHITECTURE.md](ARCHITECTURE.md)。
 
 ## 执行模型
 
@@ -62,21 +66,26 @@ ToolCallEvent
 
 ### 按需编译（PythonSandbox）
 
-`PythonSandbox` 工具（wasmtime 沙箱）默认编译进二进制，但可在构建时按需裁剪：
+默认的完整 `mink` 终端构建包含 `PythonSandbox` 工具。SDK 精简二进制和最小构建默认不包含
+wasmtime，可在构建时按需加入：
 
 ```bash
 # 最小 mink 二进制（不含 TUI/REPL/PythonSandbox）
-cargo build -p mink-cli --release --no-default-features
+cargo build -p mink-cli --release --no-default-features --bin mink
 
 # SDK 精简二进制 mink-core（不含 TUI/REPL/PythonSandbox）
 cargo build -p mink-cli --release --no-default-features --features sdk-bin --bin mink-core
 
-# 完整构建（含 PythonSandbox，默认）
+# SDK 精简二进制，手动加入 PythonSandbox
+cargo build -p mink-cli --release --no-default-features --features "sdk-bin python-sandbox" --bin mink-core
+
+# 完整终端构建（默认含 PythonSandbox）
 cargo build --release
 ```
 
-`--no-default-features` 可减少二进制体积约 30-40MB。`python-sandbox` feature 也可与
-`runtime` 或 `sdk-bin` 组合使用。
+`mink-core` Rust 发布包只保留 runtime 和工具核心；REPL/TUI 相关依赖位于 `mink-cli`。
+`--no-default-features` 可减少二进制体积约 30-40MB。`python-sandbox` feature 可与
+`mink-cli` 的 `runtime` 或 `sdk-bin` 组合使用。
 
 
 ## `Read`
@@ -343,7 +352,7 @@ open("/absolute/path/to/project/output/f.txt", "w")  # 绝对路径 ✅
 - 子代理不能递归启动子代理。
 - 子代理完成时会通过 parent display 发送完整 thinking/text。
 - tool result 会注入父会话，格式为 `[sub-agent <id>] <status> (in=<n>, out=<n>) ...`。
-- 超时后未完成项返回 `Sub-agent did not complete.`。
+- 超时后未完成项返回 `Sub-agent timed out after <n>s.`，并取消对应子代理。
 
 ## `WebSearch`
 

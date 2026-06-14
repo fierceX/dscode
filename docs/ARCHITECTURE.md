@@ -2,6 +2,10 @@
 
 更新日期：2026-06-14
 
+本文描述 mink 当前代码结构、模块职责和运行时数据流。面向用户的命令、配置和工作流见
+[USAGE.md](USAGE.md)；完整工具协议见 [tools.md](tools.md)；设计取舍和不变式见
+[DESIGN.md](DESIGN.md)。
+
 ## 项目定位
 
 mink 是一个 Rust 实现的轻量 AI coding agent，面向 DeepSeek / OpenAI-compatible API，优先服务终端中的编码工作流。
@@ -67,7 +71,8 @@ TurnExecutor (agent/turn.rs)
 │ tools/snapshot.rs     │ FileSnapshotStore、行 hash 和 snapshot tag
 │ tools/search.rs       │ Glob / Grep
 │ tools/bash.rs         │ Bash 执行、超时、ANSI 过滤、安全检查、误用拦截
-│ tools/python.rs       │ 受限 Python 执行
+│ tools/python.rs       │ 宿主 Python 执行
+│ tools/sandbox_python.rs│ WASI CPython 沙箱执行（python-sandbox feature）
 │ tools/web.rs          │ WebSearch / WebFetch
 └───────────────────────┘
          │
@@ -233,26 +238,27 @@ ToolRunResult
 
 | 文件 | 职责 |
 |------|------|
-| `ui/mod.rs` | `Display`、`ToolResultDisplay`、`StatsSnapshot` |
-| `ui/engine.rs` | REPL 同步渲染 |
-| `ui/replay.rs` | REPL replay |
-| `tui/mod.rs` | TUI 入口和事件循环 |
-| `tui/display.rs` | `Display` -> `TuiSignal` 适配 |
-| `tui/signal.rs` | `TuiSignal` reducer |
-| `tui/state.rs` | `TuiState`、消息、输入、视口、缓存、子代理状态 |
-| `tui/input.rs` | 键盘、鼠标、粘贴、历史和命令输入 |
-| `tui/command.rs` | slash command 解析 |
-| `tui/render.rs` | 渲染 facade 和布局 |
-| `tui/render/*` | content/detail/input/status 子渲染器 |
-| `tui/markdown.rs` | Markdown facade |
-| `tui/markdown/*` | normalize、block、inline、table、diff、types、util |
-| `tui/replay.rs` | TUI replay |
+| `crates/mink-core/src/ui/mod.rs` | `Display`、`ToolResultDisplay`、`StatsSnapshot`，只保留协议层抽象 |
+| `crates/mink-cli/src/ui/engine.rs` | REPL 同步渲染 |
+| `crates/mink-cli/src/ui/replay.rs` | REPL replay |
+| `crates/mink-cli/src/tui/mod.rs` | TUI 入口和事件循环 |
+| `crates/mink-cli/src/tui/display.rs` | `Display` -> `TuiSignal` 适配 |
+| `crates/mink-cli/src/tui/signal.rs` | `TuiSignal` reducer |
+| `crates/mink-cli/src/tui/state.rs` | `TuiState`、消息、输入、视口、缓存、子代理状态 |
+| `crates/mink-cli/src/tui/input.rs` | 键盘、鼠标、粘贴、历史和命令输入 |
+| `crates/mink-cli/src/tui/command.rs` | slash command 解析 |
+| `crates/mink-cli/src/tui/render.rs` | 渲染 facade 和布局 |
+| `crates/mink-cli/src/tui/render/*` | content/detail/input/status 子渲染器 |
+| `crates/mink-cli/src/tui/markdown.rs` | Markdown facade |
+| `crates/mink-cli/src/tui/markdown/*` | normalize、block、inline、table、diff、types、util |
+| `crates/mink-cli/src/tui/replay.rs` | TUI replay |
 
 ---
 
 ## Display 接口
 
-`Display` 是 REPL 与 TUI 的共享抽象。工具结果通过 `ToolResultDisplay` 传递展示字段：
+`Display` 是 runtime 与具体输出实现之间的共享抽象。`mink-core` 只定义 trait 和展示数据结构；
+REPL/TUI 的具体实现位于 `mink-cli`。工具结果通过 `ToolResultDisplay` 传递展示字段：
 
 ```rust
 pub struct ToolResultDisplay<'a> {

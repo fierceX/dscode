@@ -1,6 +1,6 @@
 # TUI 实现说明与维护建议
 
-更新日期：2026-06-09
+更新日期：2026-06-14
 
 ## 定位
 
@@ -10,18 +10,18 @@ TUI 是 mink 的全屏终端交互模式，基于 `ratatui`。它不是 agent �
 
 | 文件 | 职责 |
 |------|------|
-| `src/tui/mod.rs` | TUI 入口、事件循环、集成测试 |
-| `src/tui/display.rs` | `Display` 到 `TuiSignal` 的适配 |
-| `src/tui/file_picker.rs` | 输入区路径补全、父目录扫描和沙箱感知过滤 |
-| `src/tui/notify.rs` | TUI 任务结束后的系统通知，按平台尽力发送 |
-| `src/tui/signal.rs` | `TuiSignal` reducer |
-| `src/tui/state.rs` | 消息、输入、视口、缓存、子代理状态 |
-| `src/tui/input.rs` | 键盘、鼠标、粘贴、历史和 slash command |
-| `src/tui/command.rs` | slash command 解析 |
-| `src/tui/render.rs` / `src/tui/render/*` | 主布局、消息区、详情页、输入区、状态栏 |
-| `src/tui/markdown.rs` / `src/tui/markdown/*` | Markdown 子集渲染 |
-| `src/tui/replay.rs` | session 历史重放 |
-| `src/tui/sanitize.rs` | TUI 输入和展示文本的控制字符/ANSI 清理 |
+| `crates/mink-cli/src/tui/mod.rs` | TUI 入口、事件循环、集成测试 |
+| `crates/mink-cli/src/tui/display.rs` | `Display` 到 `TuiSignal` 的适配 |
+| `crates/mink-cli/src/tui/file_picker.rs` | 输入区路径补全、父目录扫描和沙箱感知过滤 |
+| `crates/mink-cli/src/tui/notify.rs` | TUI 任务结束后的系统通知，按平台尽力发送 |
+| `crates/mink-cli/src/tui/signal.rs` | `TuiSignal` reducer |
+| `crates/mink-cli/src/tui/state.rs` | 消息、输入、视口、缓存、子代理状态 |
+| `crates/mink-cli/src/tui/input.rs` | 键盘、鼠标、粘贴、历史和 slash command |
+| `crates/mink-cli/src/tui/command.rs` | slash command 解析 |
+| `crates/mink-cli/src/tui/render.rs` / `crates/mink-cli/src/tui/render/*` | 主布局、消息区、详情页、输入区、状态栏 |
+| `crates/mink-cli/src/tui/markdown.rs` / `crates/mink-cli/src/tui/markdown/*` | Markdown 子集渲染 |
+| `crates/mink-cli/src/tui/replay.rs` | session 历史重放 |
+| `crates/mink-cli/src/tui/sanitize.rs` | TUI 输入和展示文本的控制字符/ANSI 清理 |
 
 ## 行为边界
 
@@ -67,11 +67,11 @@ TUI 是 mink 的全屏终端交互模式，基于 `ratatui`。它不是 agent �
 当前验证基线：
 
 ```text
-cargo test tui
+cargo test -p mink-cli --all-features tui
 76 passed
 
 cargo test
-466 passed, 31 ignored
+workspace quick tests
 ```
 
 TUI 相关测试覆盖输入、中断、slash command、Markdown、表格、diff、折叠、点击目标、子代理详情、状态栏和 replay。
@@ -86,7 +86,7 @@ TUI 相关测试覆盖输入、中断、slash command、Markdown、表格、diff
 
 优先级建议：
 
-1. 将集中在 `src/tui/mod.rs` 的测试按职责迁移到 input、command、signal、render、markdown 模块。
+1. 将集中在 `crates/mink-cli/src/tui/mod.rs` 的测试按职责迁移到 input、command、signal、render、markdown 模块。
 2. 为 `Display::render_tool_result_detail()` 增加回归测试，确保工具展示内容和 LLM conversation 内容边界清晰。
 3. 增加长会话本地搜索和消息类型跳转，状态只保存在 TUI 本地。
 4. 为 Bash/Python/Edit/Read/TodoWrite 提供更清晰的工具结果头部和分区展示。

@@ -84,13 +84,21 @@ impl ConversationStore {
     }
 
     pub async fn lines(&self) -> Result<Vec<Value>> {
-        // Try cache first
         {
             let cache = self.cache.read().await;
             if let Some(ref lines) = *cache {
                 return Ok(lines.clone());
             }
         }
+
+        let _guard = self.write_lock.lock().await;
+        {
+            let cache = self.cache.read().await;
+            if let Some(ref lines) = *cache {
+                return Ok(lines.clone());
+            }
+        }
+
         let lines = self.read_lines_from_disk().await?;
         let mut cache = self.cache.write().await;
         *cache = Some(lines.clone());
@@ -152,7 +160,14 @@ impl ConversationStore {
 
     pub async fn trim_keep_last(&self, keep_lines: usize) -> Result<()> {
         let _guard = self.write_lock.lock().await;
-        let lines = self.lines().await?;
+        let lines = if let Some(lines) = self.cache.read().await.clone() {
+            lines
+        } else {
+            let lines = self.read_lines_from_disk().await?;
+            let mut cache = self.cache.write().await;
+            *cache = Some(lines.clone());
+            lines
+        };
         if keep_lines >= lines.len() {
             return Ok(());
         }

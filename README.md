@@ -4,7 +4,8 @@
 
 极简 AI coding agent。Rust 原生实现，专为 DeepSeek 优化。
 
-单二进制，零运行时依赖，可在终端独立运行或被其他程序嵌入编排。
+默认交付为 `mink` 终端二进制，也可构建 SDK 精简二进制 `mink-core`，或作为 Rust
+库嵌入到其他服务中编排。
 
 ---
 
@@ -58,8 +59,9 @@ make build
 
 ## Rust Library
 
-`mink-core` 是 Rust 发布包名，库 crate 名为 `mink`。Rust 服务可按需关闭默认 CLI feature，
-只启用嵌入式 runtime：
+`mink-core` 是 Rust 发布包名，库 crate 名为 `mink`。发布库只包含可嵌入 runtime 和
+`Display` 协议层；REPL/TUI、二进制入口和终端依赖归属 `mink-cli` workspace 包。
+Rust 服务通常只启用嵌入式 runtime：
 
 ```toml
 [dependencies]
@@ -102,7 +104,17 @@ async fn main() -> anyhow::Result<()> {
 同进程 `AgentRuntime` 不会自动 sandbox 当前进程。需要完整进程级沙箱时，推荐参考 `examples/web_api.rs` 的 hidden worker 模式：业务服务 spawn 自身 worker 子进程，worker 先 re-exec 进沙箱，再调用 `mink::runtime`。
 
 库使用方应优先从 `mink::prelude`、`mink::runtime`、`mink::config`、`mink::sandbox`
-和 `mink::sdk_protocol` 导入类型。其他公开模块目前主要服务于现有二进制和过渡期测试，不建议作为稳定 API 依赖。
+和 `mink::sdk_protocol` 导入类型。其他公开模块目前主要服务于内部 runtime 复用和过渡期测试，不建议作为稳定 API 依赖。
+
+---
+
+## Workspace Packages
+
+| 路径 | 职责 |
+|------|------|
+| [crates/mink-core](crates/mink-core/README.md) | Rust 发布包 `mink-core`，库 crate 名 `mink`，包含可嵌入 runtime、工具核心、session、sandbox 和 SDK 协议 |
+| [crates/mink-cli](crates/mink-cli/README.md) | workspace 内部二进制包，生成 `mink` 终端二进制和 `mink-core` SDK 精简二进制，持有 REPL/TUI 实现 |
+| [mink_agent](mink_agent/README.md) | Python SDK，wheel 内置无 TUI 的 `mink-core` 二进制 |
 
 ---
 
@@ -136,12 +148,12 @@ print(result["status"], result["events_path"])
 
 | 文档 | 说明 |
 |------|------|
-| [使用手册](docs/USAGE.md) | 完整 CLI 参数、配置、环境变量、会话管理、工具、技能 |
+| [使用手册](docs/USAGE.md) | 面向用户：CLI/SDK/Rust 嵌入、配置、沙箱、session、技能和常见工作流 |
+| [工具参考](docs/tools.md) | 面向工具协议：内置工具参数、结果通道、资源 URL、审批和构建裁剪 |
 | [架构说明](docs/ARCHITECTURE.md) | 运行时分层、模块职责、核心数据流 |
-| [设计文档](docs/DESIGN.md) | 14 个主题的设计哲学与实现取舍 |
+| [设计文档](docs/DESIGN.md) | 设计哲学、关键不变式、运行时和库化边界 |
 | [信号系统设计](docs/设计哲学-信号系统.md) | 控制论 + 贝叶斯、冷却机制、信念度展示 |
 | [Agent 开发指南](AGENTS.md) | 面向 AI agent：项目结构、模块索引、开发惯例 |
-| [工具参考](docs/tools.md) | 内置工具参数与行为 |
 
 ---
 

@@ -2,8 +2,8 @@ use crate::agent::orchestrator::OrchCmd;
 use crate::cancel::CancellationToken;
 use crate::config::{apply_config_file, apply_provider_defaults, parse_args};
 use crate::runtime::{
-    AgentRuntimeConfig, SessionInfo, apply_sdk_request_options, exit_code_from_turn,
-    final_from_run_result,
+    AgentRuntimeConfig, TurnOutcome, apply_sdk_request_options, exit_code_from_turn,
+    final_from_outcome,
 };
 use crate::sdk_protocol::{
     PROTOCOL_VERSION, SdkRequest, emit_failed_parse, parse_agent_jsonl_request,
@@ -161,74 +161,52 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
     }
     let runtime = crate::runtime::AgentRuntime::start(runtime_config).await?;
     let session = runtime.session_info().clone();
-    let cmd_tx = runtime.command_sender();
-    let cancel = runtime.cancel_token();
-    let interrupt = runtime.interrupt_flag();
 
     let mut process_exit_code = 0i32;
     if cfg.agent_jsonl {
-        // SDK protocol: prompt was already parsed above; execute one turn.
-        let (done_tx, done_rx) = oneshot::channel();
-        cmd_tx.send(OrchCmd::UserInput {
-            input: sdk_request.map(|r| r.prompt).unwrap_or_default(),
-            done: done_tx,
-        })?;
-        let result = done_rx.await.unwrap_or_else(|e| {
-            crate::agent::orchestrator::TurnRunResult::failed(format!(
-                "orchestrator dropped turn result: {e}"
-            ))
-        });
-        crate::sdk_protocol::emit_json_line(&final_from_run_result(&result, &session));
-        process_exit_code = exit_code_from_turn(result.status);
+        let outcome = runtime
+            .run_turn(sdk_request.map(|r| r.prompt).unwrap_or_default())
+            .await?;
+        crate::sdk_protocol::emit_json_line(&final_from_outcome(&outcome));
+        process_exit_code = exit_code_from_turn(outcome.status);
     } else if cfg.tui_mode {
         #[cfg(feature = "tui")]
-        if let Some((_, signal_rx)) = tui_tx
-            && let Err(e) = crate::tui::run_tui(
-                signal_rx,
-                cmd_tx.clone(),
-                &session.events_path,
-                Some(interrupt.clone()),
-                &cfg.sandbox,
-            )
         {
-            eprintln!("TUI error: {e}");
+            let cmd_tx = runtime.command_sender();
+            let interrupt = runtime.interrupt_flag();
+            if let Some((_, signal_rx)) = tui_tx
+                && let Err(e) = crate::tui::run_tui(
+                    signal_rx,
+                    cmd_tx.clone(),
+                    &session.events_path,
+                    Some(interrupt.clone()),
+                    &cfg.sandbox,
+                )
+            {
+                eprintln!("TUI error: {e}");
+            }
         }
         #[cfg(not(feature = "tui"))]
         anyhow::bail!("this mink binary was built without the `tui` feature");
     } else if is_interactive {
+        let cmd_tx = runtime.command_sender();
+        let cancel = runtime.cancel_token();
+        let interrupt = runtime.interrupt_flag();
         display.render_info("mink interactive mode (type 'exit' or Ctrl+D to quit)");
         if !session.is_new {
             replay_last_turns(&session.events_path);
         }
         run_interactive(cmd_tx, cancel.clone(), interrupt.clone(), &home).await?;
     } else if !cfg.prompt.is_empty() {
-        let (done_tx, done_rx) = oneshot::channel();
-        cmd_tx.send(OrchCmd::UserInput {
-            input: cfg.prompt.clone(),
-            done: done_tx,
-        })?;
-        let result = done_rx.await.unwrap_or_else(|e| {
-            crate::agent::orchestrator::TurnRunResult::failed(format!(
-                "orchestrator dropped turn result: {e}"
-            ))
-        });
-        emit_stream_json_final_if_needed(&cfg, &result, &session);
-        process_exit_code = exit_code_from_turn(result.status);
+        let outcome = runtime.run_turn(cfg.prompt.clone()).await?;
+        emit_stream_json_final_if_needed(&cfg, &outcome);
+        process_exit_code = exit_code_from_turn(outcome.status);
     } else {
         let mut input = String::new();
         tokio::io::AsyncReadExt::read_to_string(&mut tokio::io::stdin(), &mut input).await?;
-        let (done_tx, done_rx) = oneshot::channel();
-        cmd_tx.send(OrchCmd::UserInput {
-            input,
-            done: done_tx,
-        })?;
-        let result = done_rx.await.unwrap_or_else(|e| {
-            crate::agent::orchestrator::TurnRunResult::failed(format!(
-                "orchestrator dropped turn result: {e}"
-            ))
-        });
-        emit_stream_json_final_if_needed(&cfg, &result, &session);
-        process_exit_code = exit_code_from_turn(result.status);
+        let outcome = runtime.run_turn(input).await?;
+        emit_stream_json_final_if_needed(&cfg, &outcome);
+        process_exit_code = exit_code_from_turn(outcome.status);
     }
 
     runtime.shutdown().await?;
@@ -253,15 +231,11 @@ fn reexec_if_sandbox(cfg: &crate::config::Config) {
     }
 }
 
-fn emit_stream_json_final_if_needed(
-    cfg: &crate::config::Config,
-    result: &crate::agent::orchestrator::TurnRunResult,
-    session: &SessionInfo,
-) {
+fn emit_stream_json_final_if_needed(cfg: &crate::config::Config, outcome: &TurnOutcome) {
     if cfg.output_format != crate::config::OutputFormat::StreamJson || cfg.agent_jsonl {
         return;
     }
-    crate::sdk_protocol::emit_json_line(&final_from_run_result(result, session));
+    crate::sdk_protocol::emit_json_line(&final_from_outcome(outcome));
 }
 
 fn list_skills() {

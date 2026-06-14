@@ -39,7 +39,6 @@ similar.workspace = true
 time.workspace = true
 toml.workspace = true
 tokio.workspace = true
-unicode-width.workspace = true
 wasmtime = { workspace = true, optional = true }
 wasmtime-wasi = { workspace = true, optional = true }
 axum = { workspace = true, optional = true }

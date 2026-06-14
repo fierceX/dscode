@@ -1,6 +1,7 @@
 use crate::agent::turn::{TurnDecision, TurnExecutor};
 use crate::context::AgentSharedContext;
 use crate::llm::client::{AsyncLlClient, LlmClient};
+use crate::runtime::context_build::{AgentContextBuild, build_agent_context};
 use crate::session::stats::Stats;
 use crate::session::store::ConversationStore;
 use crate::ui::{Display, SubAgentStreamKind, SubAgentStreamSink};
@@ -94,23 +95,29 @@ impl SubAgentExecutor {
         fork: bool,
         cancel: crate::cancel::CancellationToken,
     ) -> Result<Self> {
-        let paths = crate::session::paths::paths_for_layout(
-            &parent_ctx.home,
-            &parent_ctx.cwd,
+        let capture = Arc::new(CaptureDisplay::new(
+            parent_ctx.sub_stream_tx.clone(),
             &session_id,
-            parent_ctx.session_layout,
-        );
-        crate::session::paths::ensure_dir(&paths.session_dir).await?;
-
-        // 共享初始化：创建文件、store、stats
-        let (child_store, child_stats, child_artifacts) =
-            crate::session::init::init_session_base_with_layout(
-                &parent_ctx.home,
-                &parent_ctx.cwd,
-                &session_id,
-                parent_ctx.session_layout,
-            )
-            .await?;
+        ));
+        let parent_display = parent_ctx.display.clone();
+        let built = build_agent_context(AgentContextBuild {
+            config: parent_ctx.config.clone(),
+            home: parent_ctx.home.clone(),
+            cwd: parent_ctx.cwd.clone(),
+            session_id: session_id.clone(),
+            session_layout: parent_ctx.session_layout,
+            api_url: parent_ctx.api_url.clone(),
+            display: capture.clone(),
+            sub_stream_tx: None,
+            cancel,
+            interrupt: parent_ctx.interrupt.clone(),
+            is_sub_agent: true,
+            http_client: reqwest::Client::new(),
+        })
+        .await?;
+        let child_ctx = built.ctx;
+        let paths = built.paths;
+        let child_store = child_ctx.store.clone();
 
         if fork {
             // Copy parent conversation, summary, plan to child session (ignore errors)
@@ -125,54 +132,6 @@ impl SubAgentExecutor {
                 let _ = tokio::fs::copy(&parent_ctx.plan_path, &paths.plan).await;
             }
         }
-
-        let child_compaction = Arc::new(crate::session::compaction::CompactionEngine::new(
-            child_store.clone(),
-            paths.summary.clone(),
-            paths.plan.clone(),
-            paths.plan_draft.clone(),
-            parent_ctx.cwd.clone(),
-            parent_ctx.home.clone(),
-            parent_ctx.config.skills.clone(),
-            parent_ctx.api_url.clone(),
-            &parent_ctx.config,
-            child_stats.clone(),
-            reqwest::Client::new(),
-        ));
-
-        // Capture child output; optionally forward live chunks to UI implementations.
-        let capture = Arc::new(CaptureDisplay::new(
-            parent_ctx.sub_stream_tx.clone(),
-            &session_id,
-        ));
-        let parent_display = parent_ctx.display.clone();
-
-        let child_ctx = Arc::new(AgentSharedContext {
-            config: parent_ctx.config.clone(),
-            cwd: parent_ctx.cwd.clone(),
-            home: parent_ctx.home.clone(),
-            session_layout: parent_ctx.session_layout,
-            api_url: parent_ctx.api_url.clone(),
-            store: child_store.clone(),
-            artifacts: child_artifacts,
-            snapshots: Arc::new(Mutex::new(
-                crate::tools::snapshot::FileSnapshotStore::default(),
-            )),
-            stats: child_stats,
-            compaction: child_compaction,
-            cancel,
-            display: capture.clone(), // ← CaptureDisplay，阻断实时输出
-            sub_stream_tx: None,
-            tool_config: parent_ctx.tool_config.clone(),
-            events_path: paths.events.clone(),
-            summary_path: paths.summary.clone(),
-            plan_path: paths.plan.clone(),
-            plan_draft_path: paths.plan_draft.clone(),
-            immutable_prefix: Mutex::new(None),
-            is_sub_agent: true,
-            interrupt: parent_ctx.interrupt.clone(),
-            event_log_warned: std::sync::atomic::AtomicBool::new(false),
-        });
 
         Ok(Self {
             child_store,

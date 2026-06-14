@@ -3,17 +3,15 @@ use crate::agent::orchestrator::OrchActor;
 use crate::agent::orchestrator::new_orchestrator;
 use crate::cancel::CancellationToken;
 use crate::config::api_url;
-use crate::context::{AgentSharedContext, ToolConfig};
 use crate::runtime::config::{AgentRuntimeConfig, SessionInfo, SessionPolicy};
+use crate::runtime::context_build::{AgentContextBuild, build_agent_context};
 use crate::runtime::events::EventDisplay;
 use crate::runtime::handle::AgentRuntime;
-use crate::session::compaction::CompactionEngine;
 use crate::session::metadata::{SessionSeed, sanitize_alias};
 use crate::session::paths;
-use crate::tools::snapshot::FileSnapshotStore;
 use anyhow::{Result, bail};
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
 #[cfg(test)]
 use tokio::sync::mpsc;
 
@@ -36,12 +34,36 @@ pub async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRuntime> {
         resolve_session(&home, &cwd, session, session_layout).await?;
     config.session_id = sid.clone();
 
-    let spaths = paths::paths_for_layout(&home, &cwd, &sid, session_layout);
-    let new_session = !spaths.events.exists();
+    let cancel = CancellationToken::new();
+    let event_display = Arc::new(EventDisplay::new(event_sink.clone(), display));
+    let display: Arc<dyn crate::ui::Display> = event_display.clone();
+    let interrupt = Arc::new(AtomicBool::new(false));
+    let api_url_str = api_url(&config);
+    let shared_client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(600))
+        .user_agent("mink/3.0")
+        .build()?;
 
-    let (store, stats, artifacts) =
-        crate::session::init::init_session_base_with_layout(&home, &cwd, &sid, session_layout)
-            .await?;
+    let built = build_agent_context(AgentContextBuild {
+        config: config.clone(),
+        home: home.clone(),
+        cwd: cwd.clone(),
+        session_id: sid.clone(),
+        session_layout,
+        api_url: api_url_str.clone(),
+        display: display.clone(),
+        sub_stream_tx,
+        cancel: cancel.clone(),
+        interrupt: interrupt.clone(),
+        is_sub_agent: false,
+        http_client: shared_client,
+    })
+    .await?;
+    let ctx = built.ctx;
+    let spaths = built.paths;
+    let new_session = built.is_new;
+
     crate::session::metadata::ensure_metadata(
         &spaths,
         &cwd,
@@ -54,55 +76,6 @@ pub async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRuntime> {
         },
     )
     .await?;
-
-    let api_url_str = api_url(&config);
-    let shared_client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(30))
-        .timeout(std::time::Duration::from_secs(600))
-        .user_agent("mink/3.0")
-        .build()?;
-
-    let compaction = Arc::new(CompactionEngine::new(
-        store.clone(),
-        spaths.summary.clone(),
-        spaths.plan.clone(),
-        spaths.plan_draft.clone(),
-        cwd.clone(),
-        home.clone(),
-        config.skills.clone(),
-        api_url_str.clone(),
-        &config,
-        stats.clone(),
-        shared_client,
-    ));
-
-    let cancel = CancellationToken::new();
-    let event_display = Arc::new(EventDisplay::new(event_sink.clone(), display));
-    let display: Arc<dyn crate::ui::Display> = event_display.clone();
-    let ctx = Arc::new(AgentSharedContext {
-        config: config.clone(),
-        cwd: cwd.clone(),
-        home: home.clone(),
-        session_layout,
-        api_url: api_url_str,
-        store,
-        artifacts,
-        snapshots: Arc::new(Mutex::new(FileSnapshotStore::default())),
-        stats,
-        compaction,
-        cancel: cancel.clone(),
-        display: display.clone(),
-        sub_stream_tx,
-        tool_config: ToolConfig::from_config(&config),
-        events_path: spaths.events.clone(),
-        summary_path: spaths.summary.clone(),
-        plan_path: spaths.plan.clone(),
-        plan_draft_path: spaths.plan_draft.clone(),
-        immutable_prefix: Mutex::new(None),
-        is_sub_agent: false,
-        interrupt: Arc::new(AtomicBool::new(false)),
-        event_log_warned: AtomicBool::new(false),
-    });
 
     let (orchestrator, cmd_tx) = {
         #[cfg(test)]
