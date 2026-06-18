@@ -137,7 +137,7 @@ mod tests {
     use crate::tui::input::{handle_ctrl_c, handle_event};
     use crate::tui::markdown::{
         InlineNode, MdBlock, TableAlign, TableRows, normalize_markdown_input, parse_blocks,
-        push_msg, push_msg_with_width, render_table, strip_ansi, wrap_lines_word,
+        push_msg, push_msg_with_tool, push_msg_with_width, render_table, strip_ansi, wrap_lines_word,
     };
     use crate::tui::notify::TaskNotificationKind;
     use crate::tui::render::{
@@ -644,6 +644,7 @@ mod tests {
             "| Key | Description |\n| --- | --- |\n| row | abcdefghijklmnopqrstuvwxyz0123456789 |",
             MsgKind::Text,
             24,
+            None,
         );
 
         let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
@@ -661,6 +662,7 @@ mod tests {
             "| Key | Description |\n| --- | --- |\n| row | abcdefghijklmnopqrstuvwxyz0123456789 |",
             MsgKind::Text,
             80,
+            None,
         );
 
         assert_eq!(lines.len(), 3);
@@ -753,10 +755,11 @@ mod tests {
     fn colored_tool_diff_is_detected_after_normalization() {
         let mut lines = Vec::new();
 
-        push_msg(
+        push_msg_with_tool(
             &mut lines,
             "\x1b[31m--- a/file\x1b[0m\n\x1b[32m+++ b/file\x1b[0m\n@@ -1 +1 @@\n-old\n+new",
             MsgKind::ToolResult,
+            "Edit",
         );
 
         assert_eq!(line_text(&lines[0]), "--- a/file");

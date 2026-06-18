@@ -45,10 +45,22 @@ pub(crate) fn style_for_kind(kind: MsgKind) -> Style {
     }
 }
 
-fn mode_for_kind(kind: MsgKind, text: &str) -> MarkdownMode {
+/// Tools whose output may contain diff markers (`---`, `+++`, `@@`) and
+/// benefit from syntax-highlighted diff rendering.
+///
+/// Only these tools are eligible for `MarkdownMode::Diff`. Other tools
+/// (Read, Write, Glob, WebSearch, SubAgent, ...) are excluded because
+/// their output is either structured text or raw file content that should
+/// not be reinterpreted as a diff — even if the text coincidentally
+/// contains diff-like lines (e.g. Read of a YAML front-matter file).
+fn is_diff_eligible(tool_name: Option<&str>) -> bool {
+    matches!(tool_name, Some("Edit" | "Bash" | "Python" | "PythonSandbox"))
+}
+
+fn mode_for_kind(kind: MsgKind, text: &str, tool_name: Option<&str>) -> MarkdownMode {
     match kind {
         MsgKind::Text | MsgKind::StreamText => MarkdownMode::Full,
-        MsgKind::ToolResult if diff::is_diff_like(text) => MarkdownMode::Diff,
+        MsgKind::ToolResult if is_diff_eligible(tool_name) && diff::is_diff_like(text) => MarkdownMode::Diff,
         MsgKind::ToolResult => MarkdownMode::ToolOutput,
         _ => MarkdownMode::Plain,
     }
@@ -56,7 +68,17 @@ fn mode_for_kind(kind: MsgKind, text: &str) -> MarkdownMode {
 
 #[cfg(test)]
 pub(crate) fn push_msg(lines: &mut Vec<Line<'static>>, text: &str, kind: MsgKind) {
-    push_msg_with_width(lines, text, kind, 80);
+    push_msg_with_width(lines, text, kind, 80, None);
+}
+
+#[cfg(test)]
+pub(crate) fn push_msg_with_tool(
+    lines: &mut Vec<Line<'static>>,
+    text: &str,
+    kind: MsgKind,
+    tool_name: &str,
+) {
+    push_msg_with_width(lines, text, kind, 80, Some(tool_name));
 }
 
 pub(crate) fn push_msg_with_width(
@@ -64,13 +86,14 @@ pub(crate) fn push_msg_with_width(
     text: &str,
     kind: MsgKind,
     max_width: u16,
+    tool_name: Option<&str>,
 ) {
     if text.is_empty() {
         return;
     }
 
     let normalized = normalize_markdown_input(text, false);
-    let mode = mode_for_kind(kind, &normalized);
+    let mode = mode_for_kind(kind, &normalized, tool_name);
     match mode {
         MarkdownMode::Full => render_markdown(lines, &normalized, style_for_kind(kind), max_width),
         MarkdownMode::Diff => diff::render_diff(lines, &normalized),

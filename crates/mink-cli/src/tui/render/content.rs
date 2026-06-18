@@ -83,11 +83,11 @@ fn build_message_segments(msg: &MsgLine, inner_w: u16) -> Vec<Line<'static>> {
     let mut seg = Vec::new();
     if msg.collapsed {
         let max_w = (inner_w as usize).saturating_sub(4).max(1);
-        push_msg_with_width(&mut seg, &collapsed_summary(msg, max_w), msg.kind, inner_w);
+        push_msg_with_width(&mut seg, &collapsed_summary(msg, max_w), msg.kind, inner_w, msg.tool_name.as_deref());
     } else if msg.is_collapsible() {
-        push_msg_with_width(&mut seg, &format!("▼ {}", msg.text), msg.kind, inner_w);
+        push_msg_with_width(&mut seg, &format!("▼ {}", msg.text), msg.kind, inner_w, msg.tool_name.as_deref());
     } else {
-        push_msg_with_width(&mut seg, &msg.text, msg.kind, inner_w);
+        push_msg_with_width(&mut seg, &msg.text, msg.kind, inner_w, msg.tool_name.as_deref());
     }
     seg
 }
@@ -195,7 +195,7 @@ fn ensure_stream_cache(state: &mut TuiState, inner_w: u16) {
     }
 
     let mut seg: Vec<Line<'static>> = Vec::new();
-    push_msg_with_width(&mut seg, &state.stream_line, state.stream_kind, inner_w);
+    push_msg_with_width(&mut seg, &state.stream_line, state.stream_kind, inner_w, None);
     state.cache.stream_lines = Some(wrap_lines_word(&seg, inner_w));
     state.cache.stream_width = inner_w;
     state.cache.stream_kind = state.stream_kind;
