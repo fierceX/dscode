@@ -1,10 +1,13 @@
 use crate::config::Config;
-use crate::llm::transport::build_openai_body;
+use crate::llm::client::{AsyncLlClient, LlmRequestContext};
 use crate::prompt;
 use crate::protocol::{ErrorEvent, Event, StopEvent, TextEvent, UsageEvent};
 use crate::session::stats::StatsTracker;
 use crate::session::store::ConversationStore;
+use crate::session::usage::{UsageJournal, UsageKind};
+use crate::ui::Display;
 use anyhow::{Result, bail};
+use futures::StreamExt;
 use serde_json::{Value, json};
 use std::io::Write;
 use std::path::PathBuf;
@@ -22,7 +25,10 @@ pub struct CompactionEngine {
     api_key: String,
     config: Config,
     stats: Arc<StatsTracker>,
-    client: reqwest::Client,
+    usage: Arc<UsageJournal>,
+    session_id: String,
+    display: Arc<dyn Display>,
+    cancel: crate::cancel::CancellationToken,
     compact_pct: u8,
 }
 
@@ -39,7 +45,42 @@ impl CompactionEngine {
         api_url: String,
         config: &Config,
         stats: Arc<StatsTracker>,
-        client: reqwest::Client,
+    ) -> Self {
+        let usage = UsageJournal::new(summary_path.with_file_name("usage.jsonl"));
+        Self::new_with_usage(
+            store,
+            summary_path,
+            plan_path,
+            plan_draft_path,
+            cwd,
+            home,
+            skills,
+            api_url,
+            config,
+            stats,
+            usage,
+            config.session_id.clone(),
+            Arc::new(SilentDisplay),
+            crate::cancel::CancellationToken::new(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_usage(
+        store: Arc<ConversationStore>,
+        summary_path: PathBuf,
+        plan_path: PathBuf,
+        plan_draft_path: PathBuf,
+        cwd: PathBuf,
+        home: PathBuf,
+        skills: Vec<String>,
+        api_url: String,
+        config: &Config,
+        stats: Arc<StatsTracker>,
+        usage: Arc<UsageJournal>,
+        session_id: String,
+        display: Arc<dyn Display>,
+        cancel: crate::cancel::CancellationToken,
     ) -> Self {
         let compact_pct = config.context_compact_pct;
         Self {
@@ -54,7 +95,10 @@ impl CompactionEngine {
             api_key: config.api_key.clone(),
             config: config.clone(),
             stats,
-            client,
+            usage,
+            session_id,
+            display,
+            cancel,
             compact_pct,
         }
     }
@@ -155,7 +199,7 @@ impl CompactionEngine {
 
     fn validate_conversation_messages(&self, messages: &[Value]) -> Result<()> {
         let system_prompt = "";
-        let _ = build_openai_body(
+        let _ = crate::llm::transport::build_openai_body(
             crate::config::resolve_model_name(&self.config.model),
             messages,
             &[],
@@ -200,29 +244,33 @@ Start directly with \"Task focus:\" — no preamble, no markdown, no code fences
         }
         .build_system_prompt()?;
 
-        let body = build_openai_body(
-            crate::config::resolve_model_name(&self.config.model),
-            &messages,
-            &[],
-            &system_prompt,
-            self.config.max_tokens,
-        )?;
-
-        let resp = self.send_summary_request(body).await?;
-
-        let resp_bytes = resp.bytes().await?;
+        let model = crate::config::resolve_model_name(&self.config.model);
+        let client = AsyncLlClient::new(model, &self.api_key, &self.api_url)?;
+        let request_ctx = LlmRequestContext {
+            max_tokens: self.config.max_tokens,
+            verbose: self.config.verbose,
+            cancel: self.cancel.clone(),
+            display: self.display.clone(),
+            usage: self.usage.clone(),
+            usage_scope: self
+                .usage
+                .scope(UsageKind::Compaction, self.session_id.clone()),
+        };
+        let mut stream = client
+            .stream_request(&request_ctx, &messages, &[], &system_prompt)
+            .await?;
         let mut out = String::new();
         let mut stop_reason = String::new();
         let mut last_error = String::new();
 
-        let mut compact_usage: Option<UsageEvent> = None;
-        let mut parse_emit = |evt: Event| -> Result<()> {
-            match evt {
+        while let Some(event) = stream.next().await {
+            match event? {
                 Event::Text(TextEvent { content }) => out.push_str(&content),
                 Event::Usage(usage) => {
                     self.log_compact_event(&usage);
-                    compact_usage = Some(usage);
+                    self.stats.record_compact(&usage).await;
                 }
+                Event::UsageUnavailable => {}
                 Event::Error(ErrorEvent { message }) => {
                     last_error = message;
                 }
@@ -231,15 +279,6 @@ Start directly with \"Task focus:\" — no preamble, no markdown, no code fences
                 }
                 _ => {}
             }
-            Ok(())
-        };
-
-        let reader: Box<dyn std::io::Read + Send> =
-            Box::new(std::io::Cursor::new(resp_bytes.to_vec()));
-        crate::sse::openai::parse(reader, &mut |evt| parse_emit(evt))?;
-
-        if let Some(usage) = compact_usage {
-            self.stats.record_compact(&usage).await;
         }
 
         if out.is_empty() {
@@ -258,51 +297,6 @@ Start directly with \"Task focus:\" — no preamble, no markdown, no code fences
             );
         }
         Ok(strip_tool_labels(&strip_dsml_tags(&out)))
-    }
-
-    async fn send_summary_request(&self, body: Vec<u8>) -> Result<reqwest::Response> {
-        let mut attempt = 0u32;
-        loop {
-            let response = self
-                .client
-                .post(&self.api_url)
-                .header("Content-Type", "application/json")
-                .header("Authorization", format!("Bearer {}", self.api_key))
-                .body(body.clone())
-                .send()
-                .await;
-
-            match response {
-                Ok(resp) => {
-                    let status = resp.status();
-                    if status.is_success() {
-                        return Ok(resp);
-                    }
-                    let code = status.as_u16();
-                    if !is_retryable_compaction_status(code) || attempt >= 2 {
-                        let body_text = resp.text().await.unwrap_or_default();
-                        bail!("compaction summary HTTP {}: {}", code, body_text.trim());
-                    }
-                    let delay = if code == 429 {
-                        resp.headers()
-                            .get("retry-after")
-                            .and_then(|v| v.to_str().ok())
-                            .and_then(|v| v.parse::<u64>().ok())
-                            .unwrap_or(2)
-                    } else {
-                        1u64 << attempt
-                    };
-                    tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
-                }
-                Err(e) => {
-                    if attempt >= 2 {
-                        return Err(e.into());
-                    }
-                    tokio::time::sleep(std::time::Duration::from_secs(1u64 << attempt)).await;
-                }
-            }
-            attempt += 1;
-        }
     }
 
     fn log_compact_event(&self, usage: &UsageEvent) {
@@ -327,12 +321,25 @@ Start directly with \"Task focus:\" — no preamble, no markdown, no code fences
     }
 }
 
-fn is_plan_trigger(trigger: &str) -> bool {
-    trigger == "plan_clear" || trigger == "plan_confirm" || trigger == "manual"
+struct SilentDisplay;
+
+impl Display for SilentDisplay {
+    fn render_thinking(&self, _: &str) {}
+    fn render_text(&self, _: &str) {}
+    fn render_tool_call(&self, _: &str, _: &str) {}
+    fn render_tool_result(&self, _: &str, _: &str) {}
+    fn render_stop(&self) {}
+    fn render_error(&self, _: &str) {}
+    fn render_retry(&self) {}
+    fn render_info(&self, _: &str) {}
+    fn render_title_update(&self, _: &str, _: &crate::ui::StatsSnapshot) {}
+    fn render_sub_agent_status(&self, _: &str, _: &str, _: u64, _: u64) {}
+    fn render_prompt(&self) {}
+    fn render_clear_line(&self) {}
 }
 
-fn is_retryable_compaction_status(code: u16) -> bool {
-    matches!(code, 408 | 409 | 425 | 429 | 500 | 502 | 503 | 504)
+fn is_plan_trigger(trigger: &str) -> bool {
+    trigger == "plan_clear" || trigger == "plan_confirm" || trigger == "manual"
 }
 
 /// Strip DSML (DeepSeek Markup Language) and common XML-like tags
@@ -590,7 +597,6 @@ mod tests {
             crate::config::api_url(&cfg),
             &cfg,
             stats,
-            reqwest::Client::new(),
         );
 
         let (did_compact, reason) = engine.evaluate_and_compact("auto", 10).await?;
@@ -616,7 +622,6 @@ mod tests {
             crate::config::api_url(&cfg),
             &cfg,
             stats,
-            reqwest::Client::new(),
         );
 
         let (did_compact, reason) = engine.evaluate_and_compact("manual", 0).await?;
@@ -643,7 +648,6 @@ mod tests {
             crate::config::api_url(&cfg),
             &cfg,
             stats,
-            reqwest::Client::new(),
         );
 
         let (did_compact, reason) = engine.evaluate_and_compact("auto", 20_000).await?;
@@ -669,7 +673,6 @@ mod tests {
             crate::config::api_url(&cfg),
             &cfg,
             stats,
-            reqwest::Client::new(),
         );
         tokio::fs::write(&summary, "keep <ds_meta>drop</ds_meta> text\n").await?;
 
@@ -721,7 +724,6 @@ Reflections: none",
             api_url,
             &cfg,
             stats.clone(),
-            reqwest::Client::new(),
         );
 
         let (did_compact, reason) = engine.evaluate_and_compact("manual", 0).await?;

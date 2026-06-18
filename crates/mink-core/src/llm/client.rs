@@ -1,10 +1,37 @@
 use crate::context::AgentSharedContext;
 use crate::protocol::Event;
+use crate::session::usage::{UsageCapture, UsageKind};
 use crate::sse::openai::OpenAIParser;
 use anyhow::Result;
 use futures::StreamExt;
 use std::time::Duration;
 use tokio::sync::mpsc;
+
+pub struct LlmRequestContext {
+    pub max_tokens: i32,
+    pub verbose: bool,
+    pub cancel: crate::cancel::CancellationToken,
+    pub display: std::sync::Arc<dyn crate::ui::Display>,
+    pub usage: std::sync::Arc<crate::session::usage::UsageJournal>,
+    pub usage_scope: crate::session::usage::UsageScope,
+}
+
+impl LlmRequestContext {
+    pub fn from_agent(ctx: &AgentSharedContext) -> Self {
+        Self {
+            max_tokens: ctx.max_tokens(),
+            verbose: ctx.verbose(),
+            cancel: ctx.cancel.clone(),
+            display: ctx.display.clone(),
+            usage: ctx.usage.clone(),
+            usage_scope: ctx.usage_scope(if ctx.is_sub_agent {
+                UsageKind::SubAgent
+            } else {
+                UsageKind::Agent
+            }),
+        }
+    }
+}
 
 const MAX_RETRIES: u32 = 2;
 const RETRY_DELAY: Duration = Duration::from_secs(1);
@@ -29,6 +56,11 @@ pub struct AsyncLlClient {
     model_name: String,
     api_url: String,
     api_key: String,
+}
+
+pub(crate) struct SendFailure {
+    pub(crate) error: anyhow::Error,
+    pub(crate) attempt_count: u32,
 }
 
 impl AsyncLlClient {
@@ -132,10 +164,30 @@ impl AsyncLlClient {
         ctx: &AgentSharedContext,
         body: Vec<u8>,
     ) -> Result<reqwest::Response> {
+        self.send_with_retry_counted(ctx, body)
+            .await
+            .map(|(response, _)| response)
+            .map_err(|failure| failure.error)
+    }
+
+    async fn send_with_retry_counted(
+        &self,
+        ctx: &AgentSharedContext,
+        body: Vec<u8>,
+    ) -> std::result::Result<(reqwest::Response, u32), SendFailure> {
+        self.send_body_with_retry(ctx.display.as_ref(), body).await
+    }
+
+    async fn send_body_with_retry(
+        &self,
+        display: &dyn crate::ui::Display,
+        body: Vec<u8>,
+    ) -> std::result::Result<(reqwest::Response, u32), SendFailure> {
         let start = std::time::Instant::now();
         let mut attempt: u32 = 0;
 
         loop {
+            let attempt_count = attempt.saturating_add(1);
             let req = self
                 .client
                 .post(&self.api_url)
@@ -147,13 +199,16 @@ impl AsyncLlClient {
                 Ok(resp) => {
                     let code = resp.status().as_u16();
                     if code < 400 {
-                        return Ok(resp);
+                        return Ok((resp, attempt_count));
                     }
                     if !is_retryable(code) || !can_retry(attempt, start) {
                         let body_text = resp.text().await.unwrap_or_default();
                         let err = anyhow::anyhow!("HTTP {}: {}", code, body_text.trim());
-                        ctx.display.render_error(&err.to_string());
-                        return Err(err);
+                        display.render_error(&err.to_string());
+                        return Err(SendFailure {
+                            error: err,
+                            attempt_count,
+                        });
                     }
                     if code == 429 {
                         let retry_after = resp
@@ -170,16 +225,72 @@ impl AsyncLlClient {
                 Err(e) => {
                     if !can_retry(attempt, start) {
                         let err = anyhow::anyhow!("{}", e);
-                        ctx.display.render_error(&err.to_string());
-                        return Err(err);
+                        display.render_error(&err.to_string());
+                        return Err(SendFailure {
+                            error: err,
+                            attempt_count,
+                        });
                     }
                     tokio::time::sleep(RETRY_DELAY).await;
                 }
             }
             attempt += 1;
-            ctx.display
-                .render_info(&format!("Retrying ({}/{})...", attempt, MAX_RETRIES));
+            display.render_info(&format!("Retrying ({}/{})...", attempt, MAX_RETRIES));
         }
+    }
+
+    pub async fn stream_request(
+        &self,
+        request_ctx: &LlmRequestContext,
+        messages_json: &[serde_json::Value],
+        tools_json: &[serde_json::Value],
+        system_prompt: &str,
+    ) -> Result<Box<dyn futures::Stream<Item = Result<Event>> + Unpin + Send>> {
+        let body = crate::llm::transport::build_openai_body(
+            &self.model_name,
+            messages_json,
+            tools_json,
+            system_prompt,
+            request_ctx.max_tokens,
+        )?;
+
+        if request_ctx.verbose {
+            let preview = String::from_utf8_lossy(&body);
+            let truncated: String = preview.chars().take(200).collect();
+            request_ctx.display.render_info(&format!(
+                "Request body ({}KB): {}...",
+                body.len() / 1024,
+                truncated
+            ));
+        }
+
+        let capture = request_ctx
+            .usage
+            .capture(request_ctx.usage_scope.clone(), self.model_name.clone());
+        let (resp, attempt_count) = match self
+            .send_body_with_retry(request_ctx.display.as_ref(), body)
+            .await
+        {
+            Ok(result) => result,
+            Err(failure) => {
+                record_unreported(
+                    &capture,
+                    failure.attempt_count,
+                    format!("request_failed: {}", failure.error),
+                );
+                return Err(failure.error);
+            }
+        };
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        let cancel = request_ctx.cancel.linked_child_token();
+        Self::spawn_stream_task(resp, cancel.clone(), tx);
+
+        Ok(Box::new(MeteredStream::new(
+            SseEventStream { rx, cancel },
+            capture,
+            attempt_count,
+        )))
     }
 }
 
@@ -203,32 +314,13 @@ impl LlmClient for AsyncLlClient {
         tools_json: &[serde_json::Value],
         system_prompt: &str,
     ) -> Result<Box<dyn futures::Stream<Item = Result<Event>> + Unpin + Send>> {
-        let body = crate::llm::transport::build_openai_body(
-            &self.model_name,
+        self.stream_request(
+            &LlmRequestContext::from_agent(ctx),
             messages_json,
             tools_json,
             system_prompt,
-            ctx.max_tokens(),
-        )?;
-
-        if ctx.verbose() {
-            let preview = String::from_utf8_lossy(&body);
-            let truncated: String = preview.chars().take(200).collect();
-            ctx.display.render_info(&format!(
-                "Request body ({}KB): {}...",
-                body.len() / 1024,
-                truncated
-            ));
-        }
-
-        let resp = self.send_with_retry(ctx, body).await?;
-
-        let (tx, rx) = mpsc::unbounded_channel();
-        let cancel = ctx.cancel.linked_child_token();
-
-        Self::spawn_stream_task(resp, cancel.clone(), tx);
-
-        Ok(Box::new(SseEventStream { rx, cancel }))
+        )
+        .await
     }
 }
 
@@ -243,6 +335,85 @@ fn can_retry(attempt: u32, start: std::time::Instant) -> bool {
 pub struct SseEventStream {
     rx: mpsc::UnboundedReceiver<Result<Event>>,
     cancel: crate::cancel::CancellationToken,
+}
+
+pub(crate) struct MeteredStream<S> {
+    inner: S,
+    capture: UsageCapture,
+    attempt_count: u32,
+    completed: bool,
+}
+
+impl<S> MeteredStream<S> {
+    pub(crate) fn new(inner: S, capture: UsageCapture, attempt_count: u32) -> Self {
+        Self {
+            inner,
+            capture,
+            attempt_count,
+            completed: false,
+        }
+    }
+
+    fn finish_unreported(&mut self, reason: impl Into<String>) {
+        if self.completed {
+            return;
+        }
+        self.completed = true;
+        record_unreported(&self.capture, self.attempt_count, reason);
+    }
+}
+
+impl<S> Drop for MeteredStream<S> {
+    fn drop(&mut self) {
+        self.finish_unreported("stream_dropped_before_usage");
+    }
+}
+
+impl<S> futures::Stream for MeteredStream<S>
+where
+    S: futures::Stream<Item = Result<Event>> + Unpin,
+{
+    type Item = Result<Event>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        match std::pin::Pin::new(&mut self.inner).poll_next(cx) {
+            std::task::Poll::Ready(Some(Ok(Event::Usage(usage)))) => {
+                if !self.completed {
+                    self.completed = true;
+                    if let Err(error) = self.capture.reported(&usage, self.attempt_count) {
+                        record_unreported(
+                            &self.capture,
+                            self.attempt_count,
+                            format!("invalid_provider_usage: {error}"),
+                        );
+                    }
+                }
+                std::task::Poll::Ready(Some(Ok(Event::Usage(usage))))
+            }
+            std::task::Poll::Ready(Some(Ok(Event::UsageUnavailable))) => {
+                self.finish_unreported("provider_usage_missing");
+                std::task::Poll::Ready(Some(Ok(Event::UsageUnavailable)))
+            }
+            std::task::Poll::Ready(Some(Err(error))) => {
+                self.finish_unreported(format!("stream_error: {error}"));
+                std::task::Poll::Ready(Some(Err(error)))
+            }
+            std::task::Poll::Ready(None) => {
+                self.finish_unreported("stream_ended_without_usage");
+                std::task::Poll::Ready(None)
+            }
+            other => other,
+        }
+    }
+}
+
+fn record_unreported(capture: &UsageCapture, attempt_count: u32, reason: impl Into<String>) {
+    if let Err(error) = capture.unreported(attempt_count, reason) {
+        eprintln!("[mink] Warning: failed to record LLM usage: {error}");
+    }
 }
 
 impl Drop for SseEventStream {
@@ -414,6 +585,7 @@ mod tests {
         let store = Arc::new(ConversationStore::new(spaths.conversation.clone()));
         store.ensure().await?;
         let stats = StatsTracker::load(&spaths.stats).await?;
+        let usage = crate::session::usage::UsageJournal::new(spaths.usage.clone());
         let artifacts = Arc::new(crate::session::artifacts::ArtifactManager::new(
             spaths.artifacts.clone(),
         ));
@@ -425,7 +597,7 @@ mod tests {
             output_format: OutputFormat::Human,
             ..Default::default()
         };
-        let compaction = Arc::new(CompactionEngine::new(
+        let compaction = Arc::new(CompactionEngine::new_with_usage(
             store.clone(),
             spaths.summary.clone(),
             spaths.plan.clone(),
@@ -436,7 +608,10 @@ mod tests {
             api_url.to_string(),
             &cfg,
             stats.clone(),
-            reqwest::Client::new(),
+            usage.clone(),
+            "client".into(),
+            Arc::new(TestDisplay::new()),
+            CancellationToken::new(),
         ));
         Ok(Arc::new(AgentSharedContext {
             config: cfg.clone(),
@@ -450,6 +625,7 @@ mod tests {
                 crate::tools::snapshot::FileSnapshotStore::default(),
             )),
             stats,
+            usage,
             compaction,
             cancel: CancellationToken::new(),
             display: Arc::new(TestDisplay::new()),

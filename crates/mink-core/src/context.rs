@@ -6,6 +6,7 @@ use crate::session::paths::SessionLayout;
 use crate::session::prefix::ImmutablePrefix;
 use crate::session::stats::StatsTracker;
 use crate::session::store::ConversationStore;
+use crate::session::usage::{UsageJournal, UsageKind, UsageScope};
 use crate::tools::snapshot::FileSnapshotStore;
 use crate::ui::{Display, SubAgentStreamSink};
 use serde_json::Value;
@@ -119,6 +120,7 @@ pub struct AgentSharedContext {
     pub artifacts: Arc<ArtifactManager>,
     pub snapshots: Arc<Mutex<FileSnapshotStore>>,
     pub stats: Arc<StatsTracker>,
+    pub usage: Arc<UsageJournal>,
     pub compaction: Arc<CompactionEngine>,
     pub cancel: CancellationToken,
     pub display: Arc<dyn Display>,
@@ -156,6 +158,10 @@ impl AgentSharedContext {
     }
     pub fn interactive(&self) -> bool {
         self.config.interactive
+    }
+
+    pub fn usage_scope(&self, kind: UsageKind) -> UsageScope {
+        self.usage.scope(kind, self.config.session_id.clone())
     }
 
     /// Append a JSON line to events.jsonl. In stream-json mode, also emit to stdout.

@@ -122,6 +122,7 @@ pub struct SessionInfo {
     pub conversation_path: PathBuf,
     pub artifacts_dir: PathBuf,
     pub summary_path: PathBuf,
+    pub usage_path: PathBuf,
     pub plan_path: PathBuf,
     pub plan_draft_path: PathBuf,
 }
@@ -145,6 +146,7 @@ impl SessionInfo {
             conversation_path: paths.conversation.clone(),
             artifacts_dir: paths.artifacts.clone(),
             summary_path: paths.summary.clone(),
+            usage_path: paths.usage.clone(),
             plan_path: paths.plan.clone(),
             plan_draft_path: paths.plan_draft.clone(),
         }

@@ -3,6 +3,7 @@ use crate::config::Config;
 use crate::context::{AgentSharedContext, ToolConfig};
 use crate::session::compaction::CompactionEngine;
 use crate::session::paths::{self, SessionLayout};
+use crate::session::usage::UsageJournal;
 use crate::tools::snapshot::FileSnapshotStore;
 use crate::ui::{Display, SubAgentStreamSink};
 use anyhow::Result;
@@ -22,7 +23,7 @@ pub(crate) struct AgentContextBuild {
     pub cancel: CancellationToken,
     pub interrupt: Arc<AtomicBool>,
     pub is_sub_agent: bool,
-    pub http_client: reqwest::Client,
+    pub usage_journal: Option<Arc<UsageJournal>>,
 }
 
 pub(crate) struct BuiltAgentContext {
@@ -32,6 +33,8 @@ pub(crate) struct BuiltAgentContext {
 }
 
 pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<BuiltAgentContext> {
+    let mut config = params.config.clone();
+    config.session_id = params.session_id.clone();
     let paths = paths::paths_for_layout(
         &params.home,
         &params.cwd,
@@ -47,23 +50,29 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
         params.session_layout,
     )
     .await?;
+    let usage = params
+        .usage_journal
+        .unwrap_or_else(|| UsageJournal::new(paths.usage.clone()));
 
-    let compaction = Arc::new(CompactionEngine::new(
+    let compaction = Arc::new(CompactionEngine::new_with_usage(
         store.clone(),
         paths.summary.clone(),
         paths.plan.clone(),
         paths.plan_draft.clone(),
         params.cwd.clone(),
         params.home.clone(),
-        params.config.skills.clone(),
+        config.skills.clone(),
         params.api_url.clone(),
-        &params.config,
+        &config,
         stats.clone(),
-        params.http_client,
+        usage.clone(),
+        params.session_id.clone(),
+        params.display.clone(),
+        params.cancel.clone(),
     ));
 
     let ctx = Arc::new(AgentSharedContext {
-        config: params.config.clone(),
+        config: config.clone(),
         cwd: params.cwd,
         home: params.home,
         session_layout: params.session_layout,
@@ -72,11 +81,12 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
         artifacts,
         snapshots: Arc::new(Mutex::new(FileSnapshotStore::default())),
         stats,
+        usage,
         compaction,
         cancel: params.cancel,
         display: params.display,
         sub_stream_tx: params.sub_stream_tx,
-        tool_config: ToolConfig::from_config(&params.config),
+        tool_config: ToolConfig::from_config(&config),
         events_path: paths.events.clone(),
         summary_path: paths.summary.clone(),
         plan_path: paths.plan.clone(),

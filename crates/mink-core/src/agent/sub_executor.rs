@@ -112,7 +112,7 @@ impl SubAgentExecutor {
             cancel,
             interrupt: parent_ctx.interrupt.clone(),
             is_sub_agent: true,
-            http_client: reqwest::Client::new(),
+            usage_journal: Some(parent_ctx.usage.clone()),
         })
         .await?;
         let child_ctx = built.ctx;

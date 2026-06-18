@@ -393,7 +393,154 @@ mink --tui
 
 搜索相关上限分为多层：`MAX_SEARCH_FILES` 控制 Glob/Grep 最多遍历的文件数，`MAX_SEARCH_RESULTS` 控制 Grep 最多返回的匹配行数；搜索工具自身还有 100KB 输出保护，最终工具结果还会受 `TOOL_RESULT_MAX_BYTES` 保护。看到 `scanned first N files` 表示文件遍历上限触发，看到 `truncated at N results` 表示匹配结果数上限触发，看到 `output > 100000 bytes` 或 artifact 提示则表示输出字节数保护触发。
 
+## Token 用量与费用
+
+每轮 `run_turn()` 结束后，`TurnOutcome` 携带本轮所有 LLM 请求的 Token 消耗和人民币费用。
+
+### 字段说明
+
+| Rust `TurnOutcome` 字段 | Python `result` 字段 | 类型 | 说明 |
+|------------------------|---------------------|------|------|
+| `billing_turn_id` | `billing_turn_id` | `String` | 本轮稳定标识。Agent、自动压缩和子代理共用同一个 `billing_turn_id` |
+| `usage_records` | `usage_records` | `Vec<UsageRecord>` | 本轮每笔 LLM 请求的明细（最多一条记录 per 请求） |
+| `usage` | `usage` | `UsageSummary` | 纯函数汇总：请求数、attempt 数、Token 总计、纳元费用 |
+| `session.usage_path` | `usage_path` | `PathBuf` | session `usage.jsonl` 路径，可自行读取完整历史 |
+
+### `UsageSummary` 字段
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `request_count` | `u64` | 本轮逻辑 LLM 请求数 |
+| `reported_request_count` | `u64` | provider 返回了 `usage` 的请求数 |
+| `unreported_request_count` | `u64` | provider 未返回 `usage` 的请求数（失败、超时等） |
+| `attempt_count` | `u64` | HTTP 重试合计次数 |
+| `tokens` | [TokenUsage](#tokenusage) | 各项 Token 总数 |
+| `cost_nano_cny` | `u64` | 预估人民币费用（纳元），`1 元 = 10⁹ 纳元` |
+
+### `TokenUsage`
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `input_tokens` | `u64` | 输入 Token（已减去缓存命中部分） |
+| `cache_read_tokens` | `u64` | 缓存命中 Token（按折扣价计费） |
+| `cache_creation_tokens` | `u64` | 新增缓存写入 Token（按全价计费，多数 provider 不报告此值） |
+| `output_tokens` | `u64` | 输出 Token |
+
+### 采集路径
+
+```text
+Turn / Compaction / SubAgent 都通过同一 AsyncLlClient 入口
+→ MeteredStream 包装 SSE 流
+→ Event::Usage → UsageCapture::reported() → usage.jsonl 追加
+→ 或 stream_error / 无 usage → UsageCapture::unreported() → usage.jsonl 追加
+→ OrchActor::finish_usage() 按 billing_turn_id 收集 → TurnOutcome
+```
+
+三类请求共享 billing_turn_id：Agent 工具循环中的多次 LLM 调用、turn 内的自动压缩、子代理的 LLM 请求都汇聚到同一 `billing_turn_id` 下。手动压缩（无活跃 turn）使用独立的 `operation-*` 标识。
+
+### 定价模型
+
+当前使用 DeepSeek API 官方单价（纳元整数运算，无浮点累积误差）：
+
+| 模型 | 输入（纳元/token） | 输出（纳元/token） | 缓存读取（纳元/token） |
+|------|-------------------|-------------------|----------------------|
+| Flash | 1,000 | 2,000 | 20 |
+| Pro | 3,000 | 6,000 | 25 |
+
+价格来源：`ModelTier::price_input_per_m() / price_output_per_m() / price_cache_read_per_m()`。
+费用计算公式（`price_usage()`）：
+
+```
+cost = input_tokens × input_nano
+     + cache_creation_tokens × input_nano
+     + cache_read_tokens × cache_read_nano
+     + output_tokens × output_nano
+```
+
+未报告 `usage` 的请求 `cost_nano_cny` 为 `None`，不会用零值伪装。
+
+### usage.jsonl 记录格式
+
+```json
+{"version":1,"billing_turn_id":"turn-...","request_id":"request-...",
+ "kind":"agent","origin_session_id":"session-...","model":"deepseek-v4-flash",
+ "attempt_count":1,"status":"reported",
+ "tokens":{"input_tokens":100,"cache_read_tokens":40,"cache_creation_tokens":0,"output_tokens":20},
+ "cost_nano_cny":140800,"reason":null,
+ "completed_at":"2026-06-18T00:00:00Z"}
+```
+
+未报告 `usage` 的记录 `tokens` 和 `cost_nano_cny` 为 `null`，`reason` 描述原因。一个逻辑请求最多写入一条终态记录。
+
+### Rust 库中访问
+
+```rust
+use mink::prelude::{AgentOptions, AgentRuntime, UsageSummary};
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let rt = AgentRuntime::start_with_options(
+        AgentOptions::new("/tmp/mink-session", ".")
+            .with_api_key(std::env::var("DEEPSEEK_API_KEY")?)
+            .with_model("flash"),
+    ).await?;
+
+    let outcome = rt.run_turn("解释这段代码").await?;
+
+    println!("billing_turn_id: {}", outcome.billing_turn_id);
+    println!("input tokens: {}", outcome.usage.tokens.input_tokens);
+    println!("cache read tokens: {}", outcome.usage.tokens.cache_read_tokens);
+    println!("output tokens: {}", outcome.usage.tokens.output_tokens);
+    println!("cost: {} 纳元 ≈ {:.4} 元", outcome.usage.cost_nano_cny,
+             outcome.usage.cost_nano_cny as f64 / 1_000_000_000.0);
+    println!("usage file: {}", outcome.session.usage_path.display());
+
+    for record in &outcome.usage_records {
+        println!("  request {}: kind={:?}, status={:?}, attempts={}",
+                 record.request_id, record.kind, record.status, record.attempt_count);
+    }
+
+    // session 中全部历史记录可通过读取 usage_path 文件获取：
+    // let data = std::fs::read_to_string(&outcome.session.usage_path)?;
+
+    rt.shutdown().await?;
+    Ok(())
+}
+```
+
+### Python SDK 中访问
+
+```python
+from mink_agent import AgentSession, SandboxConfig
+
+session = AgentSession(SandboxConfig(api_key="sk-...", read_dirs=["."]))
+result = session.run("解释这段代码")
+
+print(f"billing_turn_id: {result['billing_turn_id']}")
+print(f"usage tokens: {result['usage']['tokens']}")
+print(f"cost: {result['usage']['cost_nano_cny']} nano-cny")
+
+for record in result['usage_records']:
+    print(f"  {record['request_id']}: kind={record['kind']}, status={record['status']}")
+
+session.close()
+```
+
+### CLI 中查看
+
+```bash
+# stream-json 模式的 final 事件携带用量
+mink -m flash --print "hello" | jq 'select(.type=="final") | {billing_turn_id, usage}'
+
+# 直接读取 usage.jsonl
+cat ~/.mink/projects/<project_key>/<session_id>/usage.jsonl | jq -c
+
+# 筛选特定 billing_turn_id 的记录
+cat usage.jsonl | jq 'select(.billing_turn_id == "turn-...")'
+```
+
 ## Rust 库嵌入
+
 
 Rust 发布包名为 `mink-core`，库 crate 名为 `mink`。`mink-core` 发布包只包含可嵌入 runtime
 和 `Display` 协议层；终端 REPL/TUI 实现、`mink` / `mink-core` 二进制入口都在 `mink-cli`
@@ -444,7 +591,8 @@ CLI 的历史目录结构是 `project` layout：
         ├── summary.txt        ← 压缩后的上下文快照
         ├── plan.md            ← 确认后的计划
         ├── plan.draft         ← 草稿计划
-        └── stats.json         ← Token 用量统计
+        ├── stats.json         ← Token 用量统计
+        └── usage.jsonl        ← LLM 请求级 Token 与费用明细
 ```
 
 ### 操作

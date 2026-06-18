@@ -100,6 +100,7 @@ pub fn final_from_run_result(result: &TurnRunResult, session: &SessionInfo) -> S
         event_type: "final",
         version: PROTOCOL_VERSION,
         status: sdk_status_from_turn(result.status),
+        billing_turn_id: result.billing_turn_id.clone(),
         session_id: session.session_id.clone(),
         session_ref: session.session_ref.clone(),
         home: path_string(&session.home),
@@ -108,9 +109,12 @@ pub fn final_from_run_result(result: &TurnRunResult, session: &SessionInfo) -> S
         conversation_path: path_string(&session.conversation_path),
         artifacts_dir: path_string(&session.artifacts_dir),
         summary_path: path_string(&session.summary_path),
+        usage_path: path_string(&session.usage_path),
         tool_call_count: result.tool_call_count,
         tool_error_count: result.tool_error_count,
         error: result.error.clone(),
+        usage_records: result.usage_records.clone(),
+        usage: result.usage.clone(),
     }
 }
 
@@ -119,6 +123,7 @@ pub fn final_from_outcome(outcome: &TurnOutcome) -> SdkFinal {
         event_type: "final",
         version: PROTOCOL_VERSION,
         status: sdk_status_from_turn(outcome.status),
+        billing_turn_id: outcome.billing_turn_id.clone(),
         session_id: outcome.session.session_id.clone(),
         session_ref: outcome.session.session_ref.clone(),
         home: path_string(&outcome.session.home),
@@ -127,9 +132,12 @@ pub fn final_from_outcome(outcome: &TurnOutcome) -> SdkFinal {
         conversation_path: path_string(&outcome.session.conversation_path),
         artifacts_dir: path_string(&outcome.session.artifacts_dir),
         summary_path: path_string(&outcome.session.summary_path),
+        usage_path: path_string(&outcome.session.usage_path),
         tool_call_count: outcome.tool_call_count,
         tool_error_count: outcome.tool_error_count,
         error: outcome.error.clone(),
+        usage_records: outcome.usage_records.clone(),
+        usage: outcome.usage.clone(),
     }
 }
 
@@ -232,10 +240,12 @@ mod tests {
             conversation_path: PathBuf::from("/tmp/home/sid-1/conversation.jsonl"),
             artifacts_dir: PathBuf::from("/tmp/home/sid-1/artifacts"),
             summary_path: PathBuf::from("/tmp/home/sid-1/summary.json"),
+            usage_path: PathBuf::from("/tmp/home/sid-1/usage.jsonl"),
             plan_path: PathBuf::from("/tmp/home/sid-1/plan.md"),
             plan_draft_path: PathBuf::from("/tmp/home/sid-1/plan.draft"),
         };
         let outcome = TurnOutcome {
+            billing_turn_id: "turn-1".into(),
             status: TurnStatus::Ok,
             session: session.clone(),
             text: "hello".into(),
@@ -243,6 +253,8 @@ mod tests {
             tool_call_count: 3,
             tool_error_count: 1,
             error: None,
+            usage_records: Vec::new(),
+            usage: Default::default(),
         };
 
         let final_json = serde_json::to_value(final_from_outcome(&outcome)).unwrap();
@@ -265,6 +277,7 @@ mod tests {
             "type",
             "version",
             "status",
+            "billing_turn_id",
             "session_id",
             "session_ref",
             "home",
@@ -273,6 +286,9 @@ mod tests {
             "conversation_path",
             "artifacts_dir",
             "summary_path",
+            "usage_path",
+            "usage_records",
+            "usage",
             "tool_call_count",
             "tool_error_count",
             "error",
@@ -287,10 +303,12 @@ mod tests {
             conversation_path: "/h/sid/conversation.jsonl".into(),
             artifacts_dir: "/h/sid/artifacts".into(),
             summary_path: "/h/sid/summary.json".into(),
+            usage_path: "/h/sid/usage.jsonl".into(),
             plan_path: "/h/sid/plan.md".into(),
             plan_draft_path: "/h/sid/plan.draft".into(),
         };
         let outcome = TurnOutcome {
+            billing_turn_id: "turn-2".into(),
             status: TurnStatus::Failed,
             session,
             text: String::new(),
@@ -298,6 +316,8 @@ mod tests {
             tool_call_count: 0,
             tool_error_count: 5,
             error: Some("something broke".into()),
+            usage_records: Vec::new(),
+            usage: Default::default(),
         };
         let final_json = serde_json::to_value(final_from_outcome(&outcome)).unwrap();
         for key in expected_keys {

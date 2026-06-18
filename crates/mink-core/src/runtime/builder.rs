@@ -39,12 +39,6 @@ pub async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRuntime> {
     let display: Arc<dyn crate::ui::Display> = event_display.clone();
     let interrupt = Arc::new(AtomicBool::new(false));
     let api_url_str = api_url(&config);
-    let shared_client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(30))
-        .timeout(std::time::Duration::from_secs(600))
-        .user_agent("mink/3.0")
-        .build()?;
-
     let built = build_agent_context(AgentContextBuild {
         config: config.clone(),
         home: home.clone(),
@@ -57,7 +51,7 @@ pub async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRuntime> {
         cancel: cancel.clone(),
         interrupt: interrupt.clone(),
         is_sub_agent: false,
-        http_client: shared_client,
+        usage_journal: None,
     })
     .await?;
     let ctx = built.ctx;
@@ -396,6 +390,27 @@ mod tests {
         )
     }
 
+    fn mock_llm_with_usage() -> crate::llm::mock::MockLlmClient {
+        use crate::protocol::{Event, StopEvent, TextEvent, UsageEvent};
+        crate::llm::mock::MockLlmClient::new(
+            "flash",
+            vec![vec![
+                Ok(Event::Text(TextEvent {
+                    content: "measured".into(),
+                })),
+                Ok(Event::Usage(UsageEvent {
+                    input_tokens: 100,
+                    output_tokens: 20,
+                    cache_read_input_tokens: 40,
+                    cache_creation_input_tokens: 0,
+                })),
+                Ok(Event::Stop(StopEvent {
+                    reason: "end_turn".into(),
+                })),
+            ]],
+        )
+    }
+
     fn runtime_config_with_mock(
         home: &std::path::Path,
         cwd: &std::path::Path,
@@ -430,6 +445,34 @@ mod tests {
         assert_eq!(outcome.tool_call_count, 0);
         assert_eq!(outcome.tool_error_count, 0);
         assert!(outcome.error.is_none());
+
+        runtime.shutdown().await.unwrap();
+        let _ = tokio::fs::remove_dir_all(home).await;
+        let _ = tokio::fs::remove_dir_all(cwd).await;
+    }
+
+    #[tokio::test]
+    async fn run_turn_returns_usage_records_from_the_session_journal() {
+        let home = unique_temp_dir("mock-usage-home");
+        let cwd = unique_temp_dir("mock-usage-cwd");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+        let runtime = build_runtime(runtime_config_with_mock(&home, &cwd, mock_llm_with_usage()))
+            .await
+            .unwrap();
+
+        let outcome = runtime.run_turn("measure").await.unwrap();
+        assert!(!outcome.billing_turn_id.is_empty());
+        assert_eq!(outcome.usage_records.len(), 1);
+        assert_eq!(outcome.usage.request_count, 1);
+        assert_eq!(outcome.usage.tokens.input_tokens, 100);
+        assert_eq!(outcome.usage.tokens.cache_read_tokens, 40);
+        assert_eq!(outcome.usage.tokens.output_tokens, 20);
+        assert_eq!(outcome.usage.cost_nano_cny, 140_800);
+        assert_eq!(
+            outcome.usage_records[0].billing_turn_id,
+            outcome.billing_turn_id
+        );
+        assert!(outcome.session.usage_path.exists());
 
         runtime.shutdown().await.unwrap();
         let _ = tokio::fs::remove_dir_all(home).await;

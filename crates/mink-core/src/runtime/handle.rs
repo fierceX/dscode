@@ -12,6 +12,7 @@ use tokio::task::JoinHandle;
 
 #[derive(Debug, Clone)]
 pub struct TurnOutcome {
+    pub billing_turn_id: String,
     pub status: TurnStatus,
     pub session: SessionInfo,
     pub text: String,
@@ -19,6 +20,8 @@ pub struct TurnOutcome {
     pub tool_call_count: u32,
     pub tool_error_count: u32,
     pub error: Option<String>,
+    pub usage_records: Vec<crate::session::usage::UsageRecord>,
+    pub usage: crate::session::usage::UsageSummary,
 }
 
 impl TurnOutcome {
@@ -29,6 +32,7 @@ impl TurnOutcome {
         thinking: String,
     ) -> Self {
         Self {
+            billing_turn_id: result.billing_turn_id,
             status: result.status,
             session,
             text,
@@ -36,6 +40,8 @@ impl TurnOutcome {
             tool_call_count: result.tool_call_count,
             tool_error_count: result.tool_error_count,
             error: result.error,
+            usage_records: result.usage_records,
+            usage: result.usage,
         }
     }
 }

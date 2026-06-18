@@ -6,3 +6,4 @@ pub mod paths;
 pub mod prefix;
 pub mod stats;
 pub mod store;
+pub mod usage;

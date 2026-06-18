@@ -40,6 +40,7 @@ pub struct Paths {
     pub plan: PathBuf,
     pub plan_draft: PathBuf,
     pub stats: PathBuf,
+    pub usage: PathBuf,
     pub artifacts: PathBuf,
 }
 
@@ -86,6 +87,7 @@ pub fn paths_for_layout(home: &Path, cwd: &Path, session_id: &str, layout: Sessi
         plan: session_dir.join("plan.md"),
         plan_draft: session_dir.join("plan.draft"),
         stats: session_dir.join("stats.json"),
+        usage: session_dir.join("usage.jsonl"),
         artifacts: session_dir.join("artifacts"),
     }
 }

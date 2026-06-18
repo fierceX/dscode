@@ -58,7 +58,7 @@ TurnExecutor (agent/turn.rs)
   │  PlanActionHandler / SubAgentCoordinator
   ▼
 ┌─────── LLM 层 ────────┐
-│ llm/client.rs         │ HTTP 流式客户端、重试、模型名解析
+│ llm/client.rs         │ HTTP 流式客户端、重试、usage 采集、模型名解析
 │ llm/transport.rs      │ OpenAI chat/completions 请求构造
 │ sse/openai.rs         │ SSE 增量解析、usage、stop、tool call 合并
 │ sse/toolcall.rs       │ tool_call 字段归一化
@@ -89,6 +89,7 @@ TurnExecutor (agent/turn.rs)
 │ session/store.rs      │ ConversationStore JSONL、缓存、tool_result 写入
 │ session/artifacts.rs  │ ArtifactManager、artifact index、完整工具输出
 │ session/stats.rs      │ token、费用、请求数统计
+│ session/usage.rs      │ LLM 请求级 Token 与费用明细 JSONL（UsageJournal / MeteredStream）
 │ session/compaction.rs │ 三级压缩、摘要生成、turn 对齐截断
 │ session/prefix.rs     │ ImmutablePrefix
 │ session/init.rs       │ session 目录和共享状态初始化
@@ -127,7 +128,7 @@ OrchActor.handle_user_input()
        │
        └── while turn < max_turns:
            ├── auto compact + preflight compact
-           ├── LLM stream -> Event
+           ├── LLM stream -> Event （MeteredStream 采集 usage → usage.jsonl）
            ├── scavenge thinking/text 中遗漏的工具调用
            ├── store.add_assistant()
            ├── ToolRunner::execute_all()
@@ -136,7 +137,8 @@ OrchActor.handle_user_input()
            ├── SubAgentCoordinator 启动/收集子代理
            ├── store.add_tool_results()
            ├── Display.render_tool_result_detail()
-           └── DecisionEngine.decide()
+           ├── SignalCollector → BeliefTracker → DecisionEngine
+           └── 循环结束 → OrchActor::finish_usage() 汇总 billing_turn_id → TurnOutcome
 ```
 
 ### 工具结果进入 LLM 与 UI

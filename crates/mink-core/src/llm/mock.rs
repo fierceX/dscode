@@ -4,6 +4,8 @@ use anyhow::Result;
 use std::sync::Mutex;
 
 use super::client::LlmClient;
+use super::client::MeteredStream;
+use crate::session::usage::UsageKind;
 
 pub struct MockLlmClient {
     pub model_name: String,
@@ -27,14 +29,26 @@ impl LlmClient for MockLlmClient {
 
     async fn stream(
         &self,
-        _ctx: &AgentSharedContext,
+        ctx: &AgentSharedContext,
         _messages_json: &[serde_json::Value],
         _tools_json: &[serde_json::Value],
         _system_prompt: &str,
     ) -> Result<Box<dyn futures::Stream<Item = Result<Event>> + Unpin + Send>> {
         let mut iter = self.canned_events.lock().unwrap();
         let events = iter.next().unwrap_or_default();
-        Ok(Box::new(futures::stream::iter(events)))
+        let capture = ctx.usage.capture(
+            ctx.usage_scope(if ctx.is_sub_agent {
+                UsageKind::SubAgent
+            } else {
+                UsageKind::Agent
+            }),
+            self.model_name.clone(),
+        );
+        Ok(Box::new(MeteredStream::new(
+            futures::stream::iter(events),
+            capture,
+            1,
+        )))
     }
 }
 

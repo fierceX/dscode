@@ -23,7 +23,7 @@ mink = { package = "mink-core", version = "0.1.8", default-features = false, fea
 ```
 
 ```rust
-use mink::prelude::{AgentOptions, AgentRuntime};
+use mink::prelude::{AgentOptions, AgentRuntime, UsageSummary};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -33,12 +33,32 @@ async fn main() -> anyhow::Result<()> {
             .with_model("flash"),
     ).await?;
 
-    let outcome = rt.run_turn("hello").await?;
-    println!("{}", outcome.text);
+    let outcome = rt.run_turn("解释这段代码").await?;
+
+    // 本轮 LLM 请求的 Token 汇总
+    let u = &outcome.usage;
+    println!("billing_turn_id: {}", outcome.billing_turn_id);
+    println!("input: {}, cache_read: {}, output: {}",
+             u.tokens.input_tokens, u.tokens.cache_read_tokens, u.tokens.output_tokens);
+    println!("cost: {} 纳元 (≈ {:.4} 元)", u.cost_nano_cny,
+             u.cost_nano_cny as f64 / 1_000_000_000.0);
+
+    // 每笔 LLM 请求明细
+    for record in &outcome.usage_records {
+        println!("  request {}: kind={:?}, status={:?}",
+                 record.request_id, record.kind, record.status);
+    }
+
+    // usage.jsonl 文件路径（完整历史记录）
+    println!("usage file: {}", outcome.session.usage_path.display());
+
     rt.shutdown().await?;
     Ok(())
 }
 ```
+
+每次真实 LLM 请求都会追加到 session `usage.jsonl`。`TurnOutcome.usage_records` 只包含当前
+`billing_turn_id` 的主 Agent、自动压缩和子代理明细，`TurnOutcome.usage` 是这些记录的汇总。
 
 ## Feature
 

@@ -76,6 +76,7 @@ pub struct SdkFinal {
     pub event_type: &'static str,
     pub version: u32,
     pub status: SdkStatus,
+    pub billing_turn_id: String,
     pub session_id: String,
     pub session_ref: String,
     pub home: String,
@@ -84,9 +85,12 @@ pub struct SdkFinal {
     pub conversation_path: String,
     pub artifacts_dir: String,
     pub summary_path: String,
+    pub usage_path: String,
     pub tool_call_count: u32,
     pub tool_error_count: u32,
     pub error: Option<String>,
+    pub usage_records: Vec<crate::session::usage::UsageRecord>,
+    pub usage: crate::session::usage::UsageSummary,
 }
 
 pub fn emit_json_line<T: Serialize>(value: &T) {
@@ -100,6 +104,7 @@ pub fn emit_failed_parse(error: &str) {
         "type": "final",
         "version": PROTOCOL_VERSION,
         "status": SdkStatus::Failed.as_str(),
+        "billing_turn_id": "",
         "session_id": "",
         "session_ref": "",
         "home": "",
@@ -108,9 +113,12 @@ pub fn emit_failed_parse(error: &str) {
         "conversation_path": "",
         "artifacts_dir": "",
         "summary_path": "",
+        "usage_path": "",
         "tool_call_count": 0,
         "tool_error_count": 0,
         "error": error,
+        "usage_records": [],
+        "usage": crate::session::usage::UsageSummary::default(),
     }));
 }
 

@@ -16,7 +16,6 @@ struct PendingCall {
     name: String,
     arguments: String,
 }
-
 /// Incremental OpenAI SSE parser.
 #[derive(Default)]
 pub struct OpenAIParser {
@@ -24,11 +23,13 @@ pub struct OpenAIParser {
     input_tokens: i64,
     output_tokens: i64,
     cache_read_input_tokens: i64,
+    cache_creation_input_tokens: i64,
     saw_text: bool,
     pending_calls: BTreeMap<i64, PendingCall>,
     pending_usage: Option<UsageEvent>,
     pending_stop: Option<String>,
     saw_done: bool,
+    saw_usage: bool,
 }
 
 impl OpenAIParser {
@@ -75,6 +76,14 @@ impl OpenAIParser {
         }
 
         let usage = body.get("usage").cloned().unwrap_or(Value::Null);
+        if usage.get("prompt_tokens").is_some()
+            || usage.get("completion_tokens").is_some()
+            || usage.get("cached_tokens").is_some()
+            || usage.get("prompt_tokens_details").is_some()
+            || usage.get("cache_creation_input_tokens").is_some()
+        {
+            self.saw_usage = true;
+        }
         if let Some(v) = usage.get("completion_tokens").and_then(Value::as_i64) {
             self.output_tokens = v;
         }
@@ -97,7 +106,18 @@ impl OpenAIParser {
                 v
             };
         }
-
+        // cache_creation_input_tokens: direct field or from prompt_tokens_details.cache_creation
+        if let Some(v) = usage
+            .get("cache_creation_input_tokens")
+            .or_else(|| {
+                usage
+                    .get("prompt_tokens_details")
+                    .and_then(|d| d.get("cache_creation"))
+            })
+            .and_then(Value::as_i64)
+        {
+            self.cache_creation_input_tokens = v;
+        }
         let choice = body
             .get("choices")
             .and_then(Value::as_array)
@@ -192,15 +212,16 @@ impl OpenAIParser {
 
     fn prepare_terminal_events(&mut self, emit: &mut dyn FnMut(Event) -> Result<()>) -> Result<()> {
         self.emit_pending(emit)?;
-        if self.stop_reason.is_empty() {
-            self.stop_reason = "done".into();
+        if self.saw_usage {
+            self.pending_usage = Some(UsageEvent {
+                input_tokens: self.input_tokens,
+                output_tokens: self.output_tokens,
+                cache_read_input_tokens: self.cache_read_input_tokens,
+                cache_creation_input_tokens: self.cache_creation_input_tokens,
+            });
+        } else {
+            emit(Event::UsageUnavailable)?;
         }
-        self.pending_usage = Some(UsageEvent {
-            input_tokens: self.input_tokens,
-            output_tokens: self.output_tokens,
-            cache_read_input_tokens: self.cache_read_input_tokens,
-            cache_creation_input_tokens: 0,
-        });
         self.pending_stop = Some(self.stop_reason.clone());
         Ok(())
     }
@@ -232,6 +253,8 @@ impl OpenAIParser {
         self.input_tokens = 0;
         self.output_tokens = 0;
         self.cache_read_input_tokens = 0;
+        self.cache_creation_input_tokens = 0;
+        self.saw_usage = false;
         self.saw_text = false;
         self.pending_calls.clear();
         self.pending_usage = None;
@@ -333,6 +356,24 @@ mod tests {
                 |e| matches!(e, Event::Usage(u) if u.input_tokens == 10 && u.output_tokens == 5)
             )
         );
+    }
+
+    #[test]
+    fn missing_provider_usage_is_not_reported_as_zero_tokens() {
+        let mut parser = OpenAIParser::new();
+        let events = collect_lines(
+            &mut parser,
+            &[
+                "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}",
+                "data: [DONE]",
+            ],
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Event::UsageUnavailable))
+        );
+        assert!(!events.iter().any(|event| matches!(event, Event::Usage(_))));
     }
 
     #[test]
@@ -439,6 +480,62 @@ mod tests {
             .unwrap();
         assert_eq!(usage.input_tokens, 20); // 100 - 80
         assert_eq!(usage.cache_read_input_tokens, 80);
+    }
+    #[test]
+    fn cache_creation_input_tokens_from_direct_field() {
+        let mut p = OpenAIParser::new();
+        let lines = [
+            "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":2,\"cache_creation_input_tokens\":60,\"prompt_tokens_details\":{\"cached_tokens\":40}}}",
+            "data: [DONE]",
+        ];
+        let events = collect_lines(&mut p, &lines);
+        let usage = events
+            .iter()
+            .find_map(|e| match e {
+                Event::Usage(u) => Some(u),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(usage.input_tokens, 60); // 100 - 40
+        assert_eq!(usage.cache_creation_input_tokens, 60);
+        assert_eq!(usage.cache_read_input_tokens, 40);
+    }
+
+    #[test]
+    fn cache_creation_input_tokens_from_prompt_tokens_details() {
+        let mut p = OpenAIParser::new();
+        let lines = [
+            "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"y\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":200,\"completion_tokens\":3,\"prompt_tokens_details\":{\"cached_tokens\":150,\"cache_creation\":48}}}",
+            "data: [DONE]",
+        ];
+        let events = collect_lines(&mut p, &lines);
+        let usage = events
+            .iter()
+            .find_map(|e| match e {
+                Event::Usage(u) => Some(u),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(usage.cache_creation_input_tokens, 48);
+        assert_eq!(usage.cache_read_input_tokens, 150);
+    }
+
+    #[test]
+    fn cache_creation_input_tokens_not_reported_stays_zero() {
+        let mut p = OpenAIParser::new();
+        let lines = [
+            "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"z\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":50,\"completion_tokens\":1}}",
+            "data: [DONE]",
+        ];
+        let events = collect_lines(&mut p, &lines);
+        let usage = events
+            .iter()
+            .find_map(|e| match e {
+                Event::Usage(u) => Some(u),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(usage.cache_creation_input_tokens, 0);
     }
 
     #[test]

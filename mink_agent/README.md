@@ -67,6 +67,10 @@ print(result["text"])
 | `conversation_path` | `str or None` | session `conversation.jsonl` 路径 |
 | `artifacts_dir` | `str or None` | session artifacts 目录 |
 | `summary_path` | `str or None` | session summary 路径 |
+| `usage_path` | `str or None` | session `usage.jsonl` 路径 |
+| `billing_turn_id` | `str or None` | 本次根用户 Turn 的计量归属标识 |
+| `usage_records` | `list[dict]` | 本次 Turn 的 Agent、压缩和子代理 LLM 请求明细 |
+| `usage` | `dict` | 本次 Turn 的 Token、请求次数和人民币费用汇总 |
 | `tool_call_count` | `int` | 本次调用执行的工具调用数量 |
 | `tool_error_count` | `int` | 本次调用检测到的工具错误数量 |
 | `exit_code` | `int` | 进程退出码（0 表示成功） |

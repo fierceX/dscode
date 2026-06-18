@@ -202,6 +202,7 @@ impl TurnExecutor {
                     self.ctx.log_event(serde_json::json!({"type":"usage","input_tokens":u.input_tokens, "output_tokens":u.output_tokens, "cache_read_input_tokens":u.cache_read_input_tokens, "cache_creation_input_tokens":u.cache_creation_input_tokens, "kind":"agent"}));
                     usage = Some(u);
                 }
+                Event::UsageUnavailable => {}
                 Event::Stop(s) => {
                     self.ctx
                         .log_event(serde_json::json!({"type":"stop","reason":s.reason}));

@@ -167,7 +167,9 @@ async fn harness_with_config(
     cfg.prompt.clear();
     configure(&mut cfg);
 
-    let compaction = Arc::new(CompactionEngine::new(
+    let usage = crate::session::usage::UsageJournal::new(spaths.usage.clone());
+    let display = Arc::new(NoopDisplay::new());
+    let compaction = Arc::new(CompactionEngine::new_with_usage(
         store.clone(),
         spaths.summary.clone(),
         spaths.plan.clone(),
@@ -178,9 +180,11 @@ async fn harness_with_config(
         crate::config::api_url(&cfg),
         &cfg,
         stats.clone(),
-        reqwest::Client::new(),
+        usage.clone(),
+        cfg.session_id.clone(),
+        display.clone(),
+        crate::cancel::CancellationToken::new(),
     ));
-    let display = Arc::new(NoopDisplay::new());
     let ctx = Arc::new(AgentSharedContext {
         config: cfg.clone(),
         cwd: cwd.clone(),
@@ -193,6 +197,7 @@ async fn harness_with_config(
             crate::tools::snapshot::FileSnapshotStore::default(),
         )),
         stats,
+        usage,
         compaction,
         cancel: crate::cancel::CancellationToken::new(),
         display: display.clone(),
@@ -1663,6 +1668,12 @@ async fn sub_agent_executor_with_mock_llm_captures_child_output() -> anyhow::Res
             Ok(Event::Text(TextEvent {
                 content: "child answer".into(),
             })),
+            Ok(Event::Usage(UsageEvent {
+                input_tokens: 10,
+                output_tokens: 5,
+                cache_read_input_tokens: 3,
+                cache_creation_input_tokens: 1,
+            })),
             Ok(Event::Stop(StopEvent {
                 reason: "end_turn".into(),
             })),
@@ -1679,6 +1690,10 @@ async fn sub_agent_executor_with_mock_llm_captures_child_output() -> anyhow::Res
         result.thinking
     );
     assert_eq!(h.ctx.store.lines().await?.len(), 1);
+    let records = h.ctx.usage.all_records()?;
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].kind, crate::session::usage::UsageKind::SubAgent);
+    assert_eq!(records[0].origin_session_id, "sub_mock");
     Ok(())
 }
 

@@ -24,6 +24,9 @@ pub mod prelude {
         AgentEvent, AgentEventStream, AgentOptions, AgentRuntime, EventSink, SessionInfo,
         SessionLayout, SessionPolicy, TurnOutcome, TurnStatus,
     };
+    pub use crate::session::usage::{
+        TokenUsage, UsageKind, UsageRecord, UsageStatus, UsageSummary,
+    };
 }
 
 // Internal modules kept public during the library transition.

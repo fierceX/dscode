@@ -7,6 +7,7 @@ pub enum Event {
     Thinking(ThinkingEvent),
     ToolCall(ToolCallEvent),
     Usage(UsageEvent),
+    UsageUnavailable,
     Stop(StopEvent),
     Error(ErrorEvent),
     Retry(RetryEvent),

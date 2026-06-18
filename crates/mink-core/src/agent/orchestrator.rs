@@ -3,6 +3,7 @@ use crate::agent::turn::{TurnDecision, TurnEffect, TurnExecutor};
 use crate::context::AgentSharedContext;
 use crate::errors;
 use crate::llm::client::{AsyncLlClient, LlmClient};
+use crate::session::usage::{UsageRecord, UsageSummary};
 use anyhow::Result;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -34,10 +35,13 @@ pub enum OrchCmd {
 
 #[derive(Debug, Clone)]
 pub struct TurnRunResult {
+    pub billing_turn_id: String,
     pub status: TurnStatus,
     pub tool_call_count: u32,
     pub tool_error_count: u32,
     pub error: Option<String>,
+    pub usage_records: Vec<UsageRecord>,
+    pub usage: UsageSummary,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,19 +66,25 @@ impl TurnStatus {
 impl TurnRunResult {
     pub fn ok(tool_call_count: u32, tool_error_count: u32) -> Self {
         Self {
+            billing_turn_id: String::new(),
             status: TurnStatus::Ok,
             tool_call_count,
             tool_error_count,
             error: None,
+            usage_records: Vec::new(),
+            usage: UsageSummary::default(),
         }
     }
 
     pub fn failed(error: impl Into<String>) -> Self {
         Self {
+            billing_turn_id: String::new(),
             status: TurnStatus::Failed,
             tool_call_count: 0,
             tool_error_count: 0,
             error: Some(error.into()),
+            usage_records: Vec::new(),
+            usage: UsageSummary::default(),
         }
     }
 
@@ -94,10 +104,13 @@ impl TurnRunResult {
             _ => None,
         };
         Self {
+            billing_turn_id: String::new(),
             status,
             tool_call_count: executor.tool_call_count(),
             tool_error_count: executor.tool_error_count(),
             error,
+            usage_records: Vec::new(),
+            usage: UsageSummary::default(),
         }
     }
 }
@@ -191,6 +204,7 @@ impl OrchActor {
 
     async fn handle_user_input(&mut self, input: String) -> TurnRunResult {
         let started_at = Instant::now();
+        let billing_turn_id = self.ctx.usage.begin_turn();
         self.belief.reset();
         self.ctx.interrupt.store(false, Ordering::SeqCst);
         self.refresh_title().await;
@@ -202,7 +216,10 @@ impl OrchActor {
                     .display
                     .render_error(&format!("Failed to prepare turn: {e}"));
                 self.refresh_title().await;
-                let result = TurnRunResult::failed(format!("failed to prepare turn: {e}"));
+                let result = self.finish_usage(
+                    TurnRunResult::failed(format!("failed to prepare turn: {e}")),
+                    &billing_turn_id,
+                );
                 self.log_turn_final(&result, started_at.elapsed().as_millis() as u64);
                 return result;
             }
@@ -216,8 +233,26 @@ impl OrchActor {
             Err(e) => self.handle_turn_error(e, &executor, &model).await,
         };
 
+        let result = self.finish_usage(result, &billing_turn_id);
         self.refresh_title().await;
         self.log_turn_final(&result, started_at.elapsed().as_millis() as u64);
+        result
+    }
+
+    fn finish_usage(&self, mut result: TurnRunResult, billing_turn_id: &str) -> TurnRunResult {
+        result.billing_turn_id = billing_turn_id.to_string();
+        match self.ctx.usage.records_for(billing_turn_id) {
+            Ok(records) => {
+                result.usage = UsageSummary::from_records(&records);
+                result.usage_records = records;
+            }
+            Err(error) => {
+                self.ctx.display.render_error(&format!(
+                    "Failed to read usage records for turn {billing_turn_id}: {error}"
+                ));
+            }
+        }
+        self.ctx.usage.end_turn(billing_turn_id);
         result
     }
 
@@ -298,11 +333,13 @@ impl OrchActor {
     fn log_turn_final(&self, result: &TurnRunResult, elapsed_ms: u64) {
         self.ctx.log_event(serde_json::json!({
             "type": "turn_final",
+            "billing_turn_id": result.billing_turn_id,
             "status": result.status.as_str(),
             "tool_call_count": result.tool_call_count,
             "tool_error_count": result.tool_error_count,
             "elapsed_ms": elapsed_ms,
             "error": result.error.clone(),
+            "usage": result.usage,
         }));
     }
 
@@ -330,10 +367,13 @@ impl OrchActor {
                 .render_error(&format!("Turn execution error: {e}"));
         }
         TurnRunResult {
+            billing_turn_id: String::new(),
             status: TurnStatus::Failed,
             tool_call_count: executor.tool_call_count(),
             tool_error_count: executor.tool_error_count(),
             error: Some(error),
+            usage_records: Vec::new(),
+            usage: UsageSummary::default(),
         }
     }
 
