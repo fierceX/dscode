@@ -1,5 +1,53 @@
 # Changelog
 
+## v0.1.10 (2026-06-20)
+
+### Features
+
+- **Token 用量与费用统计** (`session/usage.rs`) — 统一的 `UsageJournal`/`MeteredStream` 采集 LLM 请求级 Token 和费用
+  - 新增 `billing_turn_id` 生命周期，覆盖 Agent 调用、自动压缩和子代理
+  - `TurnOutcome.usage`（`UsageSummary` 汇总）和 `usage_records`（`Vec<UsageRecord>` 明细）对外暴露
+  - `SessionInfo.usage_path` 指向 `usage.jsonl`，可自行读取完整历史
+  - `price_usage()` 通过 `ModelTier::price_input/output/cache_read_per_m()` 纳元整数运算，消除双重定价
+  - `OpenAIParser` 解析 `cache_creation_input_tokens`（兼容直接字段和 `prompt_tokens_details.cache_creation`）
+  - `Event::UsageUnavailable` 协议变体，区分 provider 未返回 usage 与 usage=0
+  - SubAgent 共享父 session 的 `UsageJournal`，无需额外 rollup
+
+### TUI
+
+- **移除内容区边框与 Border 切换** (`Ctrl+T` 快捷键删除)
+  - 改用稳定水平/底部 padding，便于终端文本选中
+  - 删除 `theme::border()` / `streaming_border()` 和 `show_borders` 状态
+- **模型标签同步** — TUI 启动、模型切换和 turn title 刷新时保持活跃模型标签一致
+- **修改 diff 格式化方式** — 引入 `is_diff_eligible()` 工具白名单，仅在 Edit/Bash/Python/PythonSandbox 的输出上按 diff 语法高亮渲染
+  - Read 等结构化输出工具排除，避免 YAML front matter 等文件内容误染 diff 颜色
+  - `is_diff_like` 改为全文扫描（白名单已确保安全），不再依赖前 5 行启发式
+
+### Editor Workflow
+
+- **Write 工具失效旧 snapshot** — 写入文件后自动 invalidate 对应 snapshot，后续 Edit 用旧 tag 时提示未知 tag
+- **Edit 错误上下文** — snapshot 未知、未覆盖或行 hash 不匹配时在错误信息中输出 `Current context:` 锚点行
+- **Edit 后返回新 anchor** — 成功的 Edit 返回 `@path#TAG` header 和修改区域附近行号，方便立即跟进
+- **`old_string/new_string` 显式拒绝** — 使用旧参数时提示改用 Read+patch 流程
+
+### Session & Compaction
+
+- **Compaction 复用 AsyncLlClient** — `run_summary_call()` 改用 `AsyncLlClient::stream_request()`，移除独立 HTTP client 和 `send_summary_request()` 方法
+- **Compaction 采集 usage** — 压缩生成的 LLM 请求也经过 `MeteredStream`，usage 记入同一 `usage.jsonl`
+- **移除 `CompactionEngine` 死代码** — 删除 `_client` 参数和 `is_retryable_compaction_status()`
+
+### Docs
+
+- `USAGE.md` 新增 Token 用量与费用章节，覆盖 `UsageSummary`、`TokenUsage`、定价模型和 Rust/Python/CLI 多端代码示例
+- `ARCHITECTURE.md` 新增 `session/usage.rs` 模块，数据流增加 MeteredStream 采集和 `OrchActor::finish_usage()` 汇总
+- `crates/mink-core/README.md` 补充 `billing_turn_id`/`usage_records` Rust 嵌入示例
+- `docs/tools.md` 更新 Edit 工具描述，对齐 Read+patch 流程
+- `docs/DESIGN.md` 更新 anchored Edit 设计说明
+
+### Tests
+
+- 446 tests passed (+3 新: cache_creation 解析、+ 回归测试覆盖) — 相比 v0.1.9 的 443 passed
+
 ## v0.1.9 (2026-06-14)
 
 ### Features
