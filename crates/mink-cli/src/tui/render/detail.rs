@@ -1,11 +1,12 @@
 use crate::tui::markdown::render_md_with_tables_with_width;
+use crate::tui::render::padded_content_area;
 use crate::tui::state::{MsgKind, TuiState};
 use crate::tui::theme;
 use ratatui::{
     Frame,
     layout::Rect,
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph},
+    widgets::Paragraph,
 };
 
 pub(super) fn render_detail_content(
@@ -13,16 +14,13 @@ pub(super) fn render_detail_content(
     area: Rect,
     session_id: &str,
     scroll: usize,
-    show_borders: bool,
     state: &TuiState,
 ) {
-    let inner_w = area
-        .width
-        .saturating_sub(if show_borders { 2 } else { 0 })
-        .max(1);
+    let content_area = padded_content_area(area);
+    let inner_w = content_area.width.max(1);
     let all_lines = detail_lines_for_session_with_width(state, session_id, inner_w);
 
-    let viewport = detail_viewport_height(area.height, show_borders);
+    let viewport = detail_viewport_height(area.height);
     let max_scroll = all_lines.len().saturating_sub(viewport);
     let effective_scroll = scroll.min(max_scroll);
     let visible: Vec<Line<'static>> = all_lines
@@ -32,17 +30,8 @@ pub(super) fn render_detail_content(
         .cloned()
         .collect();
 
-    let borders = if show_borders {
-        Borders::ALL
-    } else {
-        Borders::NONE
-    };
-    let block = Block::default()
-        .borders(borders)
-        .border_style(theme::border());
-
-    let paragraph = Paragraph::new(Text::from(visible)).block(block);
-    f.render_widget(paragraph, area);
+    let paragraph = Paragraph::new(Text::from(visible));
+    f.render_widget(paragraph, content_area);
 }
 
 #[cfg(test)]
@@ -108,7 +97,12 @@ pub(super) fn render_detail_bar(f: &mut Frame, area: Rect) {
     f.render_widget(Paragraph::new(Line::from(text)), area);
 }
 
-pub(crate) fn detail_viewport_height(area_height: u16, show_borders: bool) -> usize {
-    let border_rows = if show_borders { 2 } else { 0 };
-    area_height.saturating_sub(border_rows) as usize
+pub(crate) fn detail_viewport_height(area_height: u16) -> usize {
+    padded_content_area(Rect {
+        x: 0,
+        y: 0,
+        width: 1,
+        height: area_height,
+    })
+    .height as usize
 }

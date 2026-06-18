@@ -81,9 +81,6 @@ fn handle_key(
     }
 
     match (key.modifiers, key.code) {
-        (KeyModifiers::CONTROL, KeyCode::Char('t')) => {
-            state.viewport.show_borders = !state.viewport.show_borders;
-        }
         (KeyModifiers::NONE, KeyCode::Tab) => {
             state.overlay = Some(ActiveOverlay::FilePicker(FilePickerState::open(
                 &state.input.buf,
@@ -567,11 +564,6 @@ pub(crate) fn handle_event(
 }
 
 fn content_row_for_mouse(state: &TuiState, mouse_row: u16) -> Option<usize> {
-    if state.viewport.show_borders {
-        (mouse_row > state.viewport.content_y)
-            .then(|| usize::from(mouse_row - state.viewport.content_y - 1))
-    } else {
-        (mouse_row >= state.viewport.content_y)
-            .then(|| usize::from(mouse_row - state.viewport.content_y))
-    }
+    (mouse_row >= state.viewport.content_y)
+        .then(|| usize::from(mouse_row - state.viewport.content_y))
 }

@@ -338,8 +338,12 @@ impl OrchActor {
     }
 
     async fn refresh_title(&self) {
-        let model_label = crate::config::resolve_model_label(&self.ctx.config.model);
-        crate::ui::render_title_snapshot(&self.ctx, model_label, self.belief.belief()).await;
+        crate::ui::render_title_snapshot(
+            &self.ctx,
+            self.active_model_label(),
+            self.belief.belief(),
+        )
+        .await;
     }
 
     async fn handle_model_command(&mut self, model: &str) {
@@ -355,6 +359,7 @@ impl OrchActor {
                 self.ctx
                     .display
                     .render_info(&format!("Switched to {} model.", t.label()));
+                self.refresh_title().await;
             }
             Err(_) => {
                 self.ctx
@@ -372,6 +377,14 @@ impl OrchActor {
                 .unwrap_or(crate::config::ModelTier::Flash)
         };
         (tier.model_name().to_string(), self.ctx.api_url.clone())
+    }
+
+    fn active_model_label(&self) -> &'static str {
+        if let Some(forced) = self.forced_model {
+            forced.label()
+        } else {
+            crate::config::resolve_model_label(&self.ctx.config.model)
+        }
     }
 }
 

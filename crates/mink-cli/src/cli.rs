@@ -180,6 +180,7 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
                     cmd_tx.clone(),
                     &session.events_path,
                     Some(interrupt.clone()),
+                    crate::config::resolve_model_label(&cfg.model),
                     &cfg.sandbox,
                 )
             {

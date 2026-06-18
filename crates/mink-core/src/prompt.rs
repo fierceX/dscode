@@ -130,15 +130,26 @@ impl Builder {
              - For skills, use Read with `skill://<name>` (see skill-index for available skills).\n\
              \n\
              EDIT PROTOCOL (anchored patch):\n\
-             - For Edit: use the patch parameter with @PATH#TAG from Read, using replace/delete/insert line hunks. Old string matching (old_string/new_string) is not supported.\n\
-             - Every @PATH#TAG is a snapshot of one file state and one displayed range, valid only for one Edit.\n\
-             - Before every Edit, you must have a fresh non-raw Read for the target file after the last successful Edit or Write to that same file.\n\
-             - Multiple changes in the same file from the same snapshot → combine into one Edit.patch with multiple hunks.\n\
-             - Consecutive Edit calls to the same file require a fresh Read between them.\n\
-             - After any successful Edit or Write, all previous snapshot tags for that file are stale. Re-read the next target range before further edits.\n\
+             - Edit only modifies existing files. Use Write to create or fully replace a file.\n\
+             - Edit requires the patch parameter. Old string matching (old_string/new_string) is not supported.\n\
+             - Every patch starts with @PATH#TAG copied from the latest non-raw Read of that file, or from the fresh @PATH#TAG returned by the previous successful Edit.\n\
+             - Every @PATH#TAG is a snapshot of one file state. After any successful Edit or Write to that file, all older tags and line numbers for that file are dead.\n\
+             - Before every Edit, you must be grounded in the current file state: use a fresh non-raw Read after the last successful Edit/Write, or use the fresh header and numbered lines returned by the last successful Edit for an immediate follow-up in that shown range.\n\
              - Grep can locate code but cannot authorize Edit. Use Read on the exact target range to get the @PATH#TAG header.\n\
+             - Supported ops: replace N..M:, replace N:, delete N..M, delete N, insert before N:, insert after N:, insert head:, insert tail:.\n\
+             - Numbers refer to ORIGINAL file lines from the snapshot and do not shift within one patch. Multiple changes in the same file from the same snapshot -> combine into one multi-hunk Edit.patch.\n\
+             - Body rows appear only under replace/insert headers, are final content only, and each must be prefixed with '+'. To keep a line, leave it out of every range. Never include '-old' rows or bare context lines.\n\
+             - Keep ranges tight: cover only lines whose content actually changes. To change lines 2 and 5 while preserving 3-4, use two hunks, not replace 2..5.\n\
+             - Never use Edit for mechanical formatting, import sorting, whitespace cleanup, or reindent-only changes; run the project formatter once after semantic edits.\n\
              - Prefer insert before/after an anchored line. Use insert head/tail only after reading enough of the file to make the file boundary intentional.\n\
-             - On snapshot mismatch, unknown tag, uncovered line, or no-op: stop editing that file, re-read the suggested target range, then retry with the new header.",
+             - On snapshot mismatch, unknown tag, uncovered line, no-op, or any result you cannot fully account for: stop editing that file, re-read the suggested target range, then retry with the new header.\n\
+             Canonical shape:\n\
+             @src/foo.rs#0A3B\n\
+             replace 41..41:\n\
+             +    return new_value;\n\
+             insert after 55:\n\
+             +    println!(\"done\");\n\
+             Critical: re-ground after every edit; keep ranges tight and in-bounds; body rows are only +FINAL_CONTENT.",
             None,
         ));
         sections.push(wrap_section(

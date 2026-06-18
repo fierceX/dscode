@@ -39,6 +39,11 @@ impl FileSnapshotStore {
     pub fn get(&self, path: &Path, tag: &str) -> Option<&FileSnapshot> {
         self.by_key.get(&(path.to_path_buf(), tag.to_string()))
     }
+
+    pub fn invalidate_path(&mut self, path: &Path) {
+        self.by_key
+            .retain(|(snapshot_path, _), _| snapshot_path != path);
+    }
 }
 
 pub fn split_content_lines(content: &str) -> Vec<String> {
@@ -88,6 +93,20 @@ mod tests {
         assert!(snapshot.covers_line(11));
         assert!(!snapshot.covers_line(12));
         assert!(store.get(&path, &snapshot.tag).is_some());
+    }
+
+    #[test]
+    fn invalidates_snapshots_for_path() {
+        let mut store = FileSnapshotStore::default();
+        let path = PathBuf::from("a.rs");
+        let other = PathBuf::from("b.rs");
+        let snapshot = store.record(&path, "a\n", 1);
+        let other_snapshot = store.record(&other, "b\n", 1);
+
+        store.invalidate_path(&path);
+
+        assert!(store.get(&path, &snapshot.tag).is_none());
+        assert!(store.get(&other, &other_snapshot.tag).is_some());
     }
 
     #[test]

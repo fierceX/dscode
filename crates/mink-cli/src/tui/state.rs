@@ -215,7 +215,6 @@ pub(crate) struct ViewportState {
     pub scroll: usize,
     pub auto_scroll: bool,
     pub max_scroll: usize,
-    pub show_borders: bool,
     pub click_map: Vec<ClickTarget>,
     pub content_y: u16,
     pub effective_scroll: usize,
@@ -314,7 +313,6 @@ impl Default for TuiState {
             stats: StatsSnapshot::default(),
             viewport: ViewportState {
                 auto_scroll: true,
-                show_borders: true,
                 ..Default::default()
             },
             dirty: true,

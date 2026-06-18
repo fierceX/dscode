@@ -1,15 +1,18 @@
 use crate::tui::markdown::{push_msg_with_width, truncate_visual, wrap_lines_word};
+use crate::tui::render::padded_content_area;
 use crate::tui::state::{ClickAction, ClickTarget, MsgKind, MsgLine, TuiState};
-use crate::tui::theme;
 use ratatui::{
     Frame,
     layout::Rect,
-    text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph},
+    text::{Line, Text},
+    widgets::Paragraph,
 };
 
 pub(super) fn render_content(f: &mut Frame, area: Rect, state: &mut TuiState) {
-    let inner_w = area.width.saturating_sub(2).max(1);
+    let content_area = padded_content_area(area);
+    state.viewport.content_y = content_area.y;
+
+    let inner_w = content_area.width.max(1);
     let width_changed = state.cache.width != inner_w;
     state.cache.width = inner_w;
 
@@ -38,7 +41,7 @@ pub(super) fn render_content(f: &mut Frame, area: Rect, state: &mut TuiState) {
     let history_len = state.cache.history_lines.as_ref().map_or(0, Vec::len);
     let stream_len = state.cache.stream_lines.as_ref().map_or(0, Vec::len);
     let total_len = history_len + stream_len;
-    let viewport = content_viewport_height(area.height, state.viewport.show_borders);
+    let viewport = content_viewport_height(area.height);
     let max_scroll = total_len.saturating_sub(viewport);
     state.viewport.max_scroll = max_scroll;
 
@@ -50,29 +53,6 @@ pub(super) fn render_content(f: &mut Frame, area: Rect, state: &mut TuiState) {
     state.viewport.effective_scroll = scroll;
     state.viewport.click_map = build_visible_click_map(state, scroll, viewport);
 
-    let border_style = if state.streaming {
-        theme::streaming_border()
-    } else {
-        theme::border()
-    };
-    let borders = if state.viewport.show_borders {
-        Borders::ALL
-    } else {
-        Borders::NONE
-    };
-    let mut block = Block::default().borders(borders).border_style(border_style);
-
-    let mut title_parts: Vec<Span<'static>> = Vec::new();
-    if scroll > 0 {
-        title_parts.push(Span::styled(" ↥ ", theme::info()));
-    }
-    if scroll < max_scroll {
-        title_parts.push(Span::styled(" ↧ ", theme::info()));
-    }
-    if !title_parts.is_empty() {
-        block = block.title_bottom(Line::from(title_parts));
-    }
-
     let visible = visible_lines(
         state.cache.history_lines.as_deref().unwrap_or(&[]),
         state.cache.stream_lines.as_deref().unwrap_or(&[]),
@@ -80,8 +60,8 @@ pub(super) fn render_content(f: &mut Frame, area: Rect, state: &mut TuiState) {
         viewport,
     );
 
-    let paragraph = Paragraph::new(Text::from(visible)).block(block);
-    f.render_widget(paragraph, area);
+    let paragraph = Paragraph::new(Text::from(visible));
+    f.render_widget(paragraph, content_area);
 }
 
 fn rebuild_message_cache(msg: &mut MsgLine, inner_w: u16) {
@@ -247,7 +227,12 @@ pub(crate) fn visible_lines(
     visible
 }
 
-pub(crate) fn content_viewport_height(area_height: u16, show_borders: bool) -> usize {
-    let border_rows = if show_borders { 2 } else { 0 };
-    area_height.saturating_sub(border_rows) as usize
+pub(crate) fn content_viewport_height(area_height: u16) -> usize {
+    padded_content_area(Rect {
+        x: 0,
+        y: 0,
+        width: 1,
+        height: area_height,
+    })
+    .height as usize
 }

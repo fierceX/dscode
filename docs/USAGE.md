@@ -639,7 +639,7 @@ artifact、输出截断和每个工具的完整协议以 [工具参考](tools.md
 42:    old()
 ```
 
-推荐用 `Edit.patch` 修改：
+推荐用 `Edit.patch` 修改已有文件。`Edit` 不支持 `old_string/new_string`；新建或完整覆盖文件使用 `Write`。
 
 ```json
 {
@@ -649,10 +649,15 @@ artifact、输出截断和每个工具的完整协议以 [工具参考](tools.md
 ```
 
 同一文件多处修改时，优先在一次 `Edit.patch` 中合并多个 hunk。任何成功的 `Edit` 或 `Write`
-都会让该文件之前的 snapshot tag 过期；继续编辑同一文件前，需要重新 `Read` 目标范围。
+都会让该文件之前的 snapshot tag 和行号过期。成功 `Edit` 会返回新的 `@PATH#TAG` 和修改区域附近的行号；
+后续同一区域编辑可直接使用该新 header，其他区域应重新 `Read` 目标范围。patch 行号始终指向
+snapshot 中的原始行号，同一次 patch 内不会因为前面的 hunk 而位移。
 
 如果 snapshot 过期、tag 未知、目标行未覆盖或 patch 无实际变化，`Edit` 会拒绝修改，并给出建议
-`Read path:N-M` 范围。
+`Read path:N-M` 范围和当前相关行上下文。此时不要继续猜测或扩大 hunk，应先重新 `Read`，再用新 header 重试。
+
+patch body 行只写最终内容，每行以 `+` 开头；不要写 `-old` 行、原始上下文行或 unified diff 的 `@@` header。
+不要用 `Edit` 做机械格式化、import 排序、空白清理或纯缩进调整；语义修改后运行项目 formatter。
 
 ---
 

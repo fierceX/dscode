@@ -6,7 +6,7 @@ use crate::tui::render::status::render_status;
 use crate::tui::state::{TuiState, View};
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
 };
 
 mod content;
@@ -64,7 +64,6 @@ pub(crate) fn render(f: &mut Frame, state: &mut TuiState) {
                 ])
                 .split(area);
 
-            state.viewport.content_y = chunks[0].y;
             render_content(f, chunks[0], state);
             render_input(f, chunks[1], &visible_input_lines);
             render_file_picker(f, chunks[1], state);
@@ -84,15 +83,19 @@ pub(crate) fn render(f: &mut Frame, state: &mut TuiState) {
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Min(1), Constraint::Length(1)])
                 .split(area);
-            render_detail_content(
-                f,
-                chunks[0],
-                session_id,
-                *scroll,
-                state.viewport.show_borders,
-                state,
-            );
+            render_detail_content(f, chunks[0], session_id, *scroll, state);
             render_detail_bar(f, chunks[1]);
         }
+    }
+}
+
+pub(super) fn padded_content_area(area: Rect) -> Rect {
+    let horizontal = if area.width > 2 { 1 } else { 0 };
+    let bottom = if area.height > 1 { 1 } else { 0 };
+    Rect {
+        x: area.x.saturating_add(horizontal),
+        y: area.y,
+        width: area.width.saturating_sub(horizontal * 2),
+        height: area.height.saturating_sub(bottom),
     }
 }

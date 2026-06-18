@@ -13,10 +13,6 @@ pub(crate) fn border() -> Style {
     muted()
 }
 
-pub(crate) fn streaming_border() -> Style {
-    secondary()
-}
-
 pub(crate) fn primary() -> Style {
     Style::default().fg(Color::Blue)
 }

@@ -130,32 +130,45 @@ cargo build --release
 
 ## `Edit`
 
-编辑文件。仅支持 anchored patch。
+编辑已有文件。仅支持 anchored patch；新建或完整覆盖文件使用 `Write`。
 
 | 参数 | 类型 | 说明 |
 |---|---|---|
 | `path` | string | 文件路径 |
 | `patch` | string | anchored line patch |
 
-- `patch` 必须使用最近一次非 raw `Read` 输出中的 `@PATH#TAG` header。
-- patch 支持 `replace N..M:`、`delete N..M`、`insert before N:`、`insert after N:`、`insert head:`、`insert tail:`。
-- patch body 行必须以 `+` 开头。
-- patch 只能修改 snapshot 覆盖且未漂移的行；文件变化时会拒绝并要求重新 `Read`。
+- `patch` 第一行必须是最近一次非 raw `Read` 输出中的 `@PATH#TAG` header，或上一次成功 `Edit` 结果返回的新 header。
+- patch 支持 `replace N..M:`、`replace N:`、`delete N..M`、`delete N`、`insert before N:`、`insert after N:`、`insert head:`、`insert tail:`。
+- patch 中的行号来自 snapshot 的原始文件行号；同一次 patch 内多个 hunk 的行号不会因为前面的 hunk 而位移。
+- patch body 行只出现在 `replace` / `insert` header 后，必须以 `+` 开头，且只能写最终新内容；不要写 `-old` 行、原始行或上下文行。
+- patch range 应保持 tight，只覆盖实际变化的行。要修改不连续行时，使用多个 hunk。
+- snapshot 对应一个文件状态；同一文件成功 `Edit` 或 `Write` 后，之前的 snapshot tag 和行号都视为过期。
 - 同一文件如果要修改多个位置，优先在一次 `Edit.patch` 中合并多个 hunk。
-- 同一文件成功 `Edit` 或 `Write` 后，之前的 snapshot tag 都视为过期；继续编辑前重新 `Read` 目标范围。
-- snapshot 过期、未知 tag、未覆盖行或 no-op 错误会给出建议 `Read path:N-M` 范围。
-- conversation 中默认只保留结果首行，避免 diff 过度污染上下文；UI 仍可展示完整工具内容。
+- 成功 `Edit` 会返回新的 `@PATH#TAG` 和修改区域附近的行号，可用于紧接着在该可见区域继续编辑；其他区域应重新 `Read`。
+- snapshot 过期、未知 tag、未覆盖行、no-op 或任何无法完全解释的结果，都应先按工具提示重新 `Read path:N-M`，再用新 header 重试。
+- 不要用 `Edit` 做机械格式化、import 排序、空白清理或纯缩进调整；语义修改后运行项目 formatter。
 
 示例：
 
 ```text
 @src/foo.rs#0A3B
-replace 41..43:
-+fn target() {
-+    new_value()
-+}
+replace 41..41:
++    return new_value;
 insert after 55:
 +println!("done");
+```
+
+反例：
+
+```text
+# 错误：body 不能包含 -old 或无前缀上下文行
+replace 41..41:
+-    old_value()
++    new_value()
+
+# 错误：为了改第 2 和第 5 行而吞掉 3-4 行
+replace 2..5:
++...
 ```
 
 ## `Bash`
@@ -271,7 +284,7 @@ open("/absolute/path/to/project/output/f.txt", "w")  # 绝对路径 ✅
 - 基于内置目录遍历和 Rust `regex` 搜索，不依赖外部 `rg` 二进制。
 - 优先用于定位编辑目标。
 - `path` 为空或相对路径时基于当前会话 `cwd` 解析；`glob` 过滤同样使用 `globset` 语义。
-- `context` 往往足够定位目标；需要修改时优先 `Read` 目标范围拿到 `@PATH#TAG` 后使用 anchored `Edit.patch`。
+- `context` 用于定位目标；需要修改时必须 `Read` 目标范围拿到 `@PATH#TAG` 后使用 anchored `Edit.patch`。
 - 未匹配内容时返回明确的 no-match 提示；遍历达到上限或跳过不可读路径时，会追加诊断行。
 限制：
 - 最多遍历 `max_search_files`（默认 5000）个文件后截断。

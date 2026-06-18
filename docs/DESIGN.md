@@ -522,7 +522,7 @@ impl ToolExec for ReadTool {
 - 超过 `tool_result_max_bytes`（默认 100KB）时截断，并将完整输出写入 session artifact
 - Bash 输出经过 `filter_bash_noise()` 处理（ANSI 转义剥离 + 重复行压缩）
 - Read/Write 结果加上行数/字节数统计前缀
-- Edit 默认将首行作为 `conv_content`，减少 conversation 噪声
+- Edit 结果包含新的 snapshot header、修改区域附近的行号窗口和 diff，便于模型继续锚定后续修改；Edit 失败时尽量返回建议重读范围和当前相关行上下文
 
 工具结果有两个通道：
 
@@ -573,7 +573,7 @@ ToolResultDisplay {
 
 ### Anchored Edit
 
-本地文件非 raw `Read` 输出会记录 snapshot，并渲染：
+本地文件非 raw `Read` 输出会记录当前文件状态 snapshot，并渲染所请求范围：
 
 ```text
 @src/foo.rs#0A3B
@@ -581,7 +581,7 @@ ToolResultDisplay {
 42:    old()
 ```
 
-`Edit` 支持 `patch`：
+`Edit` 支持 `patch`。`old_string/new_string` 不属于当前工具协议；新建或完整覆盖文件使用 `Write`。
 
 ```text
 @src/foo.rs#0A3B
@@ -589,6 +589,8 @@ replace 41..42:
 +fn target() {
 +    new()
 +}
+replace 45:
++    return value;
 delete 80..82
 insert after 90:
 +println!("done");
@@ -602,9 +604,12 @@ insert after 90:
 - insert before/after 必须校验 anchor 行。
 - insert head/tail 校验完整文件 hash。
 - stale、overlap、unknown tag、no-op 均 fail closed。
-- 同一文件成功 `Edit` 或 `Write` 后，旧 snapshot tag 不再作为后续编辑依据。
+- 同一文件成功 `Edit` 或 `Write` 后，旧 snapshot tag 和旧行号不再作为后续编辑依据。
+- 成功 `Edit` 会返回新的 `@PATH#TAG` 和修改区域附近的行号；后续同一区域编辑可直接使用该新 header，其他区域应重新 `Read`。
 - 同一 snapshot 下的多处修改应合并为一次 multi-hunk patch。
-- stale、unknown tag、未覆盖行和 no-op 错误只给建议重读范围，不做自动 stale recovery。
+- patch 行号指向原始 snapshot 行号；同一次 patch 内多个 hunk 的行号不会因前面的 hunk 而位移。
+- body 行只出现在 replace/insert 下，只能是 `+` 前缀的最终内容；`-old`、原始上下文行和 unified diff hunk header 都不是协议内容。
+- stale、unknown tag、未覆盖行和 no-op 错误给出建议重读范围和当前相关行上下文，不做自动 stale recovery。
 
 ---
 

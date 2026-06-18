@@ -37,7 +37,7 @@
   },
   {
     "name": "Grep",
-    "description": "Default tool for searching code and file contents. Use this instead of Bash commands like rg, grep, or find | xargs grep. Supports Rust regex patterns and returns file:line matches.\n- Use context to show surrounding lines — often enough for Edit without a separate Read\n- Use glob to restrict file types or directories\n- Use multiple Grep calls if you need multiple patterns",
+    "description": "Default tool for searching code and file contents. Use this instead of Bash commands like rg, grep, or find | xargs grep. Supports Rust regex patterns and returns file:line matches.\n- Use context to identify the target range before editing\n- Grep output does NOT authorize Edit; call Read on the exact target range to get the @PATH#TAG header\n- Use glob to restrict file types or directories\n- Use multiple Grep calls if you need multiple patterns",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -55,7 +55,7 @@
         },
         "context": {
           "type": "integer",
-          "description": "Number of lines before and after each match. Useful for getting enough context to Edit directly from Grep output."
+          "description": "Number of lines before and after each match. Use this to choose the Read range for Edit.patch; Grep output itself does not provide an editable @PATH#TAG."
         }
       },
       "required": [
@@ -86,7 +86,7 @@
   },
   {
     "name": "Edit",
-    "description": "Edit a file using an anchored patch after a fresh non-raw Read. Copy the @PATH#TAG header from the most recent Read of that file and use replace/delete/insert line hunks. Edit requires patch; exact old_string replacement is not supported. A snapshot tag becomes stale after any successful Edit or Write to the same file. If modifying multiple ranges from one snapshot, combine them into one patch with multiple hunks. Do not reuse the same tag for consecutive edits to the same file.",
+    "description": "Edit an existing file using an anchored patch after a fresh non-raw Read. Edit requires patch; old_string/new_string is not supported. Copy the @PATH#TAG header from the latest Read of that file, or from the fresh header returned by the previous successful Edit. A snapshot tag becomes stale after any successful Edit or Write to the same file. Successful Edit returns a fresh @PATH#TAG and numbered lines around the change; use that new header for immediate follow-up edits in the shown range, or re-read the next target range. If modifying multiple ranges from one snapshot, combine them into one patch with multiple hunks. Keep ranges tight: cover only lines that actually change. Body rows are final content only, each prefixed with +; never include -old rows, original lines, or bare context lines. Do not use Edit for formatting, import sorting, whitespace cleanup, or reindent-only changes; run the project formatter once after semantic edits.",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -96,7 +96,7 @@
         },
         "patch": {
           "type": "string",
-          "description": "Anchored line patch using the @PATH#TAG header from a fresh Read output. Supports replace N..M:, delete N..M, insert before N:, insert after N:, insert head:, and insert tail:. Body rows are ONLY the new lines, each prefixed with +. NEVER include original lines (the N..M range already identifies them). Example: replace 5..5:\\n+    return result\\nCombine same-file changes into one multi-hunk patch when they come from the same snapshot."
+          "description": "Anchored line patch. The first non-blank line must be @PATH#TAG from a fresh Read output or from the previous successful Edit result. Supports replace N..M:, replace N:, delete N..M, delete N, insert before N:, insert after N:, insert head:, and insert tail:. Numbers refer to ORIGINAL snapshot lines and do not shift within one patch. Body rows are ONLY final new lines, each prefixed with +. NEVER include original lines, -old rows, or bare context lines. Example: @src/foo.rs#0A3B\\nreplace 5..5:\\n+    return result\\nCombine same-file changes into one multi-hunk patch when they come from the same snapshot, and keep each range tight."
         }
       },
       "required": [

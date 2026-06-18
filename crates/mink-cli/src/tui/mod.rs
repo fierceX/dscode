@@ -36,6 +36,7 @@ pub fn run_tui(
     orch_tx: tokio::sync::mpsc::UnboundedSender<OrchCmd>,
     events_path: &Path,
     interrupt: Option<Arc<AtomicBool>>,
+    initial_model: &str,
     sandbox: &SandboxConfig,
 ) -> anyhow::Result<()> {
     let mut terminal = ratatui::init();
@@ -62,6 +63,7 @@ pub fn run_tui(
         orch_tx,
         events_path,
         interrupt,
+        initial_model,
         sandbox,
     )
 }
@@ -72,12 +74,14 @@ fn tui_main_loop(
     orch_tx: tokio::sync::mpsc::UnboundedSender<OrchCmd>,
     events_path: &Path,
     interrupt: Option<Arc<AtomicBool>>,
+    initial_model: &str,
     sandbox: &SandboxConfig,
 ) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let mut state = TuiState {
         lines: load_session(events_path),
         cwd_label: short_cwd_label(),
+        model: initial_model.to_string(),
         interrupt,
         file_picker_policy: FilePickerPolicy::from_sandbox(cwd, sandbox),
         ..Default::default()
@@ -486,11 +490,13 @@ mod tests {
     }
 
     #[test]
-    fn borderless_viewports_use_full_area_height() {
-        assert_eq!(content_viewport_height(10, true), 8);
-        assert_eq!(content_viewport_height(10, false), 10);
-        assert_eq!(detail_viewport_height(1, true), 0);
-        assert_eq!(detail_viewport_height(1, false), 1);
+    fn content_viewports_leave_light_padding_when_space_allows() {
+        assert_eq!(content_viewport_height(10), 9);
+        assert_eq!(content_viewport_height(2), 1);
+        assert_eq!(content_viewport_height(1), 1);
+        assert_eq!(detail_viewport_height(10), 9);
+        assert_eq!(detail_viewport_height(2), 1);
+        assert_eq!(detail_viewport_height(1), 1);
     }
 
     #[test]
@@ -856,7 +862,7 @@ mod tests {
     }
 
     #[test]
-    fn mouse_click_on_top_border_does_not_toggle_first_target() {
+    fn mouse_click_uses_area_top_as_content_row() {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut state = TuiState::default();
         state
@@ -870,37 +876,6 @@ mod tests {
             action: ClickAction::ToggleCollapse,
         }];
         state.viewport.content_y = 0;
-        state.viewport.show_borders = true;
-
-        assert!(!handle_event(
-            Event::Mouse(MouseEvent {
-                kind: MouseEventKind::Down(MouseButton::Left),
-                column: 0,
-                row: 0,
-                modifiers: KeyModifiers::NONE,
-            }),
-            &mut state,
-            &tx,
-        ));
-        assert!(state.lines[0].collapsed);
-    }
-
-    #[test]
-    fn mouse_click_without_borders_uses_area_top_as_content_row() {
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut state = TuiState::default();
-        state
-            .lines
-            .push(MsgLine::new("thinking".into(), MsgKind::StreamThinking));
-        state.lines[0].collapsed = true;
-        state.viewport.click_map = vec![ClickTarget {
-            line_idx: 0,
-            start_row: 0,
-            end_row: 0,
-            action: ClickAction::ToggleCollapse,
-        }];
-        state.viewport.content_y = 0;
-        state.viewport.show_borders = false;
 
         assert!(!handle_event(
             Event::Mouse(MouseEvent {
@@ -944,7 +919,7 @@ mod tests {
             Event::Mouse(MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column: 0,
-                row: 1,
+                row: 0,
                 modifiers: KeyModifiers::NONE,
             }),
             &mut state,
@@ -1032,7 +1007,7 @@ mod tests {
             Event::Mouse(MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column: 0,
-                row: state.viewport.content_y + 1,
+                row: state.viewport.content_y,
                 modifiers: KeyModifiers::NONE,
             }),
             &mut state,
@@ -1186,7 +1161,7 @@ mod tests {
             Event::Mouse(MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column: 0,
-                row: 1,
+                row: 0,
                 modifiers: KeyModifiers::NONE,
             }),
             &mut state,

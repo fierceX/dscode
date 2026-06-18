@@ -69,12 +69,14 @@ impl LlmClient for IdleAfterTextLlmClient {
 
 struct NoopDisplay {
     info: Mutex<Vec<String>>,
+    title_models: Mutex<Vec<String>>,
 }
 
 impl NoopDisplay {
     fn new() -> Self {
         Self {
             info: Mutex::new(Vec::new()),
+            title_models: Mutex::new(Vec::new()),
         }
     }
 }
@@ -92,7 +94,9 @@ impl Display for NoopDisplay {
     fn render_info(&self, msg: &str) {
         self.info.lock().unwrap().push(msg.to_string());
     }
-    fn render_title_update(&self, _model: &str, _stats: &StatsSnapshot) {}
+    fn render_title_update(&self, model: &str, _stats: &StatsSnapshot) {
+        self.title_models.lock().unwrap().push(model.to_string());
+    }
     fn render_sub_agent_status(&self, _sid: &str, _st: &str, _it: u64, _ot: u64) {}
     fn render_prompt(&self) {}
     fn render_clear_line(&self) {}
@@ -1122,6 +1126,16 @@ async fn orchestrator_model_command_updates_display() -> anyhow::Result<()> {
     );
     assert!(
         h.display
+            .title_models
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|model| model == "pro"),
+        "{:?}",
+        h.display.title_models.lock().unwrap()
+    );
+    assert!(
+        h.display
             .info
             .lock()
             .unwrap()
@@ -1129,6 +1143,46 @@ async fn orchestrator_model_command_updates_display() -> anyhow::Result<()> {
             .any(|msg| msg == "error:Unknown model tier: unknown. Use /flash or /pro"),
         "{:?}",
         h.display.info.lock().unwrap()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn orchestrator_forced_model_title_survives_turn_refreshes() -> anyhow::Result<()> {
+    let h = harness("orch-forced-model-title").await?;
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let llm = Arc::new(MockLlmClient::new(
+        "pro",
+        vec![vec![
+            Ok(Event::Text(TextEvent {
+                content: "done".into(),
+            })),
+            Ok(Event::Stop(StopEvent {
+                reason: "end_turn".into(),
+            })),
+        ]],
+    ));
+    let actor = OrchActor::new_with_llm(h.ctx.clone(), rx, llm);
+    let handle = tokio::spawn(actor.run());
+    tx.send(OrchCmd::SetModel("pro".into()))?;
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    tx.send(OrchCmd::UserInput {
+        input: "say hi".into(),
+        done: done_tx,
+    })?;
+    let result = done_rx.await?;
+    assert_eq!(result.status, crate::agent::orchestrator::TurnStatus::Ok);
+    drop(tx);
+    handle.await??;
+
+    let title_models = h.display.title_models.lock().unwrap();
+    assert!(
+        !title_models.iter().any(|model| model == "flash"),
+        "{title_models:?}"
+    );
+    assert!(
+        title_models.iter().filter(|model| *model == "pro").count() >= 2,
+        "{title_models:?}"
     );
     Ok(())
 }

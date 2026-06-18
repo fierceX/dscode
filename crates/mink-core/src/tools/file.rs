@@ -9,6 +9,7 @@ use std::path::{Component, Path, PathBuf};
 /// Threshold for switching to streaming read (bytes).
 const STREAM_READ_THRESHOLD: u64 = 1_048_576; // 1MB
 const EDIT_REREAD_CONTEXT_LINES: usize = 12;
+const EDIT_ERROR_CONTEXT_LINES: usize = 2;
 
 fn ensure_full_read_within_limit(
     path: &Path,
@@ -435,17 +436,39 @@ impl super::runner::ToolExec for ReadTool {
             return Ok(super::runner::ToolOutcome::text(content));
         }
         let start_line = selection.offset.unwrap_or(1);
+        let (snapshot_content, snapshot_start_line) = snapshot_source_for_read(
+            &path,
+            &content,
+            start_line,
+            ctx.tool_config.file_write_max_bytes,
+        );
         let snapshot = ctx
             .snapshots
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .record(&path, &content, start_line);
+            .record(&path, &snapshot_content, snapshot_start_line);
         Ok(super::runner::ToolOutcome::text(format_read_snapshot(
             &selection.path,
             &snapshot.tag,
             start_line,
             &content,
         )))
+    }
+}
+
+fn snapshot_source_for_read(
+    path: &Path,
+    displayed_content: &str,
+    displayed_start_line: usize,
+    max_edit_bytes: usize,
+) -> (String, usize) {
+    let full_text = std::fs::metadata(path)
+        .ok()
+        .filter(|meta| meta.len() as u128 <= max_edit_bytes as u128)
+        .and_then(|_| std::fs::read_to_string(path).ok());
+    match full_text {
+        Some(text) => (text, 1),
+        None => (displayed_content.to_string(), displayed_start_line),
     }
 }
 
@@ -781,12 +804,16 @@ impl super::runner::ToolExec for WriteTool {
         }
         let args: Args = serde_json::from_value(input.clone())?;
         let path = resolve_tool_path(&ctx.cwd, &args.path)?;
-        write(
+        let result = write(
             &path.display().to_string(),
             &args.content,
             ctx.tool_config.file_write_max_bytes,
-        )
-        .map(super::runner::ToolOutcome::text)
+        )?;
+        ctx.snapshots
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .invalidate_path(&path);
+        Ok(super::runner::ToolOutcome::text(result))
     }
 }
 
@@ -806,6 +833,11 @@ impl super::runner::ToolExec for EditTool {
         input: &serde_json::Value,
         ctx: &crate::context::ToolContext,
     ) -> anyhow::Result<super::runner::ToolOutcome> {
+        if input.get("old_string").is_some() || input.get("new_string").is_some() {
+            bail!(
+                "Error: Edit old_string/new_string is not supported. Use Read on the target range to get @PATH#TAG, then call Edit with the patch parameter."
+            );
+        }
         #[derive(serde::Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Args {
@@ -850,6 +882,34 @@ fn format_read_snapshot(display_path: &str, tag: &str, start_line: usize, conten
     out
 }
 
+fn format_post_edit_snapshot(
+    display_path: &str,
+    tag: &str,
+    content: &str,
+    hunks: &[PatchHunk],
+) -> String {
+    let lines = crate::tools::snapshot::split_content_lines(content);
+    if lines.is_empty() {
+        return format!("@{display_path}#{tag}");
+    }
+
+    let mut min_line = usize::MAX;
+    let mut max_line = 1usize;
+    for hunk in hunks {
+        let (start, end) = hunk_post_edit_span(hunk, lines.len());
+        min_line = min_line.min(start);
+        max_line = max_line.max(end);
+    }
+    if min_line == usize::MAX {
+        min_line = 1;
+        max_line = lines.len().min(1);
+    }
+
+    let start = min_line.saturating_sub(EDIT_REREAD_CONTEXT_LINES).max(1);
+    let end = (max_line + EDIT_REREAD_CONTEXT_LINES).min(lines.len());
+    format_read_snapshot(display_path, tag, start, &lines[start - 1..end].join("\n"))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PatchHunk {
     Replace {
@@ -884,7 +944,7 @@ fn apply_anchored_patch(
     max_bytes: usize,
     snapshots: &std::sync::Arc<std::sync::Mutex<crate::tools::snapshot::FileSnapshotStore>>,
 ) -> Result<String> {
-    let (parsed, _warnings) = crate::tools::hashline::parse_patch(patch)?;
+    let (parsed, warnings) = crate::tools::hashline::parse_patch(patch)?;
     if parsed.path != display_path {
         bail!(
             "Error: patch header path '{}' does not match Edit path '{}'",
@@ -909,11 +969,16 @@ fn apply_anchored_patch(
         .cloned()
         .ok_or_else(|| {
             let target = suggested_read_target(display_path, &parsed.hunks, lines.len());
+            let context = format_current_context(
+                &lines,
+                &collect_hunk_anchor_lines(&parsed.hunks, lines.len()),
+            );
             anyhow!(
-                "Error: snapshot tag {} for {} is unknown. Re-read {}, then retry Edit with the new header.",
+                "Error: snapshot tag {} for {} is unknown. Re-read {}, then retry Edit with the new header.{}",
                 parsed.tag,
                 display_path,
-                target
+                target,
+                context
             )
         })?;
 
@@ -926,17 +991,28 @@ fn apply_anchored_patch(
     }
     if updated == content {
         let target = suggested_read_target(display_path, &parsed.hunks, lines.len());
+        let context = format_current_context(
+            &lines,
+            &collect_hunk_anchor_lines(&parsed.hunks, lines.len()),
+        );
         bail!(
-            "Error: patch parsed cleanly but produced no changes. Re-read {target} before retrying."
+            "Error: patch parsed cleanly but produced no changes. Re-read {target} before retrying.{context}"
         );
     }
 
     let (diff, added, removed) = inline_diff(&path.display().to_string(), &content, &updated)?;
     std::fs::write(path, &updated)?;
-    snapshot_guard.record(path, &updated, 1);
+    snapshot_guard.invalidate_path(path);
+    let snapshot = snapshot_guard.record(path, &updated, 1);
+    let followup = format_post_edit_snapshot(display_path, &snapshot.tag, &updated, &parsed.hunks);
+    let warning_block = if warnings.is_empty() {
+        String::new()
+    } else {
+        format!("\nWarnings:\n{}\n", warnings.join("\n"))
+    };
     Ok(format!(
-        "Edit({}) [+{} -{} lines]\n{}\n",
-        display_path, added, removed, diff
+        "Edit({}) [+{} -{} lines]\n{}\n{}{}\n",
+        display_path, added, removed, followup, warning_block, diff
     ))
 }
 
@@ -977,8 +1053,12 @@ fn validate_patch_hunks(
                         std::slice::from_ref(hunk),
                         current_lines.len(),
                     );
+                    let context = format_current_context(
+                        current_lines,
+                        &hunk_anchor_lines(hunk, current_lines.len()),
+                    );
                     bail!(
-                        "Error: snapshot mismatch in {display_path}. The file changed since Read. Re-read {target} before editing."
+                        "Error: snapshot mismatch in {display_path}. The file changed since Read. Re-read {target} before editing.{context}"
                     );
                 }
             }
@@ -995,8 +1075,9 @@ fn validate_snapshot_line(
 ) -> Result<()> {
     let expected = snapshot.expected_hash(line).ok_or_else(|| {
         let target = suggested_read_target_for_line(display_path, line, current_lines.len());
+        let context = format_current_context(current_lines, &[line]);
         anyhow!(
-            "Error: line {line} in {display_path} was not covered by snapshot {}. Re-read {target} before editing.",
+            "Error: line {line} in {display_path} was not covered by snapshot {}. Re-read {target} before editing.{context}",
             snapshot.tag
         )
     })?;
@@ -1005,11 +1086,87 @@ fn validate_snapshot_line(
     };
     if crate::tools::snapshot::hash_text(current) != expected {
         let target = suggested_read_target_for_line(display_path, line, current_lines.len());
+        let context = format_current_context(current_lines, &[line]);
         bail!(
-            "Error: snapshot mismatch in {display_path} at line {line}. The file changed since Read. Re-read {target} before editing."
+            "Error: snapshot mismatch in {display_path} at line {line}. The file changed since Read. Re-read {target} before editing.{context}"
         );
     }
     Ok(())
+}
+
+fn collect_hunk_anchor_lines(hunks: &[PatchHunk], line_count: usize) -> Vec<usize> {
+    let mut lines = Vec::new();
+    for hunk in hunks {
+        lines.extend(hunk_anchor_lines(hunk, line_count));
+    }
+    lines.sort_unstable();
+    lines.dedup();
+    lines
+}
+
+fn hunk_anchor_lines(hunk: &PatchHunk, line_count: usize) -> Vec<usize> {
+    let clamp = |line: usize| {
+        if line_count == 0 {
+            1
+        } else {
+            line.clamp(1, line_count)
+        }
+    };
+    match hunk {
+        PatchHunk::Replace { start, end, .. } | PatchHunk::Delete { start, end } => {
+            let start = clamp(*start);
+            let end = clamp(*end);
+            if start == end {
+                vec![start]
+            } else {
+                vec![start, end]
+            }
+        }
+        PatchHunk::InsertBefore { line, .. } | PatchHunk::InsertAfter { line, .. } => {
+            vec![clamp(*line)]
+        }
+        PatchHunk::InsertHead { .. } => vec![1],
+        PatchHunk::InsertTail { .. } => vec![line_count.max(1)],
+    }
+}
+
+fn format_current_context(current_lines: &[String], anchor_lines: &[usize]) -> String {
+    if current_lines.is_empty() || anchor_lines.is_empty() {
+        return String::new();
+    }
+    let anchors: BTreeSet<usize> = anchor_lines
+        .iter()
+        .copied()
+        .filter(|line| *line >= 1 && *line <= current_lines.len())
+        .collect();
+    if anchors.is_empty() {
+        return String::new();
+    }
+
+    let mut display_lines = BTreeSet::new();
+    for line in &anchors {
+        let start = line.saturating_sub(EDIT_ERROR_CONTEXT_LINES).max(1);
+        let end = (*line + EDIT_ERROR_CONTEXT_LINES).min(current_lines.len());
+        for display_line in start..=end {
+            display_lines.insert(display_line);
+        }
+    }
+
+    let mut out = String::from("\nCurrent context:\n");
+    let mut previous = 0usize;
+    for line in display_lines {
+        if previous != 0 && line > previous + 1 {
+            out.push_str("...\n");
+        }
+        previous = line;
+        let marker = if anchors.contains(&line) { '*' } else { ' ' };
+        let text = current_lines
+            .get(line - 1)
+            .map(String::as_str)
+            .unwrap_or("");
+        out.push_str(&format!("{marker}{line}:{text}\n"));
+    }
+    out
 }
 
 fn suggested_read_target(display_path: &str, hunks: &[PatchHunk], line_count: usize) -> String {
@@ -1059,6 +1216,44 @@ fn hunk_read_span(hunk: &PatchHunk, line_count: usize) -> (usize, usize) {
         }
         PatchHunk::InsertHead { .. } => (1, 1),
         PatchHunk::InsertTail { .. } => (line_count, line_count),
+    }
+}
+
+fn hunk_post_edit_span(hunk: &PatchHunk, line_count: usize) -> (usize, usize) {
+    if line_count == 0 {
+        return (1, 1);
+    }
+    match hunk {
+        PatchHunk::Replace { start, body, .. } => {
+            let start = (*start).min(line_count).max(1);
+            let end = start
+                .saturating_add(body.len().saturating_sub(1))
+                .min(line_count);
+            (start, end.max(start))
+        }
+        PatchHunk::Delete { start, .. } => {
+            let line = (*start).min(line_count).max(1);
+            (line, line)
+        }
+        PatchHunk::InsertBefore { line, body } => {
+            let start = (*line).min(line_count).max(1);
+            let end = start
+                .saturating_add(body.len().saturating_sub(1))
+                .min(line_count);
+            (start, end.max(start))
+        }
+        PatchHunk::InsertAfter { line, body } => {
+            let start = line.saturating_add(1).min(line_count).max(1);
+            let end = start
+                .saturating_add(body.len().saturating_sub(1))
+                .min(line_count);
+            (start, end.max(start))
+        }
+        PatchHunk::InsertHead { body } => (1, body.len().max(1).min(line_count)),
+        PatchHunk::InsertTail { body } => {
+            let count = body.len().max(1).min(line_count);
+            (line_count - count + 1, line_count)
+        }
     }
 }
 
@@ -1348,7 +1543,41 @@ mod tests {
             Ok(_) => panic!("legacy Edit old_string/new_string args should be rejected"),
             Err(err) => err.to_string(),
         };
-        assert!(err.contains("unknown field"), "{err}");
+        assert!(
+            err.contains("old_string/new_string is not supported"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn ranged_read_records_full_file_snapshot_for_edit() {
+        let ctx = temp_tool_context("read-range-full-snapshot");
+        let p = ctx.cwd.join("range.txt");
+        fs::write(&p, "one\ntwo\nthree\n").unwrap();
+
+        let read = ReadTool
+            .execute(&json!({"path":"range.txt:2-2"}), &ctx)
+            .unwrap()
+            .content;
+        assert!(read.contains("@range.txt#"), "{read}");
+        assert!(read.contains("2:two"), "{read}");
+        assert!(!read.contains("1:one"), "{read}");
+        let tag = read
+            .lines()
+            .next()
+            .unwrap()
+            .strip_prefix("@range.txt#")
+            .unwrap();
+
+        let patch = format!("@range.txt#{tag}\nreplace 1:\n+ONE");
+        let edited = EditTool
+            .execute(&json!({"path":"range.txt","patch":patch}), &ctx)
+            .unwrap()
+            .content;
+
+        assert!(edited.contains("@range.txt#"), "{edited}");
+        assert_eq!(fs::read_to_string(&p).unwrap(), "ONE\ntwo\nthree\n");
+        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
     }
 
     #[test]
@@ -1484,6 +1713,26 @@ mod tests {
     }
 
     #[test]
+    fn write_tool_invalidates_existing_snapshots() {
+        let ctx = temp_tool_context("write-invalidates-snapshot");
+        let p = ctx.cwd.join("write-stale.txt");
+        fs::write(&p, "old\n").unwrap();
+        let tag = ctx.snapshots.lock().unwrap().record(&p, "old\n", 1).tag;
+
+        WriteTool
+            .execute(&json!({"path":"write-stale.txt","content":"new\n"}), &ctx)
+            .unwrap();
+        let patch = format!("@write-stale.txt#{tag}\nreplace 1:\n+again");
+        let err = match EditTool.execute(&json!({"path":"write-stale.txt","patch":patch}), &ctx) {
+            Ok(_) => panic!("stale tag after Write should be rejected"),
+            Err(err) => err.to_string(),
+        };
+
+        assert!(err.contains("unknown"), "{err}");
+        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
+    }
+
+    #[test]
     fn write_exceeds_max_bytes_error() {
         let p = format!("/tmp/mink-test-write-big-{}", std::process::id());
         assert!(write(&p, "toolarge", 5).is_err());
@@ -1512,7 +1761,56 @@ mod tests {
         let result = apply_anchored_patch(&path, &p, &patch, 1000, &snapshots).unwrap();
 
         assert!(result.contains("Edit("));
+        assert!(result.contains(&format!("@{p}#")), "{result}");
+        assert!(result.contains("2:TWO"), "{result}");
         assert_eq!(fs::read_to_string(&p).unwrap(), "one\nTWO\nthree\n");
+        fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn anchored_patch_result_includes_parser_warnings() {
+        let p = temp_file("anchored-warning", "one\ntwo\nthree\n");
+        let path = PathBuf::from(&p);
+        let snapshots = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::tools::snapshot::FileSnapshotStore::default(),
+        ));
+        let tag = snapshots
+            .lock()
+            .unwrap()
+            .record(&path, "one\ntwo\nthree\n", 1)
+            .tag;
+        let patch = format!("@{p}#{tag}\nreplace 2:\nTWO");
+
+        let result = apply_anchored_patch(&path, &p, &patch, 1000, &snapshots).unwrap();
+
+        assert!(result.contains("Warnings:"), "{result}");
+        assert!(result.contains("body row missing '+' prefix"), "{result}");
+        assert_eq!(fs::read_to_string(&p).unwrap(), "one\nTWO\nthree\n");
+        fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn anchored_patch_invalidates_old_tags_after_success() {
+        let p = temp_file("anchored-invalidates-old", "one\ntwo\nthree\n");
+        let path = PathBuf::from(&p);
+        let snapshots = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::tools::snapshot::FileSnapshotStore::default(),
+        ));
+        let old_tag = snapshots
+            .lock()
+            .unwrap()
+            .record(&path, "one\ntwo\nthree\n", 1)
+            .tag;
+        let first_patch = format!("@{p}#{old_tag}\nreplace 1:\n+ONE");
+        apply_anchored_patch(&path, &p, &first_patch, 1000, &snapshots).unwrap();
+
+        let stale_patch = format!("@{p}#{old_tag}\nreplace 3:\n+THREE");
+        let err = apply_anchored_patch(&path, &p, &stale_patch, 1000, &snapshots)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("unknown"), "{err}");
+        assert_eq!(fs::read_to_string(&p).unwrap(), "ONE\ntwo\nthree\n");
         fs::remove_file(&p).ok();
     }
 
@@ -1537,6 +1835,8 @@ mod tests {
 
         assert!(err.contains("snapshot mismatch"), "{err}");
         assert!(err.contains(&format!("Re-read {p}:1-3")), "{err}");
+        assert!(err.contains("Current context:"), "{err}");
+        assert!(err.contains("*2:changed"), "{err}");
         assert_eq!(fs::read_to_string(&p).unwrap(), "one\nchanged\nthree\n");
         fs::remove_file(&p).ok();
     }
@@ -1556,6 +1856,8 @@ mod tests {
 
         assert!(err.contains("unknown"), "{err}");
         assert!(err.contains(&format!("Re-read {p}:1-2")), "{err}");
+        assert!(err.contains("Current context:"), "{err}");
+        assert!(err.contains("*1:one"), "{err}");
         fs::remove_file(&p).ok();
     }
 
