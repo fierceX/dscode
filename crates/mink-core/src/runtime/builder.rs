@@ -26,6 +26,8 @@ pub async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRuntime> {
         display,
         event_sink,
         sub_stream_tx,
+        read_only_fs,
+        resource_session_id,
         #[cfg(test)]
         llm_override,
     } = config;
@@ -39,6 +41,7 @@ pub async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRuntime> {
     let display: Arc<dyn crate::ui::Display> = event_display.clone();
     let interrupt = Arc::new(AtomicBool::new(false));
     let api_url_str = api_url(&config);
+    let resource_session_id = resource_session_id.unwrap_or_else(|| sid.clone());
     let built = build_agent_context(AgentContextBuild {
         config: config.clone(),
         home: home.clone(),
@@ -52,6 +55,8 @@ pub async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRuntime> {
         interrupt: interrupt.clone(),
         is_sub_agent: false,
         usage_journal: None,
+        read_only_fs,
+        resource_session_id,
     })
     .await?;
     let ctx = built.ctx;
@@ -221,6 +226,30 @@ mod tests {
         runtime.shutdown().await.unwrap();
         let _ = tokio::fs::remove_dir_all(session.home).await;
         let _ = tokio::fs::remove_dir_all(session.cwd).await;
+    }
+
+    #[tokio::test]
+    async fn build_runtime_sets_vfs_resource_and_agent_sessions() {
+        let home = unique_temp_dir("vfs-scope-home");
+        let cwd = unique_temp_dir("vfs-scope-cwd");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+        let mut runtime_config =
+            AgentRuntimeConfig::from_config(Config::default(), home.clone(), cwd.clone());
+        runtime_config.resource_session_id = Some("tenant-knowledge-7".into());
+
+        let runtime = build_runtime(runtime_config).await.unwrap();
+        assert_eq!(
+            runtime.ctx.vfs_scope.resource_session_id,
+            "tenant-knowledge-7"
+        );
+        assert_eq!(
+            runtime.ctx.vfs_scope.agent_session_id,
+            runtime.session_info().session_id
+        );
+
+        runtime.shutdown().await.unwrap();
+        let _ = tokio::fs::remove_dir_all(home).await;
+        let _ = tokio::fs::remove_dir_all(cwd).await;
     }
 
     #[tokio::test]

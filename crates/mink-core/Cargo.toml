@@ -43,6 +43,9 @@ wasmtime = { workspace = true, optional = true }
 wasmtime-wasi = { workspace = true, optional = true }
 axum = { workspace = true, optional = true }
 
+[dev-dependencies]
+redb = "3"
+
 [[example]]
 name = "web_api"
 required-features = ["web-api"]

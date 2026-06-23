@@ -5,6 +5,7 @@ use crate::session::compaction::CompactionEngine;
 use crate::session::paths::{self, SessionLayout};
 use crate::session::usage::UsageJournal;
 use crate::tools::snapshot::FileSnapshotStore;
+use crate::tools::vfs::{ReadOnlyFileSystem, VfsScope};
 use crate::ui::{Display, SubAgentStreamSink};
 use anyhow::Result;
 use std::path::PathBuf;
@@ -24,6 +25,8 @@ pub(crate) struct AgentContextBuild {
     pub interrupt: Arc<AtomicBool>,
     pub is_sub_agent: bool,
     pub usage_journal: Option<Arc<UsageJournal>>,
+    pub read_only_fs: Option<Arc<dyn ReadOnlyFileSystem>>,
+    pub resource_session_id: String,
 }
 
 pub(crate) struct BuiltAgentContext {
@@ -70,6 +73,10 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
         params.display.clone(),
         params.cancel.clone(),
     ));
+    let vfs_scope = VfsScope {
+        resource_session_id: params.resource_session_id,
+        agent_session_id: params.session_id.clone(),
+    };
 
     let ctx = Arc::new(AgentSharedContext {
         config: config.clone(),
@@ -86,6 +93,8 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
         cancel: params.cancel,
         display: params.display,
         sub_stream_tx: params.sub_stream_tx,
+        read_only_fs: params.read_only_fs,
+        vfs_scope,
         tool_config: ToolConfig::from_config(&config),
         events_path: paths.events.clone(),
         summary_path: paths.summary.clone(),

@@ -545,9 +545,48 @@ ToolResultDisplay {
 
 `content_preview` 用于简短展示，`content` 是工具层截断/过滤后的展示内容。LLM 读取的是 `ConversationStore` 写入的 tool result。
 
+### 同步只读 VFS hook
+
+私有化嵌入场景可能需要把知识库保存在数据库中，并按业务 session 隔离。这里不增加新工具，也不把数据库能力暴露给模型；`Read`、`Glob`、`Grep` 的名称、参数和调度方式保持不变，只允许宿主应用注入普通路径的读取后端：
+
+```rust
+pub trait ReadOnlyFileSystem: Send + Sync {
+    fn read(&self, scope: &VfsScope, request: &VfsReadRequest)
+        -> anyhow::Result<VfsReadResult>;
+    fn glob(&self, scope: &VfsScope, request: &VfsGlobRequest)
+        -> anyhow::Result<VfsGlobResult>;
+    fn grep(&self, scope: &VfsScope, request: &VfsGrepRequest)
+        -> anyhow::Result<VfsGrepResult>;
+}
+```
+
+该接口保持同步，因为三个现有工具本身在只读批次中通过 `spawn_blocking` 执行。宿主可在实现内部使用 redb、SQLite 或其他同步嵌入式数据库，不需要改变工具执行模型。
+
+核心设计边界：
+
+- **本地正确性优先**：未注入 `read_only_fs` 时，工具继续进入原有本地实现；VFS 是前置可选分支，不以抽象统一为由重写本地路径。
+- **只接管普通路径**：`artifact://`、`skill://`、`session://`、`http(s)://` 先按原有资源路由处理，不进入 VFS。
+- **只读且不可编辑**：虚拟 `Read` 输出行号和只读标记，但不记录 snapshot。`Edit` / `Write` 不委托给 VFS。
+- **结构化搜索结果**：后端返回路径、匹配行、扫描数和截断状态，由 `mink-core` 统一生成 Glob/Grep 文本，避免后端复制用户可见协议。
+- **核心保留防线**：glob 和 regex 在调用后端前校验；完整 Read 有工具层兜底字节检查；搜索文本由核心统一格式化并保留 100KB 输出保护。
+- **后端限制契约**：`VfsGlobRequest.max_files` 和 `VfsGrepRequest.max_files/max_results` 必须由后端遵守。公共 `try_collect_virtual_glob/grep` helper 已实现路径规范化、匹配和限制；不使用 helper 的实现必须提供等价约束。
+
+每次调用收到：
+
+```rust
+VfsScope {
+    resource_session_id, // 数据/知识库分区
+    agent_session_id,    // 当前主代理或子代理身份
+}
+```
+
+`resource_session_id` 未配置时默认取 runtime session id。子代理继承父代理的 resource scope，同时使用自己的 agent session id。这样数据库 key 可以稳定按业务任务隔离，审计日志仍能区分具体调用代理。
+
+`mink-core` 只定义 hook、协议和可复用 helper，不绑定数据库。`examples/redb_vfs.rs` 是示例适配器：以 `resource_session_id + NUL + normalized_path` 作为有序 key，使用 redb range iterator 惰性扫描，并在达到核心限制时停止读取。redb 仅为 dev/example 依赖，不进入正常 `mink-core` 依赖树。
+
 ### Read 资源入口
 
-`Read.path` 支持本地文件 selector：
+`Read.path` 支持普通文件 selector。未注入 VFS 时普通路径读取本地文件；注入后普通路径由 VFS 读取：
 
 | 形式 | 含义 |
 |------|------|
@@ -569,7 +608,7 @@ ToolResultDisplay {
 - `session://current/messages/all`
 - `session://current/artifacts`
 
-这些资源默认 immutable，不产生可编辑 snapshot。
+这些资源默认 immutable，不产生可编辑 snapshot，也不经过 VFS。
 
 ### Anchored Edit
 
@@ -730,6 +769,8 @@ pub async fn new(parent_ctx, session_id, fork) -> Result<Self> {
 **独立模式（默认）**：子 session 从空白上下文开始。继承父 session 的模型、API URL、工具集，但不继承对话历史。
 
 **Fork 模式**：复制父 session 的 conversation.jsonl、summary.txt、plan.md 到子 session 目录。子代理从父代理离开的地方继续执行。用于需要父会话上下文的延续性任务。
+
+如果父 runtime 注入了只读 VFS，子代理复用同一个 `Arc<dyn ReadOnlyFileSystem>`。两种模式都继承父代理的 `resource_session_id`，但 `agent_session_id` 使用子 session id；fork 只影响对话与 session 文件，不改变知识库分区。
 
 ### 结果收集
 
@@ -974,6 +1015,11 @@ Rust crate mink ───┘
 | **lossless** | `AgentRuntimeConfig` + 完整 `Config` | 不丢失任何配置项 |
 | **ergonomic** | `AgentOptions` builder | 常用字段快捷方法，`config_mut()` 逃生口 |
 | **stream** | `AgentEventStream` | per-turn 实时事件，`recv()` + `outcome()` |
+
+嵌入式调用方可通过 `AgentOptions::with_read_only_file_system()` 或
+`AgentRuntimeConfig.read_only_fs` 注入 VFS，并通过
+`AgentOptions::with_resource_session_id()` / `AgentRuntimeConfig.resource_session_id`
+指定业务知识库分区。VFS trait 和请求/结果类型从 `mink::runtime` 导出。
 
 ### 关键设计决策
 

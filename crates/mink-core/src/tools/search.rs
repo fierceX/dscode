@@ -295,6 +295,18 @@ impl super::runner::ToolExec for GlobTool {
             path: Option<String>,
         }
         let args: Args = serde_json::from_value(input.clone())?;
+        if let Some(vfs) = &ctx.read_only_fs {
+            let request = crate::tools::vfs::VfsGlobRequest {
+                pattern: args.pattern,
+                path: args.path.unwrap_or_else(|| ".".to_string()),
+                max_files: ctx.tool_config.max_search_files,
+            };
+            crate::tools::vfs::validate_virtual_glob_request(&request)?;
+            let result = vfs.glob(&ctx.vfs_scope, &request)?;
+            return Ok(super::runner::ToolOutcome::text(
+                crate::tools::vfs::format_virtual_glob(&result, &request),
+            ));
+        }
         let root = resolve_search_root(&ctx.cwd, args.path.as_deref().unwrap_or("."));
         glob(
             &args.pattern,
@@ -331,6 +343,21 @@ impl super::runner::ToolExec for GrepTool {
             context: Option<usize>,
         }
         let args: Args = serde_json::from_value(input.clone())?;
+        if let Some(vfs) = &ctx.read_only_fs {
+            let request = crate::tools::vfs::VfsGrepRequest {
+                pattern: args.pattern,
+                path: args.path.unwrap_or_else(|| ".".to_string()),
+                file_glob: args.glob.unwrap_or_default(),
+                context: args.context,
+                max_files: ctx.tool_config.max_search_files,
+                max_results: ctx.tool_config.max_search_results,
+            };
+            crate::tools::vfs::validate_virtual_grep_request(&request)?;
+            let result = vfs.grep(&ctx.vfs_scope, &request)?;
+            return Ok(super::runner::ToolOutcome::text(
+                crate::tools::vfs::format_virtual_grep(&result, &request),
+            ));
+        }
         let root = resolve_search_root(&ctx.cwd, args.path.as_deref().unwrap_or("."));
         grep(
             &args.pattern,

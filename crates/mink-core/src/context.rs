@@ -8,6 +8,7 @@ use crate::session::stats::StatsTracker;
 use crate::session::store::ConversationStore;
 use crate::session::usage::{UsageJournal, UsageKind, UsageScope};
 use crate::tools::snapshot::FileSnapshotStore;
+use crate::tools::vfs::{ReadOnlyFileSystem, VfsScope};
 use crate::ui::{Display, SubAgentStreamSink};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -93,6 +94,8 @@ pub struct ToolContext {
     pub snapshots: Arc<Mutex<FileSnapshotStore>>,
     pub tool_config: ToolConfig,
     pub interrupt: Arc<AtomicBool>,
+    pub read_only_fs: Option<Arc<dyn ReadOnlyFileSystem>>,
+    pub vfs_scope: VfsScope,
 }
 
 impl From<&AgentSharedContext> for ToolContext {
@@ -105,6 +108,8 @@ impl From<&AgentSharedContext> for ToolContext {
             snapshots: ctx.snapshots.clone(),
             tool_config: ctx.tool_config.clone(),
             interrupt: ctx.interrupt.clone(),
+            read_only_fs: ctx.read_only_fs.clone(),
+            vfs_scope: ctx.vfs_scope.clone(),
         }
     }
 }
@@ -126,6 +131,8 @@ pub struct AgentSharedContext {
     pub display: Arc<dyn Display>,
     /// Optional sink for live sub-agent streaming. TUI sets this to a channel-backed sink.
     pub sub_stream_tx: Option<Arc<dyn SubAgentStreamSink>>,
+    pub read_only_fs: Option<Arc<dyn ReadOnlyFileSystem>>,
+    pub vfs_scope: VfsScope,
     pub tool_config: ToolConfig,
     pub events_path: PathBuf,
     pub summary_path: PathBuf,

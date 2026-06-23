@@ -21,8 +21,10 @@ pub mod ui;
 /// CLI binaries and the library runtime.
 pub mod prelude {
     pub use crate::runtime::{
-        AgentEvent, AgentEventStream, AgentOptions, AgentRuntime, EventSink, SessionInfo,
-        SessionLayout, SessionPolicy, TurnOutcome, TurnStatus,
+        AgentEvent, AgentEventStream, AgentOptions, AgentRuntime, EventSink, ReadOnlyFileSystem,
+        SessionInfo, SessionLayout, SessionPolicy, TurnOutcome, TurnStatus, VfsGlobRequest,
+        VfsGlobResult, VfsGrepEntry, VfsGrepRequest, VfsGrepResult, VfsReadRequest, VfsReadResult,
+        VfsScope, VirtualFile,
     };
     pub use crate::session::usage::{
         TokenUsage, UsageKind, UsageRecord, UsageStatus, UsageSummary,

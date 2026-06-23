@@ -70,6 +70,7 @@ TurnExecutor (agent/turn.rs)
 │ tools/file.rs         │ Read / Write / Edit、selector、resource、anchored patch
 │ tools/snapshot.rs     │ FileSnapshotStore、行 hash 和 snapshot tag
 │ tools/search.rs       │ Glob / Grep
+│ tools/vfs.rs          │ Read / Glob / Grep 的同步只读 VFS hook、请求/结果协议和公共 helper
 │ tools/bash.rs         │ Bash 执行、超时、ANSI 过滤、安全检查、误用拦截
 │ tools/python.rs       │ 宿主 Python 执行
 │ tools/sandbox_python.rs│ WASI CPython 沙箱执行（python-sandbox feature）
@@ -200,7 +201,7 @@ ToolRunResult
 | `runtime/builder.rs` | `build_runtime()` — 从 `AgentRuntimeConfig` 构造完整 runtime |
 | `runtime/config.rs` | `AgentRuntimeConfig` / `SessionPolicy` / `SessionInfo` |
 | `runtime/handle.rs` | `AgentRuntime` — `start()`, `run_turn()`, `try_stream_turn()`, `stream_turn()`, `shutdown()` |
-| `runtime/options.rs` | `AgentOptions` ergonomic builder |
+| `runtime/options.rs` | `AgentOptions` ergonomic builder，包括只读 VFS 和 resource session scope 注入 |
 | `runtime/events.rs` | `AgentEvent` 枚举 / `EventSink` trait / `EventDisplay` adapter |
 | `runtime/sdk_adapter.rs` | SDK option 映射、status/exit code 映射、`SdkFinal` 组装 |
 
@@ -229,12 +230,34 @@ ToolRunResult
 | `tools/file.rs` | `ReadTool`、`WriteTool`、`EditTool`、selector、resource URL、anchored patch |
 | `tools/snapshot.rs` | 文件 snapshot、tag、行 hash 校验 |
 | `tools/search.rs` | `GlobTool`、`GrepTool` |
+| `tools/vfs.rs` | `ReadOnlyFileSystem`、`VfsScope`、结构化请求/结果、虚拟路径规范化和数据库后端 helper |
 | `tools/bash.rs` | `BashTool`、危险命令检查、误用拦截 |
 | `tools/python.rs` | `PythonTool` |
 | `tools/web.rs` | `WebSearchTool`、`WebFetchTool` |
 | `assets/tools.json` | 提供给模型的工具 schema |
 
 新增工具时需要同时实现 `ToolExec::metadata()`、注册 `TOOL_REGISTRY`、更新 `assets/tools.json`，并在 metadata 中声明 approval tier、result kind、副作用、`storm_exempt`、`internal` 或 `spawns_sub_agent`。
+
+### Read-only VFS hook
+
+VFS 不是新增工具，也不改变模型可见的工具 schema。它只是嵌入式 runtime 对普通文件路径读取后端的可选替换：
+
+```text
+Read / Glob / Grep
+  ├── read_only_fs == None
+  │     └── 原有本地文件实现，执行路径和 snapshot 行为不变
+  └── read_only_fs == Some(vfs)
+        └── ReadOnlyFileSystem
+              ├── VfsScope { resource_session_id, agent_session_id }
+              ├── 同步 read / glob / grep
+              └── 结构化结果 -> mink-core 统一格式化
+```
+
+注入链路为 `AgentOptions` / `AgentRuntimeConfig` → runtime builder → `AgentSharedContext` → `ToolContext`。未显式设置 `resource_session_id` 时使用当前 runtime session id。子代理复用同一个 `Arc<dyn ReadOnlyFileSystem>`，继承父代理的 `resource_session_id`，但使用自己的 `agent_session_id`，从而共享同一知识库作用域并保留调用方身份。
+
+VFS 只接管普通路径。`artifact://`、`skill://`、`session://` 和 `http(s)://` 仍先走现有资源读取路径。虚拟路径使用 POSIX 分隔符和词法规范化，拒绝越过虚拟根目录。Glob/regex 请求由工具层先校验，后端返回结构化路径或匹配行，`mink-core` 统一输出格式和 100KB 搜索输出保护。请求中的 `max_files` / `max_results` 是后端契约；使用公共 `try_collect_virtual_*` helper 时由 helper 执行限制，完全自定义实现必须自行遵守。
+
+虚拟文件是只读资源，不创建 anchored Edit snapshot。具体数据库适配不进入核心依赖；`crates/mink-core/examples/redb_vfs.rs` 展示了按 `resource_session_id` 分区、惰性范围扫描的 redb 后端。
 
 ### UI
 
@@ -330,6 +353,9 @@ session 根目录如何由 `home`、`cwd`、`session_id` 推导。当前有四�
 - `ToolRunner::execute_all()` 在 StormBreaker 前执行 approval 检查。
 - 超长工具输出必须保存为当前 session artifact，而不是丢失全文。
 - `Read` 本地非 raw 输出记录 snapshot；raw 和 immutable resource 不生成可编辑 snapshot。
+- 未注入 VFS 时，`Read` / `Glob` / `Grep` 必须继续执行原有本地实现；VFS 分支不得改变本地路径语义或测试。
+- 虚拟 `Read` 永远不生成可编辑 snapshot；`Edit` 和 `Write` 始终针对本地文件系统。
+- VFS 后端必须使用 `resource_session_id` 隔离数据；`agent_session_id` 只标识具体调用代理。
 - `Edit.patch` 必须校验 snapshot tag 和目标行 hash，stale 时 fail closed。
 - `render_tool_result_detail()` 必须保留默认实现。
 - TUI 输入 cursor 必须落在 UTF-8 char boundary。

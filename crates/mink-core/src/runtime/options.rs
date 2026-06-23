@@ -4,6 +4,7 @@ use crate::config::{
 };
 use crate::runtime::{AgentRuntimeConfig, EventSink, SessionPolicy};
 use crate::session::paths::SessionLayout;
+use crate::tools::vfs::ReadOnlyFileSystem;
 use crate::ui::{Display, SubAgentStreamSink};
 use anyhow::Result;
 use std::collections::BTreeMap;
@@ -29,6 +30,8 @@ pub struct AgentOptions {
     display: Option<Arc<dyn Display>>,
     event_sink: Option<Arc<dyn EventSink>>,
     sub_stream_tx: Option<Arc<dyn SubAgentStreamSink>>,
+    read_only_fs: Option<Arc<dyn ReadOnlyFileSystem>>,
+    resource_session_id: Option<String>,
 }
 
 impl AgentOptions {
@@ -66,6 +69,8 @@ impl AgentOptions {
             display: None,
             event_sink: None,
             sub_stream_tx: None,
+            read_only_fs: None,
+            resource_session_id: None,
         }
     }
 
@@ -143,6 +148,21 @@ impl AgentOptions {
 
     pub fn with_sub_stream_tx(mut self, sub_stream_tx: Arc<dyn SubAgentStreamSink>) -> Self {
         self.sub_stream_tx = Some(sub_stream_tx);
+        self
+    }
+
+    /// Replace local Read/Glob/Grep access with a synchronous read-only VFS.
+    pub fn with_read_only_file_system(mut self, fs: Arc<dyn ReadOnlyFileSystem>) -> Self {
+        self.read_only_fs = Some(fs);
+        self
+    }
+
+    /// Override the knowledge-base scope passed to the read-only VFS.
+    ///
+    /// When omitted, the resolved runtime session id is used. Child agents
+    /// inherit this value while retaining their own agent session id.
+    pub fn with_resource_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.resource_session_id = Some(session_id.into());
         self
     }
 
@@ -337,7 +357,7 @@ impl AgentOptions {
         if !self.first_prompt_overridden {
             self.first_prompt = first_prompt_from_config(&self.config);
         }
-        let runtime_config = AgentRuntimeConfig {
+        AgentRuntimeConfig {
             config: self.config,
             home: self.home,
             cwd: self.cwd,
@@ -347,10 +367,11 @@ impl AgentOptions {
             display: self.display,
             event_sink: self.event_sink,
             sub_stream_tx: self.sub_stream_tx,
+            read_only_fs: self.read_only_fs,
+            resource_session_id: self.resource_session_id,
             #[cfg(test)]
             llm_override: None,
-        };
-        runtime_config
+        }
     }
 }
 

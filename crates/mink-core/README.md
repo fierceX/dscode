@@ -57,6 +57,32 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
+## Read-only virtual filesystem
+
+Embedded services can replace the ordinary-path backend used by `Read`,
+`Glob`, and `Grep` without registering new tools:
+
+```rust
+let options = AgentOptions::new(session_home, cwd)
+    .with_resource_session_id("tenant-task-001")
+    .with_read_only_file_system(my_vfs);
+```
+
+Implement `mink::runtime::ReadOnlyFileSystem`. Every synchronous operation
+receives a `VfsScope` containing both the inherited knowledge-base
+`resource_session_id` and the concrete `agent_session_id`. Child agents inherit
+the former. Without an injected backend, all three tools continue through their
+original local implementations. Resource URLs such as `artifact://`,
+`skill://`, `session://`, and HTTP(S) bypass the VFS.
+
+Virtual reads are read-only and therefore do not produce anchored Edit
+snapshots. Glob and Grep requests are validated by `mink-core`, while backends
+return structured results for common formatting. Backends must honor the
+request limits; the exported collection helpers implement those limits for
+iterator-based stores. See [`examples/redb_vfs.rs`](examples/redb_vfs.rs) for a
+complete redb adapter; redb is an example-only dependency and is not linked
+into `mink-core`.
+
 每次真实 LLM 请求都会追加到 session `usage.jsonl`。`TurnOutcome.usage_records` 只包含当前
 `billing_turn_id` 的主 Agent、自动压缩和子代理明细，`TurnOutcome.usage` 是这些记录的汇总。
 

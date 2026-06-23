@@ -202,6 +202,11 @@ async fn harness_with_config(
         cancel: crate::cancel::CancellationToken::new(),
         display: display.clone(),
         sub_stream_tx: None,
+        read_only_fs: None,
+        vfs_scope: crate::tools::vfs::VfsScope {
+            resource_session_id: sid.into(),
+            agent_session_id: sid.into(),
+        },
         tool_config: ToolConfig::from_config(&cfg),
         events_path: spaths.events,
         summary_path: spaths.summary,
@@ -1464,6 +1469,80 @@ async fn file_summary_uses_tool_context_cwd() -> anyhow::Result<()> {
         "{}",
         result[0].content
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn virtual_search_tools_route_through_injected_backend() -> anyhow::Result<()> {
+    struct SearchVfs;
+
+    impl crate::tools::vfs::ReadOnlyFileSystem for SearchVfs {
+        fn read(
+            &self,
+            _scope: &crate::tools::vfs::VfsScope,
+            _request: &crate::tools::vfs::VfsReadRequest,
+        ) -> anyhow::Result<crate::tools::vfs::VfsReadResult> {
+            unreachable!()
+        }
+
+        fn glob(
+            &self,
+            scope: &crate::tools::vfs::VfsScope,
+            request: &crate::tools::vfs::VfsGlobRequest,
+        ) -> anyhow::Result<crate::tools::vfs::VfsGlobResult> {
+            assert_eq!(scope.resource_session_id, "knowledge-session");
+            assert_eq!(request.path, "./docs");
+            Ok(crate::tools::vfs::VfsGlobResult {
+                paths: vec!["guide.md".into()],
+                scanned_files: 1,
+                ..Default::default()
+            })
+        }
+
+        fn grep(
+            &self,
+            scope: &crate::tools::vfs::VfsScope,
+            request: &crate::tools::vfs::VfsGrepRequest,
+        ) -> anyhow::Result<crate::tools::vfs::VfsGrepResult> {
+            assert_eq!(scope.resource_session_id, "knowledge-session");
+            assert_eq!(request.pattern, "needle");
+            Ok(crate::tools::vfs::VfsGrepResult {
+                entries: vec![crate::tools::vfs::VfsGrepEntry::Line {
+                    path: "docs/guide.md".into(),
+                    line_number: 2,
+                    content: "needle".into(),
+                    matched: true,
+                }],
+                match_count: 1,
+                scanned_files: 1,
+                ..Default::default()
+            })
+        }
+    }
+
+    let mut ctx = test_context_for_agent("virtual-search-routing").await?;
+    let shared = Arc::get_mut(&mut ctx).expect("test context should be uniquely owned");
+    shared.read_only_fs = Some(Arc::new(SearchVfs));
+    shared.vfs_scope.resource_session_id = "knowledge-session".into();
+
+    let runner = ToolRunner::new(Arc::new(ToolContext::from(ctx.as_ref())));
+    let results = runner
+        .execute_all(vec![
+            tool_call(
+                "Glob",
+                "call_virtual_glob",
+                json!({"pattern": "*.md", "path": "./docs"}),
+            ),
+            tool_call(
+                "Grep",
+                "call_virtual_grep",
+                json!({"pattern": "needle", "path": "docs"}),
+            ),
+        ])
+        .await?;
+
+    assert_eq!(results[0].content, "guide.md");
+    assert_eq!(results[1].content, "docs/guide.md:2:needle");
     Ok(())
 }
 

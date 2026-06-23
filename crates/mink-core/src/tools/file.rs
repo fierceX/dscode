@@ -420,6 +420,38 @@ impl super::runner::ToolExec for ReadTool {
                 .map(|text| select_text_lines(&text, selection.offset, selection.limit))
                 .map(super::runner::ToolOutcome::text);
         }
+        if let Some(vfs) = &ctx.read_only_fs {
+            let result = vfs.read(
+                &ctx.vfs_scope,
+                &crate::tools::vfs::VfsReadRequest {
+                    path: selection.path.clone(),
+                    offset: selection.offset,
+                    limit: selection.limit,
+                    max_full_read_bytes: ctx.tool_config.tool_result_max_bytes,
+                },
+            )?;
+            if selection.offset.is_none()
+                && selection.limit.is_none()
+                && result.total_bytes > ctx.tool_config.tool_result_max_bytes
+            {
+                bail!(
+                    "Error: file too large for full Read ({} bytes > {} bytes): {}. Use a line selector such as '{}:1-200' or pass offset/limit.",
+                    result.total_bytes,
+                    ctx.tool_config.tool_result_max_bytes,
+                    selection.path,
+                    selection.path
+                );
+            }
+            if selection.raw {
+                return Ok(super::runner::ToolOutcome::text(result.content));
+            }
+            return Ok(super::runner::ToolOutcome::text(format_read_only_virtual(
+                &selection.path,
+                selection.offset.unwrap_or(1),
+                &result.content,
+            )));
+        }
+
         let path = resolve_tool_path(&ctx.cwd, &selection.path)?;
         ensure_full_read_within_limit(
             &path,
@@ -882,6 +914,18 @@ fn format_read_snapshot(display_path: &str, tag: &str, start_line: usize, conten
     out
 }
 
+fn format_read_only_virtual(display_path: &str, start_line: usize, content: &str) -> String {
+    let mut out = format!("[read-only virtual file: {display_path}]");
+    for (idx, line) in crate::tools::snapshot::split_content_lines(content)
+        .iter()
+        .enumerate()
+    {
+        out.push('\n');
+        out.push_str(&format!("{}:{line}", start_line + idx));
+    }
+    out
+}
+
 fn format_post_edit_snapshot(
     display_path: &str,
     tag: &str,
@@ -1328,6 +1372,11 @@ mod tests {
         let artifacts = Arc::new(ArtifactManager::new(session.join("artifacts")));
         artifacts.ensure().unwrap();
         ToolContext {
+            vfs_scope: crate::tools::vfs::VfsScope {
+                resource_session_id: "session-1".into(),
+                agent_session_id: "session-1".into(),
+            },
+            read_only_fs: None,
             cwd,
             home,
             store: Arc::new(ConversationStore::new(session.join("conversation.jsonl"))),
@@ -1338,6 +1387,70 @@ mod tests {
             tool_config: ToolConfig::from_config(&crate::config::Config::default()),
             interrupt: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    struct VirtualReadOnlyFs;
+
+    impl crate::tools::vfs::ReadOnlyFileSystem for VirtualReadOnlyFs {
+        fn read(
+            &self,
+            scope: &crate::tools::vfs::VfsScope,
+            request: &crate::tools::vfs::VfsReadRequest,
+        ) -> anyhow::Result<crate::tools::vfs::VfsReadResult> {
+            assert_eq!(scope.resource_session_id, "session-1");
+            assert_eq!(scope.agent_session_id, "session-1");
+            assert_eq!(request.path, "knowledge/guide.md");
+            Ok(crate::tools::vfs::VfsReadResult {
+                content: "alpha\nbeta".into(),
+                total_lines: 2,
+                total_bytes: 10,
+            })
+        }
+
+        fn glob(
+            &self,
+            _scope: &crate::tools::vfs::VfsScope,
+            _request: &crate::tools::vfs::VfsGlobRequest,
+        ) -> anyhow::Result<crate::tools::vfs::VfsGlobResult> {
+            unreachable!()
+        }
+
+        fn grep(
+            &self,
+            _scope: &crate::tools::vfs::VfsScope,
+            _request: &crate::tools::vfs::VfsGrepRequest,
+        ) -> anyhow::Result<crate::tools::vfs::VfsGrepResult> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn read_tool_routes_virtual_files_without_edit_snapshot() {
+        let mut ctx = temp_tool_context("virtual-read");
+        ctx.read_only_fs = Some(Arc::new(VirtualReadOnlyFs));
+        let outcome = ReadTool
+            .execute(&json!({"path": "knowledge/guide.md"}), &ctx)
+            .unwrap();
+
+        assert!(
+            outcome
+                .content
+                .starts_with("[read-only virtual file: knowledge/guide.md]")
+        );
+        assert!(outcome.content.contains("1:alpha"));
+        assert!(!outcome.content.starts_with('@'));
+    }
+
+    #[test]
+    fn read_tool_enforces_full_read_limit_for_virtual_backend() {
+        let mut ctx = temp_tool_context("virtual-read-limit");
+        ctx.read_only_fs = Some(Arc::new(VirtualReadOnlyFs));
+        ctx.tool_config.tool_result_max_bytes = 5;
+        let error = match ReadTool.execute(&json!({"path": "knowledge/guide.md"}), &ctx) {
+            Ok(_) => panic!("virtual full read should exceed configured limit"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("file too large for full Read"));
     }
 
     #[test]

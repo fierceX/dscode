@@ -8,4 +8,5 @@ pub mod runner;
 pub mod sandbox_python;
 pub mod search;
 pub mod snapshot;
+pub mod vfs;
 pub mod web;

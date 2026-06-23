@@ -7,6 +7,13 @@ mod options;
 mod sdk_adapter;
 
 pub use crate::session::paths::SessionLayout;
+pub use crate::tools::vfs::{
+    ReadOnlyFileSystem, VfsGlobRequest, VfsGlobResult, VfsGrepEntry, VfsGrepRequest, VfsGrepResult,
+    VfsReadRequest, VfsReadResult, VfsScope, VirtualFile, collect_virtual_glob,
+    collect_virtual_grep, format_virtual_glob, format_virtual_grep, normalize_virtual_file_path,
+    normalize_virtual_root, select_virtual_lines, tool_line_count, try_collect_virtual_glob,
+    try_collect_virtual_grep, validate_virtual_glob_request, validate_virtual_grep_request,
+};
 /// Build a full mink runtime from configuration.
 ///
 /// This is the library entry point used by the `mink` and `mink-core` binaries.

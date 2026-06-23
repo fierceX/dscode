@@ -1,6 +1,6 @@
 # 内置工具
 
-更新日期：2026-06-14
+更新日期：2026-06-21
 
 本文是 mink 内置工具的协议参考，面向需要理解工具参数、执行模型、结果通道、资源 URL、
 审批和构建裁剪的使用者与开发者。CLI 参数、session、沙箱、技能和常见工作流见
@@ -44,6 +44,32 @@ ToolCallEvent
 - `session://current/artifacts`：列出当前 session artifacts。
 
 这些资源都支持同样的行 selector，例如 `session://current/messages:1-20` 或 `https://example.com:20-60`。
+
+### 嵌入式只读 VFS
+
+嵌入式 runtime 可通过 `AgentOptions::with_read_only_file_system()` 注入同步
+`ReadOnlyFileSystem`，替换普通路径上的 `Read`、`Glob`、`Grep` 后端。该机制不注册新工具，也不修改三个工具的 schema。
+
+- 未注入时严格执行原有本地文件代码路径，包括本地路径解析、`ignore` 遍历和 Read snapshot。
+- `artifact://`、`skill://`、`session://`、`http(s)://` 不进入 VFS，继续使用已有资源实现。
+- 每次调用收到 `VfsScope { resource_session_id, agent_session_id }`。前者用于数据库分区，后者标识当前主代理或子代理。
+- 未指定 `resource_session_id` 时默认使用 runtime session id；子代理继承父代理的 resource scope，但拥有自己的 agent session id。
+- 虚拟路径按 POSIX 规则规范化，拒绝 `..` 越过虚拟根目录和 NUL 字节。
+- 虚拟 Read 不生成可供 `Edit` 使用的 snapshot；`Write` 和 `Edit` 始终操作本地文件。
+- Glob/Grep 后端返回结构化结果。glob/regex 校验、文本格式和 100KB 搜索输出保护由 `mink-core` 保持。
+- 后端必须遵守请求中的 `max_files` / `max_results`。公共 `try_collect_virtual_glob/grep` helper 已实现路径规范化、匹配和限制；完全自定义实现需要提供等价约束。
+
+虚拟非 raw Read 输出示例：
+
+```text
+[read-only virtual file: knowledge/refunds.md]
+1:# Refunds
+2:Refunds are reviewed within two business days.
+```
+
+数据库适配由宿主应用实现。`mink-core` 不依赖具体数据库；
+[`crates/mink-core/examples/redb_vfs.rs`](../crates/mink-core/examples/redb_vfs.rs)
+提供按 `resource_session_id` 隔离并惰性扫描的 redb 完整示例。
 
 工具审批模式由 `--config 'approval_mode=\"write\"'` 或 `.minkrc` 的 `[tools]` 配置控制：
 
@@ -97,7 +123,7 @@ cargo build --release
 | `path` | string | 文件路径或资源 URL |
 
 - `path` 支持 selector：`file:10-20`、`file:10+5`、`file:raw`、`file:raw:10-20`。
-- 输出包含 snapshot header 和行号，适合 anchored edit：
+- 本地非 raw 输出包含 snapshot header 和行号，适合 anchored edit：
 
 ```text
 @src/foo.rs#0A3B
@@ -106,6 +132,7 @@ cargo build --release
 ```
 
 - `:raw` 禁用 snapshot header 和行号。
+- 注入 VFS 后，普通路径读取虚拟文件并显示只读标记，不生成 snapshot；selector 和 `:raw` 语义保持一致。
 - `http(s)://...` 可读取公开 URL。URL 输出不生成 editable snapshot；首次读取会保存为 `ReadUrl` artifact cache，后续同 URL selector 从缓存分页，不重复 fetch。损坏的 URL cache index 行会被跳过；cache 正文缺失时会重新 fetch。
 - `artifact://<id>` 可读取被截断工具输出，支持同样的行 selector。
 - `skill://list` / `skill://<name>` 可读取可用 skills，搜索顺序与 `--config` 或 `.minkrc` 的 `skills` 字段一致。
@@ -257,10 +284,11 @@ open("/absolute/path/to/project/output/f.txt", "w")  # 绝对路径 ✅
 | `pattern` | string | glob 模式 |
 | `path` | string | 搜索目录，可选，默认当前目录 |
 
-- 基于 `globset` 匹配和 `ignore` 目录遍历，不依赖外部 `rg` 二进制。
+- 本地后端基于 `globset` 匹配和 `ignore` 目录遍历，不依赖外部 `rg` 二进制；注入 VFS 后由后端枚举虚拟路径。
 - 用于快速发现文件，不读取文件内容。
 - `path` 为空或相对路径时基于当前会话 `cwd` 解析。
-- pattern 透传给 `globset`，工具层不做自定义 glob 解析。
+- VFS 模式下 `path` 是虚拟根路径，不与宿主 `cwd` 拼接。
+- pattern 使用 `globset` 语义；VFS 调用前仍由工具层校验。
 - `*` 和 `?` 不跨路径分隔符；递归匹配使用 `**/`，例如 `**/*.rs`、`**/*.docx`、`**/*.*`。
 - 带路径分隔符的模式按相对路径匹配，例如 `src/*.rs` 只匹配 `src` 当前层，`src/**/*.rs` 匹配所有子层。
 - 没有匹配时返回明确的 no-match 提示，而不是静默空字符串。
@@ -281,9 +309,10 @@ open("/absolute/path/to/project/output/f.txt", "w")  # 绝对路径 ✅
 | `glob` | string | 文件过滤，可选 |
 | `context` | integer | 匹配前后上下文行数，可选 |
 
-- 基于内置目录遍历和 Rust `regex` 搜索，不依赖外部 `rg` 二进制。
+- 本地后端基于内置目录遍历和 Rust `regex` 搜索，不依赖外部 `rg` 二进制；注入 VFS 后由后端搜索虚拟内容。
 - 优先用于定位编辑目标。
 - `path` 为空或相对路径时基于当前会话 `cwd` 解析；`glob` 过滤同样使用 `globset` 语义。
+- VFS 模式下 `path` 是虚拟根路径，不与宿主 `cwd` 拼接；regex 和文件 glob 在调用后端前仍由工具层校验。
 - `context` 用于定位目标；需要修改时必须 `Read` 目标范围拿到 `@PATH#TAG` 后使用 anchored `Edit.patch`。
 - 未匹配内容时返回明确的 no-match 提示；遍历达到上限或跳过不可读路径时，会追加诊断行。
 限制：

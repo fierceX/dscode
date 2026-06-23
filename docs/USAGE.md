@@ -508,6 +508,34 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
+### Rust 嵌入式只读 VFS
+
+私有化服务可保持 `Read`、`Glob`、`Grep` 工具协议不变，把普通路径的读取和检索切换到数据库：
+
+```rust
+use std::sync::Arc;
+use mink::prelude::{AgentOptions, AgentRuntime};
+
+let vfs = Arc::new(MyReadOnlyFileSystem::open("knowledge.db")?);
+let runtime = AgentRuntime::start_with_options(
+    AgentOptions::new("/tmp/mink-session", ".")
+        .with_resource_session_id("tenant-task-001")
+        .with_read_only_file_system(vfs),
+).await?;
+```
+
+后端实现同步的 `mink::runtime::ReadOnlyFileSystem`。每个 `read` / `glob` / `grep`
+调用都会收到 `VfsScope`：
+
+- `resource_session_id`：知识库数据分区；未配置时默认使用 runtime session id。
+- `agent_session_id`：实际发起调用的主代理或子代理 session id。
+
+子代理继承父代理的 `resource_session_id`，但使用自己的 `agent_session_id`。虚拟 Read 是只读的，不产生 anchored Edit snapshot；`Write` 和 `Edit` 仍只操作本地文件。`artifact://`、`skill://`、`session://` 和 `http(s)://` 也继续走内置资源实现，不进入 VFS。
+
+完整 redb 示例见
+[`crates/mink-core/examples/redb_vfs.rs`](../crates/mink-core/examples/redb_vfs.rs)。
+redb 只是示例依赖，业务可替换为其他同步嵌入式数据库。
+
 ### Python SDK 中访问
 
 ```python
@@ -749,6 +777,8 @@ artifact、输出截断和每个工具的完整协议以 [工具参考](tools.md
 
 完整工具说明见 [tools.md](tools.md)。
 
+嵌入式 Rust runtime 注入只读 VFS 后，表中的 `Read`、`Glob`、`Grep` 对普通路径使用虚拟后端；未注入时本地工具行为不变。
+
 ### Read selector 与资源 URL
 
 `Read.path` 可追加 selector：
@@ -806,6 +836,9 @@ snapshot 中的原始行号，同一次 patch 内不会因为前面的 hunk 而�
 
 patch body 行只写最终内容，每行以 `+` 开头；不要写 `-old` 行、原始上下文行或 unified diff 的 `@@` header。
 不要用 `Edit` 做机械格式化、import 排序、空白清理或纯缩进调整；语义修改后运行项目 formatter。
+
+VFS 普通路径读取会输出行号和 `[read-only virtual file: ...]` 标记，但不会输出
+`@PATH#TAG`，因此不能作为 `Edit.patch` 的输入。
 
 ---
 

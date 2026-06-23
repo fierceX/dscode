@@ -18,6 +18,7 @@
 - **维修流水线** — Scavenge → Truncation → Storm Breaker，三段自动修复
 - **Session 持久化** — JSONL 格式，`--continue` 无缝恢复
 - **子代理（SubAgent）** — 隔离或 fork 上下文，并发执行
+- **嵌入式只读 VFS** — Rust runtime 可为 Read/Glob/Grep 注入数据库后端，并按 resource session 隔离知识库
 - **技能系统** — 按需加载 skill 文件，不污染后续 prompt
 - **自定义提示词** — `--mission` 加载 MISSION.md 文件，替换默认系统提示词，自由定义 agent 目标和行为
 - **Python SDK** — `mink-agent` pip 包，内置无 TUI 的 `mink-core` 二进制，支持沙箱控制和全参数配置

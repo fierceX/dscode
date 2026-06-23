@@ -130,6 +130,7 @@ TurnExecutor (agent/turn.rs)
 │ tools/file.rs         │ Read/Write/Edit + selector/resource/anchored patch
 │ tools/snapshot.rs     │ Read snapshot 和 anchored edit hash 校验
 │ tools/search.rs       │ Glob/Grep
+│ tools/vfs.rs          │ Read/Glob/Grep 同步只读 VFS hook、请求/结果协议和数据库 helper
 │ tools/bash.rs         │ Bash 执行 + 误用拦截
 │ tools/python.rs       │ Python 执行
 │ tools/web.rs          │ WebSearch/WebFetch
@@ -275,6 +276,7 @@ DecisionEngine.decide()
 | `tools/file.rs` | Read/Write/Edit、path selector、resource URL、anchored patch |
 | `tools/snapshot.rs` | FileSnapshotStore、hashline 轻量校验 |
 | `tools/search.rs` | Glob/Grep |
+| `tools/vfs.rs` | `ReadOnlyFileSystem`、session scope、结构化 VFS 请求/结果和虚拟路径 helper |
 | `tools/bash.rs` | Bash、危险命令检查、误用拦截 |
 | `tools/python.rs` | Python |
 | `tools/web.rs` | WebSearch/WebFetch |
@@ -360,6 +362,8 @@ Anchored patch 只修改 snapshot 覆盖且未漂移的行。tag 缺失、行 ha
 - `Bash` / `Python` 必须在 `ToolContext.cwd` 下执行；Bash 未显式设置 `timeout` 时使用稳定的全局 tool timeout
 - `TurnExecutor` 写入 LLM conversation 使用 `conv_content`，为空时使用 `content`
 - `Read` 本地非 raw 输出会记录 snapshot；raw 或 immutable resource 不生成可编辑 snapshot
+- 嵌入式 runtime 可为普通路径注入同步只读 VFS，仅替换 Read/Glob/Grep 后端；未注入时必须严格保持原有本地执行路径
+- VFS 调用同时携带继承的 `resource_session_id` 和当前 `agent_session_id`；虚拟 Read 不生成 snapshot，Edit/Write 始终操作本地文件
 - `Edit.patch` 的 header path 必须和 `Edit.path` 一致，snapshot stale 时拒绝编辑
 - `Display::render_tool_result_detail()` 必须保持默认实现。
 - TUI 光标必须始终落在 UTF-8 char boundary。

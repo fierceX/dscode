@@ -4,6 +4,7 @@ use crate::llm::client::LlmClient;
 use crate::runtime::EventSink;
 use crate::session::paths::Paths;
 use crate::session::paths::SessionLayout;
+use crate::tools::vfs::ReadOnlyFileSystem;
 use crate::ui::{Display, SubAgentStreamSink};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -24,6 +25,10 @@ pub struct AgentRuntimeConfig {
     pub display: Option<Arc<dyn Display>>,
     pub event_sink: Option<Arc<dyn EventSink>>,
     pub sub_stream_tx: Option<Arc<dyn SubAgentStreamSink>>,
+    pub read_only_fs: Option<Arc<dyn ReadOnlyFileSystem>>,
+    /// Knowledge-base scope used by the read-only VFS. Defaults to the
+    /// resolved runtime session id.
+    pub resource_session_id: Option<String>,
     /// Test-only: inject a mock LLM client so integration tests can exercise
     /// `run_turn()` end-to-end without live API calls.
     #[cfg(test)]
@@ -57,6 +62,8 @@ impl AgentRuntimeConfig {
             display: None,
             event_sink: None,
             sub_stream_tx: None,
+            read_only_fs: None,
+            resource_session_id: None,
             #[cfg(test)]
             llm_override: None,
         }

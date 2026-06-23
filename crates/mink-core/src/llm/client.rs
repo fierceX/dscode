@@ -615,7 +615,7 @@ mod tests {
         ));
         Ok(Arc::new(AgentSharedContext {
             config: cfg.clone(),
-            cwd,
+            cwd: cwd.clone(),
             home,
             session_layout: crate::session::paths::SessionLayout::ProjectScoped,
             api_url: api_url.to_string(),
@@ -630,6 +630,11 @@ mod tests {
             cancel: CancellationToken::new(),
             display: Arc::new(TestDisplay::new()),
             sub_stream_tx: None,
+            read_only_fs: None,
+            vfs_scope: crate::tools::vfs::VfsScope {
+                resource_session_id: "client".into(),
+                agent_session_id: "client".into(),
+            },
             tool_config: ToolConfig::from_config(&cfg),
             events_path: spaths.events,
             summary_path: spaths.summary,

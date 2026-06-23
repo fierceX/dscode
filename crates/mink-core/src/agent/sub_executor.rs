@@ -113,6 +113,8 @@ impl SubAgentExecutor {
             interrupt: parent_ctx.interrupt.clone(),
             is_sub_agent: true,
             usage_journal: Some(parent_ctx.usage.clone()),
+            read_only_fs: parent_ctx.read_only_fs.clone(),
+            resource_session_id: parent_ctx.vfs_scope.resource_session_id.clone(),
         })
         .await?;
         let child_ctx = built.ctx;
@@ -280,5 +282,33 @@ impl SubAgentExecutor {
             )),
             TurnDecision::Failed(msg) => Err(anyhow::anyhow!(msg)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn child_inherits_resource_session_but_has_own_agent_session() {
+        let mut parent = crate::regression::test_context_for_agent("sub-vfs-scope")
+            .await
+            .unwrap();
+        Arc::get_mut(&mut parent)
+            .expect("test context should be uniquely owned")
+            .vfs_scope
+            .resource_session_id = "tenant-knowledge".into();
+
+        let child = SubAgentExecutor::new(parent, "sub-agent-session".into(), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            child.child_ctx.vfs_scope.resource_session_id,
+            "tenant-knowledge"
+        );
+        assert_eq!(
+            child.child_ctx.vfs_scope.agent_session_id,
+            "sub-agent-session"
+        );
     }
 }
