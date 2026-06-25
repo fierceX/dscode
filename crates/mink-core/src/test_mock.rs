@@ -346,7 +346,7 @@ fn system_prompt_contains_causal_reasoning() {
     let builder = crate::prompt::Builder {
         cwd: std::path::PathBuf::from("/tmp"),
         home: std::path::PathBuf::from("/tmp"),
-        skills: vec![],
+        skill_snapshot: std::sync::Arc::new(crate::capabilities::SkillSnapshot::default()),
         summary_file: std::path::PathBuf::from("/tmp/_nonexistent_summary"),
         plan_file: std::path::PathBuf::from("/tmp/_nonexistent_plan"),
         plan_draft_file: std::path::PathBuf::from("/tmp/_nonexistent_draft"),

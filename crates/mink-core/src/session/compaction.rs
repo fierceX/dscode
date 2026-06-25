@@ -1,3 +1,4 @@
+use crate::capabilities::skills::SkillSnapshot;
 use crate::config::Config;
 use crate::llm::client::{AsyncLlClient, LlmRequestContext};
 use crate::prompt;
@@ -20,7 +21,7 @@ pub struct CompactionEngine {
     plan_draft_path: PathBuf,
     cwd: PathBuf,
     home: PathBuf,
-    skills: Vec<String>,
+    skill_snapshot: Arc<SkillSnapshot>,
     api_url: String,
     api_key: String,
     config: Config,
@@ -47,6 +48,16 @@ impl CompactionEngine {
         stats: Arc<StatsTracker>,
     ) -> Self {
         let usage = UsageJournal::new(summary_path.with_file_name("usage.jsonl"));
+        let skill_snapshot = Arc::new(
+            crate::capabilities::build_default_skill_snapshot(
+                &cwd,
+                &home,
+                &config.session_id,
+                &config.session_id,
+                &skills,
+            )
+            .unwrap_or_default(),
+        );
         Self::new_with_usage(
             store,
             summary_path,
@@ -54,7 +65,7 @@ impl CompactionEngine {
             plan_draft_path,
             cwd,
             home,
-            skills,
+            skill_snapshot,
             api_url,
             config,
             stats,
@@ -73,7 +84,7 @@ impl CompactionEngine {
         plan_draft_path: PathBuf,
         cwd: PathBuf,
         home: PathBuf,
-        skills: Vec<String>,
+        skill_snapshot: Arc<SkillSnapshot>,
         api_url: String,
         config: &Config,
         stats: Arc<StatsTracker>,
@@ -90,7 +101,7 @@ impl CompactionEngine {
             plan_draft_path,
             cwd,
             home,
-            skills,
+            skill_snapshot,
             api_url,
             api_key: config.api_key.clone(),
             config: config.clone(),
@@ -235,7 +246,7 @@ Start directly with \"Task focus:\" — no preamble, no markdown, no code fences
         let system_prompt = prompt::Builder {
             cwd: self.cwd.clone(),
             home: self.home.clone(),
-            skills: self.skills.clone(),
+            skill_snapshot: self.skill_snapshot.clone(),
             summary_file: self.summary_path.clone(),
             plan_file: self.plan_path.clone(),
             plan_draft_file: self.plan_draft_path.clone(),

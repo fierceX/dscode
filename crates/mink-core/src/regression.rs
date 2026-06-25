@@ -169,6 +169,13 @@ async fn harness_with_config(
 
     let usage = crate::session::usage::UsageJournal::new(spaths.usage.clone());
     let display = Arc::new(NoopDisplay::new());
+    let capability_snapshot = Arc::new(crate::capabilities::CapabilitySnapshot::load_default(
+        &cwd,
+        &home,
+        &cfg.session_id,
+        &cfg.session_id,
+        &cfg.skills,
+    )?);
     let compaction = Arc::new(CompactionEngine::new_with_usage(
         store.clone(),
         spaths.summary.clone(),
@@ -176,7 +183,7 @@ async fn harness_with_config(
         spaths.plan_draft.clone(),
         cwd.clone(),
         home.clone(),
-        cfg.skills.clone(),
+        Arc::new(capability_snapshot.skills.clone()),
         crate::config::api_url(&cfg),
         &cfg,
         stats.clone(),
@@ -207,6 +214,8 @@ async fn harness_with_config(
             resource_session_id: sid.into(),
             agent_session_id: sid.into(),
         },
+        resource_router: Arc::new(crate::resources::ResourceRouter::with_builtin_handlers()),
+        capability_snapshot,
         tool_config: ToolConfig::from_config(&cfg),
         events_path: spaths.events,
         summary_path: spaths.summary,

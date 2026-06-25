@@ -50,6 +50,8 @@ pub mod sse;
 #[doc(hidden)]
 pub mod cancel;
 #[doc(hidden)]
+pub mod capabilities;
+#[doc(hidden)]
 pub mod context;
 #[doc(hidden)]
 pub mod llm;
@@ -62,6 +64,8 @@ pub mod skills;
 pub mod guard;
 #[doc(hidden)]
 pub mod repair;
+#[doc(hidden)]
+pub mod resources;
 #[doc(hidden)]
 pub mod tools;
 

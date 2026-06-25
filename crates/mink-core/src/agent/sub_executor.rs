@@ -115,6 +115,8 @@ impl SubAgentExecutor {
             usage_journal: Some(parent_ctx.usage.clone()),
             read_only_fs: parent_ctx.read_only_fs.clone(),
             resource_session_id: parent_ctx.vfs_scope.resource_session_id.clone(),
+            resource_router: Some(parent_ctx.resource_router.clone()),
+            capability_snapshot: Some(parent_ctx.capability_snapshot.clone()),
         })
         .await?;
         let child_ctx = built.ctx;

@@ -1,6 +1,8 @@
 use crate::cancel::CancellationToken;
+use crate::capabilities::CapabilitySnapshot;
 use crate::config::Config;
 use crate::context::{AgentSharedContext, ToolConfig};
+use crate::resources::ResourceRouter;
 use crate::session::compaction::CompactionEngine;
 use crate::session::paths::{self, SessionLayout};
 use crate::session::usage::UsageJournal;
@@ -27,6 +29,8 @@ pub(crate) struct AgentContextBuild {
     pub usage_journal: Option<Arc<UsageJournal>>,
     pub read_only_fs: Option<Arc<dyn ReadOnlyFileSystem>>,
     pub resource_session_id: String,
+    pub resource_router: Option<Arc<ResourceRouter>>,
+    pub capability_snapshot: Option<Arc<CapabilitySnapshot>>,
 }
 
 pub(crate) struct BuiltAgentContext {
@@ -57,6 +61,21 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
         .usage_journal
         .unwrap_or_else(|| UsageJournal::new(paths.usage.clone()));
 
+    let vfs_scope = VfsScope {
+        resource_session_id: params.resource_session_id,
+        agent_session_id: params.session_id.clone(),
+    };
+    let capability_snapshot = if let Some(snapshot) = params.capability_snapshot {
+        snapshot
+    } else {
+        Arc::new(CapabilitySnapshot::load_default(
+            &params.cwd,
+            &params.home,
+            &params.session_id,
+            &vfs_scope.resource_session_id,
+            &config.skills,
+        )?)
+    };
     let compaction = Arc::new(CompactionEngine::new_with_usage(
         store.clone(),
         paths.summary.clone(),
@@ -64,7 +83,7 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
         paths.plan_draft.clone(),
         params.cwd.clone(),
         params.home.clone(),
-        config.skills.clone(),
+        Arc::new(capability_snapshot.skills.clone()),
         params.api_url.clone(),
         &config,
         stats.clone(),
@@ -73,10 +92,6 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
         params.display.clone(),
         params.cancel.clone(),
     ));
-    let vfs_scope = VfsScope {
-        resource_session_id: params.resource_session_id,
-        agent_session_id: params.session_id.clone(),
-    };
 
     let ctx = Arc::new(AgentSharedContext {
         config: config.clone(),
@@ -95,6 +110,10 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
         sub_stream_tx: params.sub_stream_tx,
         read_only_fs: params.read_only_fs,
         vfs_scope,
+        resource_router: params
+            .resource_router
+            .unwrap_or_else(|| Arc::new(ResourceRouter::with_builtin_handlers())),
+        capability_snapshot,
         tool_config: ToolConfig::from_config(&config),
         events_path: paths.events.clone(),
         summary_path: paths.summary.clone(),

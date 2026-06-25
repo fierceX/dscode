@@ -597,6 +597,13 @@ mod tests {
             output_format: OutputFormat::Human,
             ..Default::default()
         };
+        let capability_snapshot = Arc::new(crate::capabilities::CapabilitySnapshot::load_default(
+            &cwd,
+            &home,
+            "client",
+            "client",
+            &cfg.skills,
+        )?);
         let compaction = Arc::new(CompactionEngine::new_with_usage(
             store.clone(),
             spaths.summary.clone(),
@@ -604,7 +611,7 @@ mod tests {
             spaths.plan_draft.clone(),
             cwd.clone(),
             home.clone(),
-            Vec::new(),
+            Arc::new(capability_snapshot.skills.clone()),
             api_url.to_string(),
             &cfg,
             stats.clone(),
@@ -635,6 +642,8 @@ mod tests {
                 resource_session_id: "client".into(),
                 agent_session_id: "client".into(),
             },
+            resource_router: Arc::new(crate::resources::ResourceRouter::with_builtin_handlers()),
+            capability_snapshot,
             tool_config: ToolConfig::from_config(&cfg),
             events_path: spaths.events,
             summary_path: spaths.summary,

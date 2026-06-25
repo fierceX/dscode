@@ -57,6 +57,8 @@ pub async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRuntime> {
         usage_journal: None,
         read_only_fs,
         resource_session_id,
+        resource_router: None,
+        capability_snapshot: None,
     })
     .await?;
     let ctx = built.ctx;

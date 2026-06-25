@@ -1,5 +1,5 @@
+use crate::resources::selector::{select_text_lines, split_read_path_selection};
 use anyhow::{Result, anyhow, bail};
-use serde_json::Value;
 use similar::{ChangeTag, TextDiff};
 use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
@@ -231,114 +231,6 @@ pub struct ReadTool;
 pub struct WriteTool;
 pub struct EditTool;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReadPathSelection {
-    pub path: String,
-    pub offset: Option<usize>,
-    pub limit: Option<usize>,
-    pub raw: bool,
-}
-
-pub fn split_read_path_selection(input: &str) -> Result<ReadPathSelection> {
-    let mut rest = input;
-    let normalized;
-    let mut raw = false;
-
-    if let Some(stripped) = rest.strip_suffix(":raw") {
-        rest = stripped;
-        raw = true;
-    }
-    if let Some(stripped) = rest.strip_prefix("raw:") {
-        rest = stripped;
-        raw = true;
-    }
-    if let Some((base, tail)) = rest.rsplit_once(":raw:") {
-        normalized = format!("{base}:{tail}");
-        rest = &normalized;
-        raw = true;
-    }
-
-    let mut offset = None;
-    let mut limit = None;
-    let mut path = rest;
-
-    if let Some((base, suffix)) = rest.rsplit_once(':')
-        && !looks_like_url_host_port(rest)
-        && let Some((start, parsed_limit)) = parse_line_selector(suffix)?
-    {
-        path = base;
-        offset = Some(start);
-        limit = parsed_limit;
-    }
-
-    if path.is_empty() {
-        bail!("Error: no path provided");
-    }
-
-    Ok(ReadPathSelection {
-        path: path.to_string(),
-        offset,
-        limit,
-        raw,
-    })
-}
-
-fn looks_like_url_host_port(input: &str) -> bool {
-    if !is_web_url(input) {
-        return false;
-    }
-    let Ok(url) = reqwest::Url::parse(input) else {
-        return false;
-    };
-    url.port().is_some() && url.path() == "/" && url.query().is_none() && url.fragment().is_none()
-}
-
-fn parse_line_selector(suffix: &str) -> Result<Option<(usize, Option<usize>)>> {
-    if suffix.is_empty() {
-        return Ok(None);
-    }
-    if !suffix
-        .chars()
-        .all(|ch| ch.is_ascii_digit() || ch == '-' || ch == '+')
-    {
-        return Ok(None);
-    }
-    let parse_line = |raw: &str| -> Result<usize> {
-        let value = raw
-            .parse::<usize>()
-            .map_err(|_| anyhow!("Error: invalid line selector: {suffix}"))?;
-        if value == 0 {
-            bail!("Error: line selectors are 1-indexed; got 0");
-        }
-        Ok(value)
-    };
-
-    if let Some((start_raw, count_raw)) = suffix.split_once('+') {
-        let start = parse_line(start_raw)?;
-        let count = count_raw
-            .parse::<usize>()
-            .map_err(|_| anyhow!("Error: invalid line selector: {suffix}"))?;
-        if count == 0 {
-            bail!("Error: line selector count must be >= 1");
-        }
-        return Ok(Some((start, Some(count))));
-    }
-
-    if let Some((start_raw, end_raw)) = suffix.split_once('-') {
-        let start = parse_line(start_raw)?;
-        if end_raw.is_empty() {
-            return Ok(Some((start, None)));
-        }
-        let end = parse_line(end_raw)?;
-        if end < start {
-            bail!("Error: line selector range ends before it starts: {suffix}");
-        }
-        return Ok(Some((start, Some(end - start + 1))));
-    }
-
-    Ok(Some((parse_line(suffix)?, None)))
-}
-
 fn resolve_tool_path(cwd: &Path, raw: &str) -> Result<PathBuf> {
     if raw.is_empty() {
         bail!("Error: no path provided");
@@ -398,22 +290,17 @@ impl super::runner::ToolExec for ReadTool {
         if selection.limit.is_none() && args.limit.is_some() {
             selection.limit = args.limit;
         }
-        if let Some(id) = crate::session::artifacts::artifact_id_from_url(&selection.path) {
-            return ctx
-                .artifacts
-                .read_text(id)
-                .map(|text| select_text_lines(&text, selection.offset, selection.limit))
-                .map(super::runner::ToolOutcome::text);
+        if ctx.resource_router.can_handle(&selection.path) {
+            let resource = ctx.resource_router.resolve(&selection, ctx)?;
+            let text = select_text_lines(&resource.content, selection.offset, selection.limit);
+            return Ok(super::runner::ToolOutcome::text(text));
         }
-        if selection.path.starts_with("skill://") {
-            return read_skill_resource(&selection.path, ctx)
-                .map(|text| select_text_lines(&text, selection.offset, selection.limit))
-                .map(super::runner::ToolOutcome::text);
-        }
-        if selection.path.starts_with("session://") {
-            return read_session_resource(&selection.path, ctx)
-                .map(|text| select_text_lines(&text, selection.offset, selection.limit))
-                .map(super::runner::ToolOutcome::text);
+        if ctx.resource_router.is_url_like(&selection.path) && !is_web_url(&selection.path) {
+            let scheme = selection
+                .path
+                .split_once("://")
+                .map_or("", |(scheme, _)| scheme);
+            bail!("Error: unknown resource scheme: {scheme}");
         }
         if is_web_url(&selection.path) {
             return read_url_resource(&selection.path, ctx)
@@ -504,20 +391,6 @@ fn snapshot_source_for_read(
     }
 }
 
-fn select_text_lines(text: &str, offset: Option<usize>, limit: Option<usize>) -> String {
-    if offset.is_none() && limit.is_none() {
-        return text.to_string();
-    }
-    let mut lines: Vec<&str> = text.split('\n').collect();
-    if !lines.is_empty() && lines.last().is_some_and(|line| line.is_empty()) {
-        lines.pop();
-    }
-    let total = lines.len();
-    let start = offset.unwrap_or(1).saturating_sub(1).min(total);
-    let end = limit.map_or(total, |count| (start + count).min(total));
-    lines[start..end].join("\n")
-}
-
 fn is_web_url(path: &str) -> bool {
     path.starts_with("http://") || path.starts_with("https://")
 }
@@ -538,279 +411,6 @@ fn read_url_resource(url: &str, ctx: &crate::context::ToolContext) -> Result<Str
     ctx.artifacts
         .write_text("ReadUrl", "cached URL read", Some(&normalized), &text)?;
     Ok(text)
-}
-
-fn read_skill_resource(url: &str, ctx: &crate::context::ToolContext) -> Result<String> {
-    let rest = url
-        .strip_prefix("skill://")
-        .ok_or_else(|| anyhow!("Error: invalid skill resource: {url}"))?
-        .trim_matches('/');
-    if rest.is_empty() || rest == "list" || rest == "all" {
-        let mut out = String::from("# Skills\n");
-        for skill in crate::skills::list_available_skills(&ctx.cwd, &ctx.home) {
-            let source = match skill.source {
-                crate::skills::SkillSource::BuiltIn => "built-in",
-                crate::skills::SkillSource::FileSystem => "local",
-            };
-            out.push_str(&format!(
-                "- {} [{}]: {}\n",
-                skill.name, source, skill.description
-            ));
-        }
-        return Ok(out);
-    }
-    let skill = crate::skills::resolve_skill(&ctx.cwd, &ctx.home, rest)?;
-    Ok(format!(
-        "# skill://{}\n\nDescription: {}\nBase directory: {}\n\n{}",
-        skill.info.name, skill.info.description, skill.info.base_dir, skill.content
-    ))
-}
-
-fn read_session_resource(url: &str, ctx: &crate::context::ToolContext) -> Result<String> {
-    let rest = url
-        .strip_prefix("session://")
-        .ok_or_else(|| anyhow!("Error: invalid session resource: {url}"))?
-        .trim_end_matches('/');
-    match rest {
-        "current" => format_session_current(ctx),
-        "current/stats" => format_session_stats(ctx),
-        "current/messages" => format_session_messages(ctx, 40),
-        "current/messages/all" => format_session_messages(ctx, usize::MAX),
-        "current/artifacts" => format_session_artifacts(ctx),
-        _ => bail!("Error: unsupported session resource: {url}"),
-    }
-}
-
-fn session_dir(ctx: &crate::context::ToolContext) -> Result<PathBuf> {
-    ctx.store
-        .path()
-        .parent()
-        .map(Path::to_path_buf)
-        .ok_or_else(|| anyhow!("Error: session path has no parent"))
-}
-
-fn format_session_current(ctx: &crate::context::ToolContext) -> Result<String> {
-    let dir = session_dir(ctx)?;
-    let session_id = dir
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .unwrap_or_else(|| "<unknown>".to_string());
-    let metadata = read_optional_file(&dir.join("session.json"))
-        .ok()
-        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
-    let alias = metadata
-        .as_ref()
-        .and_then(|value| value.get("alias"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let title = metadata
-        .as_ref()
-        .and_then(|value| value.get("title"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let stats = read_optional_file(&dir.join("stats.json"))?;
-    let stats_summary = serde_json::from_str::<crate::session::stats::Stats>(&stats)
-        .map(format_stats_summary)
-        .unwrap_or_else(|_| "stats: unavailable".to_string());
-    let conversation_count = count_nonempty_lines(&dir.join("conversation.jsonl"));
-    let artifact_count = count_nonempty_lines(&dir.join("artifacts/index.jsonl"));
-
-    Ok(format!(
-        "# session://current\n\
-session_id: {session_id}\n\
-alias: {alias}\n\
-title: {title}\n\
-cwd: {}\n\
-home: {}\n\
-session_dir: {}\n\
-conversation_messages: {conversation_count}\n\
-artifacts: {artifact_count}\n\
-{stats_summary}\n\n\
-Resources:\n\
-- session://current/stats\n\
-- session://current/messages\n\
-- session://current/messages/all\n\
-- session://current/artifacts\n",
-        ctx.cwd.display(),
-        ctx.home.display(),
-        dir.display()
-    ))
-}
-
-fn format_session_stats(ctx: &crate::context::ToolContext) -> Result<String> {
-    let dir = session_dir(ctx)?;
-    let raw = read_optional_file(&dir.join("stats.json"))?;
-    if raw.trim().is_empty() {
-        return Ok("{}".to_string());
-    }
-    let value: Value = serde_json::from_str(&raw)?;
-    Ok(serde_json::to_string_pretty(&value)?)
-}
-
-fn format_session_messages(ctx: &crate::context::ToolContext, keep_last: usize) -> Result<String> {
-    let dir = session_dir(ctx)?;
-    let raw = read_optional_file(&dir.join("conversation.jsonl"))?;
-    let mut rows = Vec::new();
-    for (idx, line) in raw.lines().enumerate() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let value: Value = serde_json::from_str(line)
-            .map_err(|e| anyhow!("Error: invalid conversation JSONL at line {}: {e}", idx + 1))?;
-        rows.push(format!("{} {}", idx + 1, summarize_message(&value)));
-    }
-
-    let omitted = rows.len().saturating_sub(keep_last);
-    let visible = if keep_last == usize::MAX || keep_last >= rows.len() {
-        rows.as_slice()
-    } else {
-        &rows[omitted..]
-    };
-
-    let mut out = String::from("# session://current/messages\n");
-    if omitted > 0 {
-        out.push_str(&format!("... omitted {omitted} older messages\n"));
-    }
-    for row in visible {
-        out.push_str(row);
-        out.push('\n');
-    }
-    Ok(out)
-}
-
-fn format_session_artifacts(ctx: &crate::context::ToolContext) -> Result<String> {
-    let dir = session_dir(ctx)?;
-    let raw = read_optional_file(&dir.join("artifacts/index.jsonl"))?;
-    let mut out = String::from("# session://current/artifacts\n");
-    for (idx, line) in raw.lines().enumerate() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let value: Value = serde_json::from_str(line)
-            .map_err(|e| anyhow!("Error: invalid artifact index at line {}: {e}", idx + 1))?;
-        let id = value
-            .get("id")
-            .and_then(Value::as_str)
-            .unwrap_or("<unknown>");
-        let tool = value
-            .get("tool")
-            .and_then(Value::as_str)
-            .unwrap_or("<tool>");
-        let bytes = value.get("bytes").and_then(Value::as_u64).unwrap_or(0);
-        let description = value
-            .get("description")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        out.push_str(&format!(
-            "- artifact://{id} {tool} {bytes} bytes {description}\n"
-        ));
-    }
-    Ok(out)
-}
-
-fn read_optional_file(path: &Path) -> Result<String> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => Ok(text),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-        Err(e) => Err(e.into()),
-    }
-}
-
-fn count_nonempty_lines(path: &Path) -> usize {
-    read_optional_file(path)
-        .map(|text| text.lines().filter(|line| !line.trim().is_empty()).count())
-        .unwrap_or(0)
-}
-
-fn format_stats_summary(stats: crate::session::stats::Stats) -> String {
-    format!(
-        "turns: {}\nrequests: agent={} compact={} sub_agent={}\ntokens: input={} output={} cache_read={} cache_create={} context={}",
-        stats.current_turn_count,
-        stats.agent_request_count,
-        stats.compact_request_count,
-        stats.sub_agent_request_count,
-        stats.total_input_tokens,
-        stats.total_output_tokens,
-        stats.total_cache_read_tokens,
-        stats.total_cache_creation_tokens,
-        stats.current_context_tokens
-    )
-}
-
-fn summarize_message(value: &Value) -> String {
-    let role = value
-        .get("role")
-        .and_then(Value::as_str)
-        .unwrap_or("<unknown>");
-    let content = value.get("content").unwrap_or(&Value::Null);
-    format!("{role}: {}", summarize_content(content))
-}
-
-fn summarize_content(content: &Value) -> String {
-    match content {
-        Value::String(text) => truncate_for_summary(text),
-        Value::Array(items) => {
-            let mut parts = Vec::new();
-            for item in items {
-                if let Some(kind) = item.get("type").and_then(Value::as_str) {
-                    match kind {
-                        "text" => {
-                            let text = item.get("text").and_then(Value::as_str).unwrap_or("");
-                            if !text.trim().is_empty() {
-                                parts.push(format!("text {:?}", truncate_for_summary(text)));
-                            }
-                        }
-                        "thinking" => {
-                            let len = item
-                                .get("thinking")
-                                .and_then(Value::as_str)
-                                .map(str::len)
-                                .unwrap_or(0);
-                            if len > 0 {
-                                parts.push(format!("thinking {len} bytes"));
-                            }
-                        }
-                        "tool_use" => {
-                            let name = item.get("name").and_then(Value::as_str).unwrap_or("tool");
-                            parts.push(format!("tool_use {name}"));
-                        }
-                        "tool_result" => {
-                            let id = item
-                                .get("tool_use_id")
-                                .and_then(Value::as_str)
-                                .unwrap_or("<id>");
-                            let len = item
-                                .get("content")
-                                .and_then(Value::as_str)
-                                .map(str::len)
-                                .unwrap_or(0);
-                            parts.push(format!("tool_result {id} {len} bytes"));
-                        }
-                        other => parts.push(other.to_string()),
-                    }
-                }
-            }
-            if parts.is_empty() {
-                "<empty>".to_string()
-            } else {
-                parts.join("; ")
-            }
-        }
-        Value::Null => "<null>".to_string(),
-        other => truncate_for_summary(&other.to_string()),
-    }
-}
-
-fn truncate_for_summary(text: &str) -> String {
-    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut out = String::new();
-    for ch in normalized.chars().take(160) {
-        out.push(ch);
-    }
-    if normalized.chars().count() > 160 {
-        out.push_str("...");
-    }
-    out
 }
 
 impl super::runner::ToolExec for WriteTool {
@@ -1371,6 +971,16 @@ mod tests {
         fs::write(session.join("stats.json"), "{}\n").unwrap();
         let artifacts = Arc::new(ArtifactManager::new(session.join("artifacts")));
         artifacts.ensure().unwrap();
+        let capability_snapshot = Arc::new(
+            crate::capabilities::CapabilitySnapshot::load_default(
+                &cwd,
+                &home,
+                "session-1",
+                "session-1",
+                &[],
+            )
+            .unwrap(),
+        );
         ToolContext {
             vfs_scope: crate::tools::vfs::VfsScope {
                 resource_session_id: "session-1".into(),
@@ -1386,6 +996,8 @@ mod tests {
             )),
             tool_config: ToolConfig::from_config(&crate::config::Config::default()),
             interrupt: Arc::new(AtomicBool::new(false)),
+            resource_router: Arc::new(crate::resources::ResourceRouter::with_builtin_handlers()),
+            capability_snapshot,
         }
     }
 
@@ -1451,6 +1063,65 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.to_string().contains("file too large for full Read"));
+    }
+
+    #[test]
+    fn unknown_resource_scheme_fails_closed() {
+        let ctx = temp_tool_context("unknown-resource");
+        let err = match ReadTool.execute(&json!({"path": "kb://policy/rust"}), &ctx) {
+            Ok(_) => panic!("unknown resource scheme should fail closed"),
+            Err(error) => error.to_string(),
+        };
+        assert!(err.contains("unknown resource scheme: kb"), "{err}");
+    }
+
+    #[test]
+    fn unknown_resource_scheme_does_not_enter_vfs() {
+        let mut ctx = temp_tool_context("unknown-resource-vfs");
+        ctx.read_only_fs = Some(Arc::new(VirtualReadOnlyFs));
+        let err = match ReadTool.execute(&json!({"path": "kb://policy/rust"}), &ctx) {
+            Ok(_) => panic!("unknown resource scheme should fail before VFS"),
+            Err(error) => error.to_string(),
+        };
+        assert!(err.contains("unknown resource scheme: kb"), "{err}");
+    }
+
+    #[test]
+    fn resource_router_does_not_change_local_read_snapshot() {
+        let ctx = temp_tool_context("router-local-snapshot");
+        fs::write(ctx.cwd.join("local.txt"), "alpha\nbeta\n").unwrap();
+
+        let outcome = ReadTool
+            .execute(&json!({"path": "local.txt"}), &ctx)
+            .unwrap();
+
+        assert!(
+            outcome.content.starts_with("@local.txt#"),
+            "{}",
+            outcome.content
+        );
+        assert!(outcome.content.contains("1:alpha"), "{}", outcome.content);
+        assert!(outcome.content.contains("2:beta"), "{}", outcome.content);
+        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
+    }
+
+    #[test]
+    fn resource_router_does_not_consume_selector_twice() {
+        let ctx = temp_tool_context("router-selector-once");
+        let record = ctx
+            .artifacts
+            .write_text("Bash", "full output", None, "one\ntwo\nthree\n")
+            .unwrap();
+
+        let outcome = ReadTool
+            .execute(
+                &json!({"path": format!("artifact://{}:2-2", record.id)}),
+                &ctx,
+            )
+            .unwrap();
+
+        assert_eq!(outcome.content, "two");
+        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
     }
 
     #[test]
@@ -1723,7 +1394,7 @@ mod tests {
     #[test]
     fn read_skill_resource_lists_skills() {
         let ctx = temp_tool_context("skill-list");
-        let result = read_skill_resource("skill://list", &ctx).unwrap();
+        let result = crate::resources::skill::read_skill_resource("skill://list", &ctx).unwrap();
         assert!(result.contains("# Skills"));
         assert!(result.contains("debugging"));
         let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
@@ -1732,7 +1403,8 @@ mod tests {
     #[test]
     fn read_skill_resource_returns_skill_content() {
         let ctx = temp_tool_context("skill-content");
-        let result = read_skill_resource("skill://debugging", &ctx).unwrap();
+        let result =
+            crate::resources::skill::read_skill_resource("skill://debugging", &ctx).unwrap();
         assert!(result.contains("# skill://debugging"));
         assert!(result.contains("Base directory: <built-in>"));
         assert!(result.contains("Phase 1"));
@@ -1741,7 +1413,7 @@ mod tests {
 
     #[test]
     fn read_skill_resource_prefers_filesystem_skill() {
-        let ctx = temp_tool_context("skill-local");
+        let mut ctx = temp_tool_context("skill-local");
         let skill_dir = ctx.cwd.join(".claude/skills/debugging");
         fs::create_dir_all(&skill_dir).unwrap();
         fs::write(
@@ -1749,8 +1421,19 @@ mod tests {
             "---\ndescription: \"Local debugging\"\n---\n\nUse local steps.",
         )
         .unwrap();
+        ctx.capability_snapshot = Arc::new(
+            crate::capabilities::CapabilitySnapshot::load_default(
+                &ctx.cwd,
+                &ctx.home,
+                "session-1",
+                "session-1",
+                &[],
+            )
+            .unwrap(),
+        );
 
-        let result = read_skill_resource("skill://debugging", &ctx).unwrap();
+        let result =
+            crate::resources::skill::read_skill_resource("skill://debugging", &ctx).unwrap();
 
         assert!(result.contains("Description: Local debugging"));
         assert!(result.contains("Use local steps."));
@@ -1759,9 +1442,82 @@ mod tests {
     }
 
     #[test]
+    fn skill_list_excludes_model_addressable() {
+        let mut ctx = temp_tool_context("skill-hidden-list");
+        let skill_dir = ctx.cwd.join("skills/hidden-review");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: \"Hidden review\"\nhide: true\n---\n\nUse hidden steps.",
+        )
+        .unwrap();
+        ctx.capability_snapshot = Arc::new(
+            crate::capabilities::CapabilitySnapshot::load_default(
+                &ctx.cwd,
+                &ctx.home,
+                "session-1",
+                "session-1",
+                &[],
+            )
+            .unwrap(),
+        );
+
+        let result = crate::resources::skill::read_skill_resource("skill://list", &ctx).unwrap();
+
+        assert!(!result.contains("hidden-review"), "{result}");
+        let hidden =
+            crate::resources::skill::read_skill_resource("skill://hidden-review", &ctx).unwrap();
+        assert!(hidden.contains("Use hidden steps."));
+        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
+    }
+
+    #[test]
+    fn host_only_skill_cannot_be_read() {
+        let mut ctx = temp_tool_context("skill-host-only");
+        let loaded = crate::capabilities::skills::LoadedSkill {
+            skill: crate::capabilities::skills::SkillCapability {
+                name: "host-secret".to_string(),
+                description: "Host secret".to_string(),
+                content: "secret body".to_string(),
+                base_dir: "<runtime>".to_string(),
+                disable_model_invocation: true,
+            },
+            source: crate::capabilities::SourceMeta {
+                provider_id: "test".to_string(),
+                provider_name: "test".to_string(),
+                level: crate::capabilities::SourceLevel::Runtime,
+                source_path: None,
+                display_label: Some("test".to_string()),
+            },
+            exposure: crate::capabilities::CapabilityExposure::HostOnly,
+            revision: "rev".to_string(),
+        };
+        let mut by_name = std::collections::BTreeMap::new();
+        by_name.insert("host-secret".to_string(), loaded.clone());
+        ctx.capability_snapshot = Arc::new(crate::capabilities::CapabilitySnapshot {
+            skills: crate::capabilities::SkillSnapshot {
+                all: vec![loaded],
+                by_name,
+                dependency_fingerprint: "deps".to_string(),
+                ..crate::capabilities::SkillSnapshot::default()
+            },
+            warnings: Vec::new(),
+        });
+
+        let err = crate::resources::skill::read_skill_resource("skill://host-secret", &ctx)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("host-only"), "{err}");
+        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
+    }
+
+    #[test]
     fn read_skill_resource_rejects_nested_path() {
         let ctx = temp_tool_context("skill-invalid");
-        assert!(read_skill_resource("skill://debugging/extra", &ctx).is_err());
+        assert!(
+            crate::resources::skill::read_skill_resource("skill://debugging/extra", &ctx).is_err()
+        );
         let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
     }
 
@@ -1784,7 +1540,8 @@ mod tests {
         )
         .unwrap();
 
-        let result = read_session_resource("session://current", &ctx).unwrap();
+        let result =
+            crate::resources::session::read_session_resource("session://current", &ctx).unwrap();
 
         assert!(result.contains("session_id: session-1"));
         assert!(result.contains("conversation_messages: 2"));
@@ -1808,7 +1565,9 @@ mod tests {
         )
         .unwrap();
 
-        let result = read_session_resource("session://current/messages", &ctx).unwrap();
+        let result =
+            crate::resources::session::read_session_resource("session://current/messages", &ctx)
+                .unwrap();
 
         assert!(result.contains("1 user: please read file"));
         assert!(result.contains("tool_use Read"));

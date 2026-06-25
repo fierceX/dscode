@@ -34,7 +34,7 @@ impl PrefixManager {
             let system_prompt = crate::prompt::Builder {
                 cwd: self.ctx.cwd.clone(),
                 home: self.ctx.home.clone(),
-                skills: self.ctx.config.skills.clone(),
+                skill_snapshot: Arc::new(self.ctx.capability_snapshot.skills.clone()),
                 summary_file: self.ctx.summary_path.clone(),
                 plan_file: self.ctx.plan_path.clone(),
                 plan_draft_file: self.ctx.plan_draft_path.clone(),
@@ -64,6 +64,11 @@ impl PrefixManager {
             *guard = Some(ImmutablePrefix::new(
                 system_prompt.clone(),
                 tools_json.clone(),
+                self.ctx
+                    .capability_snapshot
+                    .skills
+                    .dependency_fingerprint
+                    .clone(),
             ));
             return Ok((system_prompt, tools_json));
         }
@@ -119,6 +124,7 @@ mod tests {
         *ctx.immutable_prefix.lock().unwrap() = Some(ImmutablePrefix::new_with_fingerprint(
             "stale".into(),
             vec![serde_json::json!({"name":"Bash"})],
+            String::new(),
             "bad-fingerprint".into(),
         ));
         let manager = PrefixManager::new(ctx.clone());

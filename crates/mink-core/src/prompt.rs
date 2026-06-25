@@ -1,11 +1,13 @@
+use crate::capabilities::skills::SkillSnapshot;
 use anyhow::Result;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub struct Builder {
     pub cwd: PathBuf,
     pub home: PathBuf,
-    pub skills: Vec<String>,
+    pub skill_snapshot: Arc<SkillSnapshot>,
     pub summary_file: PathBuf,
     pub plan_file: PathBuf,
     pub plan_draft_file: PathBuf,
@@ -305,13 +307,15 @@ impl Builder {
     }
 
     fn build_skill_index_section(&self) -> Result<Option<String>> {
-        let lines: Vec<String> = crate::skills::list_available_skills(&self.cwd, &self.home)
-            .into_iter()
+        let lines: Vec<String> = self
+            .skill_snapshot
+            .discoverable
+            .iter()
             .map(|skill| {
-                if skill.description.is_empty() {
-                    format!("- {}", skill.name)
+                if skill.skill.description.is_empty() {
+                    format!("- {}", skill.skill.name)
                 } else {
-                    format!("- {}: {}", skill.name, skill.description)
+                    format!("- {}: {}", skill.skill.name, skill.skill.description)
                 }
             })
             .collect();
@@ -323,12 +327,11 @@ impl Builder {
     }
 
     fn build_selected_skills_section(&self) -> Result<Option<String>> {
-        if self.skills.is_empty() {
+        if self.skill_snapshot.selected.is_empty() {
             return Ok(None);
         }
         let mut sections = Vec::new();
-        for skill in &self.skills {
-            let resolved = crate::skills::resolve_skill(&self.cwd, &self.home, skill)?;
+        for resolved in &self.skill_snapshot.selected {
             let full = format!(
                 "Base directory: {}\n\n{}",
                 resolved.info.base_dir, resolved.content
@@ -463,13 +466,19 @@ mod tests {
         Builder {
             cwd: PathBuf::from("/tmp"),
             home: PathBuf::from("/home/user"),
-            skills: vec![],
+            skill_snapshot: Arc::new(crate::capabilities::SkillSnapshot::default()),
             summary_file: PathBuf::from("/tmp/summary.txt"),
             plan_file: PathBuf::from("/tmp/plan.md"),
             plan_draft_file: PathBuf::from("/tmp/plan.draft"),
             mission_file: None,
             mission_content: None,
         }
+    }
+
+    fn temp_root(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("mink-prompt-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        dir
     }
 
     struct EnvGuard {
@@ -609,6 +618,104 @@ mod tests {
     fn build_system_prompt_includes_todo_guidance() {
         let prompt = test_builder().build_system_prompt().unwrap();
         assert!(prompt.contains("TodoWrite"));
+    }
+
+    #[test]
+    fn selected_model_addressable_skill_enters_prompt() {
+        let root = temp_root("selected-hidden");
+        let home = root.join("home");
+        let cwd = root.join("workspace");
+        let skill_dir = cwd.join("skills/hidden-review");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: \"Hidden review\"\nhide: true\n---\n\nHidden body",
+        )
+        .unwrap();
+        let snapshot = crate::capabilities::build_default_skill_snapshot(
+            &cwd,
+            &home,
+            "session-1",
+            "session-1",
+            &["hidden-review".to_string()],
+        )
+        .unwrap();
+        let mut builder = test_builder();
+        builder.cwd = cwd;
+        builder.home = home;
+        builder.skill_snapshot = Arc::new(snapshot);
+
+        let prompt = builder.build_system_prompt().unwrap();
+
+        assert!(prompt.contains("<selected-skills>"));
+        assert!(prompt.contains("<skill name=\"hidden-review\">"));
+        assert!(prompt.contains("Hidden body"));
+        assert!(!prompt.contains("- hidden-review: Hidden review"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn prompt_and_read_skill_share_same_snapshot() {
+        let root = temp_root("shared-snapshot");
+        let home = root.join("home");
+        let cwd = root.join("workspace");
+        let skill_dir = cwd.join(".claude/skills/debugging");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: \"Snapshot debugging\"\n---\n\nSnapshot body",
+        )
+        .unwrap();
+        let snapshot = Arc::new(
+            crate::capabilities::CapabilitySnapshot::load_default(
+                &cwd,
+                &home,
+                "session-1",
+                "session-1",
+                &[],
+            )
+            .unwrap(),
+        );
+        let mut builder = test_builder();
+        builder.cwd = cwd.clone();
+        builder.home = home.clone();
+        builder.skill_snapshot = Arc::new(snapshot.skills.clone());
+        let prompt = builder.build_system_prompt().unwrap();
+
+        let session = home.join(".mink/projects/-workspace/session-1");
+        fs::create_dir_all(session.join("artifacts")).unwrap();
+        fs::write(session.join("conversation.jsonl"), "").unwrap();
+        fs::write(session.join("stats.json"), "{}\n").unwrap();
+        let artifacts = Arc::new(crate::session::artifacts::ArtifactManager::new(
+            session.join("artifacts"),
+        ));
+        artifacts.ensure().unwrap();
+        let ctx = crate::context::ToolContext {
+            vfs_scope: crate::tools::vfs::VfsScope {
+                resource_session_id: "session-1".into(),
+                agent_session_id: "session-1".into(),
+            },
+            read_only_fs: None,
+            cwd,
+            home,
+            store: Arc::new(crate::session::store::ConversationStore::new(
+                session.join("conversation.jsonl"),
+            )),
+            artifacts,
+            snapshots: Arc::new(std::sync::Mutex::new(
+                crate::tools::snapshot::FileSnapshotStore::default(),
+            )),
+            tool_config: crate::context::ToolConfig::from_config(&crate::config::Config::default()),
+            interrupt: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            resource_router: Arc::new(crate::resources::ResourceRouter::with_builtin_handlers()),
+            capability_snapshot: snapshot,
+        };
+        let read = crate::resources::skill::read_skill_resource("skill://debugging", &ctx).unwrap();
+
+        assert!(prompt.contains("Snapshot debugging"));
+        assert!(read.contains("Snapshot debugging"));
+        assert!(read.contains("Snapshot body"));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

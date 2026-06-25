@@ -1,5 +1,7 @@
 use crate::cancel::CancellationToken;
+use crate::capabilities::CapabilitySnapshot;
 use crate::config::{Config, OutputFormat, ToolApprovalMode, ToolApprovalPolicy, ToolDisableFlags};
+use crate::resources::ResourceRouter;
 use crate::session::artifacts::ArtifactManager;
 use crate::session::compaction::CompactionEngine;
 use crate::session::paths::SessionLayout;
@@ -96,6 +98,8 @@ pub struct ToolContext {
     pub interrupt: Arc<AtomicBool>,
     pub read_only_fs: Option<Arc<dyn ReadOnlyFileSystem>>,
     pub vfs_scope: VfsScope,
+    pub resource_router: Arc<ResourceRouter>,
+    pub capability_snapshot: Arc<CapabilitySnapshot>,
 }
 
 impl From<&AgentSharedContext> for ToolContext {
@@ -110,6 +114,8 @@ impl From<&AgentSharedContext> for ToolContext {
             interrupt: ctx.interrupt.clone(),
             read_only_fs: ctx.read_only_fs.clone(),
             vfs_scope: ctx.vfs_scope.clone(),
+            resource_router: ctx.resource_router.clone(),
+            capability_snapshot: ctx.capability_snapshot.clone(),
         }
     }
 }
@@ -133,6 +139,8 @@ pub struct AgentSharedContext {
     pub sub_stream_tx: Option<Arc<dyn SubAgentStreamSink>>,
     pub read_only_fs: Option<Arc<dyn ReadOnlyFileSystem>>,
     pub vfs_scope: VfsScope,
+    pub resource_router: Arc<ResourceRouter>,
+    pub capability_snapshot: Arc<CapabilitySnapshot>,
     pub tool_config: ToolConfig,
     pub events_path: PathBuf,
     pub summary_path: PathBuf,
