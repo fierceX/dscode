@@ -1,5 +1,60 @@
 # Changelog
 
+## v0.1.11 (2026-06-26)
+
+### Features
+
+- **Read-only VFS hooks** (`tools/vfs.rs`) — 可注入的同步只读文件系统后端，替换 Read/Glob/Grep 的本地文件访问
+  - `VfsScope` 携带 `resource_session_id` 和 `agent_session_id` 双 scope
+  - 虚拟 Read 不生成 snapshot，Edit/Write 始终操作本地文件
+  - `redb_vfs.rs` 示例：嵌入式 redb 数据库作为 VFS 后端
+- **Registered resource & capability views** (`resources/router.rs`)
+  - `ResourceRouter` 统一分发 `artifact://`、`skill://`、`rule://`、`session://` 资源
+  - `artifact://<id>` 读取被截断的工具输出全文
+  - `session://current` 查看当前 session 摘要、stats、messages、artifacts
+- **Capability snapshot 系统** (`capabilities/`) — 统一的 skills/rules/context files 快照
+  - SkillProvider trait，支持 runtime/filesystem/built-in 三级 skill 发现
+  - `skill_discovery_policy`：Defaults / RuntimeOnly / ExplicitOnly
+  - 内联 skill、SDK 协议 `inline_skills` 字段
+  - Context files（AGENTS.md / CLAUDE.md）和 Rule 资源读取
+- **Session title 自动生成** — 交互/TUI 模式下自动从首条用户输入生成 title
+  - 退出时 (`auto_set_session_title`) 从首条用户输入生成 title 并写回 session.json
+  - `--list-sessions` 时惰性补全 (`resolve_session_title`)：无 title 时从 `conversation.jsonl` 取首条 user 消息
+  - 只写 `title` 字段，其他字段不变
+- **Exit 消息显示 alias** — 退出提示优先读取 `session.json` 的 `alias` 字段
+- **CJK 对齐修复** — `--list-sessions` 的 ALIAS/TITLE/UPDATED 列用 `unicode-width` 计算显示宽度
+  - `unicode-width` 从 TUI 选装升级为非可选依赖
+- **Python SDK 增强** (`mink_agent/`) — `inline_skills`、`skill_discovery_policy`、`resource_handlers`、`session_layout` 选项
+- **SubAgent VFS scope 继承** — 子代理继承父 session 的 `resource_session_id`
+
+### TUI
+
+- **文件选择器优化** — 扫描深度统一为 1（直接子目录），隐藏文件过滤，评分算法重写
+  - 隐藏文件：查询不以 `.` 开头时不显示 `.git/` 等条目
+  - 精确匹配 (1200) > 前缀匹配 > basename 包含，目录优先排序
+  - `./` 和 `./.` 前缀正确处理隐藏文件发现
+  - Enter 确认选择并关闭、Tab 确认选择并保持打开（便于逐级进入目录）
+
+### API Changes
+
+- `AgentOptions` 新增 `with_session_layout`、`with_skill_providers`、`with_resource_handler`、`with_runtime_skill`、`with_skill_discovery_policy`、`with_selected_skills`、`with_first_prompt` 等方法
+- `SessionPolicy` 新增 `UseOrCreate` 变体
+- `SessionInfo` 新增 `session_ref`、`artifacts_dir`、`summary_path`、`usage_path`、`plan_path`、`plan_draft_path` 字段
+- `TurnOutcome` 新增 `session`、`usage`、`usage_records` 字段
+
+### Docs
+
+- 新增 `crates/mink-core/README.md`（库 API 文档）
+- `docs/ARCHITECTURE.md` 重写运行时分层、模块索引、执行流程
+- `docs/DESIGN.md` 新增 Session、VFS、Capability、SDK Protocol 章节
+- `docs/USAGE.md` 更新 session 布局、资源读取、SDK 协议、工具参考
+- `docs/tools.md` 更新 Read/Glob/Grep 参数说明、VFS 行为
+
+### Refactor
+
+- `src/skills.rs` → `src/capabilities/` 模块化拆分
+- `src/tools/file.rs` 重构：Read path selector 抽取为 `resources/selector.rs`
+
 ## v0.1.10 (2026-06-20)
 
 ### Features
