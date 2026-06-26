@@ -4,9 +4,7 @@ use std::path::{Component, Path, PathBuf};
 const MAX_CANDIDATES: usize = 20_000;
 const MAX_RESULTS: usize = 200;
 const DEFAULT_MAX_PARENT_DEPTH: usize = 3;
-const DEFAULT_SCAN_DEPTH: usize = 8;
-const EMPTY_QUERY_SCAN_DEPTH: usize = 3;
-const PARENT_PREFIX_SCAN_DEPTH: usize = 2;
+const DIRECT_CHILD_SCAN_DEPTH: usize = 1;
 
 #[derive(Clone, Debug)]
 pub(crate) struct FilePickerPolicy {
@@ -266,11 +264,13 @@ struct ScanKey {
     root: PathBuf,
     display_prefix: String,
     max_depth: usize,
+    include_hidden: bool,
 }
 
 struct ScanTarget {
     key: ScanKey,
     max_depth: usize,
+    include_hidden: bool,
 }
 
 fn scan_candidates_for_query(
@@ -292,6 +292,7 @@ fn scan_candidates_for_target(
         &target.key.root,
         &target.key.display_prefix,
         target.max_depth,
+        target.include_hidden,
         policy,
     );
     candidates
@@ -308,7 +309,9 @@ fn scan_key_for_query(query: &str, policy: &FilePickerPolicy) -> Option<ScanTarg
     }
     let parent_prefix = "../".repeat(parent_depth);
     let rest = query.strip_prefix(&parent_prefix).unwrap_or(query);
-    let (dir_part, _) = split_query_dir(rest);
+    let (current_prefix, rest) = leading_current_prefix(rest);
+    let (dir_part, leaf) = split_query_dir(rest);
+    let include_hidden = leaf.starts_with('.');
     for segment in dir_part.split('/').filter(|segment| !segment.is_empty()) {
         if segment == "." || segment == ".." {
             return None;
@@ -319,20 +322,15 @@ fn scan_key_for_query(query: &str, policy: &FilePickerPolicy) -> Option<ScanTarg
     if !root.is_dir() || !policy.allows_path(&root) {
         return None;
     }
-    let max_depth = if parent_depth > 0 && dir_part.is_empty() {
-        PARENT_PREFIX_SCAN_DEPTH
-    } else if dir_part.is_empty() {
-        EMPTY_QUERY_SCAN_DEPTH
-    } else {
-        DEFAULT_SCAN_DEPTH.saturating_sub(1).max(1)
-    };
     Some(ScanTarget {
         key: ScanKey {
             root,
-            display_prefix: format!("{parent_prefix}{dir_part}"),
-            max_depth,
+            display_prefix: format!("{parent_prefix}{current_prefix}{dir_part}"),
+            max_depth: DIRECT_CHILD_SCAN_DEPTH,
+            include_hidden,
         },
-        max_depth,
+        max_depth: DIRECT_CHILD_SCAN_DEPTH,
+        include_hidden,
     })
 }
 
@@ -344,6 +342,14 @@ fn leading_parent_depth(query: &str) -> usize {
         rest = next;
     }
     depth
+}
+
+fn leading_current_prefix(query_without_parent_prefix: &str) -> (&str, &str) {
+    if let Some(rest) = query_without_parent_prefix.strip_prefix("./") {
+        ("./", rest)
+    } else {
+        ("", query_without_parent_prefix)
+    }
 }
 
 fn split_query_dir(query_without_parent_prefix: &str) -> (&str, &str) {
@@ -363,6 +369,7 @@ fn scan_candidates_with_prefix(
     root: &Path,
     display_prefix: &str,
     max_depth: usize,
+    include_hidden: bool,
     policy: &FilePickerPolicy,
 ) -> Vec<FilePickCandidate> {
     let allowed_below = policy.allowed_roots_below(root);
@@ -371,6 +378,7 @@ fn scan_candidates_with_prefix(
     }
     let walker = ignore::WalkBuilder::new(root)
         .standard_filters(true)
+        .hidden(!include_hidden)
         .max_depth(Some(max_depth))
         .build();
     let mut out = Vec::new();
@@ -479,12 +487,14 @@ fn normalize_lexically(path: PathBuf) -> PathBuf {
 }
 
 fn filter_candidates(candidates: &[FilePickCandidate], raw_query: &str) -> Vec<FilePickItem> {
-    let query = normalize_tui_input(raw_query)
-        .trim_start_matches("./")
-        .to_ascii_lowercase();
+    let query = filter_query_leaf(raw_query);
     let mut items = Vec::new();
     for candidate in candidates {
-        let Some(score) = score_path(&candidate.path, &query, candidate.is_dir) else {
+        let basename = path_basename(&candidate.path);
+        if !query.starts_with('.') && basename.starts_with('.') {
+            continue;
+        }
+        let Some(score) = score_path(&candidate.path, &query) else {
             continue;
         };
         items.push(FilePickItem {
@@ -496,36 +506,48 @@ fn filter_candidates(candidates: &[FilePickCandidate], raw_query: &str) -> Vec<F
     items.sort_by(|a, b| {
         b.score
             .cmp(&a.score)
-            .then_with(|| a.path.len().cmp(&b.path.len()))
+            .then_with(|| b.is_dir.cmp(&a.is_dir))
             .then_with(|| a.path.cmp(&b.path))
     });
     items.truncate(MAX_RESULTS);
     items
 }
 
-fn score_path(path: &str, query: &str, is_dir: bool) -> Option<i64> {
+fn filter_query_leaf(raw_query: &str) -> String {
+    let normalized = normalize_tui_input(raw_query);
+    let parent_prefix = "../".repeat(leading_parent_depth(&normalized));
+    let rest = normalized
+        .strip_prefix(&parent_prefix)
+        .unwrap_or(normalized.as_str());
+    let (_, rest) = leading_current_prefix(rest);
+    let (_, leaf) = split_query_dir(rest);
+    leaf.to_ascii_lowercase()
+}
+
+fn score_path(path: &str, query: &str) -> Option<i64> {
     if query.is_empty() {
-        return Some(if is_dir { 5 } else { 10 });
+        return Some(0);
     }
     let path_l = path.to_ascii_lowercase();
-    let basename = path_l
-        .rsplit('/')
-        .find(|part| !part.is_empty())
-        .unwrap_or(&path_l);
-    let mut score = if basename.starts_with(query) {
+    let basename = path_basename(&path_l);
+    let score = if basename == query {
+        1200
+    } else if basename.starts_with(query) {
         1000
-    } else if path_l.split('/').any(|segment| segment.starts_with(query)) {
-        800
-    } else if path_l.contains(query) {
-        500
+    } else if basename.contains(query) {
+        700
     } else {
-        fuzzy_score(&path_l, query)?
+        fuzzy_score(basename, query)?
     };
-    if !is_dir {
-        score += 20;
-    }
-    score -= path_l.len().min(200) as i64;
     Some(score)
+}
+
+fn path_basename(path: &str) -> &str {
+    path.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .filter(|part| !part.is_empty())
+        .unwrap_or(path)
 }
 
 fn fuzzy_score(path: &str, query: &str) -> Option<i64> {
@@ -654,4 +676,153 @@ fn prev_char_boundary(s: &str, pos: usize) -> usize {
         prev -= 1;
     }
     prev
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT_TEMP_ID: AtomicUsize = AtomicUsize::new(0);
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let id = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "mink-file-picker-{name}-{}-{id}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn current_dir_prefix_keeps_dot_slash_in_candidates() {
+        let root = temp_dir("dot-slash");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+        let policy = FilePickerPolicy::restricted_for_tests(root.clone(), vec![root.clone()], 3);
+
+        let (_, candidates) = scan_candidates_for_query("./", &policy);
+
+        assert!(candidates.iter().any(|item| item.path == "./src/"));
+        assert!(!candidates.iter().any(|item| item.path == "./src/main.rs"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn current_dir_prefix_filters_current_level_candidates() {
+        let root = temp_dir("dot-slash-filter");
+        fs::create_dir_all(root.join("src/bin")).unwrap();
+        fs::write(root.join("src/bin/main.rs"), "fn main() {}\n").unwrap();
+        fs::write(root.join("src/lib.rs"), "pub fn lib() {}\n").unwrap();
+        let policy = FilePickerPolicy::restricted_for_tests(root.clone(), vec![root.clone()], 3);
+
+        let (_, candidates) = scan_candidates_for_query("./src", &policy);
+
+        assert!(candidates.iter().any(|item| item.path == "./src/"));
+        assert!(!candidates.iter().any(|item| item.path == "./src/lib.rs"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn directory_prefix_lists_only_direct_children() {
+        let root = temp_dir("direct-children");
+        fs::create_dir_all(root.join("src/bin")).unwrap();
+        fs::write(root.join("src/bin/main.rs"), "fn main() {}\n").unwrap();
+        fs::write(root.join("src/lib.rs"), "pub fn lib() {}\n").unwrap();
+        let policy = FilePickerPolicy::restricted_for_tests(root.clone(), vec![root.clone()], 3);
+
+        let (_, candidates) = scan_candidates_for_query("./src/", &policy);
+
+        assert!(candidates.iter().any(|item| item.path == "./src/bin/"));
+        assert!(candidates.iter().any(|item| item.path == "./src/lib.rs"));
+        assert!(
+            !candidates
+                .iter()
+                .any(|item| item.path == "./src/bin/main.rs")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn filtering_matches_leaf_and_sorts_directories_first() {
+        let candidates = vec![
+            FilePickCandidate {
+                path: "src/test.rs".into(),
+                is_dir: false,
+            },
+            FilePickCandidate {
+                path: "src/tools/".into(),
+                is_dir: true,
+            },
+            FilePickCandidate {
+                path: "src/tui/".into(),
+                is_dir: true,
+            },
+            FilePickCandidate {
+                path: "src/runtime.rs".into(),
+                is_dir: false,
+            },
+        ];
+
+        let items = filter_candidates(&candidates, "src/t");
+
+        let paths: Vec<&str> = items.iter().map(|item| item.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec!["src/tools/", "src/tui/", "src/test.rs", "src/runtime.rs"]
+        );
+    }
+
+    #[test]
+    fn current_dir_prefix_hides_dot_entries_until_dot_is_typed() {
+        let candidates = vec![
+            FilePickCandidate {
+                path: "./src/".into(),
+                is_dir: true,
+            },
+            FilePickCandidate {
+                path: "./.../".into(),
+                is_dir: true,
+            },
+            FilePickCandidate {
+                path: "./.github/".into(),
+                is_dir: true,
+            },
+        ];
+
+        let visible = filter_candidates(&candidates, "./");
+        let visible_paths: Vec<&str> = visible.iter().map(|item| item.path.as_str()).collect();
+        assert_eq!(visible_paths, vec!["./src/"]);
+
+        let hidden = filter_candidates(&candidates, "./.");
+        let hidden_paths: Vec<&str> = hidden.iter().map(|item| item.path.as_str()).collect();
+        assert!(hidden_paths.contains(&"./.../"));
+        assert!(hidden_paths.contains(&"./.github/"));
+    }
+
+    #[test]
+    fn dot_query_rescans_with_hidden_directories_enabled() {
+        let root = temp_dir("hidden-scan");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::create_dir_all(root.join("...")).unwrap();
+        let policy = FilePickerPolicy::restricted_for_tests(root.clone(), vec![root.clone()], 3);
+
+        let visible = FilePickerState::open("./", "./".len(), &policy);
+        let visible_paths: Vec<&str> = visible
+            .items
+            .iter()
+            .map(|item| item.path.as_str())
+            .collect();
+        assert_eq!(visible_paths, vec!["./src/"]);
+
+        let hidden = FilePickerState::open("./.", "./.".len(), &policy);
+        let hidden_paths: Vec<&str> = hidden.items.iter().map(|item| item.path.as_str()).collect();
+        assert!(hidden_paths.contains(&"./.../"));
+        assert!(hidden_paths.contains(&"./.git/"));
+        let _ = fs::remove_dir_all(root);
+    }
 }

@@ -197,15 +197,19 @@ fn handle_overlay_key(key: &crossterm::event::KeyEvent, state: &mut TuiState) ->
             picker.move_selection(8, 8);
             true
         }
-        (KeyModifiers::NONE, KeyCode::Enter) | (KeyModifiers::NONE, KeyCode::Tab) => {
-            accept_file_picker(state);
+        (KeyModifiers::NONE, KeyCode::Enter) => {
+            accept_file_picker(state, false);
+            true
+        }
+        (KeyModifiers::NONE, KeyCode::Tab) => {
+            accept_file_picker(state, true);
             true
         }
         _ => false,
     }
 }
 
-fn accept_file_picker(state: &mut TuiState) {
+fn accept_file_picker(state: &mut TuiState, keep_open_for_dirs: bool) {
     let Some(ActiveOverlay::FilePicker(picker)) = state.overlay.take() else {
         return;
     };
@@ -220,7 +224,7 @@ fn accept_file_picker(state: &mut TuiState) {
     {
         state.input.buf.replace_range(start..end, &path);
         state.input.cursor = start + path.len();
-        if path.ends_with('/') {
+        if keep_open_for_dirs && path.ends_with('/') {
             state.overlay = Some(ActiveOverlay::FilePicker(FilePickerState::open(
                 &state.input.buf,
                 state.input.cursor,

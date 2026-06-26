@@ -344,6 +344,14 @@ pub fn parse_args(args: Vec<String>) -> Result<Config> {
                     i += 1;
                 }
             }
+            arg if arg.starts_with("--session=") => {
+                let value = arg.strip_prefix("--session=").unwrap_or_default().trim();
+                if value.is_empty() {
+                    bail!("missing value for --session");
+                }
+                cfg.session_id = value.to_string();
+                i += 1;
+            }
             "--continue" => {
                 cfg.continue_session = true;
                 i += 1;
@@ -977,6 +985,18 @@ mod tests {
         assert!(cfg.verbose);
         assert!(cfg.interactive);
         assert_eq!(cfg.output_format, OutputFormat::StreamJson);
+    }
+
+    #[test]
+    fn parse_args_session_accepts_separate_and_equals_forms() {
+        let separate = parse_args(vec!["--session".into(), "feature-x".into()]).unwrap();
+        assert_eq!(separate.session_id, "feature-x");
+
+        let equals = parse_args(vec!["--session=feature-x".into()]).unwrap();
+        assert_eq!(equals.session_id, "feature-x");
+
+        let empty = parse_args(vec!["--session=".into()]).unwrap_err();
+        assert!(empty.to_string().contains("missing value for --session"));
     }
 
     #[test]

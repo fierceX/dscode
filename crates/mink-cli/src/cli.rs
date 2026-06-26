@@ -216,18 +216,88 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
         process_exit_code = exit_code_from_turn(outcome.status);
     }
 
+    // Auto-generate session title from first user input if missing
+    auto_set_session_title(&session).await;
+
     runtime.shutdown().await?;
 
     if !session.session_id.is_empty() {
+        let alias_label = read_session_alias(&session).await;
+        let label = alias_label
+            .as_deref()
+            .unwrap_or(&session.session_ref);
         eprintln!(
             "\x1b[90mResume with: --session {}  or  --continue\x1b[0m",
-            session.session_ref
+            label
         );
     }
 
     Ok(CliExit {
         code: process_exit_code,
     })
+}
+
+async fn read_session_alias(session: &crate::runtime::SessionInfo) -> Option<String> {
+    let metadata_path = session.events_path.with_file_name("session.json");
+    let text = tokio::fs::read_to_string(&metadata_path).await.ok()?;
+    let value: serde_json::Value = serde_json::from_str(text.trim()).ok()?;
+    value.get("alias")?.as_str().map(|s| s.to_string())
+}
+
+/// After all turns complete, auto-generate a session title from the first user
+/// input if the session.json doesn't already have a title. This ensures
+/// interactive/TUI sessions show a meaningful name in `--list-sessions`.
+async fn auto_set_session_title(session: &crate::runtime::SessionInfo) {
+    let metadata_path = session.events_path.with_file_name("session.json");
+    let metadata_text = match tokio::fs::read_to_string(&metadata_path).await {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+    let mut metadata: serde_json::Value = match serde_json::from_str(&metadata_text) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    // Already has a non-empty title
+    if metadata
+        .get("title")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.is_empty())
+    {
+        return;
+    }
+    let conversation_path = &session.conversation_path;
+    let conv_text = match tokio::fs::read_to_string(conversation_path).await {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+    for line in conv_text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let msg: serde_json::Value = match serde_json::from_str(line) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if msg.get("role").and_then(|v| v.as_str()) == Some("user") {
+            let content = match msg.get("content").and_then(|v| v.as_str()) {
+                Some(c) => c,
+                None => continue,
+            };
+            let title = crate::session::metadata::title_from_prompt(content);
+            if let Some(title) = title {
+                metadata["title"] = serde_json::Value::String(title);
+                let now = time::OffsetDateTime::now_utc();
+                let fmt = time::format_description::well_known::Rfc3339;
+                let updated_at = now.format(&fmt).unwrap_or_default();
+                metadata["updated_at"] = serde_json::Value::String(updated_at);
+                if let Ok(text) = serde_json::to_string_pretty(&metadata) {
+                    let _ = tokio::fs::write(&metadata_path, format!("{text}\n")).await;
+                }
+            }
+            break;
+        }
+    }
 }
 
 fn reexec_if_sandbox(cfg: &crate::config::Config) {
@@ -460,17 +530,20 @@ async fn list_sessions(home: &Path, cwd: &Path) -> Result<()> {
         return Ok(());
     }
     rows.sort_by(|a, b| b.modified.cmp(&a.modified));
-    println!("{:<20} {:<32} {:<16} ID", "ALIAS", "TITLE", "UPDATED");
+    println!(
+        "{} {} {} ID",
+        pad_display("ALIAS", 20),
+        pad_display("TITLE", 32),
+        pad_display("UPDATED", 16),
+    );
+    let alias_width = 20;
+    let title_width = 32;
+    let updated_width = 16;
     for row in rows {
         let alias = row.metadata.alias.as_deref().unwrap_or("-");
-        let title = row
-            .metadata
-            .title
-            .as_deref()
-            .or(row.metadata.summary.as_deref())
-            .unwrap_or("-");
-        let alias = truncate_chars(alias, 20);
-        let title = truncate_chars(title, 32);
+        let title = resolve_session_title(&row.path, &row.metadata).await;
+        let alias = truncate_display(alias, alias_width);
+        let title = truncate_display(&title, title_width);
         let dt: time::OffsetDateTime = row.modified.into();
         let formatted = {
             use time::macros::format_description;
@@ -479,19 +552,107 @@ async fn list_sessions(home: &Path, cwd: &Path) -> Result<()> {
             dt.format(FMT)
                 .unwrap_or_else(|_| format!("{:?}", row.modified))
         };
-        println!("{:<20} {:<32} {:<16} {}", alias, title, formatted, row.id);
+        println!(
+            "{} {} {} {}",
+            pad_display(&alias, alias_width),
+            pad_display(&title, title_width),
+            pad_display(&formatted, updated_width),
+            row.id,
+        );
     }
     Ok(())
 }
 
-fn truncate_chars(value: &str, max: usize) -> String {
-    if value.chars().count() <= max {
-        return value.to_string();
+/// Return the session title, lazily generating it from the first user
+/// conversation turn when session.json has no title. If generated, only the
+/// `title` field is written back to session.json — all other fields are
+/// preserved untouched.
+async fn resolve_session_title(session_dir: &Path, meta: &crate::session::metadata::SessionMetadata) -> String {
+    // Fast path: title already in metadata
+    if let Some(title) = meta.title.as_deref().filter(|t| !t.is_empty()) {
+        return title.to_string();
     }
-    let keep = max.saturating_sub(3);
-    let mut out: String = value.chars().take(keep).collect();
-    out.push_str("...");
+    if let Some(summary) = meta.summary.as_deref().filter(|s| !s.is_empty()) {
+        return summary.to_string();
+    }
+    // Lazy path: generate title from first user input
+    let metadata_path = session_dir.join("session.json");
+    let metadata_text = match tokio::fs::read_to_string(&metadata_path).await {
+        Ok(t) => t,
+        Err(_) => return "-".to_string(),
+    };
+    let mut value: serde_json::Value = match serde_json::from_str(&metadata_text) {
+        Ok(v) => v,
+        Err(_) => return "-".to_string(),
+    };
+    // Double-check title in the raw JSON (may differ from cached struct)
+    if let Some(t) = value.get("title").and_then(|v| v.as_str()) {
+        if !t.is_empty() {
+            return t.to_string();
+        }
+    }
+    let conv_path = session_dir.join("conversation.jsonl");
+    let conv_text = match tokio::fs::read_to_string(&conv_path).await {
+        Ok(t) => t,
+        Err(_) => return "-".to_string(),
+    };
+    let title = conv_text
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() {
+                return None;
+            }
+            let msg: serde_json::Value = serde_json::from_str(line).ok()?;
+            if msg.get("role")?.as_str()? != "user" {
+                return None;
+            }
+            let content = msg.get("content")?.as_str()?;
+            crate::session::metadata::title_from_prompt(content)
+        })
+        .next();
+    let title = match title {
+        Some(t) => t,
+        None => return "-".to_string(),
+    };
+    // Write only the title field back, preserving all others
+    value["title"] = serde_json::Value::String(title.clone());
+    if let Ok(text) = serde_json::to_string_pretty(&value) {
+        let _ = tokio::fs::write(&metadata_path, format!("{text}\n")).await;
+    }
+    title
+}
+
+fn truncate_display(s: &str, max_width: usize) -> String {
+    use unicode_width::UnicodeWidthStr;
+    if UnicodeWidthStr::width(s) <= max_width {
+        return s.to_string();
+    }
+    let keep = max_width.saturating_sub(3);
+    let mut out = String::new();
+    let mut w = 0usize;
+    for c in s.chars() {
+        let cw = UnicodeWidthStr::width(c.to_string().as_str());
+        if w + cw > keep {
+            out.push_str("...");
+            break;
+        }
+        out.push(c);
+        w += cw;
+    }
     out
+}
+
+fn pad_display(s: &str, width: usize) -> String {
+    use unicode_width::UnicodeWidthStr;
+    let w = UnicodeWidthStr::width(s);
+    if w >= width {
+        s.to_string()
+    } else {
+        let mut result = s.to_string();
+        result.push_str(&" ".repeat(width - w));
+        result
+    }
 }
 
 fn print_usage() {

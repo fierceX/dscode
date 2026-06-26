@@ -1365,6 +1365,62 @@ mod tests {
     }
 
     #[test]
+    fn file_picker_enter_accepts_directory_and_closes_overlay() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = TuiState::default();
+        state.input.buf = "Read do".into();
+        state.input.cursor = state.input.buf.len();
+        state.overlay = Some(ActiveOverlay::FilePicker(
+            FilePickerState::open_with_candidates(
+                &state.input.buf,
+                state.input.cursor,
+                vec![FilePickCandidate {
+                    path: "docs".into(),
+                    is_dir: true,
+                }],
+            ),
+        ));
+
+        assert!(!handle_event(
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &mut state,
+            &tx,
+        ));
+
+        assert_eq!(state.input.buf, "Read docs/");
+        assert_eq!(state.input.cursor, state.input.buf.len());
+        assert!(state.overlay.is_none());
+    }
+
+    #[test]
+    fn file_picker_tab_enters_directory_and_keeps_overlay_open() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = TuiState::default();
+        state.input.buf = "Read do".into();
+        state.input.cursor = state.input.buf.len();
+        state.overlay = Some(ActiveOverlay::FilePicker(
+            FilePickerState::open_with_candidates(
+                &state.input.buf,
+                state.input.cursor,
+                vec![FilePickCandidate {
+                    path: "docs".into(),
+                    is_dir: true,
+                }],
+            ),
+        ));
+
+        assert!(!handle_event(
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            &mut state,
+            &tx,
+        ));
+
+        assert_eq!(state.input.buf, "Read docs/");
+        assert_eq!(state.input.cursor, state.input.buf.len());
+        assert!(matches!(state.overlay, Some(ActiveOverlay::FilePicker(_))));
+    }
+
+    #[test]
     fn file_picker_accept_replaces_entire_current_path_token() {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut state = TuiState::default();

@@ -247,6 +247,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn build_runtime_reuses_project_scoped_session_by_alias() {
+        let home = unique_temp_dir("alias-home");
+        let cwd = unique_temp_dir("alias-cwd");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+        let cfg = Config {
+            session_id: "feature x".into(),
+            ..Config::default()
+        };
+
+        let first = build_runtime(AgentRuntimeConfig::from_config(
+            cfg.clone(),
+            home.clone(),
+            cwd.clone(),
+        ))
+        .await
+        .unwrap();
+        let first_session = first.session_info().clone();
+        first.shutdown().await.unwrap();
+
+        let metadata: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(first_session.events_path.with_file_name("session.json"))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(metadata["alias"], "feature-x");
+
+        let second = build_runtime(AgentRuntimeConfig::from_config(
+            cfg,
+            home.clone(),
+            cwd.clone(),
+        ))
+        .await
+        .unwrap();
+        let second_session = second.session_info().clone();
+
+        assert_eq!(second_session.session_id, first_session.session_id);
+        assert!(!second_session.is_new);
+
+        second.shutdown().await.unwrap();
+        let _ = tokio::fs::remove_dir_all(home).await;
+        let _ = tokio::fs::remove_dir_all(cwd).await;
+    }
+
+    #[tokio::test]
     async fn build_runtime_sets_vfs_resource_and_agent_sessions() {
         let home = unique_temp_dir("vfs-scope-home");
         let cwd = unique_temp_dir("vfs-scope-cwd");
