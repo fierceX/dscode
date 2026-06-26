@@ -27,6 +27,10 @@ pub async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRuntime> {
         event_sink,
         sub_stream_tx,
         read_only_fs,
+        resource_handlers,
+        skill_providers,
+        runtime_skills,
+        skill_discovery_policy,
         resource_session_id,
         #[cfg(test)]
         llm_override,
@@ -57,6 +61,10 @@ pub async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRuntime> {
         usage_journal: None,
         read_only_fs,
         resource_session_id,
+        resource_handlers,
+        skill_providers,
+        runtime_skills,
+        skill_discovery_policy,
         resource_router: None,
         capability_snapshot: None,
     })
@@ -183,8 +191,16 @@ async fn resolve_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capabilities::skills::{LoadContext, LoadedSkill, SkillCapability, SkillProvider};
+    use crate::capabilities::{CapabilityExposure, SourceLevel, SourceMeta};
     use crate::config::Config;
-    use crate::runtime::{AgentEvent, EventSink};
+    use crate::resources::{
+        Resource, ResourceContentType, ResourceHandler, ResourceMetadata, ResourceRequest,
+    };
+    use crate::runtime::{AgentEvent, AgentOptions, EventSink, SkillDiscoveryPolicy};
+    use crate::runtime::{
+        runtime_skills_from_sdk_request, skill_discovery_policy_from_sdk_request,
+    };
     use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -343,6 +359,339 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(cwd).await;
     }
 
+    #[tokio::test]
+    async fn runtime_skill_can_be_read() {
+        let home = unique_temp_dir("runtime-skill-read-home");
+        let cwd = unique_temp_dir("runtime-skill-read-cwd");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+        let runtime_config = AgentOptions::new(&home, &cwd)
+            .with_runtime_skill_content("runtime-guide", "Runtime guide", "Runtime body")
+            .into_runtime_config();
+
+        let runtime = build_runtime(runtime_config).await.unwrap();
+        let tool_ctx = crate::context::ToolContext::from(&*runtime.ctx);
+        let content =
+            crate::resources::skill::read_skill_resource("skill://runtime-guide", &tool_ctx)
+                .unwrap();
+
+        assert!(content.contains("# skill://runtime-guide"));
+        assert!(content.contains("Runtime body"));
+
+        runtime.shutdown().await.unwrap();
+        let _ = tokio::fs::remove_dir_all(home).await;
+        let _ = tokio::fs::remove_dir_all(cwd).await;
+    }
+
+    #[tokio::test]
+    async fn runtime_skill_can_be_selected() {
+        let home = unique_temp_dir("runtime-skill-selected-home");
+        let cwd = unique_temp_dir("runtime-skill-selected-cwd");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+        let runtime_config = AgentOptions::new(&home, &cwd)
+            .with_runtime_skill_content("runtime-guide", "Runtime guide", "Runtime body")
+            .with_selected_skills(["runtime-guide"])
+            .into_runtime_config();
+
+        let runtime = build_runtime(runtime_config).await.unwrap();
+
+        assert_eq!(runtime.ctx.capability_snapshot.skills.selected.len(), 1);
+        assert_eq!(
+            runtime.ctx.capability_snapshot.skills.selected[0].info.name,
+            "runtime-guide"
+        );
+
+        runtime.shutdown().await.unwrap();
+        let _ = tokio::fs::remove_dir_all(home).await;
+        let _ = tokio::fs::remove_dir_all(cwd).await;
+    }
+
+    #[tokio::test]
+    async fn sdk_inline_skill_can_be_selected_and_read() {
+        let home = unique_temp_dir("sdk-inline-skill-home");
+        let cwd = unique_temp_dir("sdk-inline-skill-cwd");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+        let req = crate::sdk_protocol::parse_agent_jsonl_request(
+            r#"{
+                "prompt":"hi",
+                "options":{
+                    "skills":["company-policy"],
+                    "inline_skills":[{
+                        "name":"company-policy",
+                        "description":"Company policy",
+                        "content":"private policy",
+                        "exposure":"model_addressable"
+                    }],
+                    "skill_discovery_policy":"runtime_only"
+                }
+            }"#,
+        )
+        .unwrap();
+        crate::sdk_protocol::validate_sdk_request(&req).unwrap();
+        let mut runtime_config = AgentOptions::new(&home, &cwd).into_runtime_config();
+        runtime_config.config.skills = req.options.skills.clone().unwrap();
+        runtime_config.runtime_skills = runtime_skills_from_sdk_request(&req);
+        runtime_config.skill_discovery_policy =
+            skill_discovery_policy_from_sdk_request(&req).unwrap();
+
+        let runtime = build_runtime(runtime_config).await.unwrap();
+        let tool_ctx = crate::context::ToolContext::from(&*runtime.ctx);
+        let content =
+            crate::resources::skill::read_skill_resource("skill://company-policy", &tool_ctx)
+                .unwrap();
+
+        assert!(content.contains("private policy"));
+        assert_eq!(runtime.ctx.capability_snapshot.skills.selected.len(), 1);
+        assert!(
+            !runtime
+                .ctx
+                .capability_snapshot
+                .skills
+                .discoverable
+                .iter()
+                .any(|skill| skill.skill.name == "company-policy")
+        );
+        assert!(
+            !runtime
+                .ctx
+                .capability_snapshot
+                .skills
+                .by_name
+                .contains_key("debugging")
+        );
+
+        runtime.shutdown().await.unwrap();
+        let _ = tokio::fs::remove_dir_all(home).await;
+        let _ = tokio::fs::remove_dir_all(cwd).await;
+    }
+
+    #[tokio::test]
+    async fn runtime_only_policy_does_not_load_filesystem_or_builtin() {
+        let home = unique_temp_dir("runtime-only-home");
+        let cwd = unique_temp_dir("runtime-only-cwd");
+        tokio::fs::create_dir_all(cwd.join("skills/local-only"))
+            .await
+            .unwrap();
+        tokio::fs::write(
+            cwd.join("skills/local-only/SKILL.md"),
+            "---\ndescription: \"Local only\"\n---\n\nlocal body",
+        )
+        .await
+        .unwrap();
+        let runtime_config = AgentOptions::new(&home, &cwd)
+            .with_runtime_skill_content("runtime-only", "Runtime only", "runtime body")
+            .with_skill_discovery_policy(SkillDiscoveryPolicy::RuntimeOnly)
+            .into_runtime_config();
+
+        let runtime = build_runtime(runtime_config).await.unwrap();
+        let snapshot = &runtime.ctx.capability_snapshot.skills;
+
+        assert!(snapshot.by_name.contains_key("runtime-only"));
+        assert!(!snapshot.by_name.contains_key("local-only"));
+        assert!(!snapshot.by_name.contains_key("debugging"));
+
+        runtime.shutdown().await.unwrap();
+        let _ = tokio::fs::remove_dir_all(home).await;
+        let _ = tokio::fs::remove_dir_all(cwd).await;
+    }
+
+    struct RuntimeTestSkillProvider;
+
+    impl SkillProvider for RuntimeTestSkillProvider {
+        fn id(&self) -> &'static str {
+            "runtime-test-skills"
+        }
+
+        fn display_name(&self) -> &'static str {
+            "runtime test skills"
+        }
+
+        fn priority(&self) -> i32 {
+            250
+        }
+
+        fn load_skills(&self, _ctx: &LoadContext<'_>) -> Result<Vec<LoadedSkill>> {
+            Ok(vec![LoadedSkill {
+                skill: SkillCapability {
+                    name: "provider-guide".to_string(),
+                    description: "Provider guide".to_string(),
+                    content: "provider body".to_string(),
+                    base_dir: "<provider>".to_string(),
+                    disable_model_invocation: false,
+                },
+                source: SourceMeta {
+                    provider_id: self.id().to_string(),
+                    provider_name: self.display_name().to_string(),
+                    level: SourceLevel::Runtime,
+                    source_path: None,
+                    display_label: Some("provider".to_string()),
+                },
+                exposure: CapabilityExposure::ModelDiscoverable,
+                revision: "provider-rev-1".to_string(),
+            }])
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_skill_provider_can_be_read() {
+        let home = unique_temp_dir("explicit-provider-home");
+        let cwd = unique_temp_dir("explicit-provider-cwd");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+        let runtime_config = AgentOptions::new(&home, &cwd)
+            .with_skill_discovery_policy(SkillDiscoveryPolicy::ExplicitOnly)
+            .with_skill_provider(Arc::new(RuntimeTestSkillProvider))
+            .into_runtime_config();
+
+        let runtime = build_runtime(runtime_config).await.unwrap();
+        let tool_ctx = crate::context::ToolContext::from(&*runtime.ctx);
+        let content =
+            crate::resources::skill::read_skill_resource("skill://provider-guide", &tool_ctx)
+                .unwrap();
+
+        assert!(content.contains("provider body"));
+        assert!(
+            !runtime
+                .ctx
+                .capability_snapshot
+                .skills
+                .by_name
+                .contains_key("debugging")
+        );
+
+        runtime.shutdown().await.unwrap();
+        let _ = tokio::fs::remove_dir_all(home).await;
+        let _ = tokio::fs::remove_dir_all(cwd).await;
+    }
+
+    struct KbResourceHandler;
+
+    impl ResourceHandler for KbResourceHandler {
+        fn scheme(&self) -> &'static str {
+            "kb"
+        }
+
+        fn resolve(
+            &self,
+            req: &ResourceRequest,
+            _ctx: &crate::context::ToolContext,
+        ) -> Result<Resource> {
+            Ok(Resource {
+                canonical_url: req.resource_url.clone(),
+                content: format!("kb authority={} path={}", req.authority, req.path),
+                content_type: ResourceContentType::PlainText,
+                immutable: Some(true),
+                metadata: ResourceMetadata::default(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn custom_resource_handler_is_registered() {
+        let home = unique_temp_dir("resource-handler-home");
+        let cwd = unique_temp_dir("resource-handler-cwd");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+        let runtime_config = AgentOptions::new(&home, &cwd)
+            .with_resource_handler(Arc::new(KbResourceHandler))
+            .into_runtime_config();
+
+        let runtime = build_runtime(runtime_config).await.unwrap();
+        let tool_ctx = crate::context::ToolContext::from(&*runtime.ctx);
+        let selection = crate::resources::split_read_path_selection("kb://tenant/doc").unwrap();
+        let resource = runtime
+            .ctx
+            .resource_router
+            .resolve(&selection, &tool_ctx)
+            .unwrap();
+
+        assert_eq!(resource.content, "kb authority=tenant path=doc");
+
+        runtime.shutdown().await.unwrap();
+        let _ = tokio::fs::remove_dir_all(home).await;
+        let _ = tokio::fs::remove_dir_all(cwd).await;
+    }
+
+    #[tokio::test]
+    async fn defaults_policy_keeps_existing_skill_behavior() {
+        let home = unique_temp_dir("defaults-policy-home");
+        let cwd = unique_temp_dir("defaults-policy-cwd");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+        let runtime = build_runtime(AgentOptions::new(&home, &cwd).into_runtime_config())
+            .await
+            .unwrap();
+
+        assert!(
+            runtime
+                .ctx
+                .capability_snapshot
+                .skills
+                .by_name
+                .contains_key("debugging")
+        );
+
+        runtime.shutdown().await.unwrap();
+        let _ = tokio::fs::remove_dir_all(home).await;
+        let _ = tokio::fs::remove_dir_all(cwd).await;
+    }
+
+    #[tokio::test]
+    async fn multiple_runtimes_do_not_share_skill_snapshot() {
+        let home_a = unique_temp_dir("runtime-a-home");
+        let cwd_a = unique_temp_dir("runtime-a-cwd");
+        let home_b = unique_temp_dir("runtime-b-home");
+        let cwd_b = unique_temp_dir("runtime-b-cwd");
+        tokio::fs::create_dir_all(&cwd_a).await.unwrap();
+        tokio::fs::create_dir_all(&cwd_b).await.unwrap();
+        let runtime_a = build_runtime(
+            AgentOptions::new(&home_a, &cwd_a)
+                .with_runtime_skill_content("runtime-a", "Runtime A", "body a")
+                .into_runtime_config(),
+        )
+        .await
+        .unwrap();
+        let runtime_b = build_runtime(
+            AgentOptions::new(&home_b, &cwd_b)
+                .with_runtime_skill_content("runtime-b", "Runtime B", "body b")
+                .into_runtime_config(),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            runtime_a
+                .ctx
+                .capability_snapshot
+                .skills
+                .by_name
+                .contains_key("runtime-a")
+        );
+        assert!(
+            !runtime_a
+                .ctx
+                .capability_snapshot
+                .skills
+                .by_name
+                .contains_key("runtime-b")
+        );
+        assert!(
+            runtime_b
+                .ctx
+                .capability_snapshot
+                .skills
+                .by_name
+                .contains_key("runtime-b")
+        );
+        assert!(!Arc::ptr_eq(
+            &runtime_a.ctx.capability_snapshot,
+            &runtime_b.ctx.capability_snapshot
+        ));
+
+        runtime_a.shutdown().await.unwrap();
+        runtime_b.shutdown().await.unwrap();
+        let _ = tokio::fs::remove_dir_all(home_a).await;
+        let _ = tokio::fs::remove_dir_all(cwd_a).await;
+        let _ = tokio::fs::remove_dir_all(home_b).await;
+        let _ = tokio::fs::remove_dir_all(cwd_b).await;
+    }
+
     #[derive(Default)]
     struct RecordingSink {
         events: Mutex<Vec<AgentEvent>>,
@@ -374,12 +723,14 @@ mod tests {
         runtime.compact().await.unwrap();
         runtime.shutdown().await.unwrap();
 
-        let events = sink.events.lock().unwrap();
-        assert!(events.iter().any(|event| matches!(
-            event,
-            AgentEvent::Info { message } if message == "Compressing..."
-        )));
-        assert!(events.iter().any(|event| matches!(event, AgentEvent::Stop)));
+        {
+            let events = sink.events.lock().unwrap();
+            assert!(events.iter().any(|event| matches!(
+                event,
+                AgentEvent::Info { message } if message == "Compressing..."
+            )));
+            assert!(events.iter().any(|event| matches!(event, AgentEvent::Stop)));
+        }
 
         let _ = tokio::fs::remove_dir_all(home).await;
         let _ = tokio::fs::remove_dir_all(cwd).await;
@@ -524,21 +875,23 @@ mod tests {
         runtime.run_turn("say hello").await.unwrap();
         runtime.shutdown().await.unwrap();
 
-        let events = sink.events.lock().unwrap();
-        assert!(
-            events.iter().any(|event| matches!(
-                event,
-                AgentEvent::Text { content } if content == "Hello, world!"
-            )),
-            "expected Text event with greeting"
-        );
-        assert!(
-            events.iter().any(|event| matches!(
-                event,
-                AgentEvent::Final { outcome } if outcome.status == crate::agent::orchestrator::TurnStatus::Ok
-            )),
-            "expected Final event with Ok status"
-        );
+        {
+            let events = sink.events.lock().unwrap();
+            assert!(
+                events.iter().any(|event| matches!(
+                    event,
+                    AgentEvent::Text { content } if content == "Hello, world!"
+                )),
+                "expected Text event with greeting"
+            );
+            assert!(
+                events.iter().any(|event| matches!(
+                    event,
+                    AgentEvent::Final { outcome } if outcome.status == crate::agent::orchestrator::TurnStatus::Ok
+                )),
+                "expected Final event with Ok status"
+            );
+        }
 
         let _ = tokio::fs::remove_dir_all(home).await;
         let _ = tokio::fs::remove_dir_all(cwd).await;
@@ -838,14 +1191,18 @@ mod tests {
         runtime.run_turn("run echo hello").await.unwrap();
         runtime.shutdown().await.unwrap();
 
-        let events = sink.events.lock().unwrap();
-        let has_tool_call = events
-            .iter()
-            .any(|e| matches!(e, AgentEvent::ToolCall { .. }));
-        let has_tool_result = events
-            .iter()
-            .any(|e| matches!(e, AgentEvent::ToolResult { .. }));
-        let has_final = events.iter().any(|e| matches!(e, AgentEvent::Final { .. }));
+        let (has_tool_call, has_tool_result, has_final) = {
+            let events = sink.events.lock().unwrap();
+            (
+                events
+                    .iter()
+                    .any(|e| matches!(e, AgentEvent::ToolCall { .. })),
+                events
+                    .iter()
+                    .any(|e| matches!(e, AgentEvent::ToolResult { .. })),
+                events.iter().any(|e| matches!(e, AgentEvent::Final { .. })),
+            )
+        };
 
         assert!(has_tool_call, "expected ToolCall event");
         assert!(has_tool_result, "expected ToolResult event");

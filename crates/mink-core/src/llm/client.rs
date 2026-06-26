@@ -611,7 +611,7 @@ mod tests {
             spaths.plan_draft.clone(),
             cwd.clone(),
             home.clone(),
-            Arc::new(capability_snapshot.skills.clone()),
+            capability_snapshot.clone(),
             api_url.to_string(),
             &cfg,
             stats.clone(),

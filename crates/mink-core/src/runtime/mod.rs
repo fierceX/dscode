@@ -6,6 +6,11 @@ mod handle;
 mod options;
 mod sdk_adapter;
 
+pub use crate::capabilities::{
+    CapabilityExposure, LoadedSkill, RuntimeSkill, SkillCapability, SkillDiscoveryPolicy,
+    SkillLoadContext, SkillProvider, SourceLevel, SourceMeta,
+};
+pub use crate::resources::ResourceHandler;
 pub use crate::session::paths::SessionLayout;
 pub use crate::tools::vfs::{
     ReadOnlyFileSystem, VfsGlobRequest, VfsGlobResult, VfsGrepEntry, VfsGrepRequest, VfsGrepResult,
@@ -28,7 +33,7 @@ pub use handle::{AgentEventStream, AgentRuntime, TurnOutcome};
 pub use options::AgentOptions;
 pub use sdk_adapter::{
     apply_sdk_request_options, exit_code_from_turn, final_from_outcome, final_from_run_result,
-    sdk_status_from_turn,
+    runtime_skills_from_sdk_request, sdk_status_from_turn, skill_discovery_policy_from_sdk_request,
 };
 
 pub use crate::agent::orchestrator::TurnStatus;

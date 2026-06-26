@@ -35,6 +35,8 @@ impl PrefixManager {
                 cwd: self.ctx.cwd.clone(),
                 home: self.ctx.home.clone(),
                 skill_snapshot: Arc::new(self.ctx.capability_snapshot.skills.clone()),
+                context_file_snapshot: Arc::new(self.ctx.capability_snapshot.context_files.clone()),
+                rule_snapshot: Arc::new(self.ctx.capability_snapshot.rules.clone()),
                 summary_file: self.ctx.summary_path.clone(),
                 plan_file: self.ctx.plan_path.clone(),
                 plan_draft_file: self.ctx.plan_draft_path.clone(),
@@ -64,11 +66,7 @@ impl PrefixManager {
             *guard = Some(ImmutablePrefix::new(
                 system_prompt.clone(),
                 tools_json.clone(),
-                self.ctx
-                    .capability_snapshot
-                    .skills
-                    .dependency_fingerprint
-                    .clone(),
+                self.ctx.capability_snapshot.dependency_fingerprint.clone(),
             ));
             return Ok((system_prompt, tools_json));
         }

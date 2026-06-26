@@ -5,15 +5,15 @@ use crate::resources::router::{
 };
 use anyhow::{Result, anyhow, bail};
 
-pub struct SkillResourceHandler;
+pub struct RuleResourceHandler;
 
-impl ResourceHandler for SkillResourceHandler {
+impl ResourceHandler for RuleResourceHandler {
     fn scheme(&self) -> &'static str {
-        "skill"
+        "rule"
     }
 
     fn resolve(&self, req: &ResourceRequest, ctx: &ToolContext) -> Result<Resource> {
-        let content = read_skill_resource(&req.resource_url, ctx)?;
+        let content = read_rule_resource(&req.resource_url, ctx)?;
         Ok(Resource {
             canonical_url: req.resource_url.clone(),
             content_type: ResourceContentType::Markdown,
@@ -24,36 +24,39 @@ impl ResourceHandler for SkillResourceHandler {
     }
 }
 
-pub(crate) fn read_skill_resource(url: &str, ctx: &ToolContext) -> Result<String> {
+pub(crate) fn read_rule_resource(url: &str, ctx: &ToolContext) -> Result<String> {
     let rest = url
-        .strip_prefix("skill://")
-        .ok_or_else(|| anyhow!("Error: invalid skill resource: {url}"))?
+        .strip_prefix("rule://")
+        .ok_or_else(|| anyhow!("Error: invalid rule resource: {url}"))?
         .trim_matches('/');
     if rest.is_empty() || rest == "list" || rest == "all" {
-        let mut out = String::from("# Skills\n");
-        for skill in &ctx.capability_snapshot.skills.discoverable {
-            let source = skill.source.model_display_label();
+        let mut out = String::from("# Rules\n");
+        for rule in &ctx.capability_snapshot.rules.discoverable {
+            let source = rule.source.model_display_label();
             out.push_str(&format!(
                 "- {} [{}]: {}\n",
-                skill.skill.name, source, skill.skill.description
+                rule.rule.name, source, rule.rule.description
             ));
         }
         return Ok(out);
     }
     if rest.contains('/') {
-        bail!("Error: invalid skill resource: {url}");
+        bail!("Error: invalid rule resource: {url}");
     }
     let loaded = ctx
         .capability_snapshot
-        .skills
+        .rules
         .by_name
         .get(rest)
-        .ok_or_else(|| anyhow!("Error: skill not found: {rest}"))?;
+        .ok_or_else(|| anyhow!("Error: rule not found: {rest}"))?;
     if matches!(loaded.exposure, CapabilityExposure::HostOnly) {
-        bail!("Error: skill is host-only and cannot be read: {rest}");
+        bail!("Error: rule is host-only and cannot be read: {rest}");
     }
     Ok(format!(
-        "# skill://{}\n\nDescription: {}\nBase directory: {}\n\n{}",
-        loaded.skill.name, loaded.skill.description, loaded.skill.base_dir, loaded.skill.content
+        "# rule://{}\n\nDescription: {}\nSource: {}\n\n{}",
+        loaded.rule.name,
+        loaded.rule.description,
+        loaded.source.model_display_label(),
+        loaded.rule.content
     ))
 }

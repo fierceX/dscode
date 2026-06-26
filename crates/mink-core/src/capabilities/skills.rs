@@ -1,11 +1,11 @@
 use crate::capabilities::CapabilityWarning;
 use crate::capabilities::source::{CapabilityExposure, SourceLevel, SourceMeta};
-use crate::skills::{ResolvedSkill, SkillInfo, SkillSource};
 use anyhow::{Result, anyhow, bail};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub struct LoadContext<'a> {
     pub cwd: &'a Path,
@@ -31,11 +31,79 @@ pub struct LoadedSkill {
     pub revision: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkillSource {
+    BuiltIn,
+    FileSystem,
+}
+
+#[derive(Debug, Clone)]
+pub struct SkillInfo {
+    pub name: String,
+    pub description: String,
+    pub source: SkillSource,
+    pub base_dir: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedSkill {
+    pub info: SkillInfo,
+    pub content: String,
+}
+
 pub trait SkillProvider: Send + Sync {
     fn id(&self) -> &'static str;
     fn display_name(&self) -> &'static str;
     fn priority(&self) -> i32;
     fn load_skills(&self, ctx: &LoadContext<'_>) -> Result<Vec<LoadedSkill>>;
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SkillDiscoveryPolicy {
+    #[default]
+    Defaults,
+    RuntimeOnly,
+    ExplicitOnly,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeSkill {
+    pub name: String,
+    pub description: String,
+    pub content: String,
+    pub exposure: CapabilityExposure,
+    pub revision: Option<String>,
+}
+
+impl RuntimeSkill {
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        content: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            content: content.into(),
+            exposure: CapabilityExposure::ModelDiscoverable,
+            revision: None,
+        }
+    }
+
+    pub fn with_exposure(mut self, exposure: CapabilityExposure) -> Self {
+        self.exposure = exposure;
+        self
+    }
+
+    pub fn with_revision(mut self, revision: impl Into<String>) -> Self {
+        self.revision = Some(revision.into());
+        self
+    }
+
+    pub fn with_optional_revision(mut self, revision: Option<String>) -> Self {
+        self.revision = revision;
+        self
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -68,37 +136,53 @@ pub fn build_default_skill_snapshot(
     )
 }
 
-pub fn default_skill_providers() -> Vec<Box<dyn SkillProvider>> {
+pub fn default_skill_providers() -> Vec<Arc<dyn SkillProvider>> {
     vec![
-        Box::new(RuntimeSkillProvider::default()),
-        Box::new(FileSystemSkillProvider::new(
+        Arc::new(RuntimeSkillProvider::default()),
+        Arc::new(FileSystemSkillProvider::new(
             "project-claude-skills",
             "project .claude/skills",
             SourceLevel::Project,
             220,
             SkillBase::ProjectClaude,
         )),
-        Box::new(FileSystemSkillProvider::new(
+        Arc::new(FileSystemSkillProvider::new(
             "project-local-skills",
             "project skills",
             SourceLevel::Project,
             210,
             SkillBase::ProjectLocal,
         )),
-        Box::new(FileSystemSkillProvider::new(
+        Arc::new(FileSystemSkillProvider::new(
             "user-claude-skills",
             "user .claude/skills",
             SourceLevel::User,
             120,
             SkillBase::UserClaude,
         )),
-        Box::new(BuiltInSkillProvider),
+        Arc::new(BuiltInSkillProvider),
     ]
+}
+
+pub fn skill_providers_for_policy(
+    policy: SkillDiscoveryPolicy,
+    runtime_skills: &[RuntimeSkill],
+    explicit_providers: &[Arc<dyn SkillProvider>],
+) -> Vec<Arc<dyn SkillProvider>> {
+    let mut providers: Vec<Arc<dyn SkillProvider>> = Vec::new();
+    providers.push(Arc::new(RuntimeSkillProvider::from_runtime_skills(
+        runtime_skills.to_vec(),
+    )));
+    providers.extend(explicit_providers.iter().cloned());
+    if matches!(policy, SkillDiscoveryPolicy::Defaults) {
+        providers.extend(default_skill_providers().into_iter().skip(1));
+    }
+    providers
 }
 
 impl SkillSnapshot {
     pub fn load(
-        providers: &[Box<dyn SkillProvider>],
+        providers: &[Arc<dyn SkillProvider>],
         ctx: &LoadContext<'_>,
         selected_skills: &[String],
     ) -> Result<Self> {
@@ -152,7 +236,10 @@ impl SkillSnapshot {
             .collect::<Vec<_>>();
         let mut selected = Vec::new();
         for raw_name in selected_skills {
-            let name = raw_name.trim();
+            let name = raw_name.as_str();
+            if !is_valid_skill_name(name) {
+                bail!("Error: invalid selected skill name: {name}");
+            }
             let loaded = by_name
                 .get(name)
                 .ok_or_else(|| anyhow!("Error: skill not found: {name}"))?;
@@ -185,6 +272,12 @@ impl RuntimeSkillProvider {
     pub fn new(skills: Vec<LoadedSkill>) -> Self {
         Self { skills }
     }
+
+    pub fn from_runtime_skills(skills: Vec<RuntimeSkill>) -> Self {
+        Self {
+            skills: skills.into_iter().map(runtime_skill_to_loaded).collect(),
+        }
+    }
 }
 
 impl SkillProvider for RuntimeSkillProvider {
@@ -201,7 +294,35 @@ impl SkillProvider for RuntimeSkillProvider {
     }
 
     fn load_skills(&self, _ctx: &LoadContext<'_>) -> Result<Vec<LoadedSkill>> {
+        for skill in &self.skills {
+            if !is_valid_skill_name(&skill.skill.name) {
+                bail!("Error: invalid runtime skill name: {}", skill.skill.name);
+            }
+        }
         Ok(self.skills.clone())
+    }
+}
+
+fn runtime_skill_to_loaded(skill: RuntimeSkill) -> LoadedSkill {
+    let content = skill.content.replace("${MINK_SKILL_DIR}", "<runtime>");
+    let revision = skill.revision.unwrap_or_else(|| sha256_hex(&content));
+    LoadedSkill {
+        skill: SkillCapability {
+            name: skill.name,
+            description: skill.description,
+            content,
+            base_dir: "<runtime>".to_string(),
+            disable_model_invocation: matches!(skill.exposure, CapabilityExposure::HostOnly),
+        },
+        source: SourceMeta {
+            provider_id: "runtime-skills".to_string(),
+            provider_name: "runtime skills".to_string(),
+            level: SourceLevel::Runtime,
+            source_path: None,
+            display_label: Some("runtime".to_string()),
+        },
+        exposure: skill.exposure,
+        revision,
     }
 }
 
@@ -299,7 +420,7 @@ impl SkillProvider for FileSystemSkillProvider {
                     name,
                     description: frontmatter
                         .description
-                        .unwrap_or_else(|| crate::skills::extract_skill_summary(&content)),
+                        .unwrap_or_else(|| extract_skill_summary(&content)),
                     content,
                     base_dir,
                     disable_model_invocation,
@@ -391,6 +512,32 @@ fn parse_frontmatter(content: &str) -> Frontmatter {
         }
     }
     out
+}
+
+pub(crate) fn extract_skill_summary(content: &str) -> String {
+    let mut in_frontmatter = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed == "---" {
+            if !in_frontmatter {
+                in_frontmatter = true;
+                continue;
+            } else if in_frontmatter {
+                break;
+            }
+        }
+        if in_frontmatter && let Some(desc) = trimmed.strip_prefix("description:") {
+            return desc.trim().trim_matches('"').to_string();
+        }
+    }
+    content
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && *line != "---")
+        .unwrap_or("")
+        .chars()
+        .take(120)
+        .collect()
 }
 
 fn parse_bool(value: &str) -> bool {
@@ -487,7 +634,9 @@ fn sha256_hex(input: &str) -> String {
 }
 
 fn is_valid_skill_name(name: &str) -> bool {
-    !name.is_empty()
+    let trimmed = name.trim();
+    !trimmed.is_empty()
+        && trimmed == name
         && !name.starts_with('.')
         && !name.contains('/')
         && !name.contains('\\')
@@ -582,6 +731,56 @@ mod tests {
     }
 
     #[test]
+    fn selected_skill_rejects_whitespace_padding() {
+        let root = temp_root("selected-whitespace");
+        let home = root.join("home");
+        let cwd = root.join("workspace");
+        write_skill(
+            &cwd,
+            "skills/hidden-review",
+            "---\ndescription: \"Hidden review\"\n---\n\nbody",
+        );
+
+        let err = build_default_skill_snapshot(
+            &cwd,
+            &home,
+            "session-1",
+            "session-1",
+            &[" hidden-review".to_string()],
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("invalid selected skill name"), "{err}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn runtime_skill_rejects_whitespace_padding() {
+        let provider = RuntimeSkillProvider::from_runtime_skills(vec![RuntimeSkill::new(
+            " runtime-guide",
+            "Runtime guide",
+            "body",
+        )]);
+        let root = temp_root("runtime-whitespace");
+        let home = root.join("home");
+        let cwd = root.join("workspace");
+
+        let err = provider
+            .load_skills(&LoadContext {
+                cwd: &cwd,
+                home: &home,
+                session_id: "session-1",
+                resource_session_id: "session-1",
+            })
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("invalid runtime skill name"), "{err}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn skill_snapshot_dependency_fingerprint_changes_on_content_change() {
         let root = temp_root("fingerprint");
         let home = root.join("home");
@@ -603,5 +802,28 @@ mod tests {
 
         assert_ne!(first.dependency_fingerprint, second.dependency_fingerprint);
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn extract_skill_summary_from_frontmatter() {
+        let content =
+            "---\nname: test-skill\ndescription: \"Test skill description\"\n---\n\nSkill content";
+        let summary = extract_skill_summary(content);
+        assert_eq!(summary, "Test skill description");
+    }
+
+    #[test]
+    fn extract_skill_summary_without_frontmatter_returns_fallback() {
+        let content = "No frontmatter here.\n\nSome content";
+        let summary = extract_skill_summary(content);
+        assert!(!summary.is_empty());
+        assert!(summary.contains("No frontmatter here."));
+    }
+
+    #[test]
+    fn extract_skill_summary_falls_back_to_first_non_empty_line() {
+        let content = "\n\n---\nname: test\n---\n\nActual content";
+        let summary = extract_skill_summary(content);
+        assert!(!summary.is_empty());
     }
 }

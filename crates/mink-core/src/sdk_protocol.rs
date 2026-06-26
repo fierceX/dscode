@@ -45,9 +45,38 @@ pub struct SdkOptions {
     pub llm_wait_heartbeat: Option<i32>,
     pub verbose: Option<bool>,
     pub enabled_tools: Option<Vec<String>>,
+    pub skills: Option<Vec<String>>,
+    pub inline_skills: Option<Vec<SdkInlineSkill>>,
+    pub skill_discovery_policy: Option<SdkSkillDiscoveryPolicy>,
     pub session_id: Option<String>,
     pub session_layout: Option<SessionLayout>,
     pub stream_events: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct SdkInlineSkill {
+    pub name: String,
+    pub description: String,
+    pub content: String,
+    pub exposure: Option<SdkCapabilityExposure>,
+    pub revision: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SdkCapabilityExposure {
+    ModelDiscoverable,
+    ModelAddressable,
+    HostOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SdkSkillDiscoveryPolicy {
+    Defaults,
+    RuntimeOnly,
+    ExplicitOnly,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -182,11 +211,41 @@ pub fn validate_sdk_request(req: &SdkRequest) -> Result<(), String> {
     {
         return Err("invalid SDK request: llm_wait_heartbeat must be zero or greater".to_string());
     }
+    if let Some(skills) = &opts.skills {
+        for skill in skills {
+            validate_capability_name(skill, "skill")?;
+        }
+    }
+    if let Some(inline_skills) = &opts.inline_skills {
+        for skill in inline_skills {
+            validate_capability_name(&skill.name, "inline skill")?;
+            if skill.content.trim().is_empty() {
+                return Err(format!(
+                    "invalid SDK request: inline skill '{}' content must be non-empty",
+                    skill.name
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
 pub fn path_string(path: &Path) -> String {
     path.to_string_lossy().to_string()
+}
+
+fn validate_capability_name(name: &str, label: &str) -> Result<(), String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty()
+        || trimmed != name
+        || trimmed.starts_with('.')
+        || trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains("..")
+    {
+        return Err(format!("invalid SDK request: invalid {label} name: {name}"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -200,6 +259,9 @@ mod tests {
         assert_eq!(req.prompt, "hi");
         assert!(!req.options.disable_bash);
         assert_eq!(req.options.session_layout, None);
+        assert_eq!(req.options.skills, None);
+        assert_eq!(req.options.inline_skills, None);
+        assert_eq!(req.options.skill_discovery_policy, None);
     }
 
     #[test]
@@ -213,6 +275,71 @@ mod tests {
             parse_agent_jsonl_request(r#"{"prompt":"hi","options":{"session_layout":"isolated"}}"#)
                 .unwrap();
         assert_eq!(req.options.session_layout, Some(SessionLayout::Isolated));
+    }
+
+    #[test]
+    fn sdk_request_accepts_selected_skills() {
+        let req = parse_agent_jsonl_request(
+            r#"{"prompt":"hi","options":{"skills":["debugging","verification"]}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            req.options.skills,
+            Some(vec!["debugging".to_string(), "verification".to_string()])
+        );
+    }
+
+    #[test]
+    fn sdk_request_accepts_inline_skills_and_policy() {
+        let req = parse_agent_jsonl_request(
+            r#"{
+                "prompt":"hi",
+                "options":{
+                    "inline_skills":[{
+                        "name":"company-policy",
+                        "description":"Company policy",
+                        "content":"private policy",
+                        "exposure":"model_addressable",
+                        "revision":"rev-1"
+                    }],
+                    "skill_discovery_policy":"runtime_only"
+                }
+            }"#,
+        )
+        .unwrap();
+        let inline = req.options.inline_skills.as_ref().unwrap();
+        assert_eq!(inline[0].name, "company-policy");
+        assert_eq!(
+            inline[0].exposure,
+            Some(SdkCapabilityExposure::ModelAddressable)
+        );
+        assert_eq!(
+            req.options.skill_discovery_policy,
+            Some(SdkSkillDiscoveryPolicy::RuntimeOnly)
+        );
+    }
+
+    #[test]
+    fn validate_sdk_request_rejects_invalid_inline_skill() {
+        let req = parse_agent_jsonl_request(
+            r#"{"prompt":"hi","options":{"inline_skills":[{"name":"../secret","content":"x"}]}}"#,
+        )
+        .unwrap();
+        let err = validate_sdk_request(&req).unwrap_err();
+        assert!(err.contains("invalid inline skill name"), "{err}");
+
+        let req =
+            parse_agent_jsonl_request(r#"{"prompt":"hi","options":{"skills":[" debugging"]}}"#)
+                .unwrap();
+        let err = validate_sdk_request(&req).unwrap_err();
+        assert!(err.contains("invalid skill name"), "{err}");
+
+        let req = parse_agent_jsonl_request(
+            r#"{"prompt":"hi","options":{"inline_skills":[{"name":"empty","content":""}]}}"#,
+        )
+        .unwrap();
+        let err = validate_sdk_request(&req).unwrap_err();
+        assert!(err.contains("content must be non-empty"), "{err}");
     }
 
     #[test]

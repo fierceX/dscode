@@ -565,7 +565,7 @@ pub trait ReadOnlyFileSystem: Send + Sync {
 核心设计边界：
 
 - **本地正确性优先**：未注入 `read_only_fs` 时，工具继续进入原有本地实现；VFS 是前置可选分支，不以抽象统一为由重写本地路径。
-- **只接管普通路径**：`artifact://`、`skill://`、`session://`、`http(s)://` 先按原有资源路由处理，不进入 VFS。
+- **只接管普通路径**：`artifact://`、`skill://`、`rule://`、`session://`、`http(s)://` 先按资源路由处理，不进入 VFS。
 - **只读且不可编辑**：虚拟 `Read` 输出行号和只读标记，但不记录 snapshot。`Edit` / `Write` 不委托给 VFS。
 - **结构化搜索结果**：后端返回路径、匹配行、扫描数和截断状态，由 `mink-core` 统一生成 Glob/Grep 文本，避免后端复制用户可见协议。
 - **核心保留防线**：glob 和 regex 在调用后端前校验；完整 Read 有工具层兜底字节检查；搜索文本由核心统一格式化并保留 100KB 输出保护。
@@ -583,6 +583,43 @@ VfsScope {
 `resource_session_id` 未配置时默认取 runtime session id。子代理继承父代理的 resource scope，同时使用自己的 agent session id。这样数据库 key 可以稳定按业务任务隔离，审计日志仍能区分具体调用代理。
 
 `mink-core` 只定义 hook、协议和可复用 helper，不绑定数据库。`examples/redb_vfs.rs` 是示例适配器：以 `resource_session_id + NUL + normalized_path` 作为有序 key，使用 redb range iterator 惰性扫描，并在达到核心限制时停止读取。redb 仅为 dev/example 依赖，不进入正常 `mink-core` 依赖树。
+
+### Registered resources 与 capability snapshot
+
+轻量资源和模型能力看起来都由 `Read` 暴露，但它们承担不同职责：
+
+- resource 是“按 URL 读取一段内容”的协议，例如 `skill://debugging`、`rule://default-agent-rules`、`session://current/messages`。
+- capability 是“本轮 agent 可见的能力视图”，例如哪些 skill 可被发现、哪些 rule 总是进入 prompt、哪些 context file 应进入 system prompt。
+
+因此设计上分成两条路径：
+
+```text
+ResourceRouter
+  解决 scheme://... 如何被 Read 分发和格式化
+
+CapabilitySnapshot
+  解决 prompt、skill/rule index、selected skills 和 prefix fingerprint 看到什么
+```
+
+这个拆分避免了两个常见问题。第一，`Read` 不需要知道每类资源如何发现能力，只负责在普通路径、web URL、registered resource 和 VFS 之间选择后端。第二，prompt 构建不会直接扫描文件系统或调用 resource handler，而是消费 runtime 构建好的 snapshot。
+
+资源与能力系统由五个协作面组成：
+
+1. `ResourceRouter` 负责 `artifact://`、`skill://`、`rule://`、`session://` 等轻量资源 URL 的 scheme 分发。
+2. `SkillProvider` / `SkillSnapshot` 负责 skill 的发现、去重、exposure 和按名读取，prompt skill index、selected skills 与 `skill://` 共用这份视图。
+3. runtime builder 负责把 runtime skills、自定义 skill provider、自定义 resource handler 和 discovery policy 固化到 shared context。
+4. Agent JSONL / Python SDK 以 selected skills、inline skills 和 discovery policy 表达能力配置，Rust SDK adapter 负责映射到 runtime config。
+5. context files 和 rules 作为 capability snapshot 的组成部分进入 prompt、resource 读取和 prefix fingerprint；`rule://` 是 rules 的按需读取入口。
+
+项目保持显式模块边界，而不是用一个泛型 `CapabilityProvider<T>` 覆盖所有能力类型。skills、rules、context files 的去重、exposure 和 prompt 消费方式并不完全相同，显式模块能更清楚地表达各自约束。
+
+设计不变式：
+
+- registered resource 先于 VFS；未知非 web scheme fail closed。
+- `skill://list` 和 `<skill-index>` 来自同一 `SkillSnapshot.discoverable`。
+- selected skills 和 `skill://<name>` 读取同一 `SkillSnapshot.by_name`，但 exposure 决定是否可发现/可读取/仅 host 使用。
+- rules 和 context files 的 dependency fingerprint 必须进入 `CapabilitySnapshot`，再进入 `ImmutablePrefix`。
+- 子代理继承父代理 `ResourceRouter` 和 `CapabilitySnapshot`，保持能力视图一致。
 
 ### Read 资源入口
 
@@ -602,6 +639,8 @@ VfsScope {
 - `artifact://<id>`
 - `skill://list`
 - `skill://<name>`
+- `rule://list`
+- `rule://<name>`
 - `session://current`
 - `session://current/stats`
 - `session://current/messages`
@@ -909,18 +948,16 @@ approval 检查发生在 `ToolRunner::execute_all()` 中，早于 StormBreaker �
 <agent-identity>          ← 你是谁（中/英根据 locale）
 <environment>             ← 当前工作目录、shell、平台
 <rules>                   ← 行为规则
-<tool-selection>          ← 工具选择原则
-<safety>                  ← 安全边界
 <execution-codes>         ← 因果验证、验证门控、停止条件
 <belief-awareness>        ← 信号系统协议、常见错误对照表
-<output-discipline>       ← 输出纪律
 <tool-usage>              ← 工具优先级、Read 用法、锚定编辑协议
 <sub-agent-guidance>      ← 子代理使用指引
 <todo-guidance>           ← Todo 操作指引
 <plan-lifecycle-guidance> ← Plan 生命周期
 <instruction-files>       ← AGENTS.md / CLAUDE.md
-<skill-index>             ← 可用的 skill 列表
-<selected-skills>         ← 加载的 skill 内容
+<rule-index>              ← 可用 rule 列表
+<skill-index>             ← 可用 skill 列表
+<selected-skills>         ← 已选择的 skill 内容
 <current-plan>            ← plan.md（如果有）
 <context-snapshot>        ← summary.txt（如果有，压缩后写入）
 <output-language>         ← 输出语言要求

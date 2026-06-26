@@ -1,4 +1,4 @@
-use crate::capabilities::skills::SkillSnapshot;
+use crate::capabilities::{ContextFileSnapshot, RuleSnapshot, SkillSnapshot};
 use anyhow::Result;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -8,6 +8,8 @@ pub struct Builder {
     pub cwd: PathBuf,
     pub home: PathBuf,
     pub skill_snapshot: Arc<SkillSnapshot>,
+    pub context_file_snapshot: Arc<ContextFileSnapshot>,
+    pub rule_snapshot: Arc<RuleSnapshot>,
     pub summary_file: PathBuf,
     pub plan_file: PathBuf,
     pub plan_draft_file: PathBuf,
@@ -45,8 +47,9 @@ impl Builder {
             shell
         );
         sections.push(wrap_section("environment", &environment, None));
-        let rules_str = "- Be concise and concrete. No pleasantries, no explanations unless asked. Raw results only.\n- Prefer safe, exact edits.\n- Report failures clearly.";
-        sections.push(wrap_section("rules", rules_str, None));
+        if let Some(rules) = self.build_rules_section()? {
+            sections.push(wrap_section("rules", &rules, None));
+        }
         // Execution codes: cause-effect-verify, verification gate, stop triggers
         sections.push(wrap_section(
             "execution-codes",
@@ -204,6 +207,9 @@ impl Builder {
         if let Some(s) = self.build_instruction_files_section()? {
             sections.push(wrap_section("instruction-files", &s, None));
         }
+        if let Some(s) = self.build_rule_index_section()? {
+            sections.push(wrap_section("rule-index", &s, None));
+        }
         if let Some(s) = self.build_skill_index_section()? {
             sections.push(wrap_section("skill-index", &s, None));
         }
@@ -246,7 +252,7 @@ impl Builder {
 
         if let Some(ref mission_content) = mission_raw {
             // Collect all level-1 headings from the mission file
-            let mission_headings = extract_all_headings(&mission_content);
+            let mission_headings = extract_all_headings(mission_content);
 
             // Collect existing section tags for quick lookup
             let existing_tags: Vec<String> = sections
@@ -255,7 +261,7 @@ impl Builder {
                 .collect();
 
             for heading in &mission_headings {
-                if let Some(new_content) = extract_section(&mission_content, heading) {
+                if let Some(new_content) = extract_section(mission_content, heading) {
                     let new_wrapped = wrap_section(heading, &new_content, None);
                     // Backward compatibility: map old section tag names to merged sections
                     let matched_tag = match heading.as_str() {
@@ -282,27 +288,54 @@ impl Builder {
     }
 
     fn build_instruction_files_section(&self) -> Result<Option<String>> {
-        let global_file = find_instruction_file_in_dir(&self.home.join(".mink"));
-        let project_file = find_instruction_file_in_dir(&self.cwd);
         let mut out = Vec::new();
-        if let Some(f) = global_file {
+        for file in &self.context_file_snapshot.always_apply {
             out.push(wrap_section(
                 "instruction-file",
-                &fs::read_to_string(f)?,
-                Some("global"),
-            ));
-        }
-        if let Some(f) = project_file {
-            out.push(wrap_section(
-                "instruction-file",
-                &fs::read_to_string(f)?,
-                Some("project"),
+                &file.context_file.content,
+                Some(&file.context_file.name),
             ));
         }
         if out.is_empty() {
             Ok(None)
         } else {
             Ok(Some(out.join("\n")))
+        }
+    }
+
+    fn build_rules_section(&self) -> Result<Option<String>> {
+        let mut sections = Vec::new();
+        for rule in &self.rule_snapshot.always_apply {
+            sections.push(wrap_section(
+                "rule",
+                &rule.rule.content,
+                Some(&rule.rule.name),
+            ));
+        }
+        if sections.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(sections.join("\n")))
+        }
+    }
+
+    fn build_rule_index_section(&self) -> Result<Option<String>> {
+        let lines: Vec<String> = self
+            .rule_snapshot
+            .discoverable
+            .iter()
+            .map(|rule| {
+                if rule.rule.description.is_empty() {
+                    format!("- {}", rule.rule.name)
+                } else {
+                    format!("- {}: {}", rule.rule.name, rule.rule.description)
+                }
+            })
+            .collect();
+        if lines.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(lines.join("\n")))
         }
     }
 
@@ -443,30 +476,23 @@ fn read_optional_file(path: &Path) -> Result<Option<String>> {
     }
 }
 
-pub fn resolve_skill_file(cwd: &Path, home: &Path, skill: &str) -> Option<PathBuf> {
-    crate::skills::resolve_skill_file(cwd, home, skill)
-}
-
-fn find_instruction_file_in_dir(dir: &Path) -> Option<PathBuf> {
-    let candidates = [
-        dir.join("AGENTS.md"),
-        dir.join("AGENT.md"),
-        dir.join("CLAUDE.md"),
-        dir.join(".claude/CLAUDE.md"),
-    ];
-    candidates.into_iter().find(|p| p.is_file())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
 
     fn test_builder() -> Builder {
+        let cwd = PathBuf::from("/tmp");
+        let home = PathBuf::from("/home/user");
         Builder {
-            cwd: PathBuf::from("/tmp"),
-            home: PathBuf::from("/home/user"),
+            cwd: cwd.clone(),
+            home: home.clone(),
             skill_snapshot: Arc::new(crate::capabilities::SkillSnapshot::default()),
+            context_file_snapshot: Arc::new(crate::capabilities::ContextFileSnapshot::default()),
+            rule_snapshot: Arc::new(
+                crate::capabilities::build_default_rule_snapshot(&cwd, &home, "session", "session")
+                    .unwrap(),
+            ),
             summary_file: PathBuf::from("/tmp/summary.txt"),
             plan_file: PathBuf::from("/tmp/plan.md"),
             plan_draft_file: PathBuf::from("/tmp/plan.draft"),
@@ -719,26 +745,68 @@ mod tests {
     }
 
     #[test]
-    fn extract_skill_summary_from_frontmatter() {
-        let content =
-            "---\nname: test-skill\ndescription: \"Test skill description\"\n---\n\nSkill content";
-        let summary = crate::skills::extract_skill_summary(content);
-        assert_eq!(summary, "Test skill description");
+    fn context_files_and_rules_enter_prompt_from_snapshot() {
+        let root = temp_root("context-rules");
+        let home = root.join("home");
+        let cwd = root.join("workspace");
+        fs::create_dir_all(home.join(".mink")).unwrap();
+        fs::create_dir_all(&cwd).unwrap();
+        fs::write(home.join(".mink/AGENTS.md"), "Global instruction").unwrap();
+        fs::write(cwd.join("AGENTS.md"), "Project instruction").unwrap();
+        let snapshot = crate::capabilities::CapabilitySnapshot::load_default(
+            &cwd,
+            &home,
+            "session-1",
+            "session-1",
+            &[],
+        )
+        .unwrap();
+        let mut builder = test_builder();
+        builder.cwd = cwd;
+        builder.home = home;
+        builder.context_file_snapshot = Arc::new(snapshot.context_files.clone());
+        builder.rule_snapshot = Arc::new(snapshot.rules.clone());
+
+        let prompt = builder.build_system_prompt().unwrap();
+
+        assert!(prompt.contains("<instruction-files>"));
+        assert!(prompt.contains("Global instruction"));
+        assert!(prompt.contains("Project instruction"));
+        assert!(prompt.contains("<rules>"));
+        assert!(prompt.contains("<rule name=\"default-agent-rules\">"));
+        assert!(prompt.contains("<rule-index>"));
+        assert!(prompt.contains("default-agent-rules"));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
-    fn extract_skill_summary_without_frontmatter_returns_fallback() {
-        let content = "No frontmatter here.\n\nSome content";
-        let summary = crate::skills::extract_skill_summary(content);
-        assert!(!summary.is_empty());
-        assert!(summary.contains("No frontmatter here."));
-    }
+    fn context_file_change_updates_capability_fingerprint() {
+        let root = temp_root("context-fingerprint");
+        let home = root.join("home");
+        let cwd = root.join("workspace");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        fs::write(cwd.join("AGENTS.md"), "Project instruction 1").unwrap();
+        let first = crate::capabilities::CapabilitySnapshot::load_default(
+            &cwd,
+            &home,
+            "session-1",
+            "session-1",
+            &[],
+        )
+        .unwrap();
+        fs::write(cwd.join("AGENTS.md"), "Project instruction 2").unwrap();
+        let second = crate::capabilities::CapabilitySnapshot::load_default(
+            &cwd,
+            &home,
+            "session-1",
+            "session-1",
+            &[],
+        )
+        .unwrap();
 
-    #[test]
-    fn extract_skill_summary_falls_back_to_first_non_empty_line() {
-        let content = "\n\n---\nname: test\n---\n\nActual content";
-        let summary = crate::skills::extract_skill_summary(content);
-        assert!(!summary.is_empty());
+        assert_ne!(first.dependency_fingerprint, second.dependency_fingerprint);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # 架构说明
 
-更新日期：2026-06-14
+更新日期：2026-06-26
 
 本文描述 mink 当前代码结构、模块职责和运行时数据流。面向用户的命令、配置和工作流见
 [USAGE.md](USAGE.md)；完整工具协议见 [tools.md](tools.md)；设计取舍和不变式见
@@ -19,7 +19,8 @@ mink 是一个 Rust 实现的轻量 AI coding agent，面向 DeepSeek / OpenAI-c
 - 工具边界明确：超时、输出大小、写入大小、副作用和禁用开关都可控
 - 工具有统一 metadata 和 approval tier，支持基础审批策略
 - 超长工具输出落 session artifact，可通过 `Read artifact://<id>` 恢复
-- `Read` 是轻量资源入口，支持本地文件、artifact、skill 和 session introspection
+- `Read` 是轻量资源入口，支持本地文件、artifact、skill、rule 和 session introspection
+- registered resource 与 capability snapshot 分离：资源读取走 `ResourceRouter`，prompt/skill/rule/context 能力视图走 `CapabilitySnapshot`
 - `Edit` 支持 snapshot anchored patch，降低精确字符串替换失败率
 - 上下文预算是硬约束，通过摘要压缩和 immutable prefix 尽量保留 prefix cache 命中
 
@@ -75,6 +76,14 @@ TurnExecutor (agent/turn.rs)
 │ tools/python.rs       │ 宿主 Python 执行
 │ tools/sandbox_python.rs│ WASI CPython 沙箱执行（python-sandbox feature）
 │ tools/web.rs          │ WebSearch / WebFetch
+└───────────────────────┘
+         │
+┌─────── 资源与能力层 ───┐
+│ resources/router.rs   │ ResourceRouter、ResourceHandler、scheme 注册和分发
+│ resources/{artifact,skill,rule,session}.rs │ Read 轻量资源 handler
+│ capabilities/mod.rs   │ CapabilitySnapshot，汇总 skills/context files/rules
+│ capabilities/skills.rs│ SkillProvider、SkillSnapshot、runtime/filesystem/built-in skills
+│ capabilities/{context_files,rules}.rs │ instruction files / rules snapshot
 └───────────────────────┘
          │
 ┌─────── 信号与防护层 ──┐
@@ -185,6 +194,8 @@ ToolRunResult
 | `config.rs` | `Config`、CLI 解析、`.minkrc` 合并、环境变量默认值、sandbox 配置 |
 | `context.rs` | `AgentSharedContext` 和工具层 `ToolContext` |
 | `assets.rs` | 编译期嵌入的 `tools.json` 和 skill 索引 |
+| `capabilities/` | model-visible 能力 snapshot：skills、instruction files、rules，以及 source/exposure 元数据 |
+| `resources/` | `Read` 轻量资源 URL 的注册式 router 和内置 handler |
 | `cancel.rs` | 父子 cancellation token |
 | `safety.rs` | Bash 危险命令拦截 |
 | `sandbox/` | Linux nsjail/bwrap 与 macOS sandbox-exec 自举 |
@@ -238,6 +249,36 @@ ToolRunResult
 
 新增工具时需要同时实现 `ToolExec::metadata()`、注册 `TOOL_REGISTRY`、更新 `assets/tools.json`，并在 metadata 中声明 approval tier、result kind、副作用、`storm_exempt`、`internal` 或 `spawns_sub_agent`。
 
+### Registered Resources and Capabilities
+
+`Read` 负责承载两类读取：普通路径和轻量资源 URL。普通路径保持本地文件/VFS 后端语义；轻量资源 URL 由 `ResourceRouter` 按 scheme 分发。`tools/file.rs` 只承担读取入口和 selector 处理，具体 resource 协议由 handler 表达。
+
+```text
+Read.path
+  ├── registered scheme://... -> ResourceRouter -> ResourceHandler
+  ├── http(s)://...           -> URL artifact cache
+  ├── ordinary path + VFS     -> ReadOnlyFileSystem
+  └── ordinary path           -> local filesystem + editable snapshot
+```
+
+内置 handler 当前覆盖：
+
+| Scheme | 来源 | 说明 |
+|--------|------|------|
+| `artifact://` | session artifacts | 读取被截断工具输出或 URL cache 正文 |
+| `skill://` | `CapabilitySnapshot.skills` | 列出/读取当前 capability snapshot 中的 skill |
+| `rule://` | `CapabilitySnapshot.rules` | 列出/读取当前 capability snapshot 中的 rule |
+| `session://` | current session files | 读取当前 session 摘要、stats、messages、artifacts |
+
+`CapabilitySnapshot` 是 prompt、selected skills、`skill://`、`rule://` 和 prefix fingerprint 的共享能力视图。它在 runtime 构建时由 provider 生成，并挂到 `AgentSharedContext`；子代理继承父代理的 snapshot，避免主代理和子代理看到不同能力集合。能力 snapshot 只描述可被模型看见或按名读取的内容，不负责工具执行、文件编辑或 VFS 数据访问。
+
+这套拆分的边界是：
+
+- `resources/*` 只做 URL 到文本资源的适配，不重新发现 skill/rule。
+- `capabilities/*` 只构建能力视图和依赖 fingerprint，不处理 `Read` selector。
+- `prompt.rs` 只消费 snapshot，不扫描文件系统。
+- `tools/file.rs` 只选择读取后端并应用 selector，不内联每个 resource 的业务逻辑。
+
 ### Read-only VFS hook
 
 VFS 不是新增工具，也不改变模型可见的工具 schema。它只是嵌入式 runtime 对普通文件路径读取后端的可选替换：
@@ -255,7 +296,7 @@ Read / Glob / Grep
 
 注入链路为 `AgentOptions` / `AgentRuntimeConfig` → runtime builder → `AgentSharedContext` → `ToolContext`。未显式设置 `resource_session_id` 时使用当前 runtime session id。子代理复用同一个 `Arc<dyn ReadOnlyFileSystem>`，继承父代理的 `resource_session_id`，但使用自己的 `agent_session_id`，从而共享同一知识库作用域并保留调用方身份。
 
-VFS 只接管普通路径。`artifact://`、`skill://`、`session://` 和 `http(s)://` 仍先走现有资源读取路径。虚拟路径使用 POSIX 分隔符和词法规范化，拒绝越过虚拟根目录。Glob/regex 请求由工具层先校验，后端返回结构化路径或匹配行，`mink-core` 统一输出格式和 100KB 搜索输出保护。请求中的 `max_files` / `max_results` 是后端契约；使用公共 `try_collect_virtual_*` helper 时由 helper 执行限制，完全自定义实现必须自行遵守。
+VFS 只接管普通路径。`artifact://`、`skill://`、`rule://`、`session://` 和 `http(s)://` 仍先走资源读取路径。虚拟路径使用 POSIX 分隔符和词法规范化，拒绝越过虚拟根目录。Glob/regex 请求由工具层先校验，后端返回结构化路径或匹配行，`mink-core` 统一输出格式和 100KB 搜索输出保护。请求中的 `max_files` / `max_results` 是后端契约；使用公共 `try_collect_virtual_*` helper 时由 helper 执行限制，完全自定义实现必须自行遵守。
 
 虚拟文件是只读资源，不创建 anchored Edit snapshot。具体数据库适配不进入核心依赖；`crates/mink-core/examples/redb_vfs.rs` 展示了按 `resource_session_id` 分区、惰性范围扫描的 redb 后端。
 
@@ -353,7 +394,9 @@ session 根目录如何由 `home`、`cwd`、`session_id` 推导。当前有四�
 - `ToolRunner::execute_all()` 在 StormBreaker 前执行 approval 检查。
 - 超长工具输出必须保存为当前 session artifact，而不是丢失全文。
 - `Read` 本地非 raw 输出记录 snapshot；raw 和 immutable resource 不生成可编辑 snapshot。
+- registered resource 必须先于 VFS 处理；未知非 web scheme fail closed，不落入普通路径或 VFS。
 - 未注入 VFS 时，`Read` / `Glob` / `Grep` 必须继续执行原有本地实现；VFS 分支不得改变本地路径语义或测试。
+- prompt skill index、selected skills、`skill://` 和 `rule://` 必须来自同一 `CapabilitySnapshot`，其 dependency fingerprint 进入 `ImmutablePrefix`。
 - 虚拟 `Read` 永远不生成可编辑 snapshot；`Edit` 和 `Write` 始终针对本地文件系统。
 - VFS 后端必须使用 `resource_session_id` 隔离数据；`agent_session_id` 只标识具体调用代理。
 - `Edit.patch` 必须校验 snapshot tag 和目标行 hash，stale 时 fail closed。

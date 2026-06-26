@@ -1,7 +1,11 @@
 use crate::agent::orchestrator::{TurnRunResult, TurnStatus};
+use crate::capabilities::{CapabilityExposure, RuntimeSkill, SkillDiscoveryPolicy};
 use crate::config::{Config, OutputFormat};
 use crate::runtime::{SessionInfo, TurnOutcome};
-use crate::sdk_protocol::{PROTOCOL_VERSION, SdkFinal, SdkRequest, SdkStatus, path_string};
+use crate::sdk_protocol::{
+    PROTOCOL_VERSION, SdkCapabilityExposure, SdkFinal, SdkRequest, SdkSkillDiscoveryPolicy,
+    SdkStatus, path_string,
+};
 
 /// Apply Agent JSONL SDK request options to the complete mink config.
 ///
@@ -74,6 +78,53 @@ pub fn apply_sdk_request_options(cfg: &mut Config, req: &SdkRequest) {
     }
     if let Some(tools) = &opts.enabled_tools {
         cfg.enabled_tools = Some(tools.clone());
+    }
+    if let Some(skills) = &opts.skills {
+        cfg.skills = skills.clone();
+    }
+}
+
+pub fn runtime_skills_from_sdk_request(req: &SdkRequest) -> Vec<RuntimeSkill> {
+    req.options
+        .inline_skills
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .map(|skill| {
+            RuntimeSkill::new(
+                skill.name.clone(),
+                skill.description.clone(),
+                skill.content.clone(),
+            )
+            .with_exposure(capability_exposure_from_sdk(
+                skill
+                    .exposure
+                    .unwrap_or(SdkCapabilityExposure::ModelAddressable),
+            ))
+            .with_optional_revision(skill.revision.clone())
+        })
+        .collect()
+}
+
+pub fn skill_discovery_policy_from_sdk_request(req: &SdkRequest) -> Option<SkillDiscoveryPolicy> {
+    req.options
+        .skill_discovery_policy
+        .map(skill_discovery_policy_from_sdk)
+}
+
+fn capability_exposure_from_sdk(exposure: SdkCapabilityExposure) -> CapabilityExposure {
+    match exposure {
+        SdkCapabilityExposure::ModelDiscoverable => CapabilityExposure::ModelDiscoverable,
+        SdkCapabilityExposure::ModelAddressable => CapabilityExposure::ModelAddressable,
+        SdkCapabilityExposure::HostOnly => CapabilityExposure::HostOnly,
+    }
+}
+
+fn skill_discovery_policy_from_sdk(policy: SdkSkillDiscoveryPolicy) -> SkillDiscoveryPolicy {
+    match policy {
+        SdkSkillDiscoveryPolicy::Defaults => SkillDiscoveryPolicy::Defaults,
+        SdkSkillDiscoveryPolicy::RuntimeOnly => SkillDiscoveryPolicy::RuntimeOnly,
+        SdkSkillDiscoveryPolicy::ExplicitOnly => SkillDiscoveryPolicy::ExplicitOnly,
     }
 }
 
@@ -168,6 +219,15 @@ mod tests {
                     "llm_wait_heartbeat": 9,
                     "verbose": true,
                     "enabled_tools": ["Read", "Bash"],
+                    "skills": ["debugging", "verification"],
+                    "inline_skills": [{
+                        "name": "company-policy",
+                        "description": "Company policy",
+                        "content": "private policy",
+                        "exposure": "model_addressable",
+                        "revision": "rev-1"
+                    }],
+                    "skill_discovery_policy": "runtime_only",
                     "session_id": "inner",
                     "session_layout": "home",
                     "stream_events": false
@@ -198,6 +258,22 @@ mod tests {
         assert_eq!(
             cfg.enabled_tools,
             Some(vec!["Read".to_string(), "Bash".to_string()])
+        );
+        assert_eq!(
+            cfg.skills,
+            vec!["debugging".to_string(), "verification".to_string()]
+        );
+        let runtime_skills = runtime_skills_from_sdk_request(&req);
+        assert_eq!(runtime_skills.len(), 1);
+        assert_eq!(runtime_skills[0].name, "company-policy");
+        assert_eq!(
+            runtime_skills[0].exposure,
+            CapabilityExposure::ModelAddressable
+        );
+        assert_eq!(runtime_skills[0].revision.as_deref(), Some("rev-1"));
+        assert_eq!(
+            skill_discovery_policy_from_sdk_request(&req),
+            Some(SkillDiscoveryPolicy::RuntimeOnly)
         );
         assert_eq!(
             req.options.session_layout,

@@ -1,5 +1,5 @@
 pub(crate) use mink::{
-    agent, cancel, config, runtime, sandbox, sdk_protocol, session, skills, util,
+    agent, cancel, capabilities, config, runtime, sandbox, sdk_protocol, session, util,
 };
 
 pub mod cli;

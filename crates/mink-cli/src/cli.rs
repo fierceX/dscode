@@ -3,7 +3,7 @@ use crate::cancel::CancellationToken;
 use crate::config::{apply_config_file, apply_provider_defaults, parse_args};
 use crate::runtime::{
     AgentRuntimeConfig, TurnOutcome, apply_sdk_request_options, exit_code_from_turn,
-    final_from_outcome,
+    final_from_outcome, runtime_skills_from_sdk_request, skill_discovery_policy_from_sdk_request,
 };
 use crate::sdk_protocol::{
     PROTOCOL_VERSION, SdkRequest, emit_failed_parse, parse_agent_jsonl_request,
@@ -156,6 +156,12 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
     {
         runtime_config = runtime_config.with_session_layout(layout);
     }
+    if let Some(request) = sdk_request.as_ref() {
+        runtime_config.runtime_skills = runtime_skills_from_sdk_request(request);
+        if let Some(policy) = skill_discovery_policy_from_sdk_request(request) {
+            runtime_config.skill_discovery_policy = policy;
+        }
+    }
     if let Some(sub_stream_tx) = sub_stream_tx {
         runtime_config = runtime_config.with_sub_stream_tx(sub_stream_tx);
     }
@@ -246,20 +252,39 @@ fn list_skills() {
             .or_else(|_| std::env::var("HOME"))
             .unwrap_or_else(|_| String::from(".")),
     );
+    let snapshot = crate::capabilities::CapabilitySnapshot::load_default(
+        &cwd,
+        &home,
+        "skills-list",
+        "skills-list",
+        &[],
+    );
 
     println!("SKILLS");
     println!("{}", "-".repeat(60));
-    for skill in crate::skills::list_available_skills(&cwd, &home) {
-        let source = match skill.source {
-            crate::skills::SkillSource::BuiltIn => "built-in",
-            crate::skills::SkillSource::FileSystem => "local",
-        };
-        println!("   {} [{}]", skill.name, source);
-        println!("      {}", skill.description);
-        println!();
+    match snapshot {
+        Ok(snapshot) => {
+            for skill in &snapshot.skills.discoverable {
+                println!("   {} [{}]", skill.skill.name, skill_source_label(skill));
+                println!("      {}", skill.skill.description);
+                println!();
+            }
+        }
+        Err(e) => {
+            println!("Error loading skills: {e}");
+        }
     }
 
     println!("Load with --skill NAME or Read skill://NAME.");
+}
+
+fn skill_source_label(skill: &crate::capabilities::LoadedSkill) -> &'static str {
+    match skill.source.level {
+        crate::capabilities::SourceLevel::Runtime => "runtime",
+        crate::capabilities::SourceLevel::Project => "project",
+        crate::capabilities::SourceLevel::User => "user",
+        crate::capabilities::SourceLevel::BuiltIn => "built-in",
+    }
 }
 
 async fn run_interactive(

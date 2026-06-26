@@ -460,19 +460,45 @@ impl TuiState {
                 .or_else(|_| std::env::var("HOME"))
                 .unwrap_or_else(|_| String::from(".")),
         );
-        for skill in crate::skills::list_available_skills(&cwd, &home) {
-            let source = match skill.source {
-                crate::skills::SkillSource::BuiltIn => "built-in",
-                crate::skills::SkillSource::FileSystem => "local",
-            };
-            self.push_line(MsgLine::new(
-                format!("  {} [{}] - {}", skill.name, source, skill.description),
-                MsgKind::Text,
-            ));
+        match crate::capabilities::CapabilitySnapshot::load_default(
+            &cwd,
+            &home,
+            "skills-list",
+            "skills-list",
+            &[],
+        ) {
+            Ok(snapshot) => {
+                for skill in &snapshot.skills.discoverable {
+                    self.push_line(MsgLine::new(
+                        format!(
+                            "  {} [{}] - {}",
+                            skill.skill.name,
+                            tui_skill_source_label(skill),
+                            skill.skill.description
+                        ),
+                        MsgKind::Text,
+                    ));
+                }
+            }
+            Err(e) => {
+                self.push_line(MsgLine::new(
+                    format!("Error loading skills: {e}"),
+                    MsgKind::Error,
+                ));
+            }
         }
         self.push_line(MsgLine::new(
             "Use --skill NAME or Read skill://NAME to load.".into(),
             MsgKind::Info,
         ));
+    }
+}
+
+fn tui_skill_source_label(skill: &crate::capabilities::LoadedSkill) -> &'static str {
+    match skill.source.level {
+        crate::capabilities::SourceLevel::Runtime => "runtime",
+        crate::capabilities::SourceLevel::Project => "project",
+        crate::capabilities::SourceLevel::User => "user",
+        crate::capabilities::SourceLevel::BuiltIn => "built-in",
     }
 }

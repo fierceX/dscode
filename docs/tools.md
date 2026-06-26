@@ -1,6 +1,6 @@
 # 内置工具
 
-更新日期：2026-06-21
+更新日期：2026-06-26
 
 本文是 mink 内置工具的协议参考，面向需要理解工具参数、执行模型、结果通道、资源 URL、
 审批和构建裁剪的使用者与开发者。CLI 参数、session、沙箱、技能和常见工作流见
@@ -32,11 +32,12 @@ ToolCallEvent
 
 当工具输出超过上限时，完整输出会保存到当前 session 的 `artifacts/` 目录，工具结果中追加 `artifact://<id>`。可用 `Read` 按需读取，例如 `artifact://bash-0001:1-120`。
 
-`Read` 也承担轻量资源路由职责。当前只实现高收益、低耦合的内置协议分支，没有引入完整 `ResourceRouter` 框架：
+`Read` 也承担轻量资源路由职责。内置轻量资源通过 `ResourceRouter` 注册分发：
 
 - `http(s)://...`：读取公开 URL，首次 fetch 后写入当前 session artifact cache，后续同 URL 的 selector 从缓存分页；如果 cache index 命中但正文 artifact 丢失，会重新 fetch 并写入新缓存。
 - `artifact://<id>`：读取被截断工具输出。
-- `skill://list` / `skill://<name>`：列出或读取可用 skill；本地 skill 优先，内置 skill 兜底。
+- `skill://list` / `skill://<name>`：列出或读取可用 skill；列表与读取来自同一 capability snapshot。
+- `rule://list` / `rule://<name>`：列出或读取可用 rule。
 - `session://current`：读取当前 session 摘要。
 - `session://current/stats`：读取当前 session stats JSON。
 - `session://current/messages`：读取最近 40 条 conversation 摘要。
@@ -51,7 +52,7 @@ ToolCallEvent
 `ReadOnlyFileSystem`，替换普通路径上的 `Read`、`Glob`、`Grep` 后端。该机制不注册新工具，也不修改三个工具的 schema。
 
 - 未注入时严格执行原有本地文件代码路径，包括本地路径解析、`ignore` 遍历和 Read snapshot。
-- `artifact://`、`skill://`、`session://`、`http(s)://` 不进入 VFS，继续使用已有资源实现。
+- `artifact://`、`skill://`、`rule://`、`session://`、`http(s)://` 不进入 VFS，继续使用已有资源实现。
 - 每次调用收到 `VfsScope { resource_session_id, agent_session_id }`。前者用于数据库分区，后者标识当前主代理或子代理。
 - 未指定 `resource_session_id` 时默认使用 runtime session id；子代理继承父代理的 resource scope，但拥有自己的 agent session id。
 - 虚拟路径按 POSIX 规则规范化，拒绝 `..` 越过虚拟根目录和 NUL 字节。
@@ -135,7 +136,8 @@ cargo build --release
 - 注入 VFS 后，普通路径读取虚拟文件并显示只读标记，不生成 snapshot；selector 和 `:raw` 语义保持一致。
 - `http(s)://...` 可读取公开 URL。URL 输出不生成 editable snapshot；首次读取会保存为 `ReadUrl` artifact cache，后续同 URL selector 从缓存分页，不重复 fetch。损坏的 URL cache index 行会被跳过；cache 正文缺失时会重新 fetch。
 - `artifact://<id>` 可读取被截断工具输出，支持同样的行 selector。
-- `skill://list` / `skill://<name>` 可读取可用 skills，搜索顺序与 `--config` 或 `.minkrc` 的 `skills` 字段一致。
+- `skill://list` / `skill://<name>` 可读取可用 skills，列表与读取来自同一 capability snapshot。
+- `rule://list` / `rule://<name>` 可读取可用 rules。
 - `session://current`、`session://current/stats`、`session://current/messages`、`session://current/artifacts` 可读取当前 session 状态。
 - 默认可读整文件，但大文件会受到工具结果上限保护。
 - 搜索具体内容时优先用 `Grep`，定位后再用 `Read` path selector 读取目标范围。

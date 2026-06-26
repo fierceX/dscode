@@ -57,6 +57,7 @@ impl ResourceRouter {
     pub fn with_builtin_handlers() -> Self {
         Self::default()
             .with_builtin(crate::resources::artifact::ArtifactResourceHandler)
+            .with_builtin(crate::resources::rule::RuleResourceHandler)
             .with_builtin(crate::resources::skill::SkillResourceHandler)
             .with_builtin(crate::resources::session::SessionResourceHandler)
     }

@@ -115,6 +115,10 @@ impl SubAgentExecutor {
             usage_journal: Some(parent_ctx.usage.clone()),
             read_only_fs: parent_ctx.read_only_fs.clone(),
             resource_session_id: parent_ctx.vfs_scope.resource_session_id.clone(),
+            resource_handlers: Vec::new(),
+            skill_providers: Vec::new(),
+            runtime_skills: Vec::new(),
+            skill_discovery_policy: crate::capabilities::SkillDiscoveryPolicy::Defaults,
             resource_router: Some(parent_ctx.resource_router.clone()),
             capability_snapshot: Some(parent_ctx.capability_snapshot.clone()),
         })
@@ -301,6 +305,7 @@ mod tests {
             .vfs_scope
             .resource_session_id = "tenant-knowledge".into();
 
+        let parent_snapshot = parent.capability_snapshot.clone();
         let child = SubAgentExecutor::new(parent, "sub-agent-session".into(), false)
             .await
             .unwrap();
@@ -312,5 +317,9 @@ mod tests {
             child.child_ctx.vfs_scope.agent_session_id,
             "sub-agent-session"
         );
+        assert!(Arc::ptr_eq(
+            &child.child_ctx.capability_snapshot,
+            &parent_snapshot
+        ));
     }
 }

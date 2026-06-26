@@ -183,7 +183,7 @@ async fn harness_with_config(
         spaths.plan_draft.clone(),
         cwd.clone(),
         home.clone(),
-        Arc::new(capability_snapshot.skills.clone()),
+        capability_snapshot.clone(),
         crate::config::api_url(&cfg),
         &cfg,
         stats.clone(),

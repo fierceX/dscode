@@ -1501,7 +1501,10 @@ mod tests {
                 dependency_fingerprint: "deps".to_string(),
                 ..crate::capabilities::SkillSnapshot::default()
             },
+            context_files: crate::capabilities::ContextFileSnapshot::default(),
+            rules: crate::capabilities::RuleSnapshot::default(),
             warnings: Vec::new(),
+            dependency_fingerprint: "deps".to_string(),
         });
 
         let err = crate::resources::skill::read_skill_resource("skill://host-secret", &ctx)
@@ -1515,9 +1518,36 @@ mod tests {
     #[test]
     fn read_skill_resource_rejects_nested_path() {
         let ctx = temp_tool_context("skill-invalid");
-        assert!(
-            crate::resources::skill::read_skill_resource("skill://debugging/extra", &ctx).is_err()
-        );
+        let err = crate::resources::skill::read_skill_resource("skill://debugging/extra", &ctx)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("invalid skill resource"), "{err}");
+        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
+    }
+
+    #[test]
+    fn read_rule_resource_lists_and_returns_content() {
+        let ctx = temp_tool_context("rule-resource");
+        let list = crate::resources::rule::read_rule_resource("rule://list", &ctx).unwrap();
+        assert!(list.contains("default-agent-rules"));
+
+        let rule =
+            crate::resources::rule::read_rule_resource("rule://default-agent-rules", &ctx).unwrap();
+        assert!(rule.contains("# rule://default-agent-rules"));
+        assert!(rule.contains("Prefer safe, exact edits."));
+        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
+    }
+
+    #[test]
+    fn read_tool_routes_rule_resource() {
+        let ctx = temp_tool_context("rule-read-tool");
+        let result = ReadTool
+            .execute(
+                &serde_json::json!({"path":"rule://default-agent-rules"}),
+                &ctx,
+            )
+            .unwrap();
+        assert!(result.content.contains("Prefer safe, exact edits."));
         let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
     }
 

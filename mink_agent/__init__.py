@@ -132,6 +132,16 @@ def _state_dir(home: str) -> str:
 # ── SandboxConfig ────────────────────────────────────────────────────
 
 @dataclass
+class InlineSkill:
+    """Inline runtime skill sent through the Agent JSONL request."""
+
+    name: str
+    description: str
+    content: str
+    exposure: str = "model_addressable"
+    revision: Optional[str] = None
+
+@dataclass
 class SandboxConfig:
     """Configuration for a sandboxed agent session.
 
@@ -168,6 +178,16 @@ class SandboxConfig:
         ``None`` (default) means all enabled tools are visible (subject to
         ``allow_*`` flags).  Example: ``["Read", "Write", "Edit", "Grep",
         "Glob", "Bash"]``.
+    skills:
+        Selected skill names to inject into the system prompt. These names must
+        exist in mink's normal skill discovery paths or built-in skills.
+    inline_skills:
+        Runtime skills embedded directly in the SDK request. Use this for
+        private deployment instructions that should not be read from disk.
+    skill_discovery_policy:
+        ``"defaults"`` loads runtime, project/user filesystem, and built-in
+        skills. ``"runtime_only"`` and ``"explicit_only"`` load only SDK/Rust
+        injected runtime skills/providers.
     allow_sub_agent:
         Whether the SubAgent tool is enabled.
     enable_python_sandbox:
@@ -225,6 +245,9 @@ class SandboxConfig:
     allow_python: bool = True
     allow_network: bool = True
     enabled_tools: Optional[list[str]] = None  # 工具白名单，None=全部启用
+    skills: list[str] = field(default_factory=list)
+    inline_skills: list[InlineSkill] = field(default_factory=list)
+    skill_discovery_policy: str = "defaults"
     allow_sub_agent: bool = True
     # PythonSandbox tool (CPython WASI sandbox, default: disabled)
     enable_python_sandbox: bool = False
@@ -788,6 +811,15 @@ class AgentSession:
             options["stream_events"] = False
         if self._config.enabled_tools is not None:
             options["enabled_tools"] = self._config.enabled_tools
+        if self._config.skills:
+            options["skills"] = self._config.skills
+        if self._config.inline_skills:
+            options["inline_skills"] = [
+                self._inline_skill_to_dict(skill)
+                for skill in self._config.inline_skills
+            ]
+        if self._config.skill_discovery_policy != "defaults":
+            options["skill_discovery_policy"] = self._config.skill_discovery_policy
         if self._config.session_layout:
             options["session_layout"] = self._config.session_layout
         if extra_options:
@@ -828,6 +860,53 @@ class AgentSession:
             raise ValueError("llm_wait_heartbeat must be zero or greater")
         if cfg.session_layout not in ("project", "home", "direct", "isolated"):
             raise ValueError("session_layout must be 'project', 'home', 'direct', or 'isolated'")
+        for skill in cfg.skills:
+            self._validate_skill_name(skill, "skill")
+        valid_exposures = {"model_discoverable", "model_addressable", "host_only"}
+        valid_policies = {"defaults", "runtime_only", "explicit_only"}
+        if cfg.skill_discovery_policy not in valid_policies:
+            raise ValueError(
+                "skill_discovery_policy must be 'defaults', 'runtime_only', or 'explicit_only'"
+            )
+        for skill in cfg.inline_skills:
+            if not isinstance(skill, InlineSkill):
+                raise ValueError("inline_skills must contain InlineSkill instances")
+            self._validate_skill_name(skill.name, "inline skill")
+            if not isinstance(skill.content, str) or not skill.content.strip():
+                raise ValueError("inline skill content must be a non-empty string")
+            if skill.exposure not in valid_exposures:
+                raise ValueError(
+                    "inline skill exposure must be 'model_discoverable', "
+                    "'model_addressable', or 'host_only'"
+                )
+
+    @staticmethod
+    def _validate_skill_name(name: Any, label: str) -> None:
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(f"{label} name must be a non-empty string")
+        if (
+            name.strip() != name
+            or name.startswith(".")
+            or "/" in name
+            or "\\" in name
+            or ".." in name
+        ):
+            raise ValueError(
+                f"{label} name must not contain whitespace padding, path separators, "
+                "leading dots, or '..'"
+            )
+
+    @staticmethod
+    def _inline_skill_to_dict(skill: InlineSkill) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "name": skill.name,
+            "description": skill.description,
+            "content": skill.content,
+            "exposure": skill.exposure,
+        }
+        if skill.revision is not None:
+            data["revision"] = skill.revision
+        return data
 
     def _build_sandbox_cmd(self) -> list[str]:
         """Build the full command line: sandbox wrapper + mink-core binary."""

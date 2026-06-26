@@ -137,7 +137,8 @@ mod tests {
     use crate::tui::input::{handle_ctrl_c, handle_event};
     use crate::tui::markdown::{
         InlineNode, MdBlock, TableAlign, TableRows, normalize_markdown_input, parse_blocks,
-        push_msg, push_msg_with_tool, push_msg_with_width, render_table, strip_ansi, wrap_lines_word,
+        push_msg, push_msg_with_tool, push_msg_with_width, render_table, strip_ansi,
+        wrap_lines_word,
     };
     use crate::tui::notify::TaskNotificationKind;
     use crate::tui::render::{

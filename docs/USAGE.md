@@ -530,7 +530,7 @@ let runtime = AgentRuntime::start_with_options(
 - `resource_session_id`：知识库数据分区；未配置时默认使用 runtime session id。
 - `agent_session_id`：实际发起调用的主代理或子代理 session id。
 
-子代理继承父代理的 `resource_session_id`，但使用自己的 `agent_session_id`。虚拟 Read 是只读的，不产生 anchored Edit snapshot；`Write` 和 `Edit` 仍只操作本地文件。`artifact://`、`skill://`、`session://` 和 `http(s)://` 也继续走内置资源实现，不进入 VFS。
+子代理继承父代理的 `resource_session_id`，但使用自己的 `agent_session_id`。虚拟 Read 是只读的，不产生 anchored Edit snapshot；`Write` 和 `Edit` 仍只操作本地文件。`artifact://`、`skill://`、`rule://`、`session://` 和 `http(s)://` 也继续走内置资源实现，不进入 VFS。
 
 完整 redb 示例见
 [`crates/mink-core/examples/redb_vfs.rs`](../crates/mink-core/examples/redb_vfs.rs)。
@@ -760,7 +760,7 @@ artifact、输出截断和每个工具的完整协议以 [工具参考](tools.md
 
 | 工具 | 用途 | 关键参数 |
 |------|------|---------|
-| `Read` | 读文件或轻量资源，支持 selector 和 `artifact://` / `skill://` / `session://` | `path` |
+| `Read` | 读文件或轻量资源，支持 selector 和 `artifact://` / `skill://` / `rule://` / `session://` | `path` |
 | `Write` | 写文件 | `path`, `content` |
 | `Edit` | anchored patch 编辑 | `path`, `patch` |
 | `Bash` | 执行命令 | `command`, `timeout` |
@@ -792,7 +792,8 @@ artifact、输出截断和每个工具的完整协议以 [工具参考](tools.md
 
 - `http(s)://...`：读取公开 URL，首次 fetch 后缓存到当前 session artifact，后续 selector 从缓存分页；cache 正文缺失时会重新 fetch
 - `artifact://<id>`：读取被截断工具输出
-- `skill://list` / `skill://<name>`：列出或读取可用 skill；本地 skill 优先，内置 skill 兜底
+- `skill://list` / `skill://<name>`：列出或读取可用 skill；列表与读取来自同一 capability snapshot
+- `rule://list` / `rule://<name>`：列出或读取可用 rule
 - `session://current`：当前 session 摘要
 - `session://current/stats`：stats JSON
 - `session://current/messages` / `session://current/messages/all`：conversation 摘要
@@ -880,8 +881,14 @@ mink --list-skills
 ### 加载机制
 
 - Skill 通过 `.minkrc` 的 `skills` 字段或 `--config "skills=[\"name\"]"` 加载，加载后在 system prompt 的 `<selected-skills>` 段嵌入 SKILL.md 全文
-- `Read skill://<name>` 在运行时按需读取同一套 skill resolver，不修改后续轮次的 system prompt
+- `Read skill://<name>` 在运行时按需读取当前 capability snapshot 中的同一份 skill 视图，不修改后续轮次的 system prompt
 - 内置技能即使在离线环境也可用（编译时已嵌入）
+
+### 能力视图
+
+每次 runtime 启动会构建一份 capability snapshot。system prompt 的 skill index、selected skills、instruction files、rules，以及 `Read skill://...` / `Read rule://...` 都读取这份视图。这样 CLI、Rust runtime、Python SDK 和子代理不会各自重新扫描一套能力来源。
+
+Rust runtime 和 Agent JSONL / Python SDK 可注入 inline skills，并可通过 discovery policy 控制是否加载默认文件系统和内置 skills。默认 CLI 行为仍保留本地 skill 覆盖内置 skill 的优先级。
 
 ---
 

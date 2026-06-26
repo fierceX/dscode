@@ -21,10 +21,12 @@ pub mod ui;
 /// CLI binaries and the library runtime.
 pub mod prelude {
     pub use crate::runtime::{
-        AgentEvent, AgentEventStream, AgentOptions, AgentRuntime, EventSink, ReadOnlyFileSystem,
-        SessionInfo, SessionLayout, SessionPolicy, TurnOutcome, TurnStatus, VfsGlobRequest,
-        VfsGlobResult, VfsGrepEntry, VfsGrepRequest, VfsGrepResult, VfsReadRequest, VfsReadResult,
-        VfsScope, VirtualFile,
+        AgentEvent, AgentEventStream, AgentOptions, AgentRuntime, CapabilityExposure, EventSink,
+        LoadedSkill, ReadOnlyFileSystem, ResourceHandler, RuntimeSkill, SessionInfo, SessionLayout,
+        SessionPolicy, SkillCapability, SkillDiscoveryPolicy, SkillLoadContext, SkillProvider,
+        SourceLevel, SourceMeta, TurnOutcome, TurnStatus, VfsGlobRequest, VfsGlobResult,
+        VfsGrepEntry, VfsGrepRequest, VfsGrepResult, VfsReadRequest, VfsReadResult, VfsScope,
+        VirtualFile,
     };
     pub use crate::session::usage::{
         TokenUsage, UsageKind, UsageRecord, UsageStatus, UsageSummary,
@@ -57,8 +59,6 @@ pub mod context;
 pub mod llm;
 #[doc(hidden)]
 pub mod session;
-#[doc(hidden)]
-pub mod skills;
 
 #[doc(hidden)]
 pub mod guard;

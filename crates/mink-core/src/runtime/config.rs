@@ -1,6 +1,8 @@
+use crate::capabilities::{RuntimeSkill, SkillDiscoveryPolicy, SkillProvider};
 use crate::config::Config;
 #[cfg(test)]
 use crate::llm::client::LlmClient;
+use crate::resources::ResourceHandler;
 use crate::runtime::EventSink;
 use crate::session::paths::Paths;
 use crate::session::paths::SessionLayout;
@@ -26,6 +28,10 @@ pub struct AgentRuntimeConfig {
     pub event_sink: Option<Arc<dyn EventSink>>,
     pub sub_stream_tx: Option<Arc<dyn SubAgentStreamSink>>,
     pub read_only_fs: Option<Arc<dyn ReadOnlyFileSystem>>,
+    pub resource_handlers: Vec<Arc<dyn ResourceHandler>>,
+    pub skill_providers: Vec<Arc<dyn SkillProvider>>,
+    pub runtime_skills: Vec<RuntimeSkill>,
+    pub skill_discovery_policy: SkillDiscoveryPolicy,
     /// Knowledge-base scope used by the read-only VFS. Defaults to the
     /// resolved runtime session id.
     pub resource_session_id: Option<String>,
@@ -63,6 +69,10 @@ impl AgentRuntimeConfig {
             event_sink: None,
             sub_stream_tx: None,
             read_only_fs: None,
+            resource_handlers: Vec::new(),
+            skill_providers: Vec::new(),
+            runtime_skills: Vec::new(),
+            skill_discovery_policy: SkillDiscoveryPolicy::Defaults,
             resource_session_id: None,
             #[cfg(test)]
             llm_override: None,

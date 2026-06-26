@@ -14,7 +14,7 @@ mink 是一个 Rust 实现的轻量 AI coding agent，专为 DeepSeek/OpenAI-com
 - Session 持久化：JSONL 追加写入，支持恢复和重放
 - Artifact 持久化：超长工具输出落到 session `artifacts/`，可通过 `Read artifact://<id>` 读取
 - 工具元数据与审批策略：每个工具声明 approval tier、结果类型、副作用和 discoverable 状态
-- 轻量资源读取：`Read` 支持本地文件、artifact、skill 和 session introspection URL
+- 轻量资源读取：`Read` 支持本地文件、artifact、skill、rule 和 session introspection URL，并通过 `ResourceRouter` 分发 registered scheme
 - Anchored Edit：`Read` 生成 snapshot header，`Edit.patch` 可按行锚定修改并检测 stale snapshot
 - 两种终端交互模式：REPL + TUI
 - 子代理：SubAgent 支持隔离上下文或 fork 当前上下文并发执行
@@ -136,6 +136,14 @@ TurnExecutor (agent/turn.rs)
 │ tools/web.rs          │ WebSearch/WebFetch
 └───────────────────────┘
          │
+┌─────── 资源与能力层 ───┐
+│ resources/router.rs   │ ResourceRouter、ResourceHandler、scheme 注册和分发
+│ resources/{artifact,skill,rule,session}.rs │ Read 轻量资源 handler
+│ capabilities/mod.rs   │ CapabilitySnapshot，汇总 skills/context files/rules
+│ capabilities/skills.rs│ SkillProvider、SkillSnapshot、runtime/filesystem/built-in skills
+│ capabilities/{context_files,rules}.rs │ instruction files / rules snapshot
+└───────────────────────┘
+         │
 ┌─────── 信号层 ────────┐
 │ guard/collector.rs    │ ToolFailed/ToolError/EditLoop 信号采集
 │ agent/belief.rs       │ 信念度计算
@@ -234,7 +242,13 @@ DecisionEngine.decide()
 | `config.rs` | Config 结构体、CLI/env/配置文件合并、API key 和 sandbox 配置 |
 | `context.rs` | AgentSharedContext + ToolContext |
 | `assets.rs` | 嵌入 tools.json、内置 skills |
-| `skills.rs` | 统一 skill 发现与解析：本地目录优先、内置 skill 兜底 |
+| `capabilities/mod.rs` | CapabilitySnapshot 汇总 skills、context files、rules 和 dependency fingerprint |
+| `capabilities/skills.rs` | 统一 skill provider / snapshot：本地目录优先、内置 skill 兜底、runtime skill 注入 |
+| `capabilities/context_files.rs` | AGENTS/CLAUDE instruction files 的 snapshot |
+| `capabilities/rules.rs` | rule provider / snapshot |
+| `resources/router.rs` | ResourceRouter 和 ResourceHandler |
+| `resources/skill.rs` | `skill://list` / `skill://<name>` 资源读取 handler |
+| `resources/rule.rs` | `rule://list` / `rule://<name>` 资源读取 handler |
 | `cancel.rs` | CancellationToken 父子传播 |
 | `safety.rs` | 危险命令过滤 |
 | `sandbox/` | 沙箱自举和平台实现 |
@@ -295,7 +309,8 @@ DecisionEngine.decide()
 `Read.path` 支持轻量资源 URL：
 
 - `artifact://<id>`：读取被截断工具输出
-- `skill://list` / `skill://<name>`：列出或读取可用 skill，本地 skill 优先、内置 skill 兜底
+- `skill://list` / `skill://<name>`：列出或读取当前 capability snapshot 中的 skill
+- `rule://list` / `rule://<name>`：列出或读取当前 capability snapshot 中的 rule
 - `session://current`：当前 session 摘要
 - `session://current/stats`：stats JSON
 - `session://current/messages` / `session://current/messages/all`：conversation 摘要
@@ -362,6 +377,8 @@ Anchored patch 只修改 snapshot 覆盖且未漂移的行。tag 缺失、行 ha
 - `Bash` / `Python` 必须在 `ToolContext.cwd` 下执行；Bash 未显式设置 `timeout` 时使用稳定的全局 tool timeout
 - `TurnExecutor` 写入 LLM conversation 使用 `conv_content`，为空时使用 `content`
 - `Read` 本地非 raw 输出会记录 snapshot；raw 或 immutable resource 不生成可编辑 snapshot
+- registered resource URL 先于 VFS 处理；未知非 web scheme 必须 fail closed
+- prompt skill index、selected skills、`skill://` 和 `rule://` 必须来自同一 `CapabilitySnapshot`
 - 嵌入式 runtime 可为普通路径注入同步只读 VFS，仅替换 Read/Glob/Grep 后端；未注入时必须严格保持原有本地执行路径
 - VFS 调用同时携带继承的 `resource_session_id` 和当前 `agent_session_id`；虚拟 Read 不生成 snapshot，Edit/Write 始终操作本地文件
 - `Edit.patch` 的 header path 必须和 `Edit.path` 一致，snapshot stale 时拒绝编辑

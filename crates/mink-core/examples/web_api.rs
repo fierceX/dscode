@@ -101,15 +101,27 @@ impl TaskStatus {
     fn queued() -> Self {
         Self {
             status: "queued".into(),
-            text: None, thinking: None, tool_calls: None, tool_errors: None,
-            error: None, session_id: None, home: None, cwd: None,
+            text: None,
+            thinking: None,
+            tool_calls: None,
+            tool_errors: None,
+            error: None,
+            session_id: None,
+            home: None,
+            cwd: None,
         }
     }
     fn running() -> Self {
         Self {
             status: "running".into(),
-            text: None, thinking: None, tool_calls: None, tool_errors: None,
-            error: None, session_id: None, home: None, cwd: None,
+            text: None,
+            thinking: None,
+            tool_calls: None,
+            tool_errors: None,
+            error: None,
+            session_id: None,
+            home: None,
+            cwd: None,
         }
     }
 }
@@ -140,7 +152,10 @@ fn create_workspace(task_id: &str) -> Result<(PathBuf, PathBuf), String> {
 
 fn random_token() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
     format!("{:016x}", nanos)
 }
 
@@ -174,12 +189,34 @@ fn parse_worker_args(args: &[String]) -> Option<WorkerArgs> {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--home" => { home = next_arg(args, i).map(String::from); i += 1; }
-            "--cwd" => { cwd = next_arg(args, i).map(String::from); i += 1; }
-            "--read-dir" => { if let Some(d) = next_arg(args, i) { read_dirs.push(d.into()); } i += 1; }
-            "--write-dir" => { if let Some(d) = next_arg(args, i) { write_dirs.push(d.into()); } i += 1; }
-            "--api-key" => { api_key = next_arg(args, i).map(String::from); i += 1; }
-            "--model" => { model = next_arg(args, i).map(String::from); i += 1; }
+            "--home" => {
+                home = next_arg(args, i).map(String::from);
+                i += 1;
+            }
+            "--cwd" => {
+                cwd = next_arg(args, i).map(String::from);
+                i += 1;
+            }
+            "--read-dir" => {
+                if let Some(d) = next_arg(args, i) {
+                    read_dirs.push(d.into());
+                }
+                i += 1;
+            }
+            "--write-dir" => {
+                if let Some(d) = next_arg(args, i) {
+                    write_dirs.push(d.into());
+                }
+                i += 1;
+            }
+            "--api-key" => {
+                api_key = next_arg(args, i).map(String::from);
+                i += 1;
+            }
+            "--model" => {
+                model = next_arg(args, i).map(String::from);
+                i += 1;
+            }
             _ => {}
         }
         i += 1;
@@ -201,34 +238,55 @@ async fn create_task(
     Json(req): Json<CreateTask>,
 ) -> impl IntoResponse {
     let token = random_token();
-    state.tasks.write().await.insert(token.clone(), TaskStatus::queued());
+    state
+        .tasks
+        .write()
+        .await
+        .insert(token.clone(), TaskStatus::queued());
 
     let state = state.clone();
     let tid = token.clone();
     let prompt = req.prompt.clone();
 
     tokio::spawn(async move {
-        state.tasks.write().await.insert(tid.clone(), TaskStatus::running());
+        state
+            .tasks
+            .write()
+            .await
+            .insert(tid.clone(), TaskStatus::running());
         let result = spawn_worker_and_wait(&tid, &prompt).await;
 
         let status = match result {
             Ok(r) => TaskStatus {
                 status: r.status,
-                text: Some(r.text), thinking: Some(r.thinking),
-                tool_calls: Some(r.tool_calls), tool_errors: Some(r.tool_errors),
+                text: Some(r.text),
+                thinking: Some(r.thinking),
+                tool_calls: Some(r.tool_calls),
+                tool_errors: Some(r.tool_errors),
                 error: r.error,
-                session_id: Some(r.session_id), home: Some(r.home), cwd: Some(r.cwd),
+                session_id: Some(r.session_id),
+                home: Some(r.home),
+                cwd: Some(r.cwd),
             },
             Err(e) => TaskStatus {
                 status: "failed".into(),
-                text: None, thinking: None, tool_calls: None, tool_errors: None,
-                error: Some(e), session_id: None, home: None, cwd: None,
+                text: None,
+                thinking: None,
+                tool_calls: None,
+                tool_errors: None,
+                error: Some(e),
+                session_id: None,
+                home: None,
+                cwd: None,
             },
         };
         state.tasks.write().await.insert(tid, status);
     });
 
-    Json(CreateResponse { task_id: token, status: "queued".into() })
+    Json(CreateResponse {
+        task_id: token,
+        status: "queued".into(),
+    })
 }
 
 async fn get_task(
@@ -237,7 +295,10 @@ async fn get_task(
 ) -> impl IntoResponse {
     let task_id = params.get("id").cloned().unwrap_or_default();
     let tasks = state.tasks.read().await;
-    eprintln!("[server] GET /task?id={task_id}  keys={:?}", tasks.keys().collect::<Vec<_>>());
+    eprintln!(
+        "[server] GET /task?id={task_id}  keys={:?}",
+        tasks.keys().collect::<Vec<_>>()
+    );
     match tasks.get(&task_id) {
         Some(s) => Json(s.clone()).into_response(),
         None => (
@@ -247,9 +308,7 @@ async fn get_task(
     }
 }
 
-async fn list_tasks(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+async fn list_tasks(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let tasks = state.tasks.read().await;
     let keys: Vec<_> = tasks.keys().cloned().collect();
     eprintln!("[server] GET /tasks  keys={:?}", keys);
@@ -283,12 +342,18 @@ async fn spawn_worker_and_wait(token: &str, prompt: &str) -> Result<WorkerResult
     let mut child = std::process::Command::new(&exe)
         .args([
             "--internal-mink-worker",
-            "--home", &home_s,
-            "--cwd", &cwd_s,
-            "--read-dir", &cwd_s,
-            "--write-dir", &cwd_s,
-            "--api-key", &api_key(),
-            "--model", "flash",
+            "--home",
+            &home_s,
+            "--cwd",
+            &cwd_s,
+            "--read-dir",
+            &cwd_s,
+            "--write-dir",
+            &cwd_s,
+            "--api-key",
+            &api_key(),
+            "--model",
+            "flash",
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -297,10 +362,14 @@ async fn spawn_worker_and_wait(token: &str, prompt: &str) -> Result<WorkerResult
         .map_err(|e| format!("spawn worker: {e}"))?;
 
     // Write the prompt to stdin — worker reads it after re-exec.
-    let task_req = serde_json::to_string(&TaskRequest { prompt: prompt.to_string() })
-        .map_err(|e| format!("json: {e}"))?;
+    let task_req = serde_json::to_string(&TaskRequest {
+        prompt: prompt.to_string(),
+    })
+    .map_err(|e| format!("json: {e}"))?;
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(task_req.as_bytes()).map_err(|e| format!("write stdin: {e}"))?;
+        stdin
+            .write_all(task_req.as_bytes())
+            .map_err(|e| format!("write stdin: {e}"))?;
         drop(stdin); // close → EOF
     }
 
@@ -309,7 +378,11 @@ async fn spawn_worker_and_wait(token: &str, prompt: &str) -> Result<WorkerResult
         let reader = BufReader::new(stdout);
         let mut last = String::new();
         for line in reader.lines() {
-            if let Ok(l) = line { if !l.trim().is_empty() { last = l; } }
+            if let Ok(l) = line {
+                if !l.trim().is_empty() {
+                    last = l;
+                }
+            }
         }
         let status = child.wait().map_err(|e| format!("wait: {e}"))?;
         Ok::<_, String>((last, status))
@@ -365,8 +438,7 @@ async fn run_hidden_worker() -> Result<(), String> {
     tokio::io::AsyncReadExt::read_to_string(&mut tokio::io::stdin(), &mut input)
         .await
         .map_err(|e| format!("read stdin: {e}"))?;
-    let task: TaskRequest =
-        serde_json::from_str(&input).map_err(|e| format!("parse task: {e}"))?;
+    let task: TaskRequest = serde_json::from_str(&input).map_err(|e| format!("parse task: {e}"))?;
 
     // 4. Build and run mink runtime.
     let opts = AgentOptions::new(wa.home.clone(), wa.cwd.clone())
@@ -387,7 +459,10 @@ async fn run_hidden_worker() -> Result<(), String> {
         session.events_path.display()
     );
 
-    let outcome = rt.run_turn(&task.prompt).await.map_err(|e| format!("run_turn: {e}"))?;
+    let outcome = rt
+        .run_turn(&task.prompt)
+        .await
+        .map_err(|e| format!("run_turn: {e}"))?;
     rt.shutdown().await.map_err(|e| format!("shutdown: {e}"))?;
 
     // 5. Emit result JSON.
@@ -405,7 +480,10 @@ async fn run_hidden_worker() -> Result<(), String> {
         home: session.home.to_string_lossy().into_owned(),
         cwd: session.cwd.to_string_lossy().into_owned(),
     };
-    println!("{}", serde_json::to_string(&result).map_err(|e| format!("json: {e}"))?);
+    println!(
+        "{}",
+        serde_json::to_string(&result).map_err(|e| format!("json: {e}"))?
+    );
     Ok(())
 }
 
@@ -430,7 +508,9 @@ async fn main() {
 
     std::fs::create_dir_all(WORK_BASE).ok();
 
-    let state = Arc::new(AppState { tasks: RwLock::new(HashMap::new()) });
+    let state = Arc::new(AppState {
+        tasks: RwLock::new(HashMap::new()),
+    });
     let app = Router::new()
         .route("/task", post(create_task))
         .route("/task", get(get_task))
@@ -444,6 +524,8 @@ async fn main() {
     println!("  GET  /tasks      list all tasks");
     println!("[server] listening on :3000");
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.expect("bind :3000");
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000")
+        .await
+        .expect("bind :3000");
     axum::serve(listener, app).await.expect("server");
 }

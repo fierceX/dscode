@@ -1,7 +1,9 @@
+use crate::capabilities::{CapabilityExposure, RuntimeSkill, SkillDiscoveryPolicy, SkillProvider};
 use crate::config::{
     Config, OutputFormat, SandboxConfig, SandboxPythonConfig, ToolApprovalMode, ToolApprovalPolicy,
     ToolDisableFlags,
 };
+use crate::resources::ResourceHandler;
 use crate::runtime::{AgentRuntimeConfig, EventSink, SessionPolicy};
 use crate::session::paths::SessionLayout;
 use crate::tools::vfs::ReadOnlyFileSystem;
@@ -31,6 +33,10 @@ pub struct AgentOptions {
     event_sink: Option<Arc<dyn EventSink>>,
     sub_stream_tx: Option<Arc<dyn SubAgentStreamSink>>,
     read_only_fs: Option<Arc<dyn ReadOnlyFileSystem>>,
+    resource_handlers: Vec<Arc<dyn ResourceHandler>>,
+    skill_providers: Vec<Arc<dyn SkillProvider>>,
+    runtime_skills: Vec<RuntimeSkill>,
+    skill_discovery_policy: SkillDiscoveryPolicy,
     resource_session_id: Option<String>,
 }
 
@@ -70,6 +76,10 @@ impl AgentOptions {
             event_sink: None,
             sub_stream_tx: None,
             read_only_fs: None,
+            resource_handlers: Vec::new(),
+            skill_providers: Vec::new(),
+            runtime_skills: Vec::new(),
+            skill_discovery_policy: SkillDiscoveryPolicy::Defaults,
             resource_session_id: None,
         }
     }
@@ -154,6 +164,41 @@ impl AgentOptions {
     /// Replace local Read/Glob/Grep access with a synchronous read-only VFS.
     pub fn with_read_only_file_system(mut self, fs: Arc<dyn ReadOnlyFileSystem>) -> Self {
         self.read_only_fs = Some(fs);
+        self
+    }
+
+    pub fn with_resource_handler(mut self, handler: Arc<dyn ResourceHandler>) -> Self {
+        self.resource_handlers.push(handler);
+        self
+    }
+
+    pub fn with_skill_provider(mut self, provider: Arc<dyn SkillProvider>) -> Self {
+        self.skill_providers.push(provider);
+        self
+    }
+
+    pub fn with_runtime_skill(mut self, skill: RuntimeSkill) -> Self {
+        self.runtime_skills.push(skill);
+        self
+    }
+
+    pub fn with_runtime_skill_content(
+        self,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        content: impl Into<String>,
+    ) -> Self {
+        self.with_runtime_skill(RuntimeSkill {
+            name: name.into(),
+            description: description.into(),
+            content: content.into(),
+            exposure: CapabilityExposure::ModelDiscoverable,
+            revision: None,
+        })
+    }
+
+    pub fn with_skill_discovery_policy(mut self, policy: SkillDiscoveryPolicy) -> Self {
+        self.skill_discovery_policy = policy;
         self
     }
 
@@ -261,9 +306,21 @@ impl AgentOptions {
         self
     }
 
-    pub fn with_skills(mut self, skills: impl Into<Vec<String>>) -> Self {
-        self.config.skills = skills.into();
+    pub fn with_selected_skills<I, S>(mut self, skills: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.config.skills = skills.into_iter().map(Into::into).collect();
         self
+    }
+
+    pub fn with_skills<I, S>(self, skills: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.with_selected_skills(skills)
     }
 
     pub fn with_mission_file(mut self, mission_file: impl Into<PathBuf>) -> Self {
@@ -368,6 +425,10 @@ impl AgentOptions {
             event_sink: self.event_sink,
             sub_stream_tx: self.sub_stream_tx,
             read_only_fs: self.read_only_fs,
+            resource_handlers: self.resource_handlers,
+            skill_providers: self.skill_providers,
+            runtime_skills: self.runtime_skills,
+            skill_discovery_policy: self.skill_discovery_policy,
             resource_session_id: self.resource_session_id,
             #[cfg(test)]
             llm_override: None,
@@ -421,7 +482,9 @@ mod tests {
             .with_output_format(OutputFormat::StreamJson)
             .with_verbose(true)
             .with_log_events(false)
-            .with_skills(vec!["rust".to_string()])
+            .with_runtime_skill_content("runtime-rust", "Runtime Rust", "runtime body")
+            .with_skill_discovery_policy(SkillDiscoveryPolicy::RuntimeOnly)
+            .with_selected_skills(["runtime-rust"])
             .with_mission_content("mission")
             .disable_bash(true)
             .disable_python(true)
@@ -437,6 +500,12 @@ mod tests {
         assert_eq!(runtime_config.home, PathBuf::from("/tmp/mink-home"));
         assert_eq!(runtime_config.cwd, PathBuf::from("/tmp/project"));
         assert_eq!(runtime_config.session_layout, SessionLayout::Isolated);
+        assert_eq!(
+            runtime_config.skill_discovery_policy,
+            SkillDiscoveryPolicy::RuntimeOnly
+        );
+        assert_eq!(runtime_config.runtime_skills.len(), 1);
+        assert_eq!(runtime_config.runtime_skills[0].name, "runtime-rust");
         assert!(matches!(
             runtime_config.session,
             SessionPolicy::UseOrCreate(ref value) if value == "work"
@@ -463,7 +532,7 @@ mod tests {
         assert_eq!(cfg.output_format, OutputFormat::StreamJson);
         assert!(cfg.verbose);
         assert!(!cfg.log_events);
-        assert_eq!(cfg.skills, vec!["rust"]);
+        assert_eq!(cfg.skills, vec!["runtime-rust"]);
         assert_eq!(cfg.mission_content.as_deref(), Some("mission"));
         assert!(cfg.tool_disable.disable_bash);
         assert!(cfg.tool_disable.disable_python);
@@ -476,6 +545,15 @@ mod tests {
         );
         assert_eq!(cfg.tool_approval_mode, ToolApprovalMode::Write);
         assert_eq!(cfg.tool_approval["Bash"], ToolApprovalPolicy::Prompt);
+    }
+
+    #[test]
+    fn options_with_skills_remains_selected_skills_alias() {
+        let runtime_config = AgentOptions::new("/tmp/mink-home", "/tmp/project")
+            .with_skills(["rust", "debugging"])
+            .into_runtime_config();
+
+        assert_eq!(runtime_config.config.skills, vec!["rust", "debugging"]);
     }
 
     #[test]

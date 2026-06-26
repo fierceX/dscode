@@ -54,13 +54,18 @@ pub(crate) fn style_for_kind(kind: MsgKind) -> Style {
 /// not be reinterpreted as a diff — even if the text coincidentally
 /// contains diff-like lines (e.g. Read of a YAML front-matter file).
 fn is_diff_eligible(tool_name: Option<&str>) -> bool {
-    matches!(tool_name, Some("Edit" | "Bash" | "Python" | "PythonSandbox"))
+    matches!(
+        tool_name,
+        Some("Edit" | "Bash" | "Python" | "PythonSandbox")
+    )
 }
 
 fn mode_for_kind(kind: MsgKind, text: &str, tool_name: Option<&str>) -> MarkdownMode {
     match kind {
         MsgKind::Text | MsgKind::StreamText => MarkdownMode::Full,
-        MsgKind::ToolResult if is_diff_eligible(tool_name) && diff::is_diff_like(text) => MarkdownMode::Diff,
+        MsgKind::ToolResult if is_diff_eligible(tool_name) && diff::is_diff_like(text) => {
+            MarkdownMode::Diff
+        }
         MsgKind::ToolResult => MarkdownMode::ToolOutput,
         _ => MarkdownMode::Plain,
     }

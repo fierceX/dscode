@@ -1,4 +1,4 @@
-use crate::capabilities::skills::SkillSnapshot;
+use crate::capabilities::CapabilitySnapshot;
 use crate::config::Config;
 use crate::llm::client::{AsyncLlClient, LlmRequestContext};
 use crate::prompt;
@@ -21,7 +21,7 @@ pub struct CompactionEngine {
     plan_draft_path: PathBuf,
     cwd: PathBuf,
     home: PathBuf,
-    skill_snapshot: Arc<SkillSnapshot>,
+    capability_snapshot: Arc<CapabilitySnapshot>,
     api_url: String,
     api_key: String,
     config: Config,
@@ -48,8 +48,8 @@ impl CompactionEngine {
         stats: Arc<StatsTracker>,
     ) -> Self {
         let usage = UsageJournal::new(summary_path.with_file_name("usage.jsonl"));
-        let skill_snapshot = Arc::new(
-            crate::capabilities::build_default_skill_snapshot(
+        let capability_snapshot = Arc::new(
+            crate::capabilities::CapabilitySnapshot::load_default(
                 &cwd,
                 &home,
                 &config.session_id,
@@ -65,7 +65,7 @@ impl CompactionEngine {
             plan_draft_path,
             cwd,
             home,
-            skill_snapshot,
+            capability_snapshot,
             api_url,
             config,
             stats,
@@ -84,7 +84,7 @@ impl CompactionEngine {
         plan_draft_path: PathBuf,
         cwd: PathBuf,
         home: PathBuf,
-        skill_snapshot: Arc<SkillSnapshot>,
+        capability_snapshot: Arc<CapabilitySnapshot>,
         api_url: String,
         config: &Config,
         stats: Arc<StatsTracker>,
@@ -101,7 +101,7 @@ impl CompactionEngine {
             plan_draft_path,
             cwd,
             home,
-            skill_snapshot,
+            capability_snapshot,
             api_url,
             api_key: config.api_key.clone(),
             config: config.clone(),
@@ -246,7 +246,9 @@ Start directly with \"Task focus:\" — no preamble, no markdown, no code fences
         let system_prompt = prompt::Builder {
             cwd: self.cwd.clone(),
             home: self.home.clone(),
-            skill_snapshot: self.skill_snapshot.clone(),
+            skill_snapshot: Arc::new(self.capability_snapshot.skills.clone()),
+            context_file_snapshot: Arc::new(self.capability_snapshot.context_files.clone()),
+            rule_snapshot: Arc::new(self.capability_snapshot.rules.clone()),
             summary_file: self.summary_path.clone(),
             plan_file: self.plan_path.clone(),
             plan_draft_file: self.plan_draft_path.clone(),
