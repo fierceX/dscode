@@ -708,7 +708,7 @@ async fn disabled_tool_call_persists_error_result_instead_of_being_dropped() -> 
         lines[2]["content"][0]["content"]
             .as_str()
             .unwrap()
-            .contains("Bash tool is disabled"),
+            .contains("Tool 'Bash' is disabled by configuration"),
         "{}",
         lines[2]
     );

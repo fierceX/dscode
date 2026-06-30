@@ -1,6 +1,6 @@
 # 架构说明
 
-更新日期：2026-06-26
+更新日期：2026-07-01
 
 本文描述 mink 当前代码结构、模块职责和运行时数据流。面向用户的命令、配置和工作流见
 [USAGE.md](USAGE.md)；完整工具协议见 [tools.md](tools.md)；设计取舍和不变式见
@@ -8,12 +8,13 @@
 
 ## 项目定位
 
-mink 是一个 Rust 实现的轻量 AI coding agent，面向 DeepSeek / OpenAI-compatible API，优先服务终端中的编码工作流。
+mink 是一个 Rust 实现的轻量 AI coding agent，默认面向 DeepSeek / OpenAI-compatible API，优先服务终端中的编码工作流；作为 Rust 库嵌入时也可注入自定义 LLM backend。
 
 核心目标：
 
 - 单二进制分发，终端优先，REPL / TUI / stream-json 三种使用形态
 - 可作为 Rust 库嵌入：Rust 发布包名为 `mink-core`，库 crate 名为 `mink`，`mink::runtime` / `mink::prelude` 提供同进程调用
+- LLM backend 可注入：默认 OpenAI-compatible streaming backend，宿主可替换为私有模型、内网网关或厂商 SDK
 - Session 是一等公民，使用 JSONL 追加持久化，支持恢复、重放和压缩
 - LLM 流式输出、工具执行、信号检测、决策恢复构成闭环
 - 工具边界明确：超时、输出大小、写入大小、副作用和禁用开关都可控
@@ -59,7 +60,7 @@ TurnExecutor (agent/turn.rs)
   │  PlanActionHandler / SubAgentCoordinator
   ▼
 ┌─────── LLM 层 ────────┐
-│ llm/client.rs         │ HTTP 流式客户端、重试、usage 采集、模型名解析
+│ llm/client.rs         │ LlmBackend 注入、OpenAI-compatible 流式客户端、重试、usage 采集、模型名解析
 │ llm/transport.rs      │ OpenAI chat/completions 请求构造
 │ sse/openai.rs         │ SSE 增量解析、usage、stop、tool call 合并
 │ sse/toolcall.rs       │ tool_call 字段归一化
@@ -212,7 +213,7 @@ ToolRunResult
 | `runtime/builder.rs` | `build_runtime()` — 从 `AgentRuntimeConfig` 构造完整 runtime |
 | `runtime/config.rs` | `AgentRuntimeConfig` / `SessionPolicy` / `SessionInfo` |
 | `runtime/handle.rs` | `AgentRuntime` — `start()`, `run_turn()`, `try_stream_turn()`, `stream_turn()`, `shutdown()` |
-| `runtime/options.rs` | `AgentOptions` ergonomic builder，包括只读 VFS 和 resource session scope 注入 |
+| `runtime/options.rs` | `AgentOptions` ergonomic builder，包括 LLM backend、只读 VFS 和 resource session scope 注入 |
 | `runtime/events.rs` | `AgentEvent` 枚举 / `EventSink` trait / `EventDisplay` adapter |
 | `runtime/sdk_adapter.rs` | SDK option 映射、status/exit code 映射、`SdkFinal` 组装 |
 
@@ -237,7 +238,7 @@ ToolRunResult
 | 文件 | 职责 |
 |------|------|
 | `tools/metadata.rs` | `ToolMetadata`、approval tier、结果类型、副作用标记 |
-| `tools/runner.rs` | `ToolExec` trait、`TOOL_REGISTRY`、approval、并发调度、结果截断、artifact spill 和内置控制工具 |
+| `tools/runner.rs` | `ToolExec` trait、`TOOL_REGISTRY`、enabled/disabled gate、approval、并发调度、结果截断、artifact spill 和内置控制工具 |
 | `tools/file.rs` | `ReadTool`、`WriteTool`、`EditTool`、selector、resource URL、anchored patch |
 | `tools/snapshot.rs` | 文件 snapshot、tag、行 hash 校验 |
 | `tools/search.rs` | `GlobTool`、`GrepTool` |
@@ -391,7 +392,7 @@ session 根目录如何由 `home`、`cwd`、`session_id` 推导。当前有四�
 - `ImmutablePrefix` 变更必须通过 prefix manager / invalidate 路径。
 - `ConversationStore` append 时保持内存缓存一致，不靠读盘恢复正常路径性能。
 - `ToolRunner::format_tool_result()` 是工具输出进入 LLM/UI 前的最大字节保护。
-- `ToolRunner::execute_all()` 在 StormBreaker 前执行 approval 检查。
+- `ToolRunner::execute_all()` 在 StormBreaker 前执行 enabled/disabled 和 approval 检查；`enabled_tools` 既过滤工具 schema，也阻止真实执行。
 - 超长工具输出必须保存为当前 session artifact，而不是丢失全文。
 - `Read` 本地非 raw 输出记录 snapshot；raw 和 immutable resource 不生成可编辑 snapshot。
 - registered resource 必须先于 VFS 处理；未知非 web scheme fail closed，不落入普通路径或 VFS。

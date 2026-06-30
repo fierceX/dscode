@@ -12,7 +12,18 @@
 # ── API ─────────────────────────────────────────────────────
 api_key = "sk-xxx"                          # API 密钥（也可用 DEEPSEEK_API_KEY 环境变量）
 base_url = "https://api.deepseek.com/v1"    # API 端点（也可用 DEEPSEEK_BASE_URL 环境变量）
-model = "flash"                             # 默认模型：flash / pro
+model = "flash"                             # 默认模型：flash / pro / 任意真实模型名
+
+# ── OpenAI-compatible 请求选项 ───────────────────────────────
+openai_reasoning_effort = "max"             # reasoning_effort；设为 off/none/false/disabled 表示不发送
+openai_include_usage = true                 # 是否请求 stream_options.include_usage
+openai_token_param = "max_tokens"           # max_tokens / max_completion_tokens
+
+# ── 模型别名 ─────────────────────────────────────────────────
+#[model_aliases]
+#flash = "deepseek-v4-flash"
+#pro = "deepseek-v4-pro"
+#local = "private-model-v1"
 
 # ── LLM ──────────────────────────────────────────────────────
 max_tokens = 81920                          # 最大输出 token
@@ -44,7 +55,7 @@ max_search_results = 1000                   # Grep 最大匹配结果行数
 
 # ── 工具审批 ─────────────────────────────────────────────────
 
-# ── 工具白名单 ─────────────────────────────────────────────
+# ── 工具白名单（同时限制模型可见工具和真实执行）─────────────
 # enabled_tools = ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]
 #[tools]
 #approval_mode = "yolo"                    # yolo / write / always-ask

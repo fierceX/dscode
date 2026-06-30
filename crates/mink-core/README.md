@@ -19,7 +19,7 @@
 
 ```toml
 [dependencies]
-mink = { package = "mink-core", version = "0.1.8", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.1.11", default-features = false, features = ["runtime"] }
 ```
 
 ```rust
@@ -82,6 +82,43 @@ request limits; the exported collection helpers implement those limits for
 iterator-based stores. See [`examples/redb_vfs.rs`](examples/redb_vfs.rs) for a
 complete redb adapter; redb is an example-only dependency and is not linked
 into `mink-core`.
+
+## Custom LLM backend
+
+By default, `AgentRuntime` uses the built-in OpenAI-compatible streaming
+backend configured by `api_key`, `base_url`, model aliases, and OpenAI option
+fields. Embedded Rust applications can replace that backend without forking the
+agent loop:
+
+```rust
+use std::sync::Arc;
+use mink::prelude::{AgentOptions, AgentRuntime};
+
+let runtime = AgentRuntime::start_with_options(
+    AgentOptions::new("/tmp/mink-session", ".")
+        .with_model("local")
+        .with_llm_backend(Arc::new(MyLlmBackend::new())),
+).await?;
+```
+
+Implement `mink::runtime::LlmBackend` and return a stream of `LlmEvent` values.
+`LlmRequest.model` is the resolved provider model name, while
+`LlmRequest.model_alias` preserves the requested alias such as `flash`, `pro`,
+or a custom alias from `config.model_aliases`. On dispatch failure, return
+`LlmRequestFailure { attempt_count, error }.into()` so usage accounting can
+record the number of attempts.
+
+See [`examples/custom_llm_backend.rs`](examples/custom_llm_backend.rs) for a
+complete no-network backend:
+
+```bash
+cargo run -p mink-core --example custom_llm_backend
+```
+
+Custom model names are accepted as-is. Usage tokens are still recorded when the
+backend emits `LlmEvent::Usage`; built-in price calculation only applies to the
+default `flash` / `pro` DeepSeek tiers, so private model cost is reported as
+zero unless the host computes pricing separately.
 
 每次真实 LLM 请求都会追加到 session `usage.jsonl`。`TurnOutcome.usage_records` 只包含当前
 `billing_turn_id` 的主 Agent、自动压缩和子代理明细，`TurnOutcome.usage` 是这些记录的汇总。

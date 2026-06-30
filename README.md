@@ -2,7 +2,8 @@
 
 **简体中文**
 
-极简 AI coding agent。Rust 原生实现，专为 DeepSeek 优化。
+极简 AI coding agent。Rust 原生实现，默认面向 DeepSeek / OpenAI-compatible API，
+同时支持 Rust 嵌入式场景注入自定义 LLM backend。
 
 默认交付为 `mink` 终端二进制，也可构建 SDK 精简二进制 `mink-core`，或作为 Rust
 库嵌入到其他服务中编排。
@@ -11,7 +12,8 @@
 
 ## 特性
 
-- **DeepSeek 原生优化** — 针对 DeepSeek V4 系列设计，最大化 prefix-cache 命中率
+- **OpenAI-compatible 默认后端** — 默认适配 DeepSeek / OpenAI-compatible streaming API，支持 reasoning、usage 和工具调用
+- **可注入 LLM backend** — Rust runtime 可由宿主注入私有化模型、内网网关、厂商 SDK 或非 HTTP transport
 - **两种终端模式** — REPL（`-i`，rustyline 行编辑）和 TUI（`--tui`，ratatui 全屏界面）
 - **信号驱动的信念系统** — 自动检测工具执行错误，低信念时注入修正提示并约束恢复首步；可用 `MINK_SIGNAL_MODE=off` 关闭
 - **自适应上下文压缩** — 三级压缩，自动摘要，保持上下文在窗口内
@@ -25,7 +27,7 @@
 - **Python SDK** — `mink-agent` pip 包，内置无 TUI 的 `mink-core` 二进制，支持沙箱控制和全参数配置
 - **沙箱防护** — Linux nsjail/bubblewrap（完整文件系统隔离）、macOS sandbox-exec（写入隔离）
 - **CPython WASI 沙箱** — `PythonSandbox` 工具，在 wasmtime + CPython WASI 中执行 Python 代码，WASI 级进程隔离
-- **运行时约束** — `--disable-bash` / `--disable-sub-agent` / `--disable-web` / `--disable-python` 按场景禁用工具；`--enable-python-sandbox` 启用沙箱 Python 工具
+- **运行时约束** — `--disable-bash` / `--disable-sub-agent` / `--disable-web` / `--disable-python` 按场景禁用工具；`enabled_tools` 同时限制模型可见工具和真实执行边界
 - **机器协议** — `--print` 输出 ndjson 事件流并以 `final` 结束；`--agent-jsonl` 提供 single-shot Agent JSONL 协议
 
 ---
@@ -33,7 +35,7 @@
 ## 快速开始
 
 ```bash
-# 前置：Rust 1.85+，设置 DEEPSEEK_API_KEY
+# 前置：Rust 1.85+，设置 DEEPSEEK_API_KEY 或通过配置指定 OpenAI-compatible 端点
 
 # 编译
 cargo build --release
@@ -67,7 +69,7 @@ Rust 服务通常只启用嵌入式 runtime：
 
 ```toml
 [dependencies]
-mink = { package = "mink-core", version = "0.1.8", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.1.11", default-features = false, features = ["runtime"] }
 ```
 
 然后在代码中通过 `mink::runtime` 或 `mink::prelude` 嵌入：
@@ -104,6 +106,11 @@ async fn main() -> anyhow::Result<()> {
 ```
 
 同进程 `AgentRuntime` 不会自动 sandbox 当前进程。需要完整进程级沙箱时，推荐参考 `examples/web_api.rs` 的 hidden worker 模式：业务服务 spawn 自身 worker 子进程，worker 先 re-exec 进沙箱，再调用 `mink::runtime`。
+
+Rust 嵌入方可以继续使用默认 OpenAI-compatible backend，也可以实现 `mink::runtime::LlmBackend`
+并通过 `AgentOptions::with_llm_backend()` 注入。模型名解析仍由 mink 统一处理：
+`flash` / `pro` 是默认别名，`model_aliases` 可覆盖别名；未命中别名的模型名会原样传给 backend。
+完整示例见 [custom_llm_backend.rs](crates/mink-core/examples/custom_llm_backend.rs)。
 
 库使用方应优先从 `mink::prelude`、`mink::runtime`、`mink::config`、`mink::sandbox`
 和 `mink::sdk_protocol` 导入类型。其他公开模块目前主要服务于内部 runtime 复用和过渡期测试，不建议作为稳定 API 依赖。

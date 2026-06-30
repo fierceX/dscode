@@ -490,9 +490,7 @@ pub fn parse_args(args: Vec<String>) -> Result<Config> {
             }
             "--config" => {
                 let toml_str = require_value(&args, i)?;
-                if let Ok(cc) = toml::from_str::<MinkConfigFile>(&toml_str) {
-                    cfg.cli_config = Some(cc);
-                }
+                cfg.cli_config = Some(toml::from_str::<MinkConfigFile>(&toml_str)?);
                 i += 2;
             }
             _ => {
@@ -1093,6 +1091,14 @@ mod tests {
     fn parse_args_model_accepts_custom_model_name() {
         let cfg = parse_args(vec!["-m".into(), "gpt-4.1".into()]).unwrap();
         assert_eq!(cfg.model, "gpt-4.1");
+    }
+
+    #[test]
+    fn parse_args_config_rejects_invalid_toml() {
+        let err = parse_args(vec!["--config".into(), "max_tokens =".into()])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("TOML"), "{err}");
     }
 
     #[test]

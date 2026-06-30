@@ -1,6 +1,6 @@
 # 内置工具
 
-更新日期：2026-06-26
+更新日期：2026-07-01
 
 本文是 mink 内置工具的协议参考，面向需要理解工具参数、执行模型、结果通道、资源 URL、
 审批和构建裁剪的使用者与开发者。CLI 参数、session、沙箱、技能和常见工作流见
@@ -14,6 +14,7 @@
 
 ```text
 ToolCallEvent
+  -> ToolConfig enabled/disabled 检查
   -> Approval 检查
   -> StormBreaker 检查
   -> repair_truncated_json()
@@ -84,12 +85,13 @@ ToolCallEvent
 
 ### 工具白名单
 
-工具列表可通过两种方式过滤，减少 LLM 可见的工具数量以节省 token 并提升遵循率：
+工具列表可通过两种方式过滤，减少 LLM 可见的工具数量以节省 token 并提升遵循率，同时作为执行层边界：
 
 1. **禁用开关**（CLI `--disable-bash` 等，或 SDK `options.disable_*`）：按类别禁用，如 Bash、Python、SubAgent、Web 工具。
-2. **白名单 `enabled_tools`**（`.minkrc` 或 `--config` 或 SDK `options.enabled_tools`）：精确指定允许的工具名称列表。未在列表中的工具对 LLM 不可见。`None` 或未设置表示全部启用（受禁用开关约束）。
+2. **白名单 `enabled_tools`**（`.minkrc` 或 `--config` 或 SDK `options.enabled_tools`）：精确指定允许的工具名称列表。未在列表中的工具对 LLM 不可见，且即使模型或历史上下文产生了该工具调用，也会在 `ToolRunner` 执行前返回错误结果。`None` 或未设置表示全部启用（受禁用开关约束）。
 
-两种方式可同时使用：白名单先限定可见工具集，禁用开关进一步从中移除。
+两种方式可同时使用：白名单先限定可见工具集，禁用开关进一步从中移除。执行层使用同一个
+`ToolConfig::is_tool_enabled()` 判断，避免 prompt schema 与真实执行策略分裂。
 
 ### 按需编译（PythonSandbox）
 

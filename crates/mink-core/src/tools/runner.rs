@@ -263,6 +263,14 @@ impl ToolPolicyGate<'_> {
         call: &ToolCallEvent,
         metadata: Option<ToolMetadata>,
     ) -> Option<ToolRunResult> {
+        if !self.config.is_tool_enabled(&call.name) {
+            return Some(blocked_tool_result(
+                call.id.clone(),
+                call.name.clone(),
+                call.fields.clone(),
+                format!("Tool '{}' is disabled by configuration.", call.name),
+            ));
+        }
         let metadata = metadata?;
         if let Some(reason) = approval_block_reason(metadata, self.config) {
             return Some(blocked_tool_result(
@@ -1031,6 +1039,62 @@ mod tests {
         assert!(approval_block_reason(meta("Bash"), &config).is_none());
         let reason = approval_block_reason(meta("Read"), &config).unwrap();
         assert!(reason.contains("deny"), "{reason}");
+    }
+
+    #[test]
+    fn policy_gate_blocks_tools_disabled_by_whitelist_before_execution() {
+        let mut config = approval_test_config(ToolApprovalMode::Yolo, []);
+        config.enabled_tools = Some(vec!["Read".into()]);
+        let storm = Mutex::new(StormBreaker::new(6, 3));
+        let gate = ToolPolicyGate {
+            config: &config,
+            storm: &storm,
+        };
+        let call = test_call("Bash");
+        let metadata = tool_registry()
+            .iter()
+            .find(|tool| tool.metadata().name == "Bash")
+            .map(|tool| tool.metadata());
+
+        let blocked = gate
+            .evaluate(&call, metadata)
+            .expect("Bash should be blocked by enabled_tools");
+
+        assert_eq!(blocked.tool_name, "Bash");
+        assert!(blocked.content.contains("disabled by configuration"));
+    }
+
+    #[test]
+    fn policy_gate_blocks_tools_disabled_by_flag_before_execution() {
+        let mut config = approval_test_config(ToolApprovalMode::Yolo, []);
+        config.tool_disable.disable_bash = true;
+        let storm = Mutex::new(StormBreaker::new(6, 3));
+        let gate = ToolPolicyGate {
+            config: &config,
+            storm: &storm,
+        };
+        let call = test_call("Bash");
+        let metadata = tool_registry()
+            .iter()
+            .find(|tool| tool.metadata().name == "Bash")
+            .map(|tool| tool.metadata());
+
+        let blocked = gate
+            .evaluate(&call, metadata)
+            .expect("Bash should be blocked by disable flag");
+
+        assert_eq!(blocked.tool_name, "Bash");
+        assert!(blocked.content.contains("disabled by configuration"));
+    }
+
+    fn test_call(name: &str) -> ToolCallEvent {
+        ToolCallEvent {
+            name: name.to_string(),
+            id: "call_test".to_string(),
+            input_json: serde_json::json!({}),
+            fields: BTreeMap::new(),
+            order: Vec::new(),
+        }
     }
 
     fn approval_test_config<const N: usize>(

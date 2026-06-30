@@ -58,6 +58,21 @@ impl ToolConfig {
         }
     }
 
+    pub fn is_tool_enabled(&self, name: &str) -> bool {
+        if TOOL_DISABLE_MAP
+            .iter()
+            .any(|(tool_name, check)| *tool_name == name && check(&self.tool_disable))
+        {
+            return false;
+        }
+        if let Some(whitelist) = self.enabled_tools.as_deref()
+            && !whitelist.iter().any(|tool_name| tool_name == name)
+        {
+            return false;
+        }
+        true
+    }
+
     /// Filter tool JSON definitions by combining disable flags and enabled whitelist.
     pub fn filter_tools_json(&self, tools: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
         tools
@@ -67,20 +82,7 @@ impl ToolConfig {
                     Some(n) => n,
                     None => return false,
                 };
-                // Remove tools disabled by config flags
-                if TOOL_DISABLE_MAP
-                    .iter()
-                    .any(|(n, check)| *n == name && check(&self.tool_disable))
-                {
-                    return false;
-                }
-                // Apply enabled whitelist if configured
-                if let Some(whitelist) = self.enabled_tools.as_deref() {
-                    if !whitelist.iter().any(|n| n == name) {
-                        return false;
-                    }
-                }
-                true
+                self.is_tool_enabled(name)
             })
             .collect()
     }
@@ -340,6 +342,19 @@ mod tests {
         let names = tool_names(&filtered);
 
         assert_eq!(names, vec!["Read"]);
+    }
+
+    #[test]
+    fn is_tool_enabled_matches_filtering_rules() {
+        let mut cfg = tool_config();
+        cfg.enabled_tools = Some(vec!["Read".into(), "Bash".into()]);
+
+        assert!(cfg.is_tool_enabled("Read"));
+        assert!(cfg.is_tool_enabled("Bash"));
+        assert!(!cfg.is_tool_enabled("Write"));
+
+        cfg.tool_disable.disable_bash = true;
+        assert!(!cfg.is_tool_enabled("Bash"));
     }
 
     #[test]

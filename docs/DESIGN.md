@@ -51,6 +51,7 @@ SubAgent 由 `SubAgentCoordinator` 在 turn 内部启动、收集和注入结果
 步骤 4: Scavenge 回收（从 thinking/text 复原工具调用）
 步骤 5: 持久化 assistant 消息和 usage
 步骤 6: 工具执行（ToolRunner::execute_all）
+  ├── ToolConfig enabled/disabled 检查
   ├── ToolMetadata approval 检查
   ├── StormBreaker 重复抑制
   ├── ToolSignalProcessor 采集信号并更新 belief
@@ -302,7 +303,9 @@ for sc in &scavenged {
 
 `src/tools/runner.rs:53-75`
 
-在工具执行前，先按 `ToolMetadata.approval` 和 `ToolConfig` 执行 approval 检查。默认 `yolo` 保持旧行为；`write` 自动允许 Read/Write、阻止 Exec；`always-ask` 自动允许 Read、阻止 Write/Exec。单工具 `allow/deny/prompt` 可覆盖模式。当前没有交互式 prompt，`prompt` 会 fail closed。
+在工具执行前，先按 `ToolConfig::is_tool_enabled()` 检查禁用开关和 `enabled_tools` 白名单，再按 `ToolMetadata.approval` 执行 approval 检查。默认 `yolo` 保持旧行为；`write` 自动允许 Read/Write、阻止 Exec；`always-ask` 自动允许 Read、阻止 Write/Exec。单工具 `allow/deny/prompt` 可覆盖模式。当前没有交互式 prompt，`prompt` 会 fail closed。
+
+`enabled_tools` 是双层边界：`PrefixManager` 用它过滤发给模型的 tools schema，`ToolRunner` 用同一个 `ToolConfig::is_tool_enabled()` 在真实执行前拦截未启用工具。这样即使恢复会话、模型异常输出或自定义 backend 产生了未暴露的工具调用，也只会写入错误 tool result，不会执行。
 
 随后检查重复调用。每个工具调用的 `(name, args_json)` 进入滑动窗口。检测到同一对 `(name, args)` 连续出现 ≥3 次（窗口 6），则抑制该调用，返回抑制说明：
 
@@ -731,6 +734,22 @@ usage.get("cached_tokens")
 
 OpenAI API 只在最后一个 chunk（标记为 `[DONE]`）中提供完整的 usage 信息。Parser 在收到 `[DONE]` 时设置 `pending_usage`，然后在 `flush()` 中发出。
 
+### LLM backend 注入
+
+默认 backend 是 `OpenAiCompatibleBackend`。`AgentRuntimeConfig` / `AgentOptions` 可以注入
+`Arc<dyn LlmBackend>`，主代理、子代理和自动压缩共用同一个 backend trait，不复制 agent loop、
+tool runner、session 写入或 usage 统计。
+
+`BackendLlmClient` 负责把当前上下文转换为 `LlmRequest`：
+
+- `model`：经过 `ModelResolver` 解析后的真实 provider 模型名。
+- `model_alias`：用户请求的别名，如 `flash`、`pro` 或 `model_aliases` 自定义别名。
+- `messages` / `tools` / `system_prompt`：当前 prefix 和 conversation 状态。
+- `cancel` / `display` / `purpose`：取消、状态输出和请求归属。
+
+自定义 backend 只返回 `LlmEvent` 流。失败时可用 `LlmRequestFailure { attempt_count, error }`
+保留重试次数，`MeteredStream` / `UsageCapture` 仍统一写入 `usage.jsonl`。
+
 ---
 
 ## 主题八：Session 与持久化
@@ -849,11 +868,24 @@ pub fn apply_provider_defaults(cfg: &mut Config) -> Result<()> {
     // 1. 环境变量覆盖特定字段
     if let Ok(v) = std::env::var("TOOL_RESULT_MAX_BYTES") { ... }
     if let Ok(v) = std::env::var("FILE_WRITE_MAX_BYTES") { ... }
-    // 2. API Key: CLI 参数或配置文件 > DEEPSEEK_API_KEY > OPENAI_API_KEY
-    // 3. Base URL: CLI 参数或配置文件 > DEEPSEEK_BASE_URL > OPENAI_BASE_URL > 默认
-    // 4. 模型默认: deepseek-v4-flash
+    // 2. API Key: CLI 参数或配置文件 > DEEPSEEK_API_KEY
+    // 3. Base URL: CLI 参数或配置文件 > DEEPSEEK_BASE_URL > 默认 DeepSeek base URL
+    // 4. 模型默认: flash alias
     // 5. 验证: API Key 或 Base URL 至少一个存在
 ```
+
+`flash` / `pro` 是默认模型别名，分别解析到 DeepSeek 默认模型。`.minkrc` 或 `--config` 的
+`[model_aliases]` 可覆盖这些别名，也可新增自定义别名。未命中别名的 `model` 会作为真实模型名原样传给 LLM backend。
+
+OpenAI-compatible 请求还可通过顶层字段控制：
+
+```toml
+openai_reasoning_effort = "max"       # off/none/false/disabled 表示不发送
+openai_include_usage = true
+openai_token_param = "max_tokens"     # max_tokens | max_completion_tokens
+```
+
+显式 CLI `--config <toml>` 解析失败必须 fail fast；用户级/项目级 `.minkrc` 解析失败只输出 warning 并继续。
 
 ### size 解析
 
@@ -881,7 +913,7 @@ pub fn apply_provider_defaults(cfg: &mut Config) -> Result<()> {
 | 沙箱 | `MINK_LIMITS` | JSON 格式 sandbox 限制配置 |
 | 调试 | `LOG_EVENTS`, `MINK_HOME` | 日志和 session 路径 |
 
-`context_compact_pct` 和 `[tools] approval_mode` 通过 `.minkrc` 配置。
+`context_compact_pct`、`enabled_tools`、OpenAI-compatible 参数和 `[tools] approval_mode` 可通过 `.minkrc` 或 `--config` 配置。
 
 ### 工具审批配置
 
@@ -896,7 +928,7 @@ Bash = "prompt"        # allow | deny | prompt
 Read = "allow"
 ```
 
-approval 检查发生在 `ToolRunner::execute_all()` 中，早于 StormBreaker 和实际工具执行。当前 `prompt` 没有交互 UI，会作为工具错误 fail closed。
+enabled/disabled 和 approval 检查发生在 `ToolRunner::execute_all()` 中，早于 StormBreaker 和实际工具执行。当前 `prompt` 没有交互 UI，会作为工具错误 fail closed。
 
 ---
 
@@ -1023,7 +1055,7 @@ Rust 发布包名为 `mink-core`，库 crate 名为 `mink`。`mink-core` 发布�
 实现；终端二进制和 UI 实现由 workspace 中的 `mink-cli` 包持有。服务端依赖时推荐只启用嵌入式 runtime：
 
 ```toml
-mink = { package = "mink-core", version = "0.1.8", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.1.11", default-features = false, features = ["runtime"] }
 ```
 
 `mink::runtime` / `mink::prelude` 解决这些问题：**同一套 OrchActor / TurnExecutor / ToolRunner 核心，但无进程边界**。

@@ -160,7 +160,7 @@ prompt 为空且 stdin 是终端时自动进入交互模式。非终端 stdin �
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `PROMPT` | — | 用户输入（位置参数） |
-| `-m` / `--model` | `flash` | 模型名：`flash` / `pro` / `deepseek-v4-flash` / `deepseek-v4-pro` |
+| `-m` / `--model` | `flash` | 模型名。`flash` / `pro` 是默认别名，也可以直接指定任意 OpenAI-compatible 模型名 |
 | `--mission PATH` | — | 加载 MISSION.md 文件替换默认系统提示词 |
 | `--session [NAME]` | 自动生成 | 命名会话。提供名称可恢复 |
 | `--continue` | — | 恢复最近的 session |
@@ -201,6 +201,14 @@ output_format = "stream-json"
 enabled_tools = ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]
 approval_mode = "write"
 skills = ["python", "debugging"]
+openai_reasoning_effort = "max"          # 设为 "off" 可不发送 reasoning_effort
+openai_include_usage = true              # stream_options.include_usage
+openai_token_param = "max_tokens"        # max_tokens / max_completion_tokens
+
+[model_aliases]
+flash = "deepseek-v4-flash"
+pro = "deepseek-v4-pro"
+local = "private-model-v1"
 
 # [sandbox_python] 段
 [sandbox_python]
@@ -208,7 +216,8 @@ wasm_path = "/path/to/python.wasm"
 read_dirs = ["./data"]
 ```
 
-等价于旧版独立的 CLI 参数。也支持设置 `model`、`api_key`、`base_url`，但推荐使用独立参数以便 SDK 控制。
+等价于旧版独立的 CLI 参数。也支持设置 `model`、`api_key`、`base_url`，但推荐使用独立参数以便 SDK 控制。显式传入的 `--config <toml>` 解析失败会直接退出；用户级/项目级 `.minkrc` 解析失败只输出 warning 并继续。
+`model_aliases` 可覆盖默认别名；没有命中别名的 `model` 会作为真实模型名原样发送。
 
 `--agent-jsonl` 模式不会读取用户级/项目级 `.minkrc`，以避免 SDK 调用产生额外文件 I/O；但仍会应用同一命令行传入的 `--config <toml>`。因此 SDK 可以通过 `--config` 精确传入 `max_search_files`、`max_search_results`、`enabled_tools` 等 per-call 配置。
 ---
@@ -222,7 +231,7 @@ read_dirs = ["./data"]
 # ~/.minkrc 示例
 api_key = "sk-xxx"                        # API 密钥
 base_url = "https://api.deepseek.com/v1"  # API 端点
-model = "flash"                           # 默认模型
+model = "flash"                           # 默认模型；可为别名或真实模型名
 max_tokens = 81920                        # 最大输出 token
 max_turns = 40                            # 最大轮次
 max_context = "1M"                        # 最大上下文（支持 K/M 后缀）
@@ -236,6 +245,14 @@ log_events = true                         # 事件日志
 max_search_files = 5000                     # Glob/Grep 最大遍历文件数
 max_search_results = 1000                   # Grep 最大匹配结果行数
 enabled_tools = ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]  # 工具白名单
+openai_reasoning_effort = "max"           # OpenAI-compatible reasoning_effort；"off" 表示不发送
+openai_include_usage = true               # 是否请求 stream usage
+openai_token_param = "max_tokens"         # max_tokens | max_completion_tokens
+
+[model_aliases]
+flash = "deepseek-v4-flash"
+pro = "deepseek-v4-pro"
+# local = "private-model-v1"
 
 [tools]
 approval_mode = "yolo"                    # yolo | write | always-ask
@@ -248,6 +265,7 @@ Read = "allow"
 项目级 `.minkrc` 覆盖用户级，CLI 参数覆盖所有文件设置。
 所有字段可选，未设置的字段使用默认值或环境变量。
 当前版本尚未实现交互式审批 prompt；需要审批的工具调用会 fail closed。默认 `yolo` 保持旧行为。
+`enabled_tools` 同时作用于工具 schema 和执行层：未在白名单内的工具不会暴露给模型；即使模型或历史上下文产生该工具调用，也会在执行前返回错误结果。
 
 ---
 
@@ -458,6 +476,8 @@ cost = input_tokens × input_nano
 ```
 
 未报告 `usage` 的请求 `cost_nano_cny` 为 `None`，不会用零值伪装。
+未知模型或自定义模型即使命中了 `usage`，也只记录 Token，`cost_nano_cny` 按 0 统计；
+业务侧如需私有模型计价，应读取 `usage_records` 后按自己的价格表计算。
 
 ### usage.jsonl 记录格式
 
@@ -536,6 +556,34 @@ let runtime = AgentRuntime::start_with_options(
 [`crates/mink-core/examples/redb_vfs.rs`](../crates/mink-core/examples/redb_vfs.rs)。
 redb 只是示例依赖，业务可替换为其他同步嵌入式数据库。
 
+### Rust 嵌入式自定义 LLM backend
+
+默认 LLM backend 是 OpenAI-compatible streaming client。Rust 嵌入时可以由业务服务注入
+自己的后端，支持私有化部署、内网网关、自定义鉴权、非 HTTP transport 或模型厂商 SDK：
+
+```rust
+use std::sync::Arc;
+use mink::prelude::{AgentOptions, AgentRuntime};
+
+let runtime = AgentRuntime::start_with_options(
+    AgentOptions::new("/tmp/mink-session", ".")
+        .with_model("local")
+        .with_llm_backend(Arc::new(MyLlmBackend::new())),
+).await?;
+```
+
+后端实现 `mink::runtime::LlmBackend`，从 `LlmRequest` 读取系统提示词、消息、工具 schema、
+取消 token、真实模型名和别名，然后返回 `LlmEvent` 流。`LlmRequest.model` 是解析后的真实模型名；
+`LlmRequest.model_alias` 保留用户请求的别名。失败时建议返回
+`LlmRequestFailure { attempt_count, error }.into()`，这样 usage 日志能记录失败请求的 attempt 数。
+
+完整示例见
+[`crates/mink-core/examples/custom_llm_backend.rs`](../crates/mink-core/examples/custom_llm_backend.rs)：
+
+```bash
+cargo run -p mink-core --example custom_llm_backend
+```
+
 ### Python SDK 中访问
 
 ```python
@@ -576,7 +624,7 @@ workspace 包中。服务端嵌入时推荐只启用 runtime：
 
 ```toml
 [dependencies]
-mink = { package = "mink-core", version = "0.1.8", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.1.11", default-features = false, features = ["runtime"] }
 ```
 
 稳定入口优先使用 `mink::prelude`、`mink::runtime`、`mink::config`、`mink::sandbox` 和

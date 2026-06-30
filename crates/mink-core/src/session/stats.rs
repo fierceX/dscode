@@ -1,4 +1,5 @@
 use crate::protocol::UsageEvent;
+use crate::session::usage::TokenUsage;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -84,24 +85,33 @@ impl StatsTracker {
     }
 
     async fn record_usage_inner(&self, u: &UsageEvent, tier: Option<crate::config::ModelTier>) {
+        let tokens = match TokenUsage::from_provider(u) {
+            Ok(tokens) => tokens,
+            Err(error) => {
+                eprintln!("[mink] Warning: ignoring invalid provider usage: {error}");
+                return;
+            }
+        };
         let mut s = self.stats.write().await;
         s.agent_request_count += 1;
-        s.total_input_tokens += u.input_tokens as u64;
-        s.total_output_tokens += u.output_tokens as u64;
-        s.total_cache_read_tokens += u.cache_read_input_tokens as u64;
-        s.total_cache_creation_tokens += u.cache_creation_input_tokens as u64;
-        s.current_context_tokens = (u.input_tokens
-            + u.output_tokens
-            + u.cache_read_input_tokens
-            + u.cache_creation_input_tokens) as u64;
+        s.total_input_tokens = s.total_input_tokens.saturating_add(tokens.input_tokens);
+        s.total_output_tokens = s.total_output_tokens.saturating_add(tokens.output_tokens);
+        s.total_cache_read_tokens = s
+            .total_cache_read_tokens
+            .saturating_add(tokens.cache_read_tokens);
+        s.total_cache_creation_tokens = s
+            .total_cache_creation_tokens
+            .saturating_add(tokens.cache_creation_tokens);
+        s.current_context_tokens = usage_token_total(&tokens);
 
         if let Some(tier) = tier {
-            let input_cost = (u.input_tokens as f64) * tier.price_input_per_m() / 1_000_000.0;
-            let output_cost = (u.output_tokens as f64) * tier.price_output_per_m() / 1_000_000.0;
+            let input_cost = (tokens.input_tokens as f64) * tier.price_input_per_m() / 1_000_000.0;
+            let output_cost =
+                (tokens.output_tokens as f64) * tier.price_output_per_m() / 1_000_000.0;
             let cache_read_cost =
-                (u.cache_read_input_tokens as f64) * tier.price_cache_read_per_m() / 1_000_000.0;
+                (tokens.cache_read_tokens as f64) * tier.price_cache_read_per_m() / 1_000_000.0;
             let cache_creation_cost =
-                (u.cache_creation_input_tokens as f64) * tier.price_input_per_m() / 1_000_000.0;
+                (tokens.cache_creation_tokens as f64) * tier.price_input_per_m() / 1_000_000.0;
             let delta_micros = ((input_cost + output_cost + cache_read_cost + cache_creation_cost)
                 * 1_000_000.0) as u64;
 
@@ -116,12 +126,23 @@ impl StatsTracker {
     }
 
     pub async fn record_compact(&self, u: &UsageEvent) {
+        let tokens = match TokenUsage::from_provider(u) {
+            Ok(tokens) => tokens,
+            Err(error) => {
+                eprintln!("[mink] Warning: ignoring invalid compaction usage: {error}");
+                return;
+            }
+        };
         let mut s = self.stats.write().await;
         s.compact_request_count += 1;
-        s.total_input_tokens += u.input_tokens as u64;
-        s.total_output_tokens += u.output_tokens as u64;
-        s.total_cache_read_tokens += u.cache_read_input_tokens as u64;
-        s.total_cache_creation_tokens += u.cache_creation_input_tokens as u64;
+        s.total_input_tokens = s.total_input_tokens.saturating_add(tokens.input_tokens);
+        s.total_output_tokens = s.total_output_tokens.saturating_add(tokens.output_tokens);
+        s.total_cache_read_tokens = s
+            .total_cache_read_tokens
+            .saturating_add(tokens.cache_read_tokens);
+        s.total_cache_creation_tokens = s
+            .total_cache_creation_tokens
+            .saturating_add(tokens.cache_creation_tokens);
         s.last_updated = chrono_now_rfc3339();
         self.dirty.store(true, Ordering::Release);
     }
@@ -161,6 +182,14 @@ pub(crate) fn chrono_now_rfc3339() -> String {
     let now = time::OffsetDateTime::now_utc();
     let fmt = time::format_description::well_known::Rfc3339;
     now.format(&fmt).unwrap_or_else(|_| String::new())
+}
+
+fn usage_token_total(tokens: &TokenUsage) -> u64 {
+    tokens
+        .input_tokens
+        .saturating_add(tokens.output_tokens)
+        .saturating_add(tokens.cache_read_tokens)
+        .saturating_add(tokens.cache_creation_tokens)
 }
 
 #[cfg(test)]
@@ -219,6 +248,27 @@ mod tests {
         assert_eq!(snap.total_output_tokens, 130);
         assert_eq!(snap.total_cache_read_tokens, 30);
         assert_eq!(snap.total_cache_creation_tokens, 10);
+    }
+
+    #[tokio::test]
+    async fn record_usage_ignores_negative_provider_tokens() {
+        let (t, _) = temp_tracker().await;
+        t.record_usage_with_model(
+            &UsageEvent {
+                input_tokens: -1,
+                output_tokens: 50,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            },
+            "deepseek-v4-flash",
+        )
+        .await;
+
+        let snap = t.snapshot().await;
+        assert_eq!(snap.agent_request_count, 0);
+        assert_eq!(snap.total_input_tokens, 0);
+        assert_eq!(snap.total_output_tokens, 0);
+        assert_eq!(snap.flash_cost_micros, 0);
     }
 
     #[tokio::test]
