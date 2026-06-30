@@ -4,6 +4,7 @@ use crate::config::{
     ToolDisableFlags,
 };
 use crate::resources::ResourceHandler;
+use crate::runtime::config::{first_prompt_from_config, session_policy_from_config};
 use crate::runtime::{AgentRuntimeConfig, EventSink, SessionPolicy};
 use crate::session::paths::SessionLayout;
 use crate::tools::vfs::ReadOnlyFileSystem;
@@ -434,20 +435,6 @@ impl AgentOptions {
             llm_override: None,
         }
     }
-}
-
-fn session_policy_from_config(config: &Config) -> SessionPolicy {
-    if !config.session_id.trim().is_empty() {
-        SessionPolicy::UseOrCreate(config.session_id.trim().to_string())
-    } else if config.continue_session {
-        SessionPolicy::ContinueLatest
-    } else {
-        SessionPolicy::New
-    }
-}
-
-fn first_prompt_from_config(config: &Config) -> Option<String> {
-    (!config.prompt.trim().is_empty()).then(|| config.prompt.clone())
 }
 
 impl TryFrom<AgentOptions> for AgentRuntimeConfig {

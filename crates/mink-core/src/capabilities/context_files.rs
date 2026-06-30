@@ -1,6 +1,5 @@
 use crate::capabilities::source::{CapabilityExposure, SourceLevel, SourceMeta};
 use anyhow::{Result, anyhow};
-use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -181,7 +180,7 @@ impl ContextFileProvider for InstructionFileProvider {
         }
         .to_string();
         Ok(vec![LoadedContextFile {
-            revision: sha256_hex(&content),
+            revision: crate::util::sha256_hex(&content),
             context_file: ContextFileCapability { name, content },
             source: SourceMeta {
                 provider_id: self.id.to_string(),
@@ -238,11 +237,7 @@ fn compute_dependency_fingerprint(always_apply: &[LoadedContextFile]) -> String 
         input.push_str(&file.revision);
         input.push('\0');
     }
-    sha256_hex(&input)
-}
-
-fn sha256_hex(input: &str) -> String {
-    format!("{:x}", Sha256::digest(input.as_bytes()))
+    crate::util::sha256_hex(&input)
 }
 
 #[cfg(test)]

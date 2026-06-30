@@ -3,12 +3,24 @@ use crate::cancel::CancellationToken;
 use crate::context::AgentSharedContext;
 use crate::tools::runner::ToolRunResult;
 use crate::util::truncate_str;
+use futures::FutureExt;
 use std::collections::BTreeSet;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
+
+const SUB_AGENT_ABORT_GRACE_MS: u64 = 250;
 
 pub(crate) type SubAgentRunner = Arc<
-    dyn Fn(Arc<AgentSharedContext>, String, String, bool, CancellationToken) -> SubAgentResult
+    dyn Fn(
+            Arc<AgentSharedContext>,
+            String,
+            String,
+            bool,
+            CancellationToken,
+        ) -> Pin<Box<dyn Future<Output = SubAgentResult> + Send>>
         + Send
         + Sync,
 >;
@@ -21,6 +33,7 @@ struct SubAgentLaunch {
     idx: usize,
     session_id: String,
     cancel: CancellationToken,
+    handle: tokio::task::JoinHandle<()>,
 }
 
 impl SubAgentCoordinator {
@@ -45,9 +58,7 @@ impl SubAgentCoordinator {
         let sub_semaphore = Arc::new(tokio::sync::Semaphore::new(8));
 
         for mut result in results {
-            if result.spawns_sub_agent
-                && let Some(prompt) = result.sub_agent_prompt.take()
-            {
+            if let Some(request) = result.take_sub_agent_request() {
                 if self.ctx.is_sub_agent {
                     self.ctx.display.render_info(
                         "Sub-agent recursion blocked: sub-agent cannot spawn sub-agents.",
@@ -60,7 +71,8 @@ impl SubAgentCoordinator {
                     continue;
                 }
                 let session_id = format!("sub_{}", crate::session::paths::chrono_session_id());
-                let fork = result.sub_agent_fork;
+                let fork = request.fork;
+                let prompt = request.prompt;
 
                 self.ctx
                     .display
@@ -80,54 +92,24 @@ impl SubAgentCoordinator {
                 let cancel = self.ctx.cancel.linked_child_token();
                 let sub_semaphore = sub_semaphore.clone();
                 let runner = runner.clone();
+                let launch_cancel = cancel.clone();
+                let launch_session_id = session_id.clone();
+                let handle = tokio::spawn(async move {
+                    let Some(permit) =
+                        acquire_sub_agent_permit(sub_semaphore, &cancel, sub_idx, &session_id, &tx)
+                            .await
+                    else {
+                        return;
+                    };
+                    let sa = run_sub_agent_runner(runner, ctx, sid, prompt, fork, cancel).await;
+                    drop(permit);
+                    let _ = tx.send((sub_idx, session_id, sa));
+                });
                 launches.push(SubAgentLaunch {
                     idx: sub_idx,
-                    session_id: session_id.clone(),
-                    cancel: cancel.clone(),
-                });
-                tokio::spawn(async move {
-                    let permit = match sub_semaphore.acquire_owned().await {
-                        Ok(permit) => permit,
-                        Err(_) => {
-                            let _ = tx.send((
-                                sub_idx,
-                                session_id,
-                                SubAgentResult {
-                                    status: "failed".into(),
-                                    thinking: String::new(),
-                                    text: "Sub-agent semaphore closed.".into(),
-                                    usage: Default::default(),
-                                },
-                            ));
-                            return;
-                        }
-                    };
-                    let sa = match tokio::task::spawn_blocking(move || {
-                        let _permit = permit;
-                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            runner(ctx, sid, prompt, fork, cancel)
-                        }))
-                    })
-                    .await
-                    {
-                        Ok(Ok(sa)) => sa,
-                        Ok(Err(panic_info)) => SubAgentResult {
-                            status: "failed".into(),
-                            thinking: String::new(),
-                            text: format!(
-                                "Sub-agent thread panicked: {}",
-                                panic_message(panic_info)
-                            ),
-                            usage: Default::default(),
-                        },
-                        Err(e) => SubAgentResult {
-                            status: "failed".into(),
-                            thinking: String::new(),
-                            text: format!("Sub-agent task failed: {e}"),
-                            usage: Default::default(),
-                        },
-                    };
-                    let _ = tx.send((sub_idx, session_id, sa));
+                    session_id: launch_session_id,
+                    cancel: launch_cancel,
+                    handle,
                 });
             } else {
                 processed_results.push(result);
@@ -145,7 +127,7 @@ impl SubAgentCoordinator {
         launches: Vec<SubAgentLaunch>,
     ) -> Vec<ToolRunResult> {
         let timeout = self.ctx.tool_config.sub_agent_timeout_secs.max(0);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout as u64);
+        let deadline = Instant::now() + Duration::from_secs(timeout as u64);
         let mut sub_completed = 0usize;
         let sub_expected = launches.len();
         let mut completed_indices = BTreeSet::new();
@@ -158,7 +140,7 @@ impl SubAgentCoordinator {
                 incomplete_reason = Some("cancelled");
                 break;
             }
-            let now = std::time::Instant::now();
+            let now = Instant::now();
             if now >= deadline {
                 self.ctx
                     .display
@@ -222,7 +204,8 @@ impl SubAgentCoordinator {
         }
 
         if let Some(reason) = incomplete_reason {
-            for launch in &launches {
+            let mut pending_handles = Vec::new();
+            for launch in launches {
                 if completed_indices.contains(&launch.idx) {
                     continue;
                 }
@@ -244,7 +227,9 @@ impl SubAgentCoordinator {
                         _ => "Sub-agent did not complete.".into(),
                     };
                 }
+                pending_handles.push(launch.handle);
             }
+            await_cooperative_sub_agent_shutdown(pending_handles).await;
         }
 
         for pr in &mut processed_results {
@@ -256,10 +241,106 @@ impl SubAgentCoordinator {
     }
 }
 
+async fn await_cooperative_sub_agent_shutdown(handles: Vec<tokio::task::JoinHandle<()>>) {
+    if handles.is_empty() {
+        return;
+    }
+    let deadline = Instant::now() + Duration::from_millis(SUB_AGENT_ABORT_GRACE_MS);
+    while handles.iter().any(|handle| !handle.is_finished()) {
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        tokio::time::sleep(std::cmp::min(
+            deadline.saturating_duration_since(now),
+            Duration::from_millis(10),
+        ))
+        .await;
+    }
+    for handle in handles {
+        if handle.is_finished() {
+            let _ = handle.await;
+        } else {
+            handle.abort();
+        }
+    }
+}
+
+async fn acquire_sub_agent_permit(
+    sub_semaphore: Arc<tokio::sync::Semaphore>,
+    cancel: &CancellationToken,
+    sub_idx: usize,
+    session_id: &str,
+    tx: &tokio::sync::mpsc::UnboundedSender<(usize, String, SubAgentResult)>,
+) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    tokio::select! {
+        permit = sub_semaphore.acquire_owned() => match permit {
+            Ok(permit) => Some(permit),
+            Err(_) => {
+                let _ = tx.send((
+                    sub_idx,
+                    session_id.to_string(),
+                    SubAgentResult {
+                        status: "failed".into(),
+                        thinking: String::new(),
+                        text: "Sub-agent semaphore closed.".into(),
+                        usage: Default::default(),
+                    },
+                ));
+                None
+            }
+        },
+        _ = cancel.cancelled() => {
+            let _ = tx.send((
+                sub_idx,
+                session_id.to_string(),
+                SubAgentResult {
+                    status: "cancelled".into(),
+                    thinking: String::new(),
+                    text: "Sub-agent cancelled before execution.".into(),
+                    usage: Default::default(),
+                },
+            ));
+            None
+        }
+    }
+}
+
+async fn run_sub_agent_runner(
+    runner: SubAgentRunner,
+    ctx: Arc<AgentSharedContext>,
+    sid: String,
+    prompt: String,
+    fork: bool,
+    cancel: CancellationToken,
+) -> SubAgentResult {
+    let future = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        runner(ctx, sid, prompt, fork, cancel)
+    })) {
+        Ok(future) => future,
+        Err(panic_info) => {
+            return SubAgentResult {
+                status: "failed".into(),
+                thinking: String::new(),
+                text: format!("Sub-agent task panicked: {}", panic_message(panic_info)),
+                usage: Default::default(),
+            };
+        }
+    };
+    match std::panic::AssertUnwindSafe(future).catch_unwind().await {
+        Ok(sa) => sa,
+        Err(panic_info) => SubAgentResult {
+            status: "failed".into(),
+            thinking: String::new(),
+            text: format!("Sub-agent task panicked: {}", panic_message(panic_info)),
+            usage: Default::default(),
+        },
+    }
+}
+
 fn default_sub_agent_runner() -> SubAgentRunner {
     Arc::new(|ctx, sid, prompt, fork, cancel| {
-        let rt = tokio::runtime::Runtime::new().expect("sub-agent runtime");
-        rt.block_on(async move {
+        Box::pin(async move {
             match SubAgentExecutor::new_with_cancel(ctx, sid, fork, cancel).await {
                 Ok(executor) => executor.execute(prompt).await,
                 Err(e) => SubAgentResult {

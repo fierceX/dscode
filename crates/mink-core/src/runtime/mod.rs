@@ -32,7 +32,7 @@ pub use events::{AgentEvent, EventSink};
 pub use handle::{AgentEventStream, AgentRuntime, TurnOutcome};
 pub use options::AgentOptions;
 pub use sdk_adapter::{
-    apply_sdk_request_options, exit_code_from_turn, final_from_outcome, final_from_run_result,
+    apply_sdk_request_options, exit_code_from_turn, final_from_outcome,
     runtime_skills_from_sdk_request, sdk_status_from_turn, skill_discovery_policy_from_sdk_request,
 };
 

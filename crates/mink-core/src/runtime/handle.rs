@@ -2,8 +2,9 @@ use crate::agent::orchestrator::{OrchCmd, TurnRunResult, TurnStatus};
 use crate::cancel::CancellationToken;
 use crate::context::AgentSharedContext;
 use crate::runtime::config::SessionInfo;
-use crate::runtime::events::EventDisplay;
+use crate::runtime::events::{EventDisplay, TurnEventSubscription};
 use crate::runtime::{AgentEvent, EventSink};
+use crate::session::store::ConversationStore;
 use anyhow::{Result, bail};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -77,14 +78,14 @@ pub struct AgentRuntime {
 }
 
 struct StreamTurnGuard {
-    event_display: Arc<EventDisplay>,
+    _subscription: TurnEventSubscription,
     flag: Arc<AtomicBool>,
 }
 
 impl StreamTurnGuard {
-    fn new(event_display: Arc<EventDisplay>, flag: Arc<AtomicBool>) -> Self {
+    fn new(subscription: TurnEventSubscription, flag: Arc<AtomicBool>) -> Self {
         Self {
-            event_display,
+            _subscription: subscription,
             flag,
         }
     }
@@ -92,7 +93,6 @@ impl StreamTurnGuard {
 
 impl Drop for StreamTurnGuard {
     fn drop(&mut self) {
-        self.event_display.clear_turn_channel();
         self.flag.store(false, Ordering::SeqCst);
     }
 }
@@ -115,7 +115,7 @@ impl AgentRuntime {
         let result = done_rx.await.unwrap_or_else(|e| {
             TurnRunResult::failed(format!("orchestrator dropped turn result: {e}"))
         });
-        let (text, thinking) = self.extract_last_assistant_text().await;
+        let (text, thinking) = last_assistant_text(&self.ctx.store).await;
         let outcome = TurnOutcome::from_run_result(result, self.session.clone(), text, thinking);
         if let Some(event_sink) = &self.event_sink {
             event_sink.on_event(AgentEvent::Final {
@@ -123,13 +123,6 @@ impl AgentRuntime {
             });
         }
         Ok(outcome)
-    }
-
-    async fn extract_last_assistant_text(&self) -> (String, String) {
-        let Ok(messages) = self.ctx.store.lines().await else {
-            return (String::new(), String::new());
-        };
-        extract_text_thinking(&messages)
     }
 
     /// Execute a turn and stream events as they happen.
@@ -163,10 +156,10 @@ impl AgentRuntime {
         let event_display = self.event_display.clone();
         let event_sink = self.event_sink.clone();
 
-        event_display.set_turn_channel(tx.clone());
+        let subscription = event_display.subscribe_turn(tx.clone());
 
         let handle = tokio::spawn(async move {
-            let _guard = StreamTurnGuard::new(event_display.clone(), flag);
+            let _guard = StreamTurnGuard::new(subscription, flag);
             let (done_tx, done_rx) = oneshot::channel();
             let result = match cmd_tx.send(OrchCmd::UserInput {
                 input,
@@ -178,10 +171,7 @@ impl AgentRuntime {
                 Err(e) => TurnRunResult::failed(format!("orchestrator command failed: {e}")),
             };
 
-            let (text, thinking) = match store.lines().await {
-                Ok(messages) => extract_text_thinking(&messages),
-                Err(_) => (String::new(), String::new()),
-            };
+            let (text, thinking) = last_assistant_text(&store).await;
 
             let outcome = TurnOutcome::from_run_result(result, session, text, thinking);
             let final_event = AgentEvent::Final {
@@ -238,6 +228,13 @@ impl AgentRuntime {
     pub fn interrupt_flag(&self) -> Arc<AtomicBool> {
         self.ctx.interrupt.clone()
     }
+}
+
+async fn last_assistant_text(store: &ConversationStore) -> (String, String) {
+    let Ok(messages) = store.lines().await else {
+        return (String::new(), String::new());
+    };
+    extract_text_thinking(&messages)
 }
 
 fn extract_text_thinking(messages: &[serde_json::Value]) -> (String, String) {

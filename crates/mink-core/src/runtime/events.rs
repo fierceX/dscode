@@ -1,6 +1,7 @@
 use crate::runtime::TurnOutcome;
 use crate::ui::{Display, StatsSnapshot, ToolResultDisplay};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
@@ -61,7 +62,18 @@ pub trait EventSink: Send + Sync {
 pub(crate) struct EventDisplay {
     sink: Option<Arc<dyn EventSink>>,
     delegate: Option<Arc<dyn Display>>,
-    turn_tx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<AgentEvent>>>,
+    next_turn_subscription_id: AtomicU64,
+    turn_tx: std::sync::Mutex<Option<TurnEventChannel>>,
+}
+
+struct TurnEventChannel {
+    id: u64,
+    tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>,
+}
+
+pub(crate) struct TurnEventSubscription {
+    display: Arc<EventDisplay>,
+    id: u64,
 }
 
 impl EventDisplay {
@@ -72,25 +84,51 @@ impl EventDisplay {
         Self {
             sink,
             delegate,
+            next_turn_subscription_id: AtomicU64::new(1),
             turn_tx: std::sync::Mutex::new(None),
         }
     }
 
-    pub(crate) fn set_turn_channel(&self, tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>) {
-        *self.turn_tx.lock().unwrap() = Some(tx);
+    pub(crate) fn subscribe_turn(
+        self: &Arc<Self>,
+        tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>,
+    ) -> TurnEventSubscription {
+        let id = self
+            .next_turn_subscription_id
+            .fetch_add(1, Ordering::Relaxed);
+        *self.turn_tx.lock().unwrap() = Some(TurnEventChannel { id, tx });
+        TurnEventSubscription {
+            display: self.clone(),
+            id,
+        }
     }
 
-    pub(crate) fn clear_turn_channel(&self) {
-        *self.turn_tx.lock().unwrap() = None;
+    fn clear_turn_channel(&self, id: u64) {
+        let mut turn_tx = self.turn_tx.lock().unwrap();
+        if turn_tx.as_ref().is_some_and(|channel| channel.id == id) {
+            *turn_tx = None;
+        }
     }
 
     fn emit(&self, event: AgentEvent) {
-        if let Some(ref tx) = *self.turn_tx.lock().unwrap() {
+        let turn_tx = self
+            .turn_tx
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|channel| channel.tx.clone());
+        if let Some(tx) = turn_tx {
             let _ = tx.send(event.clone());
         }
         if let Some(sink) = &self.sink {
             sink.on_event(event);
         }
+    }
+}
+
+impl Drop for TurnEventSubscription {
+    fn drop(&mut self) {
+        self.display.clear_turn_channel(self.id);
     }
 }
 

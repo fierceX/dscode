@@ -1,5 +1,6 @@
 //! Shared utility functions used across the codebase.
 
+use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::process::{Child, Command};
 use std::sync::{Arc, Mutex};
@@ -36,6 +37,12 @@ pub fn fmt_k(n: u64) -> String {
         let rem = n % 1000;
         format!("{}.{}K", k, rem / 100)
     }
+}
+
+/// Compute SHA-256 hex digest of a string.
+#[doc(hidden)]
+pub fn sha256_hex(input: &str) -> String {
+    format!("{:x}", Sha256::digest(input.as_bytes()))
 }
 
 #[derive(Clone, Default)]

@@ -223,9 +223,7 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
 
     if !session.session_id.is_empty() {
         let alias_label = read_session_alias(&session).await;
-        let label = alias_label
-            .as_deref()
-            .unwrap_or(&session.session_ref);
+        let label = alias_label.as_deref().unwrap_or(&session.session_ref);
         eprintln!(
             "\x1b[90mResume with: --session {}  or  --continue\x1b[0m",
             label
@@ -567,7 +565,10 @@ async fn list_sessions(home: &Path, cwd: &Path) -> Result<()> {
 /// conversation turn when session.json has no title. If generated, only the
 /// `title` field is written back to session.json — all other fields are
 /// preserved untouched.
-async fn resolve_session_title(session_dir: &Path, meta: &crate::session::metadata::SessionMetadata) -> String {
+async fn resolve_session_title(
+    session_dir: &Path,
+    meta: &crate::session::metadata::SessionMetadata,
+) -> String {
     // Fast path: title already in metadata
     if let Some(title) = meta.title.as_deref().filter(|t| !t.is_empty()) {
         return title.to_string();

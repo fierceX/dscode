@@ -98,9 +98,42 @@ pub struct ToolRunResult {
     pub signals: Vec<crate::guard::collector::Signal>,
 }
 
+pub struct SubAgentRequest {
+    pub prompt: String,
+    pub fork: bool,
+}
+
+impl ToolRunResult {
+    pub(crate) fn take_sub_agent_request(&mut self) -> Option<SubAgentRequest> {
+        if !self.spawns_sub_agent {
+            return None;
+        }
+        let prompt = self.sub_agent_prompt.take()?;
+        Some(SubAgentRequest {
+            prompt,
+            fork: self.sub_agent_fork,
+        })
+    }
+}
+
 enum PreparedCall {
     Execute(ToolCallEvent),
     Immediate(ToolRunResult),
+}
+
+struct ToolPolicyGate<'a> {
+    config: &'a ToolConfig,
+    storm: &'a Mutex<StormBreaker>,
+}
+
+struct RawToolResult {
+    output: std::result::Result<String, anyhow::Error>,
+    is_bash: bool,
+    conv_content: String,
+    exit_code: Option<i32>,
+    spawns_sub_agent: bool,
+    success: bool,
+    diagnostics: Vec<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -200,52 +233,16 @@ impl ToolRunner {
     }
 
     fn prepare_call(&self, mut call: ToolCallEvent) -> PreparedCall {
-        if let Some(tool) = self.find_tool(&call.name)
-            && let Some(reason) = approval_block_reason(tool.metadata(), &self.ctx.tool_config)
-        {
-            return PreparedCall::Immediate(blocked_tool_result(
-                call.id,
-                call.name,
-                call.fields,
-                reason,
-            ));
+        let tool_metadata = self.find_tool(&call.name).map(|tool| tool.metadata());
+        let policy = ToolPolicyGate {
+            config: &self.ctx.tool_config,
+            storm: &self.storm,
+        };
+        if let Some(blocked) = policy.evaluate(&call, tool_metadata) {
+            return PreparedCall::Immediate(blocked);
         }
 
-        // Storm check: suppress repeated identical calls. This runs before any
-        // concurrent scheduling so the suppression window is deterministic.
-        if let Some(tool) = self.find_tool(&call.name)
-            && !tool.metadata().storm_exempt
-        {
-            let args_json = serde_json::to_string(&call.input_json).unwrap_or_default();
-            let decision = {
-                let mut storm = self.storm.lock().unwrap_or_else(|e| e.into_inner());
-                storm.check(&call.name, &args_json, tool.metadata().mutating)
-            };
-            if let StormDecision::Suppress(reason) = decision {
-                return PreparedCall::Immediate(ToolRunResult {
-                    tool_use_id: call.id,
-                    tool_name: call.name,
-                    tool_args: call.fields,
-                    content: format!("Error: {reason}"),
-                    conv_content: String::new(),
-                    spawns_sub_agent: false,
-                    sub_agent_prompt: None,
-                    sub_agent_description: None,
-                    sub_agent_fork: false,
-                    exit_code: None,
-                    signals: Vec::new(),
-                });
-            }
-        }
-
-        let args_str = serde_json::to_string(&call.input_json).unwrap_or_default();
-        let result = crate::repair::repair_truncated_json(&args_str);
-        if result.changed
-            && !result.fallback
-            && let Ok(repaired_val) = serde_json::from_str::<serde_json::Value>(&result.repaired)
-        {
-            call.input_json = repaired_val;
-        }
+        repair_tool_input(&mut call);
 
         PreparedCall::Execute(call)
     }
@@ -255,116 +252,186 @@ impl ToolRunner {
         call: &ToolCallEvent,
         tool_fn: Option<&dyn ToolExec>,
     ) -> Result<ToolRunResult> {
-        let (output, is_bash, mut conv_content, exit_code, spawns_sub_agent, success, diagnostics) =
-            if let Some(t) = tool_fn {
-                match t.execute(&call.input_json, ctx) {
-                    Ok(outcome) => (
-                        Ok(outcome.content),
-                        outcome.is_bash,
-                        outcome.conversation_content,
-                        outcome.exit_code,
-                        t.metadata().spawns_sub_agent,
-                        outcome.success,
-                        outcome.diagnostics,
-                    ),
-                    Err(e) => (
-                        Err(e),
-                        false,
-                        String::new(),
-                        None,
-                        t.metadata().spawns_sub_agent,
-                        false,
-                        Vec::new(),
-                    ),
-                }
-            } else {
-                (
-                    Err(anyhow::anyhow!("unknown tool: {}", call.name)),
-                    false,
-                    String::new(),
-                    None,
-                    false,
-                    false,
-                    Vec::new(),
-                )
-            };
+        let raw = dispatch_tool(ctx, call, tool_fn);
+        Ok(format_dispatched_result(ctx, call, raw))
+    }
+}
 
-        let mut output = match output {
-            Ok(v) => v,
-            Err(e) => format!("Error: tool execution failed: {e}"),
-        };
-        if !success && exit_code.is_none() && !output.starts_with("Error:") {
-            output = format!("Error: {output}");
+impl ToolPolicyGate<'_> {
+    fn evaluate(
+        &self,
+        call: &ToolCallEvent,
+        metadata: Option<ToolMetadata>,
+    ) -> Option<ToolRunResult> {
+        let metadata = metadata?;
+        if let Some(reason) = approval_block_reason(metadata, self.config) {
+            return Some(blocked_tool_result(
+                call.id.clone(),
+                call.name.clone(),
+                call.fields.clone(),
+                reason,
+            ));
         }
-        if !diagnostics.is_empty() {
-            output.push_str("\nDiagnostics:");
-            for diagnostic in diagnostics {
-                output.push('\n');
-                output.push_str(&diagnostic);
-            }
+        if metadata.storm_exempt {
+            return None;
         }
-
-        let output = format_tool_result_with_artifact(
-            &call.name,
-            &output,
-            ctx.tool_config.tool_result_max_bytes,
-            ctx,
-        );
-
-        let output = if is_bash {
-            filter_bash_noise(&output)
-        } else {
-            output
+        let args_json = serde_json::to_string(&call.input_json).unwrap_or_default();
+        let decision = {
+            let mut storm = self.storm.lock().unwrap_or_else(|e| e.into_inner());
+            storm.check(&call.name, &args_json, metadata.mutating)
         };
-
-        if call.name == "Edit" && conv_content.is_empty() {
-            conv_content = crate::session::store::first_line(&output).to_string();
+        match decision {
+            StormDecision::Allow => None,
+            StormDecision::Suppress(reason) => Some(blocked_tool_result(
+                call.id.clone(),
+                call.name.clone(),
+                call.fields.clone(),
+                reason,
+            )),
         }
+    }
+}
 
-        let final_output = if (call.name == "Read" || call.name == "Write") && !is_bash {
-            let path_str = call.fields.get("path").map(|s| s.as_str()).unwrap_or("");
-            let kind = call.name.as_str();
-            let summary_path = resolve_summary_path(&ctx.cwd, path_str);
-            let summary =
-                file_tool_result_summary_sync(kind, path_str, &summary_path.display().to_string());
-            format!("{}\n{}", summary, output)
-        } else {
-            output
-        };
+fn repair_tool_input(call: &mut ToolCallEvent) {
+    let args_str = serde_json::to_string(&call.input_json).unwrap_or_default();
+    let result = crate::repair::repair_truncated_json(&args_str);
+    if result.changed
+        && !result.fallback
+        && let Ok(repaired_val) = serde_json::from_str::<serde_json::Value>(&result.repaired)
+    {
+        call.input_json = repaired_val;
+    }
+}
 
-        // Signals collected later by TurnExecutor (needs shared SignalCollector for EditLoop)
-        let signals = Vec::new();
+fn dispatch_tool(
+    ctx: &ToolContext,
+    call: &ToolCallEvent,
+    tool_fn: Option<&dyn ToolExec>,
+) -> RawToolResult {
+    if let Some(t) = tool_fn {
+        let metadata = t.metadata();
+        match t.execute(&call.input_json, ctx) {
+            Ok(outcome) => RawToolResult {
+                output: Ok(outcome.content),
+                is_bash: outcome.is_bash,
+                conv_content: outcome.conversation_content,
+                exit_code: outcome.exit_code,
+                spawns_sub_agent: metadata.spawns_sub_agent,
+                success: outcome.success,
+                diagnostics: outcome.diagnostics,
+            },
+            Err(e) => RawToolResult {
+                output: Err(e),
+                is_bash: false,
+                conv_content: String::new(),
+                exit_code: None,
+                spawns_sub_agent: metadata.spawns_sub_agent,
+                success: false,
+                diagnostics: Vec::new(),
+            },
+        }
+    } else {
+        RawToolResult {
+            output: Err(anyhow::anyhow!("unknown tool: {}", call.name)),
+            is_bash: false,
+            conv_content: String::new(),
+            exit_code: None,
+            spawns_sub_agent: false,
+            success: false,
+            diagnostics: Vec::new(),
+        }
+    }
+}
 
-        let sub_agent_prompt = if spawns_sub_agent {
-            call.fields.get("prompt").cloned()
-        } else {
-            None
-        };
-        let sub_agent_description = if spawns_sub_agent {
-            call.fields.get("description").cloned()
-        } else {
-            None
-        };
-        let sub_agent_fork = spawns_sub_agent
-            && call
-                .fields
-                .get("fork")
-                .map(|s| s == "true" || s == "1")
-                .unwrap_or(false);
+fn format_dispatched_result(
+    ctx: &ToolContext,
+    call: &ToolCallEvent,
+    raw: RawToolResult,
+) -> ToolRunResult {
+    let RawToolResult {
+        output,
+        is_bash,
+        mut conv_content,
+        exit_code,
+        spawns_sub_agent,
+        success,
+        diagnostics,
+    } = raw;
+    let mut output = match output {
+        Ok(v) => v,
+        Err(e) => format!("Error: tool execution failed: {e}"),
+    };
+    if !success && exit_code.is_none() && !output.starts_with("Error:") {
+        output = format!("Error: {output}");
+    }
+    if !diagnostics.is_empty() {
+        output.push_str("\nDiagnostics:");
+        for diagnostic in diagnostics {
+            output.push('\n');
+            output.push_str(&diagnostic);
+        }
+    }
 
-        Ok(ToolRunResult {
-            tool_use_id: call.id.clone(),
-            tool_name: call.name.clone(),
-            tool_args: call.fields.clone(),
-            content: final_output,
-            conv_content,
-            spawns_sub_agent,
-            sub_agent_prompt,
-            sub_agent_description,
-            sub_agent_fork,
-            exit_code,
-            signals,
-        })
+    let output = format_tool_result_with_artifact(
+        &call.name,
+        &output,
+        ctx.tool_config.tool_result_max_bytes,
+        ctx,
+    );
+
+    let output = if is_bash {
+        filter_bash_noise(&output)
+    } else {
+        output
+    };
+
+    if call.name == "Edit" && conv_content.is_empty() {
+        conv_content = crate::session::store::first_line(&output).to_string();
+    }
+
+    let final_output = if (call.name == "Read" || call.name == "Write") && !is_bash {
+        let path_str = call.fields.get("path").map(|s| s.as_str()).unwrap_or("");
+        let kind = call.name.as_str();
+        let summary_path = resolve_summary_path(&ctx.cwd, path_str);
+        let summary =
+            file_tool_result_summary_sync(kind, path_str, &summary_path.display().to_string());
+        format!("{}\n{}", summary, output)
+    } else {
+        output
+    };
+
+    // Signals collected later by TurnExecutor (needs shared SignalCollector for EditLoop)
+    let signals = Vec::new();
+
+    let sub_agent_prompt = if spawns_sub_agent {
+        call.fields.get("prompt").cloned()
+    } else {
+        None
+    };
+    let sub_agent_description = if spawns_sub_agent {
+        call.fields.get("description").cloned()
+    } else {
+        None
+    };
+    let sub_agent_fork = spawns_sub_agent
+        && call
+            .fields
+            .get("fork")
+            .map(|s| s == "true" || s == "1")
+            .unwrap_or(false);
+
+    ToolRunResult {
+        tool_use_id: call.id.clone(),
+        tool_name: call.name.clone(),
+        tool_args: call.fields.clone(),
+        content: final_output,
+        conv_content,
+        spawns_sub_agent,
+        sub_agent_prompt,
+        sub_agent_description,
+        sub_agent_fork,
+        exit_code,
+        signals,
     }
 }
 

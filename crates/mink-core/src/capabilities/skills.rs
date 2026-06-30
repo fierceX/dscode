@@ -1,7 +1,6 @@
 use crate::capabilities::CapabilityWarning;
 use crate::capabilities::source::{CapabilityExposure, SourceLevel, SourceMeta};
 use anyhow::{Result, anyhow, bail};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -305,7 +304,9 @@ impl SkillProvider for RuntimeSkillProvider {
 
 fn runtime_skill_to_loaded(skill: RuntimeSkill) -> LoadedSkill {
     let content = skill.content.replace("${MINK_SKILL_DIR}", "<runtime>");
-    let revision = skill.revision.unwrap_or_else(|| sha256_hex(&content));
+    let revision = skill
+        .revision
+        .unwrap_or_else(|| crate::util::sha256_hex(&content));
     LoadedSkill {
         skill: SkillCapability {
             name: skill.name,
@@ -415,7 +416,7 @@ impl SkillProvider for FileSystemSkillProvider {
                 CapabilityExposure::ModelDiscoverable
             };
             out.push(LoadedSkill {
-                revision: sha256_hex(&content),
+                revision: crate::util::sha256_hex(&content),
                 skill: SkillCapability {
                     name,
                     description: frontmatter
@@ -460,7 +461,7 @@ impl SkillProvider for BuiltInSkillProvider {
             .map(|skill| {
                 let content = skill.content.replace("${MINK_SKILL_DIR}", "<built-in>");
                 LoadedSkill {
-                    revision: sha256_hex(&content),
+                    revision: crate::util::sha256_hex(&content),
                     skill: SkillCapability {
                         name: skill.name.to_string(),
                         description: skill.description.to_string(),
@@ -615,10 +616,10 @@ fn compute_dependency_fingerprint(
             input.push_str(&loaded.revision);
         }
         input.push('\0');
-        input.push_str(&sha256_hex(&skill.content));
+        input.push_str(&crate::util::sha256_hex(&skill.content));
         input.push('\0');
     }
-    sha256_hex(&input)
+    crate::util::sha256_hex(&input)
 }
 
 fn exposure_label(exposure: &CapabilityExposure) -> &'static str {
@@ -627,10 +628,6 @@ fn exposure_label(exposure: &CapabilityExposure) -> &'static str {
         CapabilityExposure::ModelAddressable => "model-addressable",
         CapabilityExposure::HostOnly => "host-only",
     }
-}
-
-fn sha256_hex(input: &str) -> String {
-    format!("{:x}", Sha256::digest(input.as_bytes()))
 }
 
 fn is_valid_skill_name(name: &str) -> bool {

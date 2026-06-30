@@ -50,14 +50,8 @@ impl AgentRuntimeConfig {
     /// the runtime after session resolution, with `config.session_id` rewritten
     /// to the concrete session id.
     pub fn from_config(config: Config, home: PathBuf, cwd: PathBuf) -> Self {
-        let session = if !config.session_id.trim().is_empty() {
-            SessionPolicy::UseOrCreate(config.session_id.trim().to_string())
-        } else if config.continue_session {
-            SessionPolicy::ContinueLatest
-        } else {
-            SessionPolicy::New
-        };
-        let first_prompt = (!config.prompt.trim().is_empty()).then(|| config.prompt.clone());
+        let session = session_policy_from_config(&config);
+        let first_prompt = first_prompt_from_config(&config);
         Self {
             config,
             home,
@@ -103,6 +97,20 @@ impl AgentRuntimeConfig {
         self.session_layout = layout;
         self
     }
+}
+
+pub(crate) fn session_policy_from_config(config: &Config) -> SessionPolicy {
+    if !config.session_id.trim().is_empty() {
+        SessionPolicy::UseOrCreate(config.session_id.trim().to_string())
+    } else if config.continue_session {
+        SessionPolicy::ContinueLatest
+    } else {
+        SessionPolicy::New
+    }
+}
+
+pub(crate) fn first_prompt_from_config(config: &Config) -> Option<String> {
+    (!config.prompt.trim().is_empty()).then(|| config.prompt.clone())
 }
 
 /// Session selection policy for embedded callers.

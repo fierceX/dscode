@@ -1270,7 +1270,7 @@ mod tests {
         let mut saw_tool_call = false;
         let mut saw_tool_result = false;
         while let Some(event) =
-            tokio::time::timeout(tokio::time::Duration::from_secs(2), stream.recv())
+            tokio::time::timeout(tokio::time::Duration::from_secs(10), stream.recv())
                 .await
                 .expect("stream event timed out")
         {

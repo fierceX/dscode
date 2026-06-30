@@ -1,7 +1,7 @@
-use crate::agent::orchestrator::{TurnRunResult, TurnStatus};
+use crate::agent::orchestrator::TurnStatus;
 use crate::capabilities::{CapabilityExposure, RuntimeSkill, SkillDiscoveryPolicy};
 use crate::config::{Config, OutputFormat};
-use crate::runtime::{SessionInfo, TurnOutcome};
+use crate::runtime::TurnOutcome;
 use crate::sdk_protocol::{
     PROTOCOL_VERSION, SdkCapabilityExposure, SdkFinal, SdkRequest, SdkSkillDiscoveryPolicy,
     SdkStatus, path_string,
@@ -146,12 +146,13 @@ pub fn exit_code_from_turn(status: TurnStatus) -> i32 {
     }
 }
 
-pub fn final_from_run_result(result: &TurnRunResult, session: &SessionInfo) -> SdkFinal {
+pub fn final_from_outcome(outcome: &TurnOutcome) -> SdkFinal {
+    let session = &outcome.session;
     SdkFinal {
         event_type: "final",
         version: PROTOCOL_VERSION,
-        status: sdk_status_from_turn(result.status),
-        billing_turn_id: result.billing_turn_id.clone(),
+        status: sdk_status_from_turn(outcome.status),
+        billing_turn_id: outcome.billing_turn_id.clone(),
         session_id: session.session_id.clone(),
         session_ref: session.session_ref.clone(),
         home: path_string(&session.home),
@@ -161,29 +162,6 @@ pub fn final_from_run_result(result: &TurnRunResult, session: &SessionInfo) -> S
         artifacts_dir: path_string(&session.artifacts_dir),
         summary_path: path_string(&session.summary_path),
         usage_path: path_string(&session.usage_path),
-        tool_call_count: result.tool_call_count,
-        tool_error_count: result.tool_error_count,
-        error: result.error.clone(),
-        usage_records: result.usage_records.clone(),
-        usage: result.usage.clone(),
-    }
-}
-
-pub fn final_from_outcome(outcome: &TurnOutcome) -> SdkFinal {
-    SdkFinal {
-        event_type: "final",
-        version: PROTOCOL_VERSION,
-        status: sdk_status_from_turn(outcome.status),
-        billing_turn_id: outcome.billing_turn_id.clone(),
-        session_id: outcome.session.session_id.clone(),
-        session_ref: outcome.session.session_ref.clone(),
-        home: path_string(&outcome.session.home),
-        cwd: path_string(&outcome.session.cwd),
-        events_path: path_string(&outcome.session.events_path),
-        conversation_path: path_string(&outcome.session.conversation_path),
-        artifacts_dir: path_string(&outcome.session.artifacts_dir),
-        summary_path: path_string(&outcome.session.summary_path),
-        usage_path: path_string(&outcome.session.usage_path),
         tool_call_count: outcome.tool_call_count,
         tool_error_count: outcome.tool_error_count,
         error: outcome.error.clone(),
@@ -196,6 +174,7 @@ pub fn final_from_outcome(outcome: &TurnOutcome) -> SdkFinal {
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crate::runtime::SessionInfo;
 
     #[test]
     fn sdk_request_options_map_to_config_once() {

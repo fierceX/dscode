@@ -1,6 +1,5 @@
 use crate::capabilities::source::{CapabilityExposure, SourceLevel, SourceMeta};
 use anyhow::{Result, anyhow, bail};
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -149,7 +148,7 @@ impl RuleProvider for BuiltInRuleProvider {
     fn load_rules(&self, _ctx: &LoadContext<'_>) -> Result<Vec<LoadedRule>> {
         let content = "- Be concise and concrete. No pleasantries, no explanations unless asked. Raw results only.\n- Prefer safe, exact edits.\n- Report failures clearly.";
         Ok(vec![LoadedRule {
-            revision: sha256_hex(content),
+            revision: crate::util::sha256_hex(content),
             rule: RuleCapability {
                 name: "default-agent-rules".to_string(),
                 description: "Default response and edit discipline".to_string(),
@@ -191,11 +190,7 @@ fn compute_dependency_fingerprint(
         input.push_str(&rule.revision);
         input.push('\0');
     }
-    sha256_hex(&input)
-}
-
-fn sha256_hex(input: &str) -> String {
-    format!("{:x}", Sha256::digest(input.as_bytes()))
+    crate::util::sha256_hex(&input)
 }
 
 fn is_valid_rule_name(name: &str) -> bool {
