@@ -180,17 +180,18 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
         {
             let cmd_tx = runtime.command_sender();
             let interrupt = runtime.interrupt_flag();
-            if let Some((_, signal_rx)) = tui_tx
-                && let Err(e) = crate::tui::run_tui(
+            if let Some((_, signal_rx)) = tui_tx {
+                let model_label = crate::config::resolve_model_label(&cfg.model);
+                if let Err(e) = crate::tui::run_tui(
                     signal_rx,
                     cmd_tx.clone(),
                     &session.events_path,
                     Some(interrupt.clone()),
-                    crate::config::resolve_model_label(&cfg.model),
+                    &model_label,
                     &cfg.sandbox,
-                )
-            {
-                eprintln!("TUI error: {e}");
+                ) {
+                    eprintln!("TUI error: {e}");
+                }
             }
         }
         #[cfg(not(feature = "tui"))]
@@ -399,8 +400,9 @@ async fn run_interactive(
                 }
                 if line == "/help" {
                     println!("Commands:");
-                    println!("  /flash        Switch to flash tier");
-                    println!("  /pro          Switch to pro tier");
+                    println!("  /flash        Switch to flash alias");
+                    println!("  /pro          Switch to pro alias");
+                    println!("  /model NAME   Switch to a model name or alias");
                     println!("  /compact      Force context compaction");
                     println!("  /skills       List available skills");
                     println!("  /help         Show this help");
@@ -424,6 +426,15 @@ async fn run_interactive(
                 if line == "/flash" || line == "/pro" {
                     let model = line.trim_start_matches('/');
                     if cmd_tx.send(OrchCmd::SetModel(model.to_string())).is_err() {
+                        break;
+                    }
+                    continue;
+                }
+                if let Some(model) = line.strip_prefix("/model ") {
+                    let model = model.trim();
+                    if !model.is_empty()
+                        && cmd_tx.send(OrchCmd::SetModel(model.to_string())).is_err()
+                    {
                         break;
                     }
                     continue;
@@ -487,7 +498,7 @@ fn simple_stdin_loop(cmd_tx: &mpsc::UnboundedSender<OrchCmd>, cancel: &Cancellat
         }
         if line.starts_with('/') {
             if line == "/help" {
-                println!("Commands: /flash, /pro, /compact, /skills, /help");
+                println!("Commands: /flash, /pro, /model NAME, /compact, /skills, /help");
                 println!("Ctrl+C = interrupt, Ctrl+C again = exit");
             } else if line == "/skills" {
                 list_skills();
@@ -498,6 +509,11 @@ fn simple_stdin_loop(cmd_tx: &mpsc::UnboundedSender<OrchCmd>, cancel: &Cancellat
             } else if line == "/flash" || line == "/pro" {
                 let model = line.trim_start_matches('/');
                 let _ = cmd_tx.send(OrchCmd::SetModel(model.to_string()));
+            } else if let Some(model) = line.strip_prefix("/model ") {
+                let model = model.trim();
+                if !model.is_empty() {
+                    let _ = cmd_tx.send(OrchCmd::SetModel(model.to_string()));
+                }
             }
             continue;
         }
@@ -668,7 +684,7 @@ fn print_usage() {
     println!("Usage: {program} [options] [prompt]");
     println!();
     println!("Options:");
-    println!("  -m, --model TIER        Model tier: flash | pro (default: flash)");
+    println!("  -m, --model MODEL       Model name or alias: flash | pro | any backend model");
     println!("  --api-key KEY           API key (default from env)");
     println!("  --base-url URL          Override API base URL");
     println!("  --mission PATH          Load custom system prompt from MISSION.md file");

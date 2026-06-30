@@ -305,7 +305,9 @@ fn read_records(path: &Path) -> Result<Vec<UsageRecord>> {
 }
 
 fn price_usage(model: &str, tokens: &TokenUsage) -> Result<u64> {
-    let tier = ModelTier::parse(model).unwrap_or(ModelTier::Flash);
+    let Ok(tier) = ModelTier::parse(model) else {
+        return Ok(0);
+    };
     let input_nano = (tier.price_input_per_m() * 1000.0).round() as u64;
     let output_nano = (tier.price_output_per_m() * 1000.0).round() as u64;
     let cache_read_nano = (tier.price_cache_read_per_m() * 1000.0).round() as u64;

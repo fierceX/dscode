@@ -5,6 +5,7 @@ use crate::capabilities::{
 };
 use crate::config::Config;
 use crate::context::{AgentSharedContext, ToolConfig};
+use crate::llm::client::LlmBackend;
 use crate::resources::{ResourceHandler, ResourceRouter};
 use crate::session::compaction::CompactionEngine;
 use crate::session::paths::{self, SessionLayout};
@@ -36,6 +37,7 @@ pub(crate) struct AgentContextBuild {
     pub skill_providers: Vec<Arc<dyn SkillProvider>>,
     pub runtime_skills: Vec<RuntimeSkill>,
     pub skill_discovery_policy: SkillDiscoveryPolicy,
+    pub llm_backend: Arc<dyn LlmBackend>,
     pub resource_router: Option<Arc<ResourceRouter>>,
     pub capability_snapshot: Option<Arc<CapabilitySnapshot>>,
 }
@@ -113,6 +115,7 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
         params.session_id.clone(),
         params.display.clone(),
         params.cancel.clone(),
+        params.llm_backend.clone(),
     ));
 
     let ctx = Arc::new(AgentSharedContext {
@@ -121,6 +124,7 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
         home: params.home,
         session_layout: params.session_layout,
         api_url: params.api_url,
+        llm_backend: params.llm_backend,
         store,
         artifacts,
         snapshots: Arc::new(Mutex::new(FileSnapshotStore::default())),

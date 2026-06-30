@@ -627,6 +627,8 @@ mod tests {
 
     #[test]
     fn build_system_prompt_includes_rationalization_table_in_belief_awareness() {
+        let _lock = signal_env_lock();
+        let _guard = EnvGuard::set("MINK_SIGNAL_MODE", "full");
         let prompt = test_builder().build_system_prompt().unwrap();
         assert!(prompt.contains("Common rationalizations"));
         assert!(prompt.contains("Without searching you WILL miss"));

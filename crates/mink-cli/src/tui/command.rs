@@ -1,7 +1,8 @@
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SlashCommand {
     Flash,
     Pro,
+    Model(String),
     Compact,
     Help,
     Skills,
@@ -25,6 +26,9 @@ pub(crate) fn parse_slash_command(input: &str) -> Result<Option<SlashCommand>, S
         "/help" => SlashCommand::Help,
         "/skills" => SlashCommand::Skills,
         "/exit" | "/quit" | "/q" => SlashCommand::Quit,
+        _ if input.starts_with("/model ") && !input["/model ".len()..].trim().is_empty() => {
+            SlashCommand::Model(input["/model ".len()..].trim().to_string())
+        }
         _ => {
             return Err(SlashCommandError {
                 input: input.to_string(),

@@ -4,34 +4,10 @@ use crate::session::usage::{UsageCapture, UsageKind};
 use crate::sse::openai::OpenAIParser;
 use anyhow::Result;
 use futures::StreamExt;
+use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
-
-pub struct LlmRequestContext {
-    pub max_tokens: i32,
-    pub verbose: bool,
-    pub cancel: crate::cancel::CancellationToken,
-    pub display: std::sync::Arc<dyn crate::ui::Display>,
-    pub usage: std::sync::Arc<crate::session::usage::UsageJournal>,
-    pub usage_scope: crate::session::usage::UsageScope,
-}
-
-impl LlmRequestContext {
-    pub fn from_agent(ctx: &AgentSharedContext) -> Self {
-        Self {
-            max_tokens: ctx.max_tokens(),
-            verbose: ctx.verbose(),
-            cancel: ctx.cancel.clone(),
-            display: ctx.display.clone(),
-            usage: ctx.usage.clone(),
-            usage_scope: ctx.usage_scope(if ctx.is_sub_agent {
-                UsageKind::SubAgent
-            } else {
-                UsageKind::Agent
-            }),
-        }
-    }
-}
 
 const MAX_RETRIES: u32 = 2;
 const RETRY_DELAY: Duration = Duration::from_secs(1);
@@ -42,6 +18,9 @@ const MAX_STREAM_ERRORS: u32 = 5;
 #[async_trait::async_trait]
 pub trait LlmClient: Send + Sync {
     fn model(&self) -> &str;
+    fn model_label(&self) -> &str {
+        self.model()
+    }
     async fn stream(
         &self,
         ctx: &AgentSharedContext,
@@ -51,9 +30,203 @@ pub trait LlmClient: Send + Sync {
     ) -> Result<Box<dyn futures::Stream<Item = Result<Event>> + Unpin + Send>>;
 }
 
+pub type LlmEvent = Event;
+pub type LlmTextEvent = crate::protocol::TextEvent;
+pub type LlmThinkingEvent = crate::protocol::ThinkingEvent;
+pub type LlmToolCallEvent = crate::protocol::ToolCallEvent;
+pub type LlmUsageEvent = crate::protocol::UsageEvent;
+pub type LlmStopEvent = crate::protocol::StopEvent;
+pub type LlmErrorEvent = crate::protocol::ErrorEvent;
+pub type LlmRetryEvent = crate::protocol::RetryEvent;
+pub type LlmCancelToken = crate::cancel::CancellationToken;
+pub type LlmEventStream = Pin<Box<dyn futures::Stream<Item = Result<LlmEvent>> + Send>>;
+
+pub struct LlmResponseStream {
+    pub events: LlmEventStream,
+    pub attempt_count: u32,
+}
+
+#[derive(Debug)]
+pub struct LlmRequestFailure {
+    pub attempt_count: u32,
+    pub error: anyhow::Error,
+}
+
+impl std::fmt::Display for LlmRequestFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.error)
+    }
+}
+
+impl std::error::Error for LlmRequestFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.error.source()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum LlmPurpose {
+    Agent,
+    SubAgent { session_id: String },
+    Compaction,
+}
+
+pub struct LlmRequest {
+    pub purpose: LlmPurpose,
+    pub model: String,
+    pub model_alias: Option<String>,
+    pub api_url: String,
+    pub api_key: String,
+    pub system_prompt: String,
+    pub messages: Vec<serde_json::Value>,
+    pub tools: Vec<serde_json::Value>,
+    pub max_tokens: i32,
+    pub cancel: LlmCancelToken,
+    pub verbose: bool,
+    pub display: Arc<dyn crate::ui::Display>,
+}
+
+#[async_trait::async_trait]
+pub trait LlmBackend: Send + Sync {
+    fn name(&self) -> &str;
+    async fn stream(&self, request: LlmRequest) -> Result<LlmResponseStream>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenParamKind {
+    MaxTokens,
+    MaxCompletionTokens,
+}
+
+#[derive(Debug, Clone)]
+pub struct OpenAiCompatibleOptions {
+    pub send_reasoning_effort: bool,
+    pub reasoning_effort: Option<String>,
+    pub include_usage: bool,
+    pub token_param: TokenParamKind,
+    pub parallel_tool_calls: Option<bool>,
+}
+
+impl Default for OpenAiCompatibleOptions {
+    fn default() -> Self {
+        Self {
+            send_reasoning_effort: true,
+            reasoning_effort: Some("max".to_string()),
+            include_usage: true,
+            token_param: TokenParamKind::MaxTokens,
+            parallel_tool_calls: None,
+        }
+    }
+}
+
+pub struct OpenAiCompatibleBackend {
+    options: OpenAiCompatibleOptions,
+}
+
+impl OpenAiCompatibleBackend {
+    pub fn new(options: OpenAiCompatibleOptions) -> Self {
+        Self { options }
+    }
+
+    pub fn from_config(config: &crate::config::Config) -> Self {
+        let token_param = match config.openai_token_param {
+            crate::config::OpenAiTokenParamConfig::MaxTokens => TokenParamKind::MaxTokens,
+            crate::config::OpenAiTokenParamConfig::MaxCompletionTokens => {
+                TokenParamKind::MaxCompletionTokens
+            }
+        };
+        let reasoning_effort = config
+            .openai_reasoning_effort
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| {
+                !value.is_empty()
+                    && !matches!(
+                        value.to_ascii_lowercase().as_str(),
+                        "off" | "none" | "false" | "disabled"
+                    )
+            })
+            .map(str::to_string);
+        Self::new(OpenAiCompatibleOptions {
+            send_reasoning_effort: reasoning_effort.is_some(),
+            reasoning_effort,
+            include_usage: config.openai_include_usage,
+            token_param,
+            parallel_tool_calls: None,
+        })
+    }
+
+    pub fn deepseek_defaults() -> Self {
+        Self::new(OpenAiCompatibleOptions::default())
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmBackend for OpenAiCompatibleBackend {
+    fn name(&self) -> &str {
+        "openai-compatible"
+    }
+
+    async fn stream(&self, request: LlmRequest) -> Result<LlmResponseStream> {
+        let client = AsyncLlClient::new(&request.api_key, &request.api_url)?;
+        let body = crate::llm::transport::build_openai_body_with_options(
+            &request.model,
+            &request.messages,
+            &request.tools,
+            &request.system_prompt,
+            request.max_tokens,
+            &self.options,
+        )?;
+
+        if request.verbose {
+            let preview = String::from_utf8_lossy(&body);
+            let truncated: String = preview.chars().take(200).collect();
+            request.display.render_info(&format!(
+                "Request body ({}KB): {}...",
+                body.len() / 1024,
+                truncated
+            ));
+        }
+
+        let (resp, attempt_count) = client
+            .send_body_with_retry(request.display.as_ref(), body)
+            .await
+            .map_err(|failure| LlmRequestFailure {
+                attempt_count: failure.attempt_count,
+                error: failure.error,
+            })?;
+        let (tx, rx) = mpsc::unbounded_channel();
+        let cancel = request.cancel.linked_child_token();
+        AsyncLlClient::spawn_stream_task(resp, cancel.clone(), tx);
+        Ok(LlmResponseStream {
+            events: Box::pin(SseEventStream { rx, cancel }),
+            attempt_count,
+        })
+    }
+}
+
+pub struct BackendLlmClient {
+    backend: Arc<dyn LlmBackend>,
+    model_name: String,
+    model_alias: Option<String>,
+}
+
+impl BackendLlmClient {
+    pub fn new(
+        backend: Arc<dyn LlmBackend>,
+        model_name: impl Into<String>,
+        model_alias: Option<String>,
+    ) -> Self {
+        Self {
+            backend,
+            model_name: model_name.into(),
+            model_alias,
+        }
+    }
+}
+
 pub struct AsyncLlClient {
     client: reqwest::Client,
-    model_name: String,
     api_url: String,
     api_key: String,
 }
@@ -64,7 +237,7 @@ pub(crate) struct SendFailure {
 }
 
 impl AsyncLlClient {
-    pub fn new(model: &str, api_key: &str, api_url: &str) -> Result<Self> {
+    pub fn new(api_key: &str, api_url: &str) -> Result<Self> {
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(30))
             .timeout(Duration::from_secs(600))
@@ -72,7 +245,6 @@ impl AsyncLlClient {
             .build()?;
         Ok(Self {
             client,
-            model_name: model.to_string(),
             api_url: api_url.to_string(),
             api_key: api_key.to_string(),
         })
@@ -238,73 +410,16 @@ impl AsyncLlClient {
             display.render_info(&format!("Retrying ({}/{})...", attempt, MAX_RETRIES));
         }
     }
-
-    pub async fn stream_request(
-        &self,
-        request_ctx: &LlmRequestContext,
-        messages_json: &[serde_json::Value],
-        tools_json: &[serde_json::Value],
-        system_prompt: &str,
-    ) -> Result<Box<dyn futures::Stream<Item = Result<Event>> + Unpin + Send>> {
-        let body = crate::llm::transport::build_openai_body(
-            &self.model_name,
-            messages_json,
-            tools_json,
-            system_prompt,
-            request_ctx.max_tokens,
-        )?;
-
-        if request_ctx.verbose {
-            let preview = String::from_utf8_lossy(&body);
-            let truncated: String = preview.chars().take(200).collect();
-            request_ctx.display.render_info(&format!(
-                "Request body ({}KB): {}...",
-                body.len() / 1024,
-                truncated
-            ));
-        }
-
-        let capture = request_ctx
-            .usage
-            .capture(request_ctx.usage_scope.clone(), self.model_name.clone());
-        let (resp, attempt_count) = match self
-            .send_body_with_retry(request_ctx.display.as_ref(), body)
-            .await
-        {
-            Ok(result) => result,
-            Err(failure) => {
-                record_unreported(
-                    &capture,
-                    failure.attempt_count,
-                    format!("request_failed: {}", failure.error),
-                );
-                return Err(failure.error);
-            }
-        };
-
-        let (tx, rx) = mpsc::unbounded_channel();
-        let cancel = request_ctx.cancel.linked_child_token();
-        Self::spawn_stream_task(resp, cancel.clone(), tx);
-
-        Ok(Box::new(MeteredStream::new(
-            SseEventStream { rx, cancel },
-            capture,
-            attempt_count,
-        )))
-    }
-}
-
-fn is_fatal_parser_error(e: &anyhow::Error) -> bool {
-    let msg = e.to_string();
-    msg.contains("parse tool call")
-        || msg.contains("parse tool input")
-        || msg.contains("tool input must be object")
 }
 
 #[async_trait::async_trait]
-impl LlmClient for AsyncLlClient {
+impl LlmClient for BackendLlmClient {
     fn model(&self) -> &str {
         &self.model_name
+    }
+
+    fn model_label(&self) -> &str {
+        self.model_alias.as_deref().unwrap_or(&self.model_name)
     }
 
     async fn stream(
@@ -314,14 +429,59 @@ impl LlmClient for AsyncLlClient {
         tools_json: &[serde_json::Value],
         system_prompt: &str,
     ) -> Result<Box<dyn futures::Stream<Item = Result<Event>> + Unpin + Send>> {
-        self.stream_request(
-            &LlmRequestContext::from_agent(ctx),
-            messages_json,
-            tools_json,
-            system_prompt,
-        )
-        .await
+        let purpose = if ctx.is_sub_agent {
+            LlmPurpose::SubAgent {
+                session_id: ctx.config.session_id.clone(),
+            }
+        } else {
+            LlmPurpose::Agent
+        };
+        let capture = ctx.usage.capture(
+            ctx.usage_scope(if ctx.is_sub_agent {
+                UsageKind::SubAgent
+            } else {
+                UsageKind::Agent
+            }),
+            self.model_name.clone(),
+        );
+        let response = match self
+            .backend
+            .stream(LlmRequest {
+                purpose,
+                model: self.model_name.clone(),
+                model_alias: self.model_alias.clone(),
+                api_url: ctx.api_url.clone(),
+                api_key: ctx.api_key().to_string(),
+                system_prompt: system_prompt.to_string(),
+                messages: messages_json.to_vec(),
+                tools: tools_json.to_vec(),
+                max_tokens: ctx.max_tokens(),
+                cancel: ctx.cancel.clone(),
+                verbose: ctx.verbose(),
+                display: ctx.display.clone(),
+            })
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                let attempt_count = request_failure_attempt_count(&error);
+                record_unreported(&capture, attempt_count, format!("request_failed: {error}"));
+                return Err(error);
+            }
+        };
+        Ok(Box::new(MeteredStream::new(
+            response.events,
+            capture,
+            response.attempt_count,
+        )))
     }
+}
+
+fn is_fatal_parser_error(e: &anyhow::Error) -> bool {
+    let msg = e.to_string();
+    msg.contains("parse tool call")
+        || msg.contains("parse tool input")
+        || msg.contains("tool input must be object")
 }
 
 fn is_retryable(code: u16) -> bool {
@@ -416,6 +576,13 @@ fn record_unreported(capture: &UsageCapture, attempt_count: u32, reason: impl In
     }
 }
 
+pub(crate) fn request_failure_attempt_count(error: &anyhow::Error) -> u32 {
+    error
+        .downcast_ref::<LlmRequestFailure>()
+        .map(|failure| failure.attempt_count)
+        .unwrap_or(1)
+}
+
 impl Drop for SseEventStream {
     fn drop(&mut self) {
         self.cancel.cancel();
@@ -493,7 +660,7 @@ mod tests {
         ];
         let (api_url, seen, _server) = start_http_server(responses).await?;
         let ctx = test_context("client-retry", &api_url).await?;
-        let client = AsyncLlClient::new("deepseek-v4-flash", "secret-key", &api_url)?;
+        let client = AsyncLlClient::new("secret-key", &api_url)?;
 
         let resp = client
             .send_with_retry(&ctx, br#"{"ping":true}"#.to_vec())
@@ -509,7 +676,7 @@ mod tests {
         let responses = vec![http_response(400, &[], "bad request")];
         let (api_url, seen, _server) = start_http_server(responses).await?;
         let ctx = test_context("client-400", &api_url).await?;
-        let client = AsyncLlClient::new("deepseek-v4-flash", "secret-key", &api_url)?;
+        let client = AsyncLlClient::new("secret-key", &api_url)?;
 
         let err = client
             .send_with_retry(&ctx, br#"{"ping":true}"#.to_vec())
@@ -536,15 +703,23 @@ mod tests {
         )];
         let (api_url, seen, _server) = start_http_server(responses).await?;
         let ctx = test_context("client-stream", &api_url).await?;
-        let client = AsyncLlClient::new("deepseek-v4-flash", "secret-key", &api_url)?;
-        let mut stream = client
-            .stream(
-                &ctx,
-                &[json!({"role":"user","content":"ping"})],
-                &[],
-                "system",
-            )
+        let response = OpenAiCompatibleBackend::deepseek_defaults()
+            .stream(LlmRequest {
+                purpose: LlmPurpose::Agent,
+                model: "deepseek-v4-flash".into(),
+                model_alias: Some("flash".into()),
+                api_url,
+                api_key: "secret-key".into(),
+                system_prompt: "system".into(),
+                messages: vec![json!({"role":"user","content":"ping"})],
+                tools: Vec::new(),
+                max_tokens: ctx.max_tokens(),
+                cancel: ctx.cancel.clone(),
+                verbose: ctx.verbose(),
+                display: ctx.display.clone(),
+            })
             .await?;
+        let mut stream = response.events;
 
         let mut text = String::new();
         let mut usage = None;
@@ -567,6 +742,104 @@ mod tests {
         assert_eq!(usage.output_tokens, 2);
         assert_eq!(stop.as_deref(), Some("stop"));
         assert_eq!(seen.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    struct FailingBackend;
+
+    #[async_trait::async_trait]
+    impl LlmBackend for FailingBackend {
+        fn name(&self) -> &str {
+            "failing"
+        }
+
+        async fn stream(&self, _request: LlmRequest) -> Result<LlmResponseStream> {
+            anyhow::bail!("backend unavailable")
+        }
+    }
+
+    struct AttemptFailingBackend;
+
+    #[async_trait::async_trait]
+    impl LlmBackend for AttemptFailingBackend {
+        fn name(&self) -> &str {
+            "attempt-failing"
+        }
+
+        async fn stream(&self, _request: LlmRequest) -> Result<LlmResponseStream> {
+            Err(LlmRequestFailure {
+                attempt_count: 3,
+                error: anyhow::anyhow!("transport unavailable"),
+            }
+            .into())
+        }
+    }
+
+    #[tokio::test]
+    async fn backend_client_records_unreported_usage_when_request_fails() -> anyhow::Result<()> {
+        let ctx = test_context("backend-request-failed", "https://example.invalid/v1").await?;
+        let client = BackendLlmClient::new(Arc::new(FailingBackend), "custom-model", None);
+        let result = client
+            .stream(
+                &ctx,
+                &[json!({"role":"user","content":"ping"})],
+                &[],
+                "system",
+            )
+            .await;
+        let err = match result {
+            Ok(_) => anyhow::bail!("expected backend failure"),
+            Err(error) => error.to_string(),
+        };
+        assert!(err.contains("backend unavailable"), "{err}");
+        let records = ctx.usage.all_records()?;
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].status,
+            crate::session::usage::UsageStatus::Unreported
+        );
+        assert_eq!(records[0].kind, crate::session::usage::UsageKind::Agent);
+        assert_eq!(records[0].model, "custom-model");
+        assert_eq!(records[0].attempt_count, 1);
+        assert!(
+            records[0]
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("request_failed: backend unavailable")),
+            "{:?}",
+            records[0].reason
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn backend_client_preserves_request_failure_attempt_count() -> anyhow::Result<()> {
+        let ctx = test_context("backend-attempt-failed", "https://example.invalid/v1").await?;
+        let client = BackendLlmClient::new(Arc::new(AttemptFailingBackend), "custom-model", None);
+        let result = client
+            .stream(
+                &ctx,
+                &[json!({"role":"user","content":"ping"})],
+                &[],
+                "system",
+            )
+            .await;
+        let err = match result {
+            Ok(_) => anyhow::bail!("expected backend failure"),
+            Err(error) => error.to_string(),
+        };
+        assert!(err.contains("transport unavailable"), "{err}");
+        let records = ctx.usage.all_records()?;
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].attempt_count, 3);
+        assert!(
+            records[0]
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("request_failed: transport unavailable")),
+            "{:?}",
+            records[0].reason
+        );
         Ok(())
     }
 
@@ -604,6 +877,7 @@ mod tests {
             "client",
             &cfg.skills,
         )?);
+        let llm_backend = Arc::new(OpenAiCompatibleBackend::deepseek_defaults());
         let compaction = Arc::new(CompactionEngine::new_with_usage(
             store.clone(),
             spaths.summary.clone(),
@@ -619,6 +893,7 @@ mod tests {
             "client".into(),
             Arc::new(TestDisplay::new()),
             CancellationToken::new(),
+            llm_backend.clone(),
         ));
         Ok(Arc::new(AgentSharedContext {
             config: cfg.clone(),
@@ -626,6 +901,7 @@ mod tests {
             home,
             session_layout: crate::session::paths::SessionLayout::ProjectScoped,
             api_url: api_url.to_string(),
+            llm_backend,
             store,
             artifacts,
             snapshots: Arc::new(Mutex::new(

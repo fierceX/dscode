@@ -179,8 +179,23 @@ impl OpenAIParser {
                 }
             }
         }
+        if let Some(function_call) = delta.get("function_call") {
+            let entry = self.pending_calls.entry(0).or_default();
+            if entry.id.is_empty() {
+                entry.id = "legacy_function_call".to_string();
+            }
+            if let Some(v) = function_call.get("name").and_then(Value::as_str) {
+                entry.name = v.into();
+            }
+            if let Some(v) = function_call.get("arguments").and_then(Value::as_str) {
+                entry.arguments.push_str(v);
+            }
+        }
 
-        if choice.get("finish_reason").and_then(Value::as_str) == Some("tool_calls") {
+        if matches!(
+            choice.get("finish_reason").and_then(Value::as_str),
+            Some("tool_calls" | "function_call")
+        ) {
             self.emit_pending(emit)?;
         }
 
@@ -228,7 +243,7 @@ impl OpenAIParser {
 
     fn emit_pending(&mut self, emit: &mut dyn FnMut(Event) -> Result<()>) -> Result<()> {
         for call in self.pending_calls.values_mut() {
-            if call.arguments.is_empty() {
+            if call.name.is_empty() {
                 continue;
             }
             let evt = match build_tool_call_event(&call.name, &call.id, &call.arguments) {
@@ -243,6 +258,8 @@ impl OpenAIParser {
                 }
             };
             emit(Event::ToolCall(evt))?;
+            call.id.clear();
+            call.name.clear();
             call.arguments.clear();
         }
         Ok(())
@@ -419,6 +436,35 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, Event::Stop(s) if s.reason == "tool_calls"))
         );
+    }
+
+    #[test]
+    fn legacy_function_call_becomes_tool_call() {
+        let mut p = OpenAIParser::new();
+        let lines = [
+            "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"function_call\":{\"name\":\"Read\",\"arguments\":\"{\\\"path\\\":\\\"/tmp/f.txt\\\"}\"}},\"finish_reason\":\"function_call\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}",
+            "data: [DONE]",
+        ];
+        let events = collect_lines(&mut p, &lines);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::ToolCall(c)
+                if c.name == "Read" && c.fields.get("path").map(String::as_str) == Some("/tmp/f.txt")
+        )));
+    }
+
+    #[test]
+    fn empty_tool_call_arguments_default_to_empty_object() {
+        let mut p = OpenAIParser::new();
+        let lines = [
+            "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_empty\",\"type\":\"function\",\"function\":{\"name\":\"Glob\",\"arguments\":\"\"}}]},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}",
+            "data: [DONE]",
+        ];
+        let events = collect_lines(&mut p, &lines);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::ToolCall(c) if c.name == "Glob" && c.input_json == serde_json::json!({})
+        )));
     }
 
     #[test]

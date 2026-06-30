@@ -5,6 +5,7 @@ use crate::config::{
 };
 use crate::resources::ResourceHandler;
 use crate::runtime::config::{first_prompt_from_config, session_policy_from_config};
+use crate::runtime::llm::LlmBackend;
 use crate::runtime::{AgentRuntimeConfig, EventSink, SessionPolicy};
 use crate::session::paths::SessionLayout;
 use crate::tools::vfs::ReadOnlyFileSystem;
@@ -38,6 +39,7 @@ pub struct AgentOptions {
     skill_providers: Vec<Arc<dyn SkillProvider>>,
     runtime_skills: Vec<RuntimeSkill>,
     skill_discovery_policy: SkillDiscoveryPolicy,
+    llm_backend: Option<Arc<dyn LlmBackend>>,
     resource_session_id: Option<String>,
 }
 
@@ -81,6 +83,7 @@ impl AgentOptions {
             skill_providers: Vec::new(),
             runtime_skills: Vec::new(),
             skill_discovery_policy: SkillDiscoveryPolicy::Defaults,
+            llm_backend: None,
             resource_session_id: None,
         }
     }
@@ -159,6 +162,11 @@ impl AgentOptions {
 
     pub fn with_sub_stream_tx(mut self, sub_stream_tx: Arc<dyn SubAgentStreamSink>) -> Self {
         self.sub_stream_tx = Some(sub_stream_tx);
+        self
+    }
+
+    pub fn with_llm_backend(mut self, backend: Arc<dyn LlmBackend>) -> Self {
+        self.llm_backend = Some(backend);
         self
     }
 
@@ -430,9 +438,8 @@ impl AgentOptions {
             skill_providers: self.skill_providers,
             runtime_skills: self.runtime_skills,
             skill_discovery_policy: self.skill_discovery_policy,
+            llm_backend: self.llm_backend,
             resource_session_id: self.resource_session_id,
-            #[cfg(test)]
-            llm_override: None,
         }
     }
 }

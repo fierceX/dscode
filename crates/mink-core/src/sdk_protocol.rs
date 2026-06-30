@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::io::Write;
 use std::path::Path;
 
 use crate::session::paths::SessionLayout;
@@ -124,7 +125,9 @@ pub struct SdkFinal {
 
 pub fn emit_json_line<T: Serialize>(value: &T) {
     if let Ok(line) = serde_json::to_string(value) {
-        println!("{line}");
+        let mut stdout = std::io::stdout().lock();
+        let _ = writeln!(stdout, "{line}");
+        let _ = stdout.flush();
     }
 }
 
@@ -165,14 +168,9 @@ pub fn parse_agent_jsonl_request(input: &str) -> Result<SdkRequest, String> {
 pub fn validate_sdk_request(req: &SdkRequest) -> Result<(), String> {
     let opts = &req.options;
     if let Some(model) = opts.model.as_deref()
-        && !matches!(
-            model,
-            "flash" | "pro" | "deepseek-v4-flash" | "deepseek-v4-pro"
-        )
+        && model.trim().is_empty()
     {
-        return Err(format!(
-            "invalid SDK request: model must be flash or pro, got {model}"
-        ));
+        return Err("invalid SDK request: model must not be empty".to_string());
     }
     if let Some(max_tokens) = opts.max_tokens
         && max_tokens <= 0
@@ -386,10 +384,16 @@ mod tests {
     }
 
     #[test]
-    fn validate_sdk_request_rejects_unknown_model() {
+    fn validate_sdk_request_accepts_custom_model() {
         let req =
             parse_agent_jsonl_request(r#"{"prompt":"hi","options":{"model":"gpt-4"}}"#).unwrap();
+        validate_sdk_request(&req).unwrap();
+    }
+
+    #[test]
+    fn validate_sdk_request_rejects_empty_model() {
+        let req = parse_agent_jsonl_request(r#"{"prompt":"hi","options":{"model":" "}}"#).unwrap();
         let err = validate_sdk_request(&req).unwrap_err();
-        assert!(err.contains("model must be flash or pro"));
+        assert!(err.contains("model must not be empty"));
     }
 }

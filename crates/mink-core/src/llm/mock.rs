@@ -1,11 +1,8 @@
-use crate::context::AgentSharedContext;
 use crate::protocol::Event;
 use anyhow::Result;
 use std::sync::Mutex;
 
-use super::client::LlmClient;
-use super::client::MeteredStream;
-use crate::session::usage::UsageKind;
+use super::client::{LlmBackend, LlmRequest, LlmResponseStream};
 
 pub struct MockLlmClient {
     pub model_name: String,
@@ -22,33 +19,18 @@ impl MockLlmClient {
 }
 
 #[async_trait::async_trait]
-impl LlmClient for MockLlmClient {
-    fn model(&self) -> &str {
-        &self.model_name
+impl LlmBackend for MockLlmClient {
+    fn name(&self) -> &str {
+        "mock"
     }
 
-    async fn stream(
-        &self,
-        ctx: &AgentSharedContext,
-        _messages_json: &[serde_json::Value],
-        _tools_json: &[serde_json::Value],
-        _system_prompt: &str,
-    ) -> Result<Box<dyn futures::Stream<Item = Result<Event>> + Unpin + Send>> {
+    async fn stream(&self, _request: LlmRequest) -> Result<LlmResponseStream> {
         let mut iter = self.canned_events.lock().unwrap();
         let events = iter.next().unwrap_or_default();
-        let capture = ctx.usage.capture(
-            ctx.usage_scope(if ctx.is_sub_agent {
-                UsageKind::SubAgent
-            } else {
-                UsageKind::Agent
-            }),
-            self.model_name.clone(),
-        );
-        Ok(Box::new(MeteredStream::new(
-            futures::stream::iter(events),
-            capture,
-            1,
-        )))
+        Ok(LlmResponseStream {
+            events: Box::pin(futures::stream::iter(events)),
+            attempt_count: 1,
+        })
     }
 }
 
@@ -60,7 +42,7 @@ mod tests {
     #[tokio::test]
     async fn mock_empty_sequence() {
         let client = MockLlmClient::new("test-model", vec![vec![]]);
-        assert_eq!(client.model(), "test-model");
+        assert_eq!(client.model_name, "test-model");
     }
 
     #[tokio::test]
@@ -74,6 +56,6 @@ mod tests {
             })),
         ];
         let client = MockLlmClient::new("m", vec![events]);
-        assert_eq!(client.model(), "m");
+        assert_eq!(client.model_name, "m");
     }
 }

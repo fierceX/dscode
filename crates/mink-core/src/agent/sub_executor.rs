@@ -1,6 +1,6 @@
 use crate::agent::turn::{TurnDecision, TurnExecutor};
 use crate::context::AgentSharedContext;
-use crate::llm::client::{AsyncLlClient, LlmClient};
+use crate::llm::client::{BackendLlmClient, LlmClient};
 use crate::runtime::context_build::{AgentContextBuild, build_agent_context};
 use crate::session::stats::Stats;
 use crate::session::store::ConversationStore;
@@ -75,8 +75,6 @@ pub struct SubAgentExecutor {
     capture: Arc<CaptureDisplay>,
     parent_display: Arc<dyn Display>,
     session_id: String,
-    #[cfg(test)]
-    llm_override: Option<Arc<dyn LlmClient>>,
 }
 
 impl SubAgentExecutor {
@@ -119,6 +117,7 @@ impl SubAgentExecutor {
             skill_providers: Vec::new(),
             runtime_skills: Vec::new(),
             skill_discovery_policy: crate::capabilities::SkillDiscoveryPolicy::Defaults,
+            llm_backend: parent_ctx.llm_backend.clone(),
             resource_router: Some(parent_ctx.resource_router.clone()),
             capability_snapshot: Some(parent_ctx.capability_snapshot.clone()),
         })
@@ -147,21 +146,7 @@ impl SubAgentExecutor {
             capture,
             parent_display,
             session_id,
-            #[cfg(test)]
-            llm_override: None,
         })
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn new_with_llm(
-        parent_ctx: Arc<AgentSharedContext>,
-        session_id: String,
-        fork: bool,
-        llm: Arc<dyn LlmClient>,
-    ) -> Result<Self> {
-        let mut executor = Self::new(parent_ctx, session_id, fork).await?;
-        executor.llm_override = Some(llm);
-        Ok(executor)
     }
 
     /// Execute the sub-agent with the given prompt.
@@ -225,24 +210,13 @@ impl SubAgentExecutor {
     }
 
     async fn run_impl(self, prompt: String) -> Result<(String, String)> {
-        let model_name = crate::config::resolve_model_name(&self.child_ctx.config.model);
-        let api_url = &self.child_ctx.api_url;
-        #[cfg(test)]
-        let llm: Arc<dyn LlmClient> = if let Some(llm) = self.llm_override.clone() {
-            llm
-        } else {
-            Arc::new(AsyncLlClient::new(
-                model_name,
-                &self.child_ctx.config.api_key,
-                api_url,
-            )?)
-        };
-        #[cfg(not(test))]
-        let llm: Arc<dyn LlmClient> = Arc::new(AsyncLlClient::new(
-            model_name,
-            &self.child_ctx.config.api_key,
-            api_url,
-        )?);
+        let resolved = crate::config::model_resolver(&self.child_ctx.config)
+            .resolve(&self.child_ctx.config.model);
+        let llm: Arc<dyn LlmClient> = Arc::new(BackendLlmClient::new(
+            self.child_ctx.llm_backend.clone(),
+            resolved.actual,
+            resolved.alias,
+        ));
         // 子代理内部也可调用 SubAgent，用独立池（容量1，结果丢弃）
         let mut executor = TurnExecutor::new(self.child_ctx.clone(), llm);
         let (decision, _effects) = Box::pin(executor.execute(&prompt, None)).await?;

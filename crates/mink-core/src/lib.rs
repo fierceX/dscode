@@ -22,11 +22,14 @@ pub mod ui;
 pub mod prelude {
     pub use crate::runtime::{
         AgentEvent, AgentEventStream, AgentOptions, AgentRuntime, CapabilityExposure, EventSink,
-        LoadedSkill, ReadOnlyFileSystem, ResourceHandler, RuntimeSkill, SessionInfo, SessionLayout,
-        SessionPolicy, SkillCapability, SkillDiscoveryPolicy, SkillLoadContext, SkillProvider,
-        SourceLevel, SourceMeta, TurnOutcome, TurnStatus, VfsGlobRequest, VfsGlobResult,
-        VfsGrepEntry, VfsGrepRequest, VfsGrepResult, VfsReadRequest, VfsReadResult, VfsScope,
-        VirtualFile,
+        LlmBackend, LlmCancelToken, LlmErrorEvent, LlmEvent, LlmEventStream, LlmPurpose,
+        LlmRequest, LlmRequestFailure, LlmResponseStream, LlmRetryEvent, LlmStopEvent,
+        LlmTextEvent, LlmThinkingEvent, LlmToolCallEvent, LlmUsageEvent, LoadedSkill,
+        OpenAiCompatibleBackend, OpenAiCompatibleOptions, ReadOnlyFileSystem, ResourceHandler,
+        RuntimeSkill, SessionInfo, SessionLayout, SessionPolicy, SkillCapability,
+        SkillDiscoveryPolicy, SkillLoadContext, SkillProvider, SourceLevel, SourceMeta,
+        TokenParamKind, TurnOutcome, TurnStatus, VfsGlobRequest, VfsGlobResult, VfsGrepEntry,
+        VfsGrepRequest, VfsGrepResult, VfsReadRequest, VfsReadResult, VfsScope, VirtualFile,
     };
     pub use crate::session::usage::{
         TokenUsage, UsageKind, UsageRecord, UsageStatus, UsageSummary,

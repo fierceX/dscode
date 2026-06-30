@@ -1,8 +1,7 @@
-#[cfg(test)]
-use crate::agent::orchestrator::OrchActor;
 use crate::agent::orchestrator::new_orchestrator;
 use crate::cancel::CancellationToken;
 use crate::config::api_url;
+use crate::llm::client::OpenAiCompatibleBackend;
 use crate::runtime::config::{AgentRuntimeConfig, SessionInfo, SessionPolicy};
 use crate::runtime::context_build::{AgentContextBuild, build_agent_context};
 use crate::runtime::events::EventDisplay;
@@ -12,8 +11,6 @@ use crate::session::paths;
 use anyhow::{Result, bail};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-#[cfg(test)]
-use tokio::sync::mpsc;
 
 pub async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRuntime> {
     let AgentRuntimeConfig {
@@ -31,9 +28,8 @@ pub async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRuntime> {
         skill_providers,
         runtime_skills,
         skill_discovery_policy,
+        llm_backend,
         resource_session_id,
-        #[cfg(test)]
-        llm_override,
     } = config;
 
     let (sid, session_ref, session_alias) =
@@ -45,6 +41,8 @@ pub async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRuntime> {
     let display: Arc<dyn crate::ui::Display> = event_display.clone();
     let interrupt = Arc::new(AtomicBool::new(false));
     let api_url_str = api_url(&config);
+    let llm_backend =
+        llm_backend.unwrap_or_else(|| Arc::new(OpenAiCompatibleBackend::from_config(&config)));
     let resource_session_id = resource_session_id.unwrap_or_else(|| sid.clone());
     let built = build_agent_context(AgentContextBuild {
         config: config.clone(),
@@ -65,6 +63,7 @@ pub async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRuntime> {
         skill_providers,
         runtime_skills,
         skill_discovery_policy,
+        llm_backend,
         resource_router: None,
         capability_snapshot: None,
     })
@@ -86,20 +85,7 @@ pub async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRuntime> {
     )
     .await?;
 
-    let (orchestrator, cmd_tx) = {
-        #[cfg(test)]
-        if let Some(llm) = llm_override {
-            let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-            let actor = OrchActor::new_with_llm(ctx.clone(), cmd_rx, llm);
-            (actor, cmd_tx)
-        } else {
-            new_orchestrator(ctx.clone())
-        }
-        #[cfg(not(test))]
-        {
-            new_orchestrator(ctx.clone())
-        }
-    };
+    let (orchestrator, cmd_tx) = new_orchestrator(ctx.clone());
     let orch_display = display.clone();
     let orch_handle = tokio::spawn(async move {
         if let Err(e) = orchestrator.run().await {
@@ -852,7 +838,7 @@ mod tests {
         };
         let mut rt_config =
             AgentRuntimeConfig::from_config(cfg, home.to_path_buf(), cwd.to_path_buf());
-        rt_config.llm_override = Some(Arc::new(mock));
+        rt_config.llm_backend = Some(Arc::new(mock));
         rt_config
     }
 
@@ -871,6 +857,101 @@ mod tests {
         assert_eq!(outcome.tool_call_count, 0);
         assert_eq!(outcome.tool_error_count, 0);
         assert!(outcome.error.is_none());
+
+        runtime.shutdown().await.unwrap();
+        let _ = tokio::fs::remove_dir_all(home).await;
+        let _ = tokio::fs::remove_dir_all(cwd).await;
+    }
+
+    type SeenModels = Arc<Mutex<Vec<(String, Option<String>)>>>;
+
+    struct RecordingBackend {
+        seen: SeenModels,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::runtime::LlmBackend for RecordingBackend {
+        fn name(&self) -> &str {
+            "recording"
+        }
+
+        async fn stream(
+            &self,
+            request: crate::runtime::LlmRequest,
+        ) -> anyhow::Result<crate::runtime::LlmResponseStream> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((request.model, request.model_alias));
+            Ok(crate::runtime::LlmResponseStream {
+                events: Box::pin(futures::stream::iter(vec![
+                    Ok(crate::runtime::LlmEvent::Text(
+                        crate::runtime::LlmTextEvent {
+                            content: "ok".into(),
+                        },
+                    )),
+                    Ok(crate::runtime::LlmEvent::Stop(
+                        crate::runtime::LlmStopEvent {
+                            reason: "end_turn".into(),
+                        },
+                    )),
+                ])),
+                attempt_count: 1,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn injected_backend_receives_resolved_model_alias() {
+        let home = unique_temp_dir("backend-alias-home");
+        let cwd = unique_temp_dir("backend-alias-cwd");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut aliases = std::collections::BTreeMap::new();
+        aliases.insert("flash".to_string(), "local-fast".to_string());
+        let cfg = Config {
+            model: "flash".into(),
+            model_aliases: aliases,
+            api_key: "test-key".into(),
+            base_url: "https://example.invalid/v1".into(),
+            max_context_tokens: 1_000_000,
+            ..Config::default()
+        };
+        let runtime_config = AgentRuntimeConfig::from_config(cfg, home.clone(), cwd.clone())
+            .with_llm_backend(Arc::new(RecordingBackend { seen: seen.clone() }));
+        let runtime = build_runtime(runtime_config).await.unwrap();
+
+        let outcome = runtime.run_turn("hi").await.unwrap();
+        assert_eq!(outcome.status, crate::agent::orchestrator::TurnStatus::Ok);
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            &[("local-fast".to_string(), Some("flash".to_string()))]
+        );
+
+        runtime.shutdown().await.unwrap();
+        let _ = tokio::fs::remove_dir_all(home).await;
+        let _ = tokio::fs::remove_dir_all(cwd).await;
+    }
+
+    #[tokio::test]
+    async fn agent_options_default_model_resolves_to_flash_for_injected_backend() {
+        let home = unique_temp_dir("backend-default-model-home");
+        let cwd = unique_temp_dir("backend-default-model-cwd");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let runtime_config = crate::runtime::AgentOptions::new(home.clone(), cwd.clone())
+            .with_llm_backend(Arc::new(RecordingBackend { seen: seen.clone() }))
+            .into_runtime_config();
+        let runtime = build_runtime(runtime_config).await.unwrap();
+
+        let outcome = runtime.run_turn("hi").await.unwrap();
+        assert_eq!(outcome.status, crate::agent::orchestrator::TurnStatus::Ok);
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            &[("deepseek-v4-flash".to_string(), Some("flash".to_string()))]
+        );
 
         runtime.shutdown().await.unwrap();
         let _ = tokio::fs::remove_dir_all(home).await;
@@ -1061,33 +1142,34 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl crate::llm::client::LlmClient for InterruptTestMockLlmClient {
-        fn model(&self) -> &str {
-            "flash"
+    impl crate::llm::client::LlmBackend for InterruptTestMockLlmClient {
+        fn name(&self) -> &str {
+            "interrupt-test"
         }
         async fn stream(
             &self,
-            _ctx: &crate::context::AgentSharedContext,
-            _messages_json: &[serde_json::Value],
-            _tools_json: &[serde_json::Value],
-            _system_prompt: &str,
-        ) -> anyhow::Result<
-            Box<dyn futures::Stream<Item = anyhow::Result<crate::protocol::Event>> + Unpin + Send>,
-        > {
+            _request: crate::runtime::LlmRequest,
+        ) -> anyhow::Result<crate::runtime::LlmResponseStream> {
             let mut c = self.calls.lock().unwrap();
             *c += 1;
             if *c == 1 {
-                Ok(Box::new(futures::stream::pending()))
+                Ok(crate::runtime::LlmResponseStream {
+                    events: Box::pin(futures::stream::pending()),
+                    attempt_count: 1,
+                })
             } else {
                 use crate::protocol::{Event, StopEvent, TextEvent};
-                Ok(Box::new(futures::stream::iter(vec![
-                    Ok(Event::Text(TextEvent {
-                        content: "recovered".into(),
-                    })),
-                    Ok(Event::Stop(StopEvent {
-                        reason: "end_turn".into(),
-                    })),
-                ])))
+                Ok(crate::runtime::LlmResponseStream {
+                    events: Box::pin(futures::stream::iter(vec![
+                        Ok(Event::Text(TextEvent {
+                            content: "recovered".into(),
+                        })),
+                        Ok(Event::Stop(StopEvent {
+                            reason: "end_turn".into(),
+                        })),
+                    ])),
+                    attempt_count: 1,
+                })
             }
         }
     }
@@ -1106,7 +1188,7 @@ mod tests {
         };
         let mut rt_config =
             AgentRuntimeConfig::from_config(cfg, home.to_path_buf(), cwd.to_path_buf());
-        rt_config.llm_override = Some(Arc::new(InterruptTestMockLlmClient {
+        rt_config.llm_backend = Some(Arc::new(InterruptTestMockLlmClient {
             calls: std::sync::Mutex::new(0),
         }));
         rt_config

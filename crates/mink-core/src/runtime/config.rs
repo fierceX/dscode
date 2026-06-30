@@ -1,7 +1,6 @@
 use crate::capabilities::{RuntimeSkill, SkillDiscoveryPolicy, SkillProvider};
 use crate::config::Config;
-#[cfg(test)]
-use crate::llm::client::LlmClient;
+use crate::llm::client::LlmBackend;
 use crate::resources::ResourceHandler;
 use crate::runtime::EventSink;
 use crate::session::paths::Paths;
@@ -32,13 +31,10 @@ pub struct AgentRuntimeConfig {
     pub skill_providers: Vec<Arc<dyn SkillProvider>>,
     pub runtime_skills: Vec<RuntimeSkill>,
     pub skill_discovery_policy: SkillDiscoveryPolicy,
+    pub llm_backend: Option<Arc<dyn LlmBackend>>,
     /// Knowledge-base scope used by the read-only VFS. Defaults to the
     /// resolved runtime session id.
     pub resource_session_id: Option<String>,
-    /// Test-only: inject a mock LLM client so integration tests can exercise
-    /// `run_turn()` end-to-end without live API calls.
-    #[cfg(test)]
-    pub(crate) llm_override: Option<Arc<dyn LlmClient>>,
 }
 
 impl AgentRuntimeConfig {
@@ -67,9 +63,8 @@ impl AgentRuntimeConfig {
             skill_providers: Vec::new(),
             runtime_skills: Vec::new(),
             skill_discovery_policy: SkillDiscoveryPolicy::Defaults,
+            llm_backend: None,
             resource_session_id: None,
-            #[cfg(test)]
-            llm_override: None,
         }
     }
 
@@ -85,6 +80,11 @@ impl AgentRuntimeConfig {
 
     pub fn with_sub_stream_tx(mut self, sub_stream_tx: Arc<dyn SubAgentStreamSink>) -> Self {
         self.sub_stream_tx = Some(sub_stream_tx);
+        self
+    }
+
+    pub fn with_llm_backend(mut self, backend: Arc<dyn LlmBackend>) -> Self {
+        self.llm_backend = Some(backend);
         self
     }
 

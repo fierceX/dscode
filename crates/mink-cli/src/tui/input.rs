@@ -450,6 +450,10 @@ fn handle_enter(
                 let _ = orch_tx.send(OrchCmd::SetModel("pro".into()));
                 state.model = "pro".into();
             }
+            SlashCommand::Model(model) => {
+                let _ = orch_tx.send(OrchCmd::SetModel(model.clone()));
+                state.model = model;
+            }
             SlashCommand::Compact => {
                 let (done_tx, _) = tokio::sync::oneshot::channel();
                 if orch_tx.send(OrchCmd::Compact { done: done_tx }).is_ok() {

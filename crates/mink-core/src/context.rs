@@ -1,6 +1,7 @@
 use crate::cancel::CancellationToken;
 use crate::capabilities::CapabilitySnapshot;
 use crate::config::{Config, OutputFormat, ToolApprovalMode, ToolApprovalPolicy, ToolDisableFlags};
+use crate::llm::client::LlmBackend;
 use crate::resources::ResourceRouter;
 use crate::session::artifacts::ArtifactManager;
 use crate::session::compaction::CompactionEngine;
@@ -127,6 +128,7 @@ pub struct AgentSharedContext {
     pub home: PathBuf,
     pub session_layout: SessionLayout,
     pub api_url: String,
+    pub llm_backend: Arc<dyn LlmBackend>,
     pub store: Arc<ConversationStore>,
     pub artifacts: Arc<ArtifactManager>,
     pub snapshots: Arc<Mutex<FileSnapshotStore>>,
@@ -156,8 +158,10 @@ pub struct AgentSharedContext {
 }
 
 impl AgentSharedContext {
-    pub fn model(&self) -> &str {
-        crate::config::resolve_model_name(&self.config.model)
+    pub fn model(&self) -> String {
+        crate::config::model_resolver(&self.config)
+            .resolve(&self.config.model)
+            .actual
     }
     pub fn max_turns(&self) -> i32 {
         self.config.max_turns

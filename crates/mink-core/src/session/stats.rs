@@ -75,6 +75,15 @@ impl StatsTracker {
 
     /// Record usage with a specific model tier for per-tier cost tracking.
     pub async fn record_usage_with_tier(&self, u: &UsageEvent, tier: crate::config::ModelTier) {
+        self.record_usage_inner(u, Some(tier)).await;
+    }
+
+    pub async fn record_usage_with_model(&self, u: &UsageEvent, model: &str) {
+        self.record_usage_inner(u, crate::config::ModelTier::parse(model).ok())
+            .await;
+    }
+
+    async fn record_usage_inner(&self, u: &UsageEvent, tier: Option<crate::config::ModelTier>) {
         let mut s = self.stats.write().await;
         s.agent_request_count += 1;
         s.total_input_tokens += u.input_tokens as u64;
@@ -86,19 +95,20 @@ impl StatsTracker {
             + u.cache_read_input_tokens
             + u.cache_creation_input_tokens) as u64;
 
-        // Per-tier cost accumulation
-        let input_cost = (u.input_tokens as f64) * tier.price_input_per_m() / 1_000_000.0;
-        let output_cost = (u.output_tokens as f64) * tier.price_output_per_m() / 1_000_000.0;
-        let cache_read_cost =
-            (u.cache_read_input_tokens as f64) * tier.price_cache_read_per_m() / 1_000_000.0;
-        let cache_creation_cost =
-            (u.cache_creation_input_tokens as f64) * tier.price_input_per_m() / 1_000_000.0;
-        let delta_micros = ((input_cost + output_cost + cache_read_cost + cache_creation_cost)
-            * 1_000_000.0) as u64;
+        if let Some(tier) = tier {
+            let input_cost = (u.input_tokens as f64) * tier.price_input_per_m() / 1_000_000.0;
+            let output_cost = (u.output_tokens as f64) * tier.price_output_per_m() / 1_000_000.0;
+            let cache_read_cost =
+                (u.cache_read_input_tokens as f64) * tier.price_cache_read_per_m() / 1_000_000.0;
+            let cache_creation_cost =
+                (u.cache_creation_input_tokens as f64) * tier.price_input_per_m() / 1_000_000.0;
+            let delta_micros = ((input_cost + output_cost + cache_read_cost + cache_creation_cost)
+                * 1_000_000.0) as u64;
 
-        match tier {
-            crate::config::ModelTier::Flash => s.flash_cost_micros += delta_micros,
-            crate::config::ModelTier::Pro => s.pro_cost_micros += delta_micros,
+            match tier {
+                crate::config::ModelTier::Flash => s.flash_cost_micros += delta_micros,
+                crate::config::ModelTier::Pro => s.pro_cost_micros += delta_micros,
+            }
         }
 
         s.last_updated = chrono_now_rfc3339();

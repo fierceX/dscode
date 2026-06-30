@@ -375,9 +375,10 @@ impl TurnExecutor {
     ) -> Result<()> {
         self.ctx.store.add_assistant(text, thinking, calls).await?;
         if let Some(u) = usage {
-            let tier = crate::config::ModelTier::parse(self.llm.model())
-                .unwrap_or(crate::config::ModelTier::Flash);
-            self.ctx.stats.record_usage_with_tier(u, tier).await;
+            self.ctx
+                .stats
+                .record_usage_with_model(u, self.llm.model())
+                .await;
         }
         Ok(())
     }
@@ -403,13 +404,9 @@ impl TurnExecutor {
 
         let mut prepared_results = Vec::new();
         for mut result in results {
+            let model_label = self.llm.model_label();
             self.signal_processor
-                .process(
-                    &mut result,
-                    belief.as_deref_mut(),
-                    &self.ctx,
-                    crate::config::resolve_model_label(self.llm.model()),
-                )
+                .process(&mut result, belief.as_deref_mut(), &self.ctx, model_label)
                 .await;
             self.plan_actions
                 .handle(&mut result, effects, &self.prefix)
@@ -501,12 +498,7 @@ impl TurnExecutor {
         // 更新标题栏信念度
         let _ = self.ctx.stats.flush_if_dirty().await;
         let current_belief = belief.as_ref().map_or(0.0, |bt| bt.belief());
-        crate::ui::render_title_snapshot(
-            &self.ctx,
-            crate::config::resolve_model_label(self.llm.model()),
-            current_belief,
-        )
-        .await;
+        crate::ui::render_title_snapshot(&self.ctx, self.llm.model_label(), current_belief).await;
 
         match stop {
             "tool_use" | "tool_calls" => {
@@ -706,6 +698,7 @@ fn blocked_by_signal_recovery(call: ToolCallEvent) -> crate::tools::runner::Tool
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::client::BackendLlmClient;
     use crate::llm::mock::MockLlmClient;
     use std::sync::Arc;
 
@@ -714,7 +707,11 @@ mod tests {
         let ctx = crate::regression::test_context_for_agent("turn-signal-disabled")
             .await
             .unwrap();
-        let llm = Arc::new(MockLlmClient::new("flash", vec![]));
+        let llm = Arc::new(BackendLlmClient::new(
+            Arc::new(MockLlmClient::new("flash", vec![])),
+            "flash",
+            Some("flash".into()),
+        ));
         let mut executor = TurnExecutor::new(ctx, llm);
         let mut belief = crate::agent::belief::BeliefTracker::new(16);
         belief.observe(&[crate::guard::collector::Signal {

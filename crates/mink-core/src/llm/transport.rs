@@ -1,3 +1,4 @@
+use crate::llm::client::{OpenAiCompatibleOptions, TokenParamKind};
 use anyhow::Result;
 use serde_json::{Value, json};
 
@@ -7,6 +8,24 @@ pub fn build_openai_body(
     tools: &[Value],
     system_prompt: &str,
     max_tokens: i32,
+) -> Result<Vec<u8>> {
+    build_openai_body_with_options(
+        model,
+        messages,
+        tools,
+        system_prompt,
+        max_tokens,
+        &OpenAiCompatibleOptions::default(),
+    )
+}
+
+pub fn build_openai_body_with_options(
+    model: &str,
+    messages: &[Value],
+    tools: &[Value],
+    system_prompt: &str,
+    max_tokens: i32,
+    options: &OpenAiCompatibleOptions,
 ) -> Result<Vec<u8>> {
     let converted = convert_messages_to_openai(messages)?;
 
@@ -18,11 +37,24 @@ pub fn build_openai_body(
 
     let mut body = json!({
         "model": model,
-        "max_tokens": max_tokens,
         "stream": true,
         "messages": openai_messages,
-        "reasoning_effort": "max",
     });
+    match options.token_param {
+        TokenParamKind::MaxTokens => body["max_tokens"] = json!(max_tokens),
+        TokenParamKind::MaxCompletionTokens => body["max_completion_tokens"] = json!(max_tokens),
+    }
+    if options.include_usage {
+        body["stream_options"] = json!({"include_usage": true});
+    }
+    if options.send_reasoning_effort
+        && let Some(reasoning_effort) = &options.reasoning_effort
+    {
+        body["reasoning_effort"] = json!(reasoning_effort);
+    }
+    if let Some(parallel_tool_calls) = options.parallel_tool_calls {
+        body["parallel_tool_calls"] = json!(parallel_tool_calls);
+    }
 
     if !tools.is_empty() {
         body["tools"] = Value::Array(convert_tools_to_openai(tools));
@@ -266,5 +298,31 @@ mod tests {
         // Assistant should still have tool_calls (call_1 is matched)
         let assistant = converted.iter().find(|m| m["role"] == "assistant").unwrap();
         assert!(assistant.get("tool_calls").is_some());
+    }
+
+    #[test]
+    fn openai_body_respects_compatible_options() {
+        let body = build_openai_body_with_options(
+            "custom-model",
+            &[json!({"role":"user","content":"hello"})],
+            &[],
+            "",
+            123,
+            &OpenAiCompatibleOptions {
+                send_reasoning_effort: false,
+                reasoning_effort: None,
+                include_usage: false,
+                token_param: TokenParamKind::MaxCompletionTokens,
+                parallel_tool_calls: Some(false),
+            },
+        )
+        .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["model"], "custom-model");
+        assert_eq!(value["max_completion_tokens"], 123);
+        assert!(value.get("max_tokens").is_none());
+        assert!(value.get("reasoning_effort").is_none());
+        assert!(value.get("stream_options").is_none());
+        assert_eq!(value["parallel_tool_calls"], false);
     }
 }

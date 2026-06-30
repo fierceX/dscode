@@ -506,6 +506,10 @@ mod tests {
             parse_slash_command("/flash").unwrap(),
             Some(SlashCommand::Flash)
         );
+        assert_eq!(
+            parse_slash_command("/model qwen3-coder-plus").unwrap(),
+            Some(SlashCommand::Model("qwen3-coder-plus".into()))
+        );
         assert_eq!(parse_slash_command("/q").unwrap(), Some(SlashCommand::Quit));
         assert_eq!(parse_slash_command(" /flash").unwrap(), None);
         assert!(parse_slash_command("/unknown").is_err());

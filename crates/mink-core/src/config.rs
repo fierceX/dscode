@@ -8,7 +8,24 @@ pub enum OutputFormat {
     StreamJson,
 }
 
-/// Model tier — only two options. Maps internally to DeepSeek API model names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OpenAiTokenParamConfig {
+    #[default]
+    MaxTokens,
+    MaxCompletionTokens,
+}
+
+impl OpenAiTokenParamConfig {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "max_tokens" | "max-tokens" | "max_tokens_param" => Some(Self::MaxTokens),
+            "max_completion_tokens" | "max-completion-tokens" => Some(Self::MaxCompletionTokens),
+            _ => None,
+        }
+    }
+}
+
+/// Built-in model aliases used for DeepSeek defaults and legacy price tracking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ModelTier {
     #[default]
@@ -67,12 +84,69 @@ impl ModelTier {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedModel {
+    pub requested: String,
+    pub actual: String,
+    pub label: String,
+    pub alias: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModelResolver {
+    aliases: BTreeMap<String, String>,
+}
+
+impl ModelResolver {
+    pub fn new(custom_aliases: &BTreeMap<String, String>) -> Self {
+        let mut aliases = BTreeMap::from([
+            ("flash".to_string(), "deepseek-v4-flash".to_string()),
+            ("pro".to_string(), "deepseek-v4-pro".to_string()),
+        ]);
+        for (alias, model) in custom_aliases {
+            let alias = alias.trim();
+            let model = model.trim();
+            if !alias.is_empty() && !model.is_empty() {
+                aliases.insert(alias.to_string(), model.to_string());
+            }
+        }
+        Self { aliases }
+    }
+
+    pub fn resolve(&self, model: &str) -> ResolvedModel {
+        let requested = model.trim();
+        let requested = if requested.is_empty() {
+            "flash"
+        } else {
+            requested
+        };
+        if let Some(actual) = self.aliases.get(requested) {
+            return ResolvedModel {
+                requested: requested.to_string(),
+                actual: actual.clone(),
+                label: requested.to_string(),
+                alias: Some(requested.to_string()),
+            };
+        }
+        ResolvedModel {
+            requested: requested.to_string(),
+            actual: requested.to_string(),
+            label: requested.to_string(),
+            alias: None,
+        }
+    }
+}
+
 /// TOML config file structure (optional, loaded from ~/.minkrc or <project>/.minkrc).
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct MinkConfigFile {
     pub api_key: Option<String>,
     pub base_url: Option<String>,
     pub model: Option<String>,
+    pub model_aliases: Option<BTreeMap<String, String>>,
+    pub openai_reasoning_effort: Option<String>,
+    pub openai_include_usage: Option<bool>,
+    pub openai_token_param: Option<String>,
     pub max_tokens: Option<i32>,
     pub max_turns: Option<i32>,
     pub max_context: Option<String>, // supports K/M suffix
@@ -193,6 +267,10 @@ impl SandboxPythonConfig {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub model: String,
+    pub model_aliases: BTreeMap<String, String>,
+    pub openai_reasoning_effort: Option<String>,
+    pub openai_include_usage: bool,
+    pub openai_token_param: OpenAiTokenParamConfig,
     pub max_tokens: i32,
     pub tool_timeout_secs: i32,
     pub sub_agent_timeout_secs: i32,
@@ -263,6 +341,10 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             model: String::new(),
+            model_aliases: BTreeMap::new(),
+            openai_reasoning_effort: Some("max".to_string()),
+            openai_include_usage: true,
+            openai_token_param: OpenAiTokenParamConfig::MaxTokens,
             max_tokens: 81920,
             tool_timeout_secs: 600,
             sub_agent_timeout_secs: 300,
@@ -313,7 +395,9 @@ pub fn parse_args(args: Vec<String>) -> Result<Config> {
         match arg.as_str() {
             "-m" | "--model" => {
                 let val = require_value(&args, i)?;
-                ModelTier::parse(&val)?; // validate
+                if val.trim().is_empty() {
+                    bail!("model must not be empty");
+                }
                 cfg.model = val;
                 cfg.cli_overrides.model = true;
                 i += 2;
@@ -542,6 +626,24 @@ fn apply_config_sources(
         if !cli_model && let Some(model) = &toml_cfg.model {
             cfg.model = model.clone();
         }
+        if let Some(model_aliases) = &toml_cfg.model_aliases {
+            for (alias, model) in model_aliases {
+                cfg.model_aliases.insert(alias.clone(), model.clone());
+            }
+        }
+        if let Some(reasoning_effort) = &toml_cfg.openai_reasoning_effort {
+            cfg.openai_reasoning_effort = normalize_openai_reasoning_effort(reasoning_effort);
+        }
+        if let Some(include_usage) = toml_cfg.openai_include_usage {
+            cfg.openai_include_usage = include_usage;
+        }
+        if let Some(token_param) = &toml_cfg.openai_token_param {
+            if let Some(parsed) = OpenAiTokenParamConfig::parse(token_param) {
+                cfg.openai_token_param = parsed;
+            } else {
+                eprintln!("[mink] Warning: ignoring openai_token_param={token_param:?}");
+            }
+        }
         if !cli_api_key && let Some(api_key) = &toml_cfg.api_key {
             cfg.api_key = api_key.clone();
         }
@@ -643,6 +745,20 @@ fn apply_nonnegative_i32_config(target: &mut i32, value: i32, name: &str) {
         *target = value;
     } else {
         eprintln!("[mink] Warning: ignoring {name}={value}; must be zero or greater");
+    }
+}
+
+fn normalize_openai_reasoning_effort(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || matches!(
+            trimmed.to_ascii_lowercase().as_str(),
+            "off" | "none" | "false" | "disabled"
+        )
+    {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
 }
 
@@ -779,19 +895,18 @@ pub fn api_url(cfg: &Config) -> String {
     format!("{}/chat/completions", base.trim_end_matches('/'))
 }
 
-/// Resolve the actual API model name from a Config model string.
-/// "flash" → "deepseek-v4-flash", "pro" → "deepseek-v4-pro"
-pub fn resolve_model_name(model: &str) -> &'static str {
-    ModelTier::parse(model)
-        .map(|t| t.model_name())
-        .unwrap_or("deepseek-v4-flash")
+pub fn model_resolver(cfg: &Config) -> ModelResolver {
+    ModelResolver::new(&cfg.model_aliases)
+}
+
+/// Resolve the actual API model name from a Config model string with default aliases.
+pub fn resolve_model_name(model: &str) -> String {
+    ModelResolver::new(&BTreeMap::new()).resolve(model).actual
 }
 
 /// Resolve the display label for the title bar.
-pub fn resolve_model_label(model: &str) -> &'static str {
-    ModelTier::parse(model)
-        .map(|t| t.label())
-        .unwrap_or("flash")
+pub fn resolve_model_label(model: &str) -> String {
+    ModelResolver::new(&BTreeMap::new()).resolve(model).label
 }
 
 pub fn parse_size_bytes(raw: &str) -> Result<usize> {
@@ -975,8 +1090,35 @@ mod tests {
     }
 
     #[test]
-    fn parse_args_model_rejects_unknown() {
-        assert!(parse_args(vec!["-m".into(), "gpt-4".into()]).is_err());
+    fn parse_args_model_accepts_custom_model_name() {
+        let cfg = parse_args(vec!["-m".into(), "gpt-4.1".into()]).unwrap();
+        assert_eq!(cfg.model, "gpt-4.1");
+    }
+
+    #[test]
+    fn model_resolver_maps_aliases_and_preserves_custom_names() {
+        let mut aliases = BTreeMap::new();
+        aliases.insert("flash".to_string(), "local-fast".to_string());
+        aliases.insert("coder".to_string(), "qwen3-coder-plus".to_string());
+        let resolver = ModelResolver::new(&aliases);
+
+        let flash = resolver.resolve("flash");
+        assert_eq!(flash.actual, "local-fast");
+        assert_eq!(flash.alias.as_deref(), Some("flash"));
+
+        let custom = resolver.resolve("gpt-4.1");
+        assert_eq!(custom.actual, "gpt-4.1");
+        assert_eq!(custom.alias, None);
+    }
+
+    #[test]
+    fn model_resolver_defaults_empty_model_to_flash_alias() {
+        let resolver = ModelResolver::new(&BTreeMap::new());
+        let resolved = resolver.resolve(" ");
+        assert_eq!(resolved.requested, "flash");
+        assert_eq!(resolved.actual, "deepseek-v4-flash");
+        assert_eq!(resolved.label, "flash");
+        assert_eq!(resolved.alias.as_deref(), Some("flash"));
     }
 
     #[test]
@@ -1089,6 +1231,22 @@ llm_wait_heartbeat = 3
     }
 
     #[test]
+    fn parse_config_file_openai_compatible_options() {
+        let toml_str = r#"
+openai_reasoning_effort = "off"
+openai_include_usage = false
+openai_token_param = "max_completion_tokens"
+"#;
+        let parsed: MinkConfigFile = toml::from_str(toml_str).unwrap();
+        assert_eq!(parsed.openai_reasoning_effort.unwrap(), "off");
+        assert_eq!(parsed.openai_include_usage, Some(false));
+        assert_eq!(
+            parsed.openai_token_param.unwrap(),
+            "max_completion_tokens".to_string()
+        );
+    }
+
+    #[test]
     fn parse_config_file_partial_fields() {
         // Only setting one field should not require others
         let toml_str = r#"log_events = false"#;
@@ -1180,6 +1338,25 @@ Read = "allow"
         let mut cfg = Config::default();
         apply_config_sources(&mut cfg, &defaults, Some(&user), None, None);
         assert_eq!(cfg.context_compact_pct, 72);
+    }
+
+    #[test]
+    fn config_file_sets_openai_compatible_options() {
+        let defaults = Config::default();
+        let project = MinkConfigFile {
+            openai_reasoning_effort: Some("off".into()),
+            openai_include_usage: Some(false),
+            openai_token_param: Some("max_completion_tokens".into()),
+            ..Default::default()
+        };
+        let mut cfg = Config::default();
+        apply_config_sources(&mut cfg, &defaults, None, Some(&project), None);
+        assert_eq!(cfg.openai_reasoning_effort, None);
+        assert!(!cfg.openai_include_usage);
+        assert_eq!(
+            cfg.openai_token_param,
+            OpenAiTokenParamConfig::MaxCompletionTokens
+        );
     }
 
     #[test]

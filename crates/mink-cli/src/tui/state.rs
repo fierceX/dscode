@@ -419,11 +419,15 @@ impl TuiState {
     pub(crate) fn add_help(&mut self) {
         self.push_line(MsgLine::new("Commands:".into(), MsgKind::Info));
         self.push_line(MsgLine::new(
-            "  /flash          Switch to flash tier".into(),
+            "  /flash          Switch to flash alias".into(),
             MsgKind::Text,
         ));
         self.push_line(MsgLine::new(
-            "  /pro            Switch to pro tier".into(),
+            "  /pro            Switch to pro alias".into(),
+            MsgKind::Text,
+        ));
+        self.push_line(MsgLine::new(
+            "  /model NAME     Switch to a model name or alias".into(),
             MsgKind::Text,
         ));
         self.push_line(MsgLine::new(

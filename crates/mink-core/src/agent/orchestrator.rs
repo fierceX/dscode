@@ -2,7 +2,7 @@ use crate::agent::belief::BeliefTracker;
 use crate::agent::turn::{TurnDecision, TurnEffect, TurnExecutor};
 use crate::context::AgentSharedContext;
 use crate::errors;
-use crate::llm::client::{AsyncLlClient, LlmClient};
+use crate::llm::client::{BackendLlmClient, LlmClient};
 use crate::session::usage::{UsageRecord, UsageSummary};
 use anyhow::Result;
 use std::sync::Arc;
@@ -16,9 +16,7 @@ pub struct OrchActor {
     ctx: Arc<AgentSharedContext>,
     cmd_rx: mpsc::UnboundedReceiver<OrchCmd>,
     belief: BeliefTracker,
-    forced_model: Option<crate::config::ModelTier>,
-    #[cfg(test)]
-    llm_override: Option<Arc<dyn LlmClient>>,
+    forced_model: Option<String>,
 }
 
 /// Commands received by the orchestrator.
@@ -122,23 +120,6 @@ impl OrchActor {
             cmd_rx,
             belief: BeliefTracker::new(16),
             forced_model: None,
-            #[cfg(test)]
-            llm_override: None,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn new_with_llm(
-        ctx: Arc<AgentSharedContext>,
-        cmd_rx: mpsc::UnboundedReceiver<OrchCmd>,
-        llm: Arc<dyn LlmClient>,
-    ) -> Self {
-        Self {
-            ctx,
-            cmd_rx,
-            belief: BeliefTracker::new(16),
-            forced_model: None,
-            llm_override: Some(llm),
         }
     }
 
@@ -257,26 +238,23 @@ impl OrchActor {
     }
 
     async fn prepare_turn(&mut self) -> Result<(String, String, TurnExecutor)> {
-        let (model, api_url) = self.resolve_active();
+        let resolved = self.resolve_active();
 
         self.ctx.log_event(serde_json::json!({
             "type": "turn_start",
-            "model": &model,
+            "model": &resolved.actual,
+            "model_alias": &resolved.alias,
             "belief": self.belief.belief(),
-            "forced_model": self.forced_model.map(|t| t.label()),
+            "forced_model": self.forced_model.as_deref(),
         }));
 
-        #[cfg(test)]
-        let llm: Arc<dyn LlmClient> = if let Some(llm) = &self.llm_override {
-            llm.clone()
-        } else {
-            Arc::new(AsyncLlClient::new(&model, self.ctx.api_key(), &api_url)?)
-        };
-        #[cfg(not(test))]
-        let llm: Arc<dyn LlmClient> =
-            Arc::new(AsyncLlClient::new(&model, self.ctx.api_key(), &api_url)?);
+        let llm: Arc<dyn LlmClient> = Arc::new(BackendLlmClient::new(
+            self.ctx.llm_backend.clone(),
+            resolved.actual.clone(),
+            resolved.alias.clone(),
+        ));
         let executor = TurnExecutor::new(self.ctx.clone(), llm);
-        Ok((model, api_url, executor))
+        Ok((resolved.actual, self.ctx.api_url.clone(), executor))
     }
 
     async fn post_process_turn(
@@ -378,53 +356,42 @@ impl OrchActor {
     }
 
     async fn refresh_title(&self) {
-        crate::ui::render_title_snapshot(
-            &self.ctx,
-            self.active_model_label(),
-            self.belief.belief(),
-        )
-        .await;
+        let label = self.active_model_label();
+        crate::ui::render_title_snapshot(&self.ctx, &label, self.belief.belief()).await;
     }
 
     async fn handle_model_command(&mut self, model: &str) {
-        match crate::config::ModelTier::parse(model) {
-            Ok(t) => {
-                if t == crate::config::ModelTier::Flash {
-                    self.forced_model = None;
-                    self.belief.reset();
-                    self.ctx.display.render_info("切回 flash。");
-                } else {
-                    self.forced_model = Some(t);
-                }
-                self.ctx
-                    .display
-                    .render_info(&format!("Switched to {} model.", t.label()));
-                self.refresh_title().await;
-            }
-            Err(_) => {
-                self.ctx
-                    .display
-                    .render_error(&format!("Unknown model tier: {model}. Use /flash or /pro"));
-            }
+        let model = model.trim();
+        if model.is_empty() {
+            self.ctx
+                .display
+                .render_error("Model name must not be empty.");
+            return;
         }
+        if model == self.ctx.config.model {
+            self.forced_model = None;
+        } else {
+            self.forced_model = Some(model.to_string());
+        }
+        self.belief.reset();
+        let resolved = self.resolve_active();
+        self.ctx
+            .display
+            .render_info(&format!("Switched to {} model.", resolved.label));
+        self.refresh_title().await;
     }
 
-    fn resolve_active(&self) -> (String, String) {
-        let tier = if let Some(forced) = self.forced_model {
+    fn resolve_active(&self) -> crate::config::ResolvedModel {
+        let requested = if let Some(forced) = self.forced_model.as_deref() {
             forced
         } else {
-            crate::config::ModelTier::parse(&self.ctx.config.model)
-                .unwrap_or(crate::config::ModelTier::Flash)
+            &self.ctx.config.model
         };
-        (tier.model_name().to_string(), self.ctx.api_url.clone())
+        crate::config::model_resolver(&self.ctx.config).resolve(requested)
     }
 
-    fn active_model_label(&self) -> &'static str {
-        if let Some(forced) = self.forced_model {
-            forced.label()
-        } else {
-            crate::config::resolve_model_label(&self.ctx.config.model)
-        }
+    fn active_model_label(&self) -> String {
+        self.resolve_active().label
     }
 }
 

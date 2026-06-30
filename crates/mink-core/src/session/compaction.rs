@@ -1,6 +1,6 @@
 use crate::capabilities::CapabilitySnapshot;
 use crate::config::Config;
-use crate::llm::client::{AsyncLlClient, LlmRequestContext};
+use crate::llm::client::{LlmBackend, LlmPurpose, LlmRequest, MeteredStream};
 use crate::prompt;
 use crate::protocol::{ErrorEvent, Event, StopEvent, TextEvent, UsageEvent};
 use crate::session::stats::StatsTracker;
@@ -24,6 +24,7 @@ pub struct CompactionEngine {
     capability_snapshot: Arc<CapabilitySnapshot>,
     api_url: String,
     api_key: String,
+    llm_backend: Arc<dyn LlmBackend>,
     config: Config,
     stats: Arc<StatsTracker>,
     usage: Arc<UsageJournal>,
@@ -73,6 +74,9 @@ impl CompactionEngine {
             config.session_id.clone(),
             Arc::new(SilentDisplay),
             crate::cancel::CancellationToken::new(),
+            Arc::new(crate::llm::client::OpenAiCompatibleBackend::from_config(
+                config,
+            )),
         )
     }
 
@@ -92,6 +96,7 @@ impl CompactionEngine {
         session_id: String,
         display: Arc<dyn Display>,
         cancel: crate::cancel::CancellationToken,
+        llm_backend: Arc<dyn LlmBackend>,
     ) -> Self {
         let compact_pct = config.context_compact_pct;
         Self {
@@ -104,6 +109,7 @@ impl CompactionEngine {
             capability_snapshot,
             api_url,
             api_key: config.api_key.clone(),
+            llm_backend,
             config: config.clone(),
             stats,
             usage,
@@ -211,7 +217,9 @@ impl CompactionEngine {
     fn validate_conversation_messages(&self, messages: &[Value]) -> Result<()> {
         let system_prompt = "";
         let _ = crate::llm::transport::build_openai_body(
-            crate::config::resolve_model_name(&self.config.model),
+            &crate::config::model_resolver(&self.config)
+                .resolve(&self.config.model)
+                .actual,
             messages,
             &[],
             system_prompt,
@@ -257,21 +265,44 @@ Start directly with \"Task focus:\" — no preamble, no markdown, no code fences
         }
         .build_system_prompt()?;
 
-        let model = crate::config::resolve_model_name(&self.config.model);
-        let client = AsyncLlClient::new(model, &self.api_key, &self.api_url)?;
-        let request_ctx = LlmRequestContext {
-            max_tokens: self.config.max_tokens,
-            verbose: self.config.verbose,
-            cancel: self.cancel.clone(),
-            display: self.display.clone(),
-            usage: self.usage.clone(),
-            usage_scope: self
-                .usage
+        let resolved = crate::config::model_resolver(&self.config).resolve(&self.config.model);
+        let capture = self.usage.capture(
+            self.usage
                 .scope(UsageKind::Compaction, self.session_id.clone()),
+            resolved.actual.clone(),
+        );
+        let response = match self
+            .llm_backend
+            .stream(LlmRequest {
+                purpose: LlmPurpose::Compaction,
+                model: resolved.actual.clone(),
+                model_alias: resolved.alias.clone(),
+                api_url: self.api_url.clone(),
+                api_key: self.api_key.clone(),
+                system_prompt,
+                messages,
+                tools: Vec::new(),
+                max_tokens: self.config.max_tokens,
+                cancel: self.cancel.clone(),
+                verbose: self.config.verbose,
+                display: self.display.clone(),
+            })
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                let attempt_count = crate::llm::client::request_failure_attempt_count(&error);
+                if let Err(record_error) =
+                    capture.unreported(attempt_count, format!("request_failed: {error}"))
+                {
+                    self.display.render_error(&format!(
+                        "Failed to record compaction usage failure: {record_error}"
+                    ));
+                }
+                return Err(error);
+            }
         };
-        let mut stream = client
-            .stream_request(&request_ctx, &messages, &[], &system_prompt)
-            .await?;
+        let mut stream = MeteredStream::new(response.events, capture, response.attempt_count);
         let mut out = String::new();
         let mut stop_reason = String::new();
         let mut last_error = String::new();
