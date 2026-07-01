@@ -29,7 +29,7 @@ pub mod prelude {
         RuntimeSkill, SessionInfo, SessionLayout, SessionPolicy, SkillCapability,
         SkillDiscoveryPolicy, SkillLoadContext, SkillProvider, SourceLevel, SourceMeta,
         TokenParamKind, TurnOutcome, TurnStatus, VfsGlobRequest, VfsGlobResult, VfsGrepEntry,
-        VfsGrepRequest, VfsGrepResult, VfsReadRequest, VfsReadResult, VfsScope, VirtualFile,
+        VfsGrepRequest, VfsGrepResult, VfsReadRequest, VfsReadResult, VfsScope,
     };
     pub use crate::session::usage::{
         TokenUsage, UsageKind, UsageRecord, UsageStatus, UsageSummary,

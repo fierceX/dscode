@@ -312,7 +312,7 @@ pub struct Config {
     /// 从 --config CLI 参数解析的 TOML 配置（最高优先级，在 apply_config_sources 中应用）
     pub cli_config: Option<MinkConfigFile>,
     pub tool_disable: ToolDisableFlags,
-    /// 工具白名单：仅启用列表中的工具。空/None 表示全部启用。
+    /// 工具白名单：`None` 表示全部启用；`Some(vec![])` 表示不启用任何工具。
     pub enabled_tools: Option<Vec<String>>,
     /// Tool approval mode.
     pub tool_approval_mode: ToolApprovalMode,

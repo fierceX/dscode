@@ -51,7 +51,7 @@ pub enum AgentEvent {
     Prompt,
     ClearLine,
     Final {
-        outcome: TurnOutcome,
+        outcome: Box<TurnOutcome>,
     },
 }
 

@@ -7,6 +7,8 @@ session、技能和常见工作流。内置工具的完整参数、结果格式�
 ## 快速开始
 
 ```bash
+# 前置：Rust 1.94+，设置 DEEPSEEK_API_KEY 或通过配置指定 OpenAI-compatible 端点
+
 # 编译
 make build
 # 或

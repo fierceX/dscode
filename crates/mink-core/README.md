@@ -78,8 +78,8 @@ original local implementations. Resource URLs such as `artifact://`,
 Virtual reads are read-only and therefore do not produce anchored Edit
 snapshots. Glob and Grep requests are validated by `mink-core`, while backends
 return structured results for common formatting. Backends must honor the
-request limits; the exported collection helpers implement those limits for
-iterator-based stores. See [`examples/redb_vfs.rs`](examples/redb_vfs.rs) for a
+request limits themselves; `mink-core` does not provide a second VFS search
+implementation. See [`examples/redb_vfs.rs`](examples/redb_vfs.rs) for a
 complete redb adapter; redb is an example-only dependency and is not linked
 into `mink-core`.
 

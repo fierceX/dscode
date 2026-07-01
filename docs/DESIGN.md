@@ -572,7 +572,7 @@ pub trait ReadOnlyFileSystem: Send + Sync {
 - **只读且不可编辑**：虚拟 `Read` 输出行号和只读标记，但不记录 snapshot。`Edit` / `Write` 不委托给 VFS。
 - **结构化搜索结果**：后端返回路径、匹配行、扫描数和截断状态，由 `mink-core` 统一生成 Glob/Grep 文本，避免后端复制用户可见协议。
 - **核心保留防线**：glob 和 regex 在调用后端前校验；完整 Read 有工具层兜底字节检查；搜索文本由核心统一格式化并保留 100KB 输出保护。
-- **后端限制契约**：`VfsGlobRequest.max_files` 和 `VfsGrepRequest.max_files/max_results` 必须由后端遵守。公共 `try_collect_virtual_glob/grep` helper 已实现路径规范化、匹配和限制；不使用 helper 的实现必须提供等价约束。
+- **后端限制契约**：`VfsGlobRequest.max_files` 和 `VfsGrepRequest.max_files/max_results` 必须由后端遵守。`mink-core` 只校验请求、格式化结构化结果，不提供第二套 VFS 搜索实现。
 
 每次调用收到：
 
@@ -585,7 +585,7 @@ VfsScope {
 
 `resource_session_id` 未配置时默认取 runtime session id。子代理继承父代理的 resource scope，同时使用自己的 agent session id。这样数据库 key 可以稳定按业务任务隔离，审计日志仍能区分具体调用代理。
 
-`mink-core` 只定义 hook、协议和可复用 helper，不绑定数据库。`examples/redb_vfs.rs` 是示例适配器：以 `resource_session_id + NUL + normalized_path` 作为有序 key，使用 redb range iterator 惰性扫描，并在达到核心限制时停止读取。redb 仅为 dev/example 依赖，不进入正常 `mink-core` 依赖树。
+`mink-core` 只定义 hook、协议、请求校验和结果格式化，不绑定数据库，也不提供独立 VFS 搜索实现。`examples/redb_vfs.rs` 是示例适配器：以 `resource_session_id + NUL + normalized_path` 作为有序 key，使用 redb range iterator 惰性扫描，并在达到请求限制时停止读取。redb 仅为 dev/example 依赖，不进入正常 `mink-core` 依赖树。
 
 ### Registered resources 与 capability snapshot
 

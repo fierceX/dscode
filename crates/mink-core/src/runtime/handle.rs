@@ -119,7 +119,7 @@ impl AgentRuntime {
         let outcome = TurnOutcome::from_run_result(result, self.session.clone(), text, thinking);
         if let Some(event_sink) = &self.event_sink {
             event_sink.on_event(AgentEvent::Final {
-                outcome: outcome.clone(),
+                outcome: Box::new(outcome.clone()),
             });
         }
         Ok(outcome)
@@ -175,7 +175,7 @@ impl AgentRuntime {
 
             let outcome = TurnOutcome::from_run_result(result, session, text, thinking);
             let final_event = AgentEvent::Final {
-                outcome: outcome.clone(),
+                outcome: Box::new(outcome.clone()),
             };
             if let Some(sink) = event_sink {
                 sink.on_event(final_event.clone());

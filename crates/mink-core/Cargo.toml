@@ -31,6 +31,9 @@ once_cell.workspace = true
 regex.workspace = true
 ignore.workspace = true
 globset.workspace = true
+grep-printer.workspace = true
+grep-regex.workspace = true
+grep-searcher.workspace = true
 libc.workspace = true
 reqwest.workspace = true
 serde.workspace = true
@@ -45,7 +48,7 @@ wasmtime-wasi = { workspace = true, optional = true }
 axum = { workspace = true, optional = true }
 
 [dev-dependencies]
-redb = "3"
+redb = "4"
 
 [[example]]
 name = "web_api"

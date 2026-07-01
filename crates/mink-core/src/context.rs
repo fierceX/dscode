@@ -33,7 +33,7 @@ pub struct ToolConfig {
     pub max_search_results: usize,
     /// 工具禁用开关（运行时覆盖）
     pub tool_disable: ToolDisableFlags,
-    /// 工具白名单：仅启用列表中的工具。空/None 表示全部启用。
+    /// 工具白名单：`None` 表示全部启用；`Some(vec![])` 表示不启用任何工具。
     pub enabled_tools: Option<Vec<String>>,
     pub tool_approval_mode: ToolApprovalMode,
     pub tool_approval: BTreeMap<String, ToolApprovalPolicy>,

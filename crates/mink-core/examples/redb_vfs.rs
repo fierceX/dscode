@@ -5,18 +5,24 @@
 
 use anyhow::{Result, anyhow, bail};
 use mink::prelude::{
-    AgentOptions, AgentRuntime, ReadOnlyFileSystem, VfsGlobRequest, VfsGlobResult, VfsGrepRequest,
-    VfsGrepResult, VfsReadRequest, VfsReadResult, VfsScope, VirtualFile,
+    AgentOptions, AgentRuntime, ReadOnlyFileSystem, VfsGlobRequest, VfsGlobResult, VfsGrepEntry,
+    VfsGrepRequest, VfsGrepResult, VfsReadRequest, VfsReadResult, VfsScope,
 };
 use mink::runtime::{
     normalize_virtual_file_path, normalize_virtual_root, select_virtual_lines, tool_line_count,
-    try_collect_virtual_glob, try_collect_virtual_grep,
+    validate_virtual_glob_request, validate_virtual_grep_request,
 };
 use redb::{Database, ReadableDatabase, TableDefinition};
+use regex::Regex;
 use std::path::Path;
 use std::sync::Arc;
 
 const FILES: TableDefinition<&str, &str> = TableDefinition::new("virtual_files");
+
+struct StoredFile {
+    path: String,
+    content: String,
+}
 
 struct RedbFileSystem {
     db: Database,
@@ -58,7 +64,7 @@ impl RedbFileSystem {
         resource_session_id: &str,
         root: &str,
         include_content: bool,
-        consume: impl FnOnce(&mut dyn Iterator<Item = Result<VirtualFile>>) -> Result<T>,
+        consume: impl FnOnce(&mut dyn Iterator<Item = Result<StoredFile>>) -> Result<T>,
     ) -> Result<T> {
         let session_prefix = session_prefix(resource_session_id)?;
         let root = normalize_virtual_root(root)?;
@@ -88,14 +94,14 @@ impl RedbFileSystem {
                         .as_deref()
                         .is_some_and(|prefix| path.as_str() < prefix)
                     {
-                        return Some(Ok(VirtualFile {
+                        return Some(Ok(StoredFile {
                             path,
                             content: String::new(),
                         }));
                     }
                     return None;
                 }
-                Some(Ok(VirtualFile {
+                Some(Ok(StoredFile {
                     path,
                     content: if include_content {
                         value.value().to_owned()
@@ -135,15 +141,124 @@ impl ReadOnlyFileSystem for RedbFileSystem {
     }
 
     fn glob(&self, scope: &VfsScope, request: &VfsGlobRequest) -> Result<VfsGlobResult> {
+        validate_virtual_glob_request(request)?;
+        let matcher = globset::GlobBuilder::new(&request.pattern)
+            .literal_separator(true)
+            .build()
+            .map_err(|e| anyhow!("Error: invalid glob pattern '{}': {e}", request.pattern))?
+            .compile_matcher();
+        let root = normalize_virtual_root(&request.path)?;
         self.scan_files(&scope.resource_session_id, &request.path, false, |files| {
-            try_collect_virtual_glob(files, request)
+            let mut result = VfsGlobResult::default();
+            for file in files {
+                let file = file?;
+                let Some(relative) = relative_path(&file.path, &root) else {
+                    continue;
+                };
+                result.scanned_files += 1;
+                if result.scanned_files > request.max_files {
+                    result.scanned_files = request.max_files;
+                    result.truncated = true;
+                    break;
+                }
+                if matcher.is_match(relative) {
+                    result.paths.push(relative.to_string());
+                }
+            }
+            Ok(result)
         })
     }
 
     fn grep(&self, scope: &VfsScope, request: &VfsGrepRequest) -> Result<VfsGrepResult> {
+        validate_virtual_grep_request(request)?;
+        let regex = Regex::new(&request.pattern)
+            .map_err(|e| anyhow!("Error: invalid regex pattern '{}': {e}", request.pattern))?;
+        let file_matcher = if request.file_glob.is_empty() {
+            None
+        } else {
+            Some(
+                globset::GlobBuilder::new(&request.file_glob)
+                    .literal_separator(true)
+                    .build()
+                    .map_err(|e| anyhow!("Error: invalid glob '{}': {e}", request.file_glob))?
+                    .compile_matcher(),
+            )
+        };
+        let root = normalize_virtual_root(&request.path)?;
+        let context = request.context.unwrap_or(0);
         self.scan_files(&scope.resource_session_id, &request.path, true, |files| {
-            try_collect_virtual_grep(files, request)
+            let mut result = VfsGrepResult::default();
+            for file in files {
+                let file = file?;
+                let Some(relative) = relative_path(&file.path, &root) else {
+                    continue;
+                };
+                result.scanned_files += 1;
+                if result.scanned_files > request.max_files {
+                    result.scanned_files = request.max_files;
+                    result.truncated_files = true;
+                    break;
+                }
+                if file_matcher
+                    .as_ref()
+                    .is_some_and(|matcher| !matcher.is_match(relative))
+                {
+                    continue;
+                }
+
+                let lines: Vec<&str> = file.content.lines().collect();
+                for (index, line) in lines.iter().enumerate() {
+                    if !regex.is_match(line) {
+                        continue;
+                    }
+                    if result.match_count >= request.max_results {
+                        result.truncated_results = true;
+                        break;
+                    }
+                    if context > 0 {
+                        let start = index.saturating_sub(context);
+                        let end = (index + 1 + context).min(lines.len());
+                        for (line_index, context_line) in
+                            lines.iter().enumerate().take(end).skip(start)
+                        {
+                            result.entries.push(VfsGrepEntry::Line {
+                                path: file.path.clone(),
+                                line_number: line_index + 1,
+                                content: (*context_line).to_string(),
+                                matched: line_index == index,
+                            });
+                        }
+                    } else {
+                        result.entries.push(VfsGrepEntry::Line {
+                            path: file.path.clone(),
+                            line_number: index + 1,
+                            content: (*line).to_string(),
+                            matched: true,
+                        });
+                    }
+                    result.match_count += 1;
+                    if result.match_count >= request.max_results {
+                        result.truncated_results = true;
+                        break;
+                    }
+                }
+                if result.truncated_results {
+                    break;
+                }
+            }
+            Ok(result)
         })
+    }
+}
+
+fn relative_path<'a>(path: &'a str, root: &str) -> Option<&'a str> {
+    if root.is_empty() {
+        Some(path)
+    } else if path == root {
+        Some("")
+    } else {
+        path.strip_prefix(root)
+            .and_then(|rest| rest.strip_prefix('/'))
     }
 }
 

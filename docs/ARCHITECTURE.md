@@ -72,7 +72,7 @@ TurnExecutor (agent/turn.rs)
 │ tools/file.rs         │ Read / Write / Edit、selector、resource、anchored patch
 │ tools/snapshot.rs     │ FileSnapshotStore、行 hash 和 snapshot tag
 │ tools/search.rs       │ Glob / Grep
-│ tools/vfs.rs          │ Read / Glob / Grep 的同步只读 VFS hook、请求/结果协议和公共 helper
+│ tools/vfs.rs          │ Read / Glob / Grep 的同步只读 VFS hook、请求/结果协议和格式化
 │ tools/bash.rs         │ Bash 执行、超时、ANSI 过滤、安全检查、误用拦截
 │ tools/python.rs       │ 宿主 Python 执行
 │ tools/sandbox_python.rs│ WASI CPython 沙箱执行（python-sandbox feature）
@@ -242,7 +242,7 @@ ToolRunResult
 | `tools/file.rs` | `ReadTool`、`WriteTool`、`EditTool`、selector、resource URL、anchored patch |
 | `tools/snapshot.rs` | 文件 snapshot、tag、行 hash 校验 |
 | `tools/search.rs` | `GlobTool`、`GrepTool` |
-| `tools/vfs.rs` | `ReadOnlyFileSystem`、`VfsScope`、结构化请求/结果、虚拟路径规范化和数据库后端 helper |
+| `tools/vfs.rs` | `ReadOnlyFileSystem`、`VfsScope`、结构化请求/结果、虚拟路径规范化、请求校验和结果格式化 |
 | `tools/bash.rs` | `BashTool`、危险命令检查、误用拦截 |
 | `tools/python.rs` | `PythonTool` |
 | `tools/web.rs` | `WebSearchTool`、`WebFetchTool` |
@@ -297,7 +297,7 @@ Read / Glob / Grep
 
 注入链路为 `AgentOptions` / `AgentRuntimeConfig` → runtime builder → `AgentSharedContext` → `ToolContext`。未显式设置 `resource_session_id` 时使用当前 runtime session id。子代理复用同一个 `Arc<dyn ReadOnlyFileSystem>`，继承父代理的 `resource_session_id`，但使用自己的 `agent_session_id`，从而共享同一知识库作用域并保留调用方身份。
 
-VFS 只接管普通路径。`artifact://`、`skill://`、`rule://`、`session://` 和 `http(s)://` 仍先走资源读取路径。虚拟路径使用 POSIX 分隔符和词法规范化，拒绝越过虚拟根目录。Glob/regex 请求由工具层先校验，后端返回结构化路径或匹配行，`mink-core` 统一输出格式和 100KB 搜索输出保护。请求中的 `max_files` / `max_results` 是后端契约；使用公共 `try_collect_virtual_*` helper 时由 helper 执行限制，完全自定义实现必须自行遵守。
+VFS 只接管普通路径。`artifact://`、`skill://`、`rule://`、`session://` 和 `http(s)://` 仍先走资源读取路径。虚拟路径使用 POSIX 分隔符和词法规范化，拒绝越过虚拟根目录。Glob/regex 请求由工具层先校验，后端返回结构化路径或匹配行，`mink-core` 统一输出格式和 100KB 搜索输出保护。请求中的 `max_files` / `max_results` 是后端契约，后端必须自行遵守；核心不提供第二套 VFS 搜索实现。
 
 虚拟文件是只读资源，不创建 anchored Edit snapshot。具体数据库适配不进入核心依赖；`crates/mink-core/examples/redb_vfs.rs` 展示了按 `resource_session_id` 分区、惰性范围扫描的 redb 后端。
 

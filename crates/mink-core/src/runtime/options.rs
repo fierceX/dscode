@@ -387,6 +387,10 @@ impl AgentOptions {
         self
     }
 
+    /// Restrict execution to exactly the provided tools.
+    ///
+    /// Passing an empty list disables all tools. Use
+    /// [`AgentOptions::with_all_tools_enabled`] to clear the whitelist.
     pub fn with_enabled_tools(mut self, tools: impl Into<Vec<String>>) -> Self {
         self.config.enabled_tools = Some(tools.into());
         self

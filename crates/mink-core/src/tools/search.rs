@@ -1,4 +1,8 @@
 use anyhow::{Result, anyhow, bail};
+use grep_printer::StandardBuilder;
+use grep_regex::RegexMatcher;
+use grep_searcher::{BinaryDetection, SearcherBuilder};
+use ignore::overrides::OverrideBuilder;
 use std::path::{Path, PathBuf};
 
 const MAX_OUTPUT_BYTES: usize = 100_000;
@@ -7,15 +11,15 @@ pub fn glob(pattern: &str, path: &str, max_files: usize) -> Result<String> {
     if pattern.is_empty() {
         bail!("Error: no pattern provided");
     }
-    let glob = build_glob_matcher(pattern)
-        .map_err(|e| anyhow!("Error: invalid glob pattern '{pattern}': {e}"))?
-        .compile_matcher();
     let base = Path::new(path);
-    let walk_root = glob_walk_root(base, pattern);
+    let overrides = build_rg_overrides(base, pattern)
+        .map_err(|e| anyhow!("Error: invalid glob pattern '{pattern}': {e}"))?
+        .build()
+        .map_err(|e| anyhow!("Error: invalid glob pattern '{pattern}': {e}"))?;
 
-    let walker = ignore::WalkBuilder::new(walk_root)
+    let walker = ignore::WalkBuilder::new(base)
         .standard_filters(true)
-        .max_depth(Some(50))
+        .overrides(overrides)
         .build();
 
     let mut results = Vec::new();
@@ -40,28 +44,18 @@ pub fn glob(pattern: &str, path: &str, max_files: usize) -> Result<String> {
             truncated_walk = true;
             break;
         }
-        let p = entry.path();
-        let match_path = relative_match_path(p, base);
-        if glob.is_match(&match_path) {
-            let line = match_path;
-            total_bytes += line.len() + 1;
-            if total_bytes > MAX_OUTPUT_BYTES {
-                results.push(format!(
-                    "... truncated: {} files shown, output > {MAX_OUTPUT_BYTES} bytes",
-                    results.len()
-                ));
-                break;
-            }
-            results.push(line);
+        let line = display_search_path(entry.path());
+        total_bytes += line.len() + 1;
+        if total_bytes > MAX_OUTPUT_BYTES {
+            results.push(format!(
+                "... truncated: {} files shown, output > {MAX_OUTPUT_BYTES} bytes",
+                results.len()
+            ));
+            break;
         }
+        results.push(line);
     }
 
-    if results.is_empty() {
-        let scope = base.display();
-        results.push(format!(
-            "No files matched pattern '{pattern}' under {scope}"
-        ));
-    }
     if truncated_walk {
         results.push(format!(
             "... search truncated: scanned first {max_files} files; results may be incomplete"
@@ -76,44 +70,17 @@ pub fn glob(pattern: &str, path: &str, max_files: usize) -> Result<String> {
     Ok(results.join("\n"))
 }
 
-fn build_glob_matcher(pattern: &str) -> std::result::Result<globset::Glob, globset::Error> {
-    globset::GlobBuilder::new(pattern)
-        .literal_separator(true)
-        .build()
+fn build_rg_overrides(
+    base: &Path,
+    pattern: &str,
+) -> std::result::Result<OverrideBuilder, ignore::Error> {
+    let mut builder = OverrideBuilder::new(base);
+    builder.add(pattern)?;
+    Ok(builder)
 }
 
-fn glob_walk_root(base: &Path, pattern: &str) -> PathBuf {
-    let Some(prefix) = static_glob_dir_prefix(pattern) else {
-        return base.to_path_buf();
-    };
-    let candidate = base.join(prefix);
-    if candidate.is_dir() {
-        candidate
-    } else {
-        base.to_path_buf()
-    }
-}
-
-fn static_glob_dir_prefix(pattern: &str) -> Option<&str> {
-    let meta_idx = pattern
-        .char_indices()
-        .find_map(|(idx, ch)| matches!(ch, '*' | '?' | '[' | '{').then_some(idx))?;
-    let raw_prefix = &pattern[..meta_idx];
-    let trimmed = raw_prefix.trim_end_matches(['/', '\\']);
-    if trimmed.is_empty() {
-        return None;
-    }
-    if raw_prefix.ends_with('/') || raw_prefix.ends_with('\\') {
-        return Some(trimmed);
-    }
-    trimmed
-        .rfind(['/', '\\'])
-        .and_then(|idx| (idx > 0).then_some(&trimmed[..idx]))
-}
-
-fn relative_match_path(path: &Path, base: &Path) -> String {
-    let rel = path.strip_prefix(base).unwrap_or(path);
-    let normalized = rel
+fn display_search_path(path: &Path) -> String {
+    let normalized = path
         .to_string_lossy()
         .replace(std::path::MAIN_SEPARATOR, "/");
     normalized
@@ -133,33 +100,27 @@ pub fn grep(
     if pattern.is_empty() {
         bail!("Error: no pattern provided");
     }
-    let re = regex::Regex::new(pattern)
+    let matcher = RegexMatcher::new_line_matcher(pattern)
         .map_err(|e| anyhow!("Error: invalid regex pattern '{pattern}': {e}"))?;
     let ctx = context.unwrap_or(0);
+    let base = Path::new(path);
 
-    let file_glob_matcher = if !file_glob.is_empty() {
-        Some(
-            build_glob_matcher(file_glob)
-                .map_err(|e| anyhow!("Error: invalid glob '{file_glob}': {e}"))?
-                .compile_matcher(),
-        )
-    } else {
-        None
-    };
+    let mut walk_builder = ignore::WalkBuilder::new(base);
+    walk_builder.standard_filters(true);
+    if !file_glob.is_empty() {
+        let overrides = build_rg_overrides(base, file_glob)
+            .map_err(|e| anyhow!("Error: invalid glob '{file_glob}': {e}"))?
+            .build()
+            .map_err(|e| anyhow!("Error: invalid glob '{file_glob}': {e}"))?;
+        walk_builder.overrides(overrides);
+    }
+    let walker = walk_builder.build();
 
-    let walker = ignore::WalkBuilder::new(path)
-        .standard_filters(true)
-        .max_depth(Some(50))
-        .build();
-
-    let mut results: Vec<String> = Vec::new();
+    let mut output: Vec<u8> = Vec::new();
     let mut total_results = 0usize;
-    let mut total_bytes = 0usize;
-    let mut truncated = false;
     let mut files_seen = 0usize;
     let mut walk_errors = 0usize;
     let mut truncated_walk = false;
-
     for entry in walker {
         let entry = match entry {
             Ok(entry) => entry,
@@ -177,95 +138,88 @@ pub fn grep(
             break;
         }
         let file_path = entry.path();
-
-        if let Some(ref matcher) = file_glob_matcher {
-            let relative_path = relative_match_path(file_path, Path::new(path));
-            if !matcher.is_match(&relative_path) {
-                continue;
-            }
+        let remaining = max_results.saturating_sub(total_results);
+        if remaining == 0 {
+            break;
         }
 
-        let content = match std::fs::read_to_string(file_path) {
-            Ok(c) => c,
-            Err(_) => continue,
+        let mut file_output = Vec::new();
+        let mut searcher = SearcherBuilder::new()
+            .line_number(true)
+            .before_context(ctx)
+            .after_context(ctx)
+            .binary_detection(BinaryDetection::quit(b'\x00'))
+            .max_matches(Some(remaining as u64))
+            .build();
+
+        let mut printer_builder = StandardBuilder::new();
+        printer_builder.heading(false).path(true);
+        let match_count = {
+            let mut printer = printer_builder.build_no_color(&mut file_output);
+            let display_path = PathBuf::from(display_search_path(file_path));
+            let mut sink = printer.sink_with_path(&matcher, &display_path);
+            if searcher
+                .search_path(&matcher, file_path, &mut sink)
+                .is_err()
+            {
+                continue;
+            }
+            sink.match_count() as usize
         };
-
-        let lines: Vec<&str> = content.lines().collect();
-        let mut in_hunk = false;
-
-        for (i, line) in lines.iter().enumerate() {
-            if !re.is_match(line) {
-                continue;
-            }
-
-            if total_results >= max_results {
-                results.push(format!("... truncated at {max_results} results"));
-                truncated = true;
-                break;
-            }
-
-            if ctx > 0 {
-                let start = i.saturating_sub(ctx);
-                let end = (i + 1 + ctx).min(lines.len());
-
-                if !in_hunk && i > start {
-                    results.push("--".to_string());
-                    total_bytes += 3;
-                }
-                in_hunk = true;
-
-                for (ctx_i, ctx_line) in lines.iter().enumerate().take(end).skip(start) {
-                    let marker = if ctx_i == i { '>' } else { ' ' };
-                    let line_str = format!(
-                        "{}:{}:{} {}",
-                        file_path.display(),
-                        ctx_i + 1,
-                        marker,
-                        ctx_line
-                    );
-                    total_bytes += line_str.len() + 1;
-                    if total_bytes > MAX_OUTPUT_BYTES {
-                        results.push(format!("... truncated: output > {MAX_OUTPUT_BYTES} bytes"));
-                        truncated = true;
-                        break;
-                    }
-                    results.push(line_str);
-                }
-            } else {
-                let line_str = format!("{}:{}:{}", file_path.display(), i + 1, line);
-                total_bytes += line_str.len() + 1;
-                if total_bytes > MAX_OUTPUT_BYTES {
-                    results.push(format!("... truncated: output > {MAX_OUTPUT_BYTES} bytes"));
-                    truncated = true;
-                    break;
-                }
-                results.push(line_str);
-            }
-
-            total_results += 1;
+        if match_count == 0 {
+            continue;
         }
-        if truncated {
+        append_rg_output(&mut output, &file_output, ctx > 0);
+        total_results = total_results.saturating_add(match_count.min(remaining));
+        if output.len() > MAX_OUTPUT_BYTES {
+            output.truncate(MAX_OUTPUT_BYTES);
+            output.extend_from_slice(
+                format!("\n... truncated: output > {MAX_OUTPUT_BYTES} bytes").as_bytes(),
+            );
+            break;
+        }
+        if total_results >= max_results {
+            append_tool_note(
+                &mut output,
+                &format!("... truncated at {max_results} results"),
+            );
             break;
         }
     }
 
-    if results.is_empty() {
-        results.push(format!(
-            "No content matched pattern '{pattern}' under {path}"
-        ));
-    }
     if truncated_walk {
-        results.push(format!(
-            "... search truncated: scanned first {max_files} files; results may be incomplete"
-        ));
+        append_tool_note(
+            &mut output,
+            &format!(
+                "... search truncated: scanned first {max_files} files; results may be incomplete"
+            ),
+        );
     }
     if walk_errors > 0 {
-        results.push(format!(
-            "... skipped {walk_errors} paths due to traversal errors"
-        ));
+        append_tool_note(
+            &mut output,
+            &format!("... skipped {walk_errors} paths due to traversal errors"),
+        );
     }
 
-    Ok(results.join("\n"))
+    Ok(String::from_utf8_lossy(&output).into_owned())
+}
+
+fn append_rg_output(output: &mut Vec<u8>, file_output: &[u8], with_context: bool) {
+    if file_output.is_empty() {
+        return;
+    }
+    if with_context && !output.is_empty() {
+        output.extend_from_slice(b"--\n");
+    }
+    output.extend_from_slice(file_output);
+}
+
+fn append_tool_note(output: &mut Vec<u8>, note: &str) {
+    if !output.is_empty() && !output.ends_with(b"\n") {
+        output.push(b'\n');
+    }
+    output.extend_from_slice(note.as_bytes());
 }
 
 // ---- Tool implementations ----
@@ -437,7 +391,7 @@ mod tests {
     }
 
     #[test]
-    fn glob_plain_pattern_matches_current_level_only() {
+    fn glob_plain_pattern_matches_file_names_recursively_like_rg() {
         let dir = temp_dir("glob-plain");
         fs::create_dir_all(dir.join("docs/specs")).unwrap();
         fs::write(dir.join("root.docx"), "doc").unwrap();
@@ -447,7 +401,7 @@ mod tests {
         let result = glob("*.docx", &dir.display().to_string(), 5000).unwrap();
 
         assert!(result.contains("root.docx"));
-        assert!(!result.contains("docs/specs/api.docx"));
+        assert!(result.contains("docs/specs/api.docx"));
         assert!(!result.contains("docs/specs/notes.txt"));
 
         fs::remove_dir_all(&dir).ok();
@@ -467,13 +421,13 @@ mod tests {
     }
 
     #[test]
-    fn glob_empty_result_reports_no_match() {
+    fn glob_empty_result_matches_rg_empty_stdout() {
         let dir = temp_dir("glob-empty");
         fs::create_dir_all(&dir).unwrap();
 
         let result = glob("*.docx", &dir.display().to_string(), 5000).unwrap();
 
-        assert!(result.contains("No files matched pattern '*.docx'"));
+        assert!(result.is_empty(), "{result}");
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -490,8 +444,8 @@ mod tests {
         fs::write(dir.join("test.txt"), "hello world\nfoo bar\n").unwrap();
 
         let result = grep("hello", &dir.display().to_string(), "", None, 5000, 1000).unwrap();
-        assert!(result.contains("hello"));
-        assert!(!result.contains("foo"));
+        assert!(result.contains("test.txt:1:hello world"), "{result}");
+        assert!(!result.contains("foo"), "{result}");
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -503,9 +457,21 @@ mod tests {
         fs::write(dir.join("test.txt"), "line1\nline2\nmatch\nline4\nline5\n").unwrap();
 
         let result = grep("match", &dir.display().to_string(), "", Some(1), 5000, 1000).unwrap();
-        assert!(result.contains("match"));
-        assert!(result.contains("line2")); // context before
-        assert!(result.contains("line4")); // context after
+        assert!(result.contains("test.txt-2-line2"), "{result}");
+        assert!(result.contains("test.txt:3:match"), "{result}");
+        assert!(result.contains("test.txt-4-line4"), "{result}");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn grep_empty_result_matches_rg_empty_stdout() {
+        let dir = temp_dir("grep-empty");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("test.txt"), "hello world\n").unwrap();
+
+        let result = grep("missing", &dir.display().to_string(), "", None, 5000, 1000).unwrap();
+        assert!(result.is_empty(), "{result}");
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -549,7 +515,7 @@ mod tests {
     }
 
     #[test]
-    fn grep_file_glob_uses_globset_path_semantics() {
+    fn grep_file_glob_uses_rg_override_semantics() {
         let dir = temp_dir("grep-glob-path");
         fs::create_dir_all(dir.join("nested")).unwrap();
         fs::write(dir.join("root.txt"), "secret\n").unwrap();
@@ -567,7 +533,7 @@ mod tests {
         .unwrap();
 
         assert!(result.contains("root.txt"));
-        assert!(!result.contains("nested/data.txt"));
+        assert!(result.contains("nested/data.txt"));
         assert!(!result.contains("nested/data.md"));
 
         fs::remove_dir_all(&dir).ok();
@@ -597,7 +563,7 @@ mod tests {
     }
 
     #[test]
-    fn glob_uses_ignore_standard_filters() {
+    fn glob_explicit_pattern_can_match_hidden_files_like_rg() {
         let dir = temp_dir("glob-ignore");
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join(".hidden.txt"), "hidden\n").unwrap();
@@ -606,7 +572,7 @@ mod tests {
         let result = glob("*.txt", &dir.display().to_string(), 5000).unwrap();
 
         assert!(result.contains("kept.txt"));
-        assert!(!result.contains(".hidden.txt"));
+        assert!(result.contains(".hidden.txt"));
 
         fs::remove_dir_all(&dir).ok();
     }

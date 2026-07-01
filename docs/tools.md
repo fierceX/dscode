@@ -59,7 +59,7 @@ ToolCallEvent
 - 虚拟路径按 POSIX 规则规范化，拒绝 `..` 越过虚拟根目录和 NUL 字节。
 - 虚拟 Read 不生成可供 `Edit` 使用的 snapshot；`Write` 和 `Edit` 始终操作本地文件。
 - Glob/Grep 后端返回结构化结果。glob/regex 校验、文本格式和 100KB 搜索输出保护由 `mink-core` 保持。
-- 后端必须遵守请求中的 `max_files` / `max_results`。公共 `try_collect_virtual_glob/grep` helper 已实现路径规范化、匹配和限制；完全自定义实现需要提供等价约束。
+- 后端必须自行实现 `glob` / `grep` 并遵守请求中的 `max_files` / `max_results`；`mink-core` 不提供第二套 VFS 搜索实现。
 
 虚拟非 raw Read 输出示例：
 
@@ -288,14 +288,14 @@ open("/absolute/path/to/project/output/f.txt", "w")  # 绝对路径 ✅
 | `pattern` | string | glob 模式 |
 | `path` | string | 搜索目录，可选，默认当前目录 |
 
-- 本地后端基于 `globset` 匹配和 `ignore` 目录遍历，不依赖外部 `rg` 二进制；注入 VFS 后由后端枚举虚拟路径。
+- 本地后端基于 ripgrep 的 `ignore::WalkBuilder` 和 `OverrideBuilder`，语义对齐 `rg --files -g <pattern>`，不依赖外部 `rg` 二进制；注入 VFS 后由后端枚举虚拟路径。
 - 用于快速发现文件，不读取文件内容。
 - `path` 为空或相对路径时基于当前会话 `cwd` 解析。
 - VFS 模式下 `path` 是虚拟根路径，不与宿主 `cwd` 拼接。
-- pattern 使用 `globset` 语义；VFS 调用前仍由工具层校验。
-- `*` 和 `?` 不跨路径分隔符；递归匹配使用 `**/`，例如 `**/*.rs`、`**/*.docx`、`**/*.*`。
-- 带路径分隔符的模式按相对路径匹配，例如 `src/*.rs` 只匹配 `src` 当前层，`src/**/*.rs` 匹配所有子层。
-- 没有匹配时返回明确的 no-match 提示，而不是静默空字符串。
+- pattern 使用 `rg -g` override glob 语义；VFS 调用前仍由工具层校验。
+- 裸文件名 glob 会递归匹配，例如 `*.rs` 匹配任意目录下的 Rust 文件；带路径分隔符的模式按相对路径匹配，例如 `src/*.rs` 只匹配 `src` 当前层，`src/**/*.rs` 匹配所有子层。
+- `!pattern` 表示排除匹配项，和 `rg -g '!pattern'` 一致。
+- 没有匹配时返回空输出，和 `rg --files -g` 一致。
 - 遍历达到上限或跳过不可读路径时，会在结果末尾追加诊断行，提示结果可能不完整。
 限制：
 - 最多遍历 `max_search_files`（默认 5000）个文件后截断，可通过 `.minkrc` 的 `max_search_files` 或环境变量 `MAX_SEARCH_FILES` 调整。
@@ -313,12 +313,13 @@ open("/absolute/path/to/project/output/f.txt", "w")  # 绝对路径 ✅
 | `glob` | string | 文件过滤，可选 |
 | `context` | integer | 匹配前后上下文行数，可选 |
 
-- 本地后端基于内置目录遍历和 Rust `regex` 搜索，不依赖外部 `rg` 二进制；注入 VFS 后由后端搜索虚拟内容。
+- 本地后端基于 ripgrep 的 `ignore::WalkBuilder`、`OverrideBuilder`、`grep-regex`、`grep-searcher` 和 `grep-printer`，语义和输出对齐 `rg -n/-C -g`，不依赖外部 `rg` 二进制；注入 VFS 后由后端搜索虚拟内容。
 - 优先用于定位编辑目标。
-- `path` 为空或相对路径时基于当前会话 `cwd` 解析；`glob` 过滤同样使用 `globset` 语义。
+- `path` 为空或相对路径时基于当前会话 `cwd` 解析；`glob` 过滤使用 `rg -g` override glob 语义。
 - VFS 模式下 `path` 是虚拟根路径，不与宿主 `cwd` 拼接；regex 和文件 glob 在调用后端前仍由工具层校验。
 - `context` 用于定位目标；需要修改时必须 `Read` 目标范围拿到 `@PATH#TAG` 后使用 anchored `Edit.patch`。
-- 未匹配内容时返回明确的 no-match 提示；遍历达到上限或跳过不可读路径时，会追加诊断行。
+- 输出采用 rg 标准格式：匹配行为 `path:line:content`，上下文行为 `path-line-content`，上下文块之间为 `--`。
+- 未匹配内容时返回空输出；遍历达到上限或跳过不可读路径时，会追加诊断行。
 限制：
 - 最多遍历 `max_search_files`（默认 5000）个文件后截断。
 - 最多返回 `max_search_results`（默认 1000）行匹配结果后截断。

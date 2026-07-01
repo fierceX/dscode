@@ -17,13 +17,13 @@
   },
   {
     "name": "Glob",
-    "description": "Find files matching a single globset pattern. Default tool for file discovery. Use this instead of Bash commands like find, ls, or rg --files when you need file paths. Patterns are passed to the globset engine; use **/*.rs, **/*.docx, or **/*.* for recursive matches, and src/*.rs for one directory level. Use multiple Glob calls if you need multiple patterns.",
+    "description": "Find files with ripgrep-style rg --files -g semantics. Default tool for file discovery. Use this instead of Bash commands like find, ls, or rg --files when you need file paths. Patterns are passed as a single rg -g override glob: *.rs matches Rust files recursively by file name, src/*.rs matches one level under src, src/**/*.rs matches recursively under src, and !pattern excludes matches. Use multiple Glob calls if you need multiple independent patterns.",
     "input_schema": {
       "type": "object",
       "properties": {
         "pattern": {
           "type": "string",
-          "description": "Globset pattern, for example *.rs, **/*.rs, **/*.docx, **/*.*, or src/**/*.ts. Use **/ for recursive matches."
+          "description": "A single rg -g override glob, for example *.rs, **/*.rs, **/*.docx, **/*.*, src/**/*.ts, or !target/**. Bare file-name globs such as *.rs match recursively like ripgrep."
         },
         "path": {
           "type": "string",
@@ -37,7 +37,7 @@
   },
   {
     "name": "Grep",
-    "description": "Default tool for searching code and file contents. Use this instead of Bash commands like rg, grep, or find | xargs grep. Supports Rust regex patterns and returns file:line matches.\n- Use context to identify the target range before editing\n- Grep output does NOT authorize Edit; call Read on the exact target range to get the @PATH#TAG header\n- Use glob to restrict file types or directories\n- Use multiple Grep calls if you need multiple patterns",
+    "description": "Default tool for searching code and file contents. Use this instead of Bash commands like rg, grep, or find | xargs grep. Uses ripgrep's regex/search/printer components and returns rg-style output: path:line:match, path-line-context with context, and -- between context groups.\n- Use context to identify the target range before editing\n- Grep output does NOT authorize Edit; call Read on the exact target range to get the @PATH#TAG header\n- Use glob as a single rg -g override glob to restrict file types or directories\n- Use multiple Grep calls if you need multiple patterns",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -51,7 +51,7 @@
         },
         "glob": {
           "type": "string",
-          "description": "Globset pattern to filter files (e.g. \"*.rs\", \"**/*.docx\", \"src/**/*.ts\", \"*.{ts,tsx}\"). Use **/ for recursive matches."
+          "description": "A single rg -g override glob to filter files (e.g. \"*.rs\", \"**/*.docx\", \"src/**/*.ts\", \"*.{ts,tsx}\", or \"!target/**\"). Bare file-name globs such as *.rs match recursively like ripgrep."
         },
         "context": {
           "type": "integer",

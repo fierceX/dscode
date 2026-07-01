@@ -1,6 +1,8 @@
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::util::hex_lower;
+
 /// ImmutablePrefix holds content that cannot change during a session.
 /// This is the foundation for prefix-cache alignment: the system prompt
 /// and tool definitions must produce byte-identical tokens across all
@@ -81,7 +83,7 @@ impl ImmutablePrefix {
         hasher.update(tools_str.as_bytes());
         hasher.update(b"\0");
         hasher.update(dependency_fingerprint.as_bytes());
-        format!("{:x}", hasher.finalize())
+        hex_lower(hasher.finalize())
     }
 }
 

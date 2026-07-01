@@ -35,7 +35,7 @@
 ## 快速开始
 
 ```bash
-# 前置：Rust 1.85+，设置 DEEPSEEK_API_KEY 或通过配置指定 OpenAI-compatible 端点
+# 前置：Rust 1.94+，设置 DEEPSEEK_API_KEY 或通过配置指定 OpenAI-compatible 端点
 
 # 编译
 cargo build --release

@@ -1,4 +1,5 @@
 use anyhow::{Result, anyhow, bail};
+use grep_regex::RegexMatcher;
 
 const MAX_SEARCH_OUTPUT_BYTES: usize = 100_000;
 
@@ -102,7 +103,7 @@ pub fn validate_virtual_grep_request(request: &VfsGrepRequest) -> Result<()> {
     if request.pattern.is_empty() {
         bail!("Error: no pattern provided");
     }
-    regex::Regex::new(&request.pattern)
+    RegexMatcher::new_line_matcher(&request.pattern)
         .map_err(|e| anyhow!("Error: invalid regex pattern '{}': {e}", request.pattern))?;
     if !request.file_glob.is_empty() {
         globset::GlobBuilder::new(&request.file_glob)
@@ -112,13 +113,6 @@ pub fn validate_virtual_grep_request(request: &VfsGrepRequest) -> Result<()> {
     }
     normalize_virtual_root(&request.path)?;
     Ok(())
-}
-
-/// A logical UTF-8 file used by database backend helpers.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VirtualFile {
-    pub path: String,
-    pub content: String,
 }
 
 /// Normalize a virtual file path using POSIX separators and lexical `.`/`..`.
@@ -158,45 +152,6 @@ fn normalize_virtual_path(path: &str) -> Result<String> {
     Ok(parts.join("/"))
 }
 
-pub fn collect_virtual_glob(
-    files: impl IntoIterator<Item = VirtualFile>,
-    request: &VfsGlobRequest,
-) -> Result<VfsGlobResult> {
-    try_collect_virtual_glob(files.into_iter().map(Ok), request)
-}
-
-pub fn try_collect_virtual_glob(
-    files: impl IntoIterator<Item = Result<VirtualFile>>,
-    request: &VfsGlobRequest,
-) -> Result<VfsGlobResult> {
-    validate_virtual_glob_request(request)?;
-    let matcher = globset::GlobBuilder::new(&request.pattern)
-        .literal_separator(true)
-        .build()
-        .map_err(|e| anyhow!("Error: invalid glob pattern '{}': {e}", request.pattern))?
-        .compile_matcher();
-    let root = normalize_virtual_root(&request.path)?;
-    let mut result = VfsGlobResult::default();
-
-    for file in files {
-        let file = file?;
-        let path = normalize_virtual_file_path(&file.path)?;
-        let Some(relative) = relative_virtual_path(&path, &root) else {
-            continue;
-        };
-        result.scanned_files += 1;
-        if result.scanned_files > request.max_files {
-            result.scanned_files = request.max_files;
-            result.truncated = true;
-            break;
-        }
-        if matcher.is_match(relative) {
-            result.paths.push(relative.to_string());
-        }
-    }
-    Ok(result)
-}
-
 pub fn format_virtual_glob(result: &VfsGlobResult, request: &VfsGlobRequest) -> String {
     let mut lines = Vec::new();
     let mut total_bytes = 0usize;
@@ -230,100 +185,6 @@ pub fn format_virtual_glob(result: &VfsGlobResult, request: &VfsGlobRequest) -> 
         ));
     }
     lines.join("\n")
-}
-
-pub fn collect_virtual_grep(
-    files: impl IntoIterator<Item = VirtualFile>,
-    request: &VfsGrepRequest,
-) -> Result<VfsGrepResult> {
-    try_collect_virtual_grep(files.into_iter().map(Ok), request)
-}
-
-pub fn try_collect_virtual_grep(
-    files: impl IntoIterator<Item = Result<VirtualFile>>,
-    request: &VfsGrepRequest,
-) -> Result<VfsGrepResult> {
-    validate_virtual_grep_request(request)?;
-    let regex = regex::Regex::new(&request.pattern)
-        .map_err(|e| anyhow!("Error: invalid regex pattern '{}': {e}", request.pattern))?;
-    let file_matcher = if request.file_glob.is_empty() {
-        None
-    } else {
-        Some(
-            globset::GlobBuilder::new(&request.file_glob)
-                .literal_separator(true)
-                .build()
-                .map_err(|e| anyhow!("Error: invalid glob '{}': {e}", request.file_glob))?
-                .compile_matcher(),
-        )
-    };
-    let root = normalize_virtual_root(&request.path)?;
-    let context = request.context.unwrap_or(0);
-    let mut result = VfsGrepResult::default();
-
-    for file in files {
-        let file = file?;
-        let path = normalize_virtual_file_path(&file.path)?;
-        let Some(relative) = relative_virtual_path(&path, &root) else {
-            continue;
-        };
-        result.scanned_files += 1;
-        if result.scanned_files > request.max_files {
-            result.scanned_files = request.max_files;
-            result.truncated_files = true;
-            break;
-        }
-        if file_matcher
-            .as_ref()
-            .is_some_and(|matcher| !matcher.is_match(relative))
-        {
-            continue;
-        }
-
-        let lines: Vec<&str> = file.content.lines().collect();
-        let mut in_hunk = false;
-        for (index, line) in lines.iter().enumerate() {
-            if !regex.is_match(line) {
-                continue;
-            }
-            if result.match_count >= request.max_results {
-                result.truncated_results = true;
-                break;
-            }
-            if context > 0 {
-                let start = index.saturating_sub(context);
-                let end = (index + 1 + context).min(lines.len());
-                if !in_hunk && index > start {
-                    result.entries.push(VfsGrepEntry::Separator);
-                }
-                in_hunk = true;
-                for (line_index, context_line) in lines.iter().enumerate().take(end).skip(start) {
-                    result.entries.push(VfsGrepEntry::Line {
-                        path: path.clone(),
-                        line_number: line_index + 1,
-                        content: (*context_line).to_string(),
-                        matched: line_index == index,
-                    });
-                }
-            } else {
-                result.entries.push(VfsGrepEntry::Line {
-                    path: path.clone(),
-                    line_number: index + 1,
-                    content: (*line).to_string(),
-                    matched: true,
-                });
-            }
-            result.match_count += 1;
-            if result.match_count >= request.max_results {
-                result.truncated_results = true;
-                break;
-            }
-        }
-        if result.truncated_results {
-            break;
-        }
-    }
-    Ok(result)
 }
 
 pub fn format_virtual_grep(result: &VfsGrepResult, request: &VfsGrepRequest) -> String {
@@ -429,33 +290,9 @@ pub fn tool_line_count(text: &str) -> usize {
     }
 }
 
-fn relative_virtual_path<'a>(path: &'a str, root: &str) -> Option<&'a str> {
-    if root.is_empty() {
-        Some(path)
-    } else if path == root {
-        Some("")
-    } else {
-        path.strip_prefix(root)
-            .and_then(|rest| rest.strip_prefix('/'))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn files() -> Vec<VirtualFile> {
-        vec![
-            VirtualFile {
-                path: "docs/guide.md".into(),
-                content: "intro\nneedle\nend\n".into(),
-            },
-            VirtualFile {
-                path: "src/lib.rs".into(),
-                content: "pub fn value() {}\n".into(),
-            },
-        ]
-    }
 
     #[test]
     fn normalizes_virtual_paths() {
@@ -466,18 +303,23 @@ mod tests {
     }
 
     #[test]
-    fn virtual_glob_preserves_globset_semantics() {
+    fn virtual_glob_formatter_preserves_protocol_output() {
         let request = VfsGlobRequest {
             pattern: "**/*.md".into(),
             path: ".".into(),
             max_files: 100,
         };
-        let result = collect_virtual_glob(files(), &request).unwrap();
+        let result = VfsGlobResult {
+            paths: vec!["docs/guide.md".into()],
+            scanned_files: 1,
+            truncated: false,
+            skipped_files: 0,
+        };
         assert_eq!(format_virtual_glob(&result, &request), "docs/guide.md");
     }
 
     #[test]
-    fn virtual_grep_renders_context_and_paths() {
+    fn virtual_grep_formatter_renders_context_and_paths() {
         let request = VfsGrepRequest {
             pattern: "needle".into(),
             path: "./docs".into(),
@@ -486,7 +328,27 @@ mod tests {
             max_files: 100,
             max_results: 100,
         };
-        let result = collect_virtual_grep(files(), &request).unwrap();
+        let result = VfsGrepResult {
+            entries: vec![
+                VfsGrepEntry::Line {
+                    path: "docs/guide.md".into(),
+                    line_number: 1,
+                    content: "intro".into(),
+                    matched: false,
+                },
+                VfsGrepEntry::Line {
+                    path: "docs/guide.md".into(),
+                    line_number: 2,
+                    content: "needle".into(),
+                    matched: true,
+                },
+            ],
+            match_count: 1,
+            scanned_files: 1,
+            truncated_results: false,
+            truncated_files: false,
+            skipped_files: 0,
+        };
         let output = format_virtual_grep(&result, &request);
         assert!(output.contains("docs/guide.md:2:> needle"), "{output}");
         assert!(output.contains("docs/guide.md:1:  intro"), "{output}");
@@ -503,21 +365,7 @@ mod tests {
     }
 
     #[test]
-    fn virtual_grep_accepts_exact_file_root() {
-        let request = VfsGrepRequest {
-            pattern: "needle".into(),
-            path: "docs/guide.md".into(),
-            file_glob: String::new(),
-            context: None,
-            max_files: 10,
-            max_results: 10,
-        };
-        let result = collect_virtual_grep(files(), &request).unwrap();
-        assert_eq!(result.match_count, 1);
-    }
-
-    #[test]
-    fn zero_result_limit_reports_truncation_without_false_no_match() {
+    fn virtual_grep_formatter_handles_zero_result_limit() {
         let request = VfsGrepRequest {
             pattern: "needle".into(),
             path: ".".into(),
@@ -526,30 +374,11 @@ mod tests {
             max_files: 10,
             max_results: 0,
         };
-        let result = collect_virtual_grep(files(), &request).unwrap();
+        let result = VfsGrepResult {
+            truncated_results: true,
+            ..VfsGrepResult::default()
+        };
         let output = format_virtual_grep(&result, &request);
         assert_eq!(output, "... truncated at 0 results");
-    }
-
-    #[test]
-    fn fallible_grep_iterator_stops_after_result_limit() {
-        let request = VfsGrepRequest {
-            pattern: "needle".into(),
-            path: ".".into(),
-            file_glob: String::new(),
-            context: None,
-            max_files: 10,
-            max_results: 1,
-        };
-        let files = vec![
-            Ok(VirtualFile {
-                path: "first.md".into(),
-                content: "needle\n".into(),
-            }),
-            Err(anyhow!("second row should not be consumed")),
-        ];
-        let result = try_collect_virtual_grep(files, &request).unwrap();
-        assert_eq!(result.match_count, 1);
-        assert!(result.truncated_results);
     }
 }

@@ -6,6 +6,8 @@ pub mod source;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
+use crate::util::hex_lower;
+
 pub use context_files::{
     ContextFileProvider, ContextFileSnapshot, build_default_context_file_snapshot,
 };
@@ -120,5 +122,5 @@ fn compute_dependency_fingerprint(parts: &[&str]) -> String {
         hasher.update(part.as_bytes());
         hasher.update(b"\0");
     }
-    format!("{:x}", hasher.finalize())
+    hex_lower(hasher.finalize())
 }

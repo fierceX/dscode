@@ -20,22 +20,25 @@ once_cell = "1"
 regex = "1"
 ignore = "0.4"
 globset = "0.4"
+grep-printer = "0.3"
+grep-regex = "0.1"
+grep-searcher = "0.1"
 libc = "0.2"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "socks", "stream"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "socks", "stream", "query", "form"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
-similar = "2"
-rustyline = "14"
+sha2 = "0.11"
+similar = "3"
+rustyline = "18"
 crossterm = "0.29"
-time = { version = "0.3.47", features = ["formatting", "macros"] }
-toml = "0.8"
+time = { version = "0.3.52", features = ["formatting", "macros"] }
+toml = "1.1"
 tokio = { version = "1", features = ["full"] }
 ratatui = "0.30"
 unicode-width = "0.2"
-wasmtime = { version = "28", features = ["async"] }
-wasmtime-wasi = "28"
-axum = "0.7"
+wasmtime = { version = "46", features = ["async"] }
+wasmtime-wasi = "46"
+axum = "0.8"
 
 [profile.release]
 opt-level = "s"

@@ -14,8 +14,8 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 use wasmtime::{Config, Engine, Linker, Module, Store};
-use wasmtime_wasi::pipe::MemoryOutputPipe;
-use wasmtime_wasi::preview1::{self, WasiP1Ctx};
+use wasmtime_wasi::p1::{self, WasiP1Ctx};
+use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 
 fn resolve_abs(dir: &str, cwd: &Path) -> PathBuf {
@@ -138,7 +138,7 @@ fn execute_in_sandbox(
     let wasi = builder.build_p1();
     let mut store = Store::new(&engine, wasi);
     let mut linker: Linker<WasiP1Ctx> = Linker::new(&engine);
-    preview1::add_to_linker_sync(&mut linker, |ctx| ctx)?;
+    p1::add_to_linker_sync(&mut linker, |ctx| ctx)?;
 
     let instance = linker.instantiate(&mut store, &module)?;
     let start = instance.get_typed_func::<(), ()>(&mut store, "_start")?;
