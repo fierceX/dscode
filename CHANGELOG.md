@@ -1,5 +1,47 @@
 # Changelog
 
+## v0.1.12 (2026-07-01)
+
+### Features
+
+- **可注入 LLM backend** (`mink::runtime::LlmBackend`) — Rust 嵌入式场景可替换默认 OpenAI-compatible HTTP client，接入私有化部署、内网网关、厂商 SDK 或非 HTTP transport。
+  - `AgentOptions::with_llm_backend()` 将自定义 backend 注入现有 agent 循环，不复制 turn 执行逻辑。
+  - `LlmRequest` 暴露解析后的真实模型名、请求别名、system prompt、messages、tools、timeout、OpenAI-compatible options 和取消状态。
+  - `LlmEvent` 保留 text、thinking/reasoning、tool call、stop 和 usage 事件，供自定义 backend 流式返回。
+  - `examples/custom_llm_backend.rs` 提供无网络 backend 示例。
+- **自定义模型名与别名** — `flash` / `pro` 继续作为 CLI 别名；任意模型名未命中别名时原样传给 backend。`model_aliases` 可覆盖私有模型等级。
+- **OpenAI-compatible client 防护增强** — 请求失败保留 attempt count 以便 usage accounting，失败且 provider 未返回 usage 时记录 unreported usage，提交 provider 前清理孤立 tool call。
+- **Runtime event / stream 收敛** — runtime streaming 和子代理协调在嵌入式与 CLI 路径中保持 final outcome、状态映射和子代理 usage 传播一致。
+
+### Tools
+
+- **本地搜索对齐 ripgrep 语义** (`tools/search.rs`)
+  - `Glob` 改用 ripgrep 的 `ignore::WalkBuilder` 和 override glob 语义，对齐 `rg --files -g <pattern>`，不依赖外部 `rg` 二进制。
+  - `Grep` 改用 `grep-regex`、`grep-searcher` 和 `grep-printer`，对齐 `rg -n/-C -g` 风格输出和 regex 行为。
+  - 本地搜索无结果时返回空输出，和 rg 保持一致；结果数和字节上限仍会追加明确截断诊断。
+- **VFS 搜索边界清理** (`tools/vfs.rs`)
+  - 移除 core 内重复的虚拟搜索 helper 实现。
+  - 注入的 `ReadOnlyFileSystem` 后端自行实现 `glob` / `grep` 搜索逻辑，并负责遵守 `max_files` / `max_results`。
+  - core 保留 VFS trait、请求/结果结构、请求校验、路径规范化、结果格式化和 100KB 输出保护。
+  - `examples/redb_vfs.rs` 将后端搜索逻辑移动到示例 adapter 内部。
+
+### Dependencies
+
+- Workspace 保持 Rust edition 2024；升级后的依赖集合要求 Rust 1.94+。
+- 升级主要依赖：`reqwest 0.13`、`wasmtime 46`、`wasmtime-wasi 46`、`axum 0.8`、`rustyline 18`、`sha2 0.11`、`similar 3`、`toml 1.1`、`redb 4`。
+- 新增 ripgrep 组件依赖：`grep-printer`、`grep-regex`、`grep-searcher`。
+- 适配 `reqwest 0.13` feature：`rustls`、`query`、`form`；WASI preview1 import 迁移到 `wasmtime_wasi::p1` / `p2::pipe`。
+- 为 `sha2 0.11` digest 输出新增显式 SHA-256 小写十六进制格式化 helper。
+
+### Docs
+
+- 更新 README、`crates/mink-core/README.md`、`docs/USAGE.md`、`docs/DESIGN.md`、`docs/ARCHITECTURE.md` 和 `docs/tools.md`，同步自定义 LLM backend 注入、模型名直传、VFS 后端职责、rg 风格搜索行为、依赖要求和构建用法。
+
+### Tests
+
+- 新增和更新测试覆盖：模型别名解析、自定义 backend 流式/失败行为、runtime SDK 映射、子代理协调、rg 风格 Glob/Grep 行为和 redb VFS 后端职责。
+- 已通过 `cargo fmt --check`、`cargo check --workspace --all-targets --all-features`、`cargo test -q`、`cargo test -q --all-features` 和 Python WASI sandbox 慢测。
+
 ## v0.1.11 (2026-06-26)
 
 ### Features

@@ -626,7 +626,7 @@ workspace 包中。服务端嵌入时推荐只启用 runtime：
 
 ```toml
 [dependencies]
-mink = { package = "mink-core", version = "0.1.11", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.1.12", default-features = false, features = ["runtime"] }
 ```
 
 稳定入口优先使用 `mink::prelude`、`mink::runtime`、`mink::config`、`mink::sandbox` 和

@@ -69,7 +69,7 @@ Rust 服务通常只启用嵌入式 runtime：
 
 ```toml
 [dependencies]
-mink = { package = "mink-core", version = "0.1.11", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.1.12", default-features = false, features = ["runtime"] }
 ```
 
 然后在代码中通过 `mink::runtime` 或 `mink::prelude` 嵌入：
