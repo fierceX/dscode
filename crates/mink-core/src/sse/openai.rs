@@ -151,9 +151,10 @@ impl OpenAIParser {
             .and_then(Value::as_str)
             && !reasoning.is_empty()
         {
-            emit(Event::Thinking(ThinkingEvent {
-                content: reasoning.into(),
-            }))?;
+            let reasoning = strip_reasoning_think_tags(reasoning);
+            if !reasoning.trim().is_empty() {
+                emit(Event::Thinking(ThinkingEvent { content: reasoning }))?;
+            }
         }
 
         if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
@@ -278,6 +279,10 @@ impl OpenAIParser {
         self.pending_stop = None;
         self.saw_done = false;
     }
+}
+
+fn strip_reasoning_think_tags(content: &str) -> String {
+    content.replace("<think>", "").replace("</think>", "")
 }
 
 // ---- Legacy synchronous parse ----
@@ -411,6 +416,46 @@ mod tests {
             events
                 .iter()
                 .any(|e| matches!(e, Event::Text(t) if t.content == "OK"))
+        );
+    }
+
+    #[test]
+    fn reasoning_content_strips_think_tags() {
+        let mut p = OpenAIParser::new();
+        let lines = [
+            "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"reasoning_content\":\"<think>Plan step\\n</think>\\n\"}}]}",
+            "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"</think>\\n\\n\"}}]}",
+            "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"OK\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2}}",
+            "data: [DONE]",
+        ];
+        let events = collect_lines(&mut p, &lines);
+        let thinking: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Thinking(t) => Some(t.content.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(thinking, vec!["Plan step\n\n"]);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::Text(t) if t.content == "OK"))
+        );
+    }
+
+    #[test]
+    fn text_content_preserves_literal_think_tags() {
+        let mut p = OpenAIParser::new();
+        let lines = [
+            "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"literal </think>\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2}}",
+            "data: [DONE]",
+        ];
+        let events = collect_lines(&mut p, &lines);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::Text(t) if t.content == "literal </think>"))
         );
     }
 
