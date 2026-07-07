@@ -1,5 +1,39 @@
 # Changelog
 
+## v0.1.13 (2026-07-07)
+
+### Features
+
+- **OpenAI-compatible 请求扩展参数** — 默认 OpenAI-compatible backend 支持 `openai_tool_choice` 和 `[openai_extra_body]`。
+  - `openai_tool_choice` 可配置 `auto` / `none` / `required` 或 JSON 对象，用于兼容标准 Chat Completions 工具选择策略。
+  - `[openai_extra_body]` 可透传兼容端点的模型参数、采样参数、结构化输出参数和嵌套扩展字段。
+  - `openai_extra_body` 不允许覆盖 `model`、`messages`、`stream`、`tools`、`tool_choice`、`max_tokens` 和 `max_completion_tokens`，避免破坏 agent 协议核心字段。
+
+### Rust API
+
+- `AgentOptions` 新增 OpenAI-compatible backend 便捷配置方法：
+  - `with_openai_reasoning_effort()`
+  - `without_openai_reasoning_effort()`
+  - `with_openai_include_usage()`
+  - `with_openai_token_param()`
+  - `with_openai_tool_choice()`
+  - `with_openai_extra_body()`
+- `OpenAiCompatibleBackend` 新增 `with_tool_choice()` 和 `with_extra_body()`，用于直接配置内置 backend。
+
+### Fixes
+
+- `tool_choice` 现在只会在本次请求实际包含 `tools` 时发送，避免压缩、禁用工具或纯文本请求携带孤立 `tool_choice` 被兼容端点拒绝。
+- OpenAI-compatible SSE reasoning 字段会过滤模型额外输出的 `<think>` / `</think>` 标签，避免私有化部署或兼容端点把 reasoning 闭合标签直接渲染到终端。
+- 保持 `OpenAiCompatibleOptions` 公开结构体字段不变，避免破坏外部使用 struct literal 构造 options 的代码。
+
+### Docs
+
+- 更新 `.minkrc.example`、README、`crates/mink-core/README.md`、`docs/USAGE.md`、`docs/DESIGN.md` 和 `docs/ARCHITECTURE.md`，补充 OpenAI-compatible 参数配置、嵌套 extra body 示例和 Rust 嵌入式 builder 用法。
+
+### Tests
+
+- 新增测试覆盖 OpenAI-compatible extra body 合并、reserved key 保护、无工具请求不发送 `tool_choice`、runtime builder 配置转换和 reasoning effort 禁用。
+
 ## v0.1.12 (2026-07-01)
 
 ### Features

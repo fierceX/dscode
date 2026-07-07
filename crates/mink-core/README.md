@@ -19,7 +19,7 @@
 
 ```toml
 [dependencies]
-mink = { package = "mink-core", version = "0.1.12", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.1.13", default-features = false, features = ["runtime"] }
 ```
 
 ```rust
