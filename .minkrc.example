@@ -18,6 +18,19 @@ model = "flash"                             # 默认模型：flash / pro / 任�
 openai_reasoning_effort = "max"             # reasoning_effort；设为 off/none/false/disabled 表示不发送
 openai_include_usage = true                 # 是否请求 stream_options.include_usage
 openai_token_param = "max_tokens"           # max_tokens / max_completion_tokens
+#openai_tool_choice = "auto"                 # 可选：auto / none / required，或在 --config 中传 JSON 对象
+
+# 透传给 OpenAI-compatible /chat/completions 的额外请求字段。
+# 适用于兼容端点的模型参数、采样参数、结构化输出参数等扩展字段。
+#[openai_extra_body]
+#custom_boolean = true
+#custom_budget = 8192
+#temperature = 0.2
+#min_p = 0.05
+#
+# 嵌套扩展参数示例：
+#[openai_extra_body.custom_options]
+#enabled = true
 
 # ── 模型别名 ─────────────────────────────────────────────────
 #[model_aliases]

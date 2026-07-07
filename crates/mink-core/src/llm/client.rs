@@ -121,11 +121,30 @@ impl Default for OpenAiCompatibleOptions {
 
 pub struct OpenAiCompatibleBackend {
     options: OpenAiCompatibleOptions,
+    tool_choice: Option<serde_json::Value>,
+    extra_body: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 impl OpenAiCompatibleBackend {
     pub fn new(options: OpenAiCompatibleOptions) -> Self {
-        Self { options }
+        Self {
+            options,
+            tool_choice: None,
+            extra_body: std::collections::BTreeMap::new(),
+        }
+    }
+
+    pub fn with_tool_choice(mut self, tool_choice: impl Into<serde_json::Value>) -> Self {
+        self.tool_choice = Some(tool_choice.into());
+        self
+    }
+
+    pub fn with_extra_body(
+        mut self,
+        extra_body: std::collections::BTreeMap<String, serde_json::Value>,
+    ) -> Self {
+        self.extra_body = extra_body;
+        self
     }
 
     pub fn from_config(config: &crate::config::Config) -> Self {
@@ -154,10 +173,17 @@ impl OpenAiCompatibleBackend {
             token_param,
             parallel_tool_calls: None,
         })
+        .with_extra_body(config.openai_extra_body.clone())
+        .with_optional_tool_choice(config.openai_tool_choice.clone())
     }
 
     pub fn deepseek_defaults() -> Self {
         Self::new(OpenAiCompatibleOptions::default())
+    }
+
+    fn with_optional_tool_choice(mut self, tool_choice: Option<serde_json::Value>) -> Self {
+        self.tool_choice = tool_choice;
+        self
     }
 }
 
@@ -169,13 +195,15 @@ impl LlmBackend for OpenAiCompatibleBackend {
 
     async fn stream(&self, request: LlmRequest) -> Result<LlmResponseStream> {
         let client = AsyncLlClient::new(&request.api_key, &request.api_url)?;
-        let body = crate::llm::transport::build_openai_body_with_options(
+        let body = crate::llm::transport::build_openai_body_with_options_and_extensions(
             &request.model,
             &request.messages,
             &request.tools,
             &request.system_prompt,
             request.max_tokens,
             &self.options,
+            self.tool_choice.as_ref(),
+            &self.extra_body,
         )?;
 
         if request.verbose {

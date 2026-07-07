@@ -110,6 +110,9 @@ async fn main() -> anyhow::Result<()> {
 Rust 嵌入方可以继续使用默认 OpenAI-compatible backend，也可以实现 `mink::runtime::LlmBackend`
 并通过 `AgentOptions::with_llm_backend()` 注入。模型名解析仍由 mink 统一处理：
 `flash` / `pro` 是默认别名，`model_aliases` 可覆盖别名；未命中别名的模型名会原样传给 backend。
+默认 OpenAI-compatible backend 支持 `openai_tool_choice` 和 `openai_extra_body`，可直接透传
+Chat Completions 兼容端点的扩展请求参数；`reasoning_effort`、usage 和 token 参数也有
+对应的 `AgentOptions` builder。非标准协议再使用自定义 `LlmBackend`。
 完整示例见 [custom_llm_backend.rs](crates/mink-core/examples/custom_llm_backend.rs)。
 
 库使用方应优先从 `mink::prelude`、`mink::runtime`、`mink::config`、`mink::sandbox`

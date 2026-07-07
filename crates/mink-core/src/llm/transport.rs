@@ -1,6 +1,7 @@
 use crate::llm::client::{OpenAiCompatibleOptions, TokenParamKind};
 use anyhow::Result;
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 
 pub fn build_openai_body(
     model: &str,
@@ -26,6 +27,28 @@ pub fn build_openai_body_with_options(
     system_prompt: &str,
     max_tokens: i32,
     options: &OpenAiCompatibleOptions,
+) -> Result<Vec<u8>> {
+    build_openai_body_with_options_and_extensions(
+        model,
+        messages,
+        tools,
+        system_prompt,
+        max_tokens,
+        options,
+        None,
+        &BTreeMap::new(),
+    )
+}
+
+pub(crate) fn build_openai_body_with_options_and_extensions(
+    model: &str,
+    messages: &[Value],
+    tools: &[Value],
+    system_prompt: &str,
+    max_tokens: i32,
+    options: &OpenAiCompatibleOptions,
+    tool_choice: Option<&Value>,
+    extra_body: &BTreeMap<String, Value>,
 ) -> Result<Vec<u8>> {
     let converted = convert_messages_to_openai(messages)?;
 
@@ -56,11 +79,35 @@ pub fn build_openai_body_with_options(
         body["parallel_tool_calls"] = json!(parallel_tool_calls);
     }
 
+    if let Some(body_obj) = body.as_object_mut() {
+        for (key, value) in extra_body {
+            if is_reserved_body_key(key) {
+                continue;
+            }
+            body_obj.insert(key.clone(), value.clone());
+        }
+    }
     if !tools.is_empty() {
         body["tools"] = Value::Array(convert_tools_to_openai(tools));
+        if let Some(tool_choice) = tool_choice {
+            body["tool_choice"] = tool_choice.clone();
+        }
     }
 
     Ok(serde_json::to_vec(&body)?)
+}
+
+fn is_reserved_body_key(key: &str) -> bool {
+    matches!(
+        key,
+        "model"
+            | "messages"
+            | "stream"
+            | "tools"
+            | "tool_choice"
+            | "max_tokens"
+            | "max_completion_tokens"
+    )
 }
 
 fn convert_messages_to_openai(messages: &[Value]) -> Result<Vec<Value>> {
@@ -324,5 +371,90 @@ mod tests {
         assert!(value.get("reasoning_effort").is_none());
         assert!(value.get("stream_options").is_none());
         assert_eq!(value["parallel_tool_calls"], false);
+    }
+
+    #[test]
+    fn openai_body_merges_extra_body_and_tool_choice_without_overriding_core_fields() {
+        let mut extra_body = std::collections::BTreeMap::new();
+        extra_body.insert("temperature".to_string(), json!(0.2));
+        extra_body.insert("enable_thinking".to_string(), json!(true));
+        extra_body.insert("model".to_string(), json!("ignored-model"));
+        extra_body.insert("messages".to_string(), json!([]));
+        extra_body.insert("stream".to_string(), json!(false));
+        extra_body.insert("max_tokens".to_string(), json!(999));
+        extra_body.insert("tool_choice".to_string(), json!("none"));
+
+        let options = OpenAiCompatibleOptions {
+            send_reasoning_effort: false,
+            reasoning_effort: None,
+            include_usage: false,
+            token_param: TokenParamKind::MaxTokens,
+            parallel_tool_calls: None,
+        };
+        let tool_choice = json!("auto");
+        let tools = vec![json!({
+            "name": "Read",
+            "description": "read file",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"}
+                },
+                "required": ["path"]
+            }
+        })];
+        let body = build_openai_body_with_options_and_extensions(
+            "custom-model",
+            &[json!({"role":"user","content":"hello"})],
+            &tools,
+            "",
+            123,
+            &options,
+            Some(&tool_choice),
+            &extra_body,
+        )
+        .unwrap();
+
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["model"], "custom-model");
+        assert_eq!(value["stream"], true);
+        assert_eq!(value["max_tokens"], 123);
+        assert_eq!(value["temperature"], 0.2);
+        assert_eq!(value["enable_thinking"], true);
+        assert_eq!(value["tool_choice"], "auto");
+        assert!(
+            value["tools"]
+                .as_array()
+                .is_some_and(|tools| tools.len() == 1)
+        );
+        assert_eq!(value["messages"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn openai_body_omits_tool_choice_when_no_tools_are_sent() {
+        let options = OpenAiCompatibleOptions {
+            send_reasoning_effort: false,
+            reasoning_effort: None,
+            include_usage: false,
+            token_param: TokenParamKind::MaxTokens,
+            parallel_tool_calls: None,
+        };
+        let tool_choice = json!("auto");
+
+        let body = build_openai_body_with_options_and_extensions(
+            "custom-model",
+            &[json!({"role":"user","content":"hello"})],
+            &[],
+            "",
+            123,
+            &options,
+            Some(&tool_choice),
+            &Default::default(),
+        )
+        .unwrap();
+
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert!(value.get("tools").is_none());
+        assert!(value.get("tool_choice").is_none());
     }
 }

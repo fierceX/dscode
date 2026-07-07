@@ -1,11 +1,11 @@
 use crate::capabilities::{CapabilityExposure, RuntimeSkill, SkillDiscoveryPolicy, SkillProvider};
 use crate::config::{
-    Config, OutputFormat, SandboxConfig, SandboxPythonConfig, ToolApprovalMode, ToolApprovalPolicy,
-    ToolDisableFlags,
+    Config, OpenAiTokenParamConfig, OutputFormat, SandboxConfig, SandboxPythonConfig,
+    ToolApprovalMode, ToolApprovalPolicy, ToolDisableFlags,
 };
 use crate::resources::ResourceHandler;
 use crate::runtime::config::{first_prompt_from_config, session_policy_from_config};
-use crate::runtime::llm::LlmBackend;
+use crate::runtime::llm::{LlmBackend, TokenParamKind};
 use crate::runtime::{AgentRuntimeConfig, EventSink, SessionPolicy};
 use crate::session::paths::SessionLayout;
 use crate::tools::vfs::ReadOnlyFileSystem;
@@ -167,6 +167,43 @@ impl AgentOptions {
 
     pub fn with_llm_backend(mut self, backend: Arc<dyn LlmBackend>) -> Self {
         self.llm_backend = Some(backend);
+        self
+    }
+
+    pub fn with_openai_reasoning_effort(mut self, effort: impl Into<String>) -> Self {
+        let effort = effort.into();
+        self.config.openai_reasoning_effort = Some(effort);
+        self
+    }
+
+    pub fn without_openai_reasoning_effort(mut self) -> Self {
+        self.config.openai_reasoning_effort = None;
+        self
+    }
+
+    pub fn with_openai_include_usage(mut self, include_usage: bool) -> Self {
+        self.config.openai_include_usage = include_usage;
+        self
+    }
+
+    pub fn with_openai_token_param(mut self, token_param: TokenParamKind) -> Self {
+        self.config.openai_token_param = match token_param {
+            TokenParamKind::MaxTokens => OpenAiTokenParamConfig::MaxTokens,
+            TokenParamKind::MaxCompletionTokens => OpenAiTokenParamConfig::MaxCompletionTokens,
+        };
+        self
+    }
+
+    pub fn with_openai_tool_choice(mut self, tool_choice: impl Into<serde_json::Value>) -> Self {
+        self.config.openai_tool_choice = Some(tool_choice.into());
+        self
+    }
+
+    pub fn with_openai_extra_body(
+        mut self,
+        extra_body: BTreeMap<String, serde_json::Value>,
+    ) -> Self {
+        self.config.openai_extra_body = extra_body;
         self
     }
 
@@ -480,6 +517,14 @@ mod tests {
             .with_output_format(OutputFormat::StreamJson)
             .with_verbose(true)
             .with_log_events(false)
+            .with_openai_reasoning_effort("high")
+            .with_openai_include_usage(false)
+            .with_openai_token_param(TokenParamKind::MaxCompletionTokens)
+            .with_openai_tool_choice("auto")
+            .with_openai_extra_body(BTreeMap::from([(
+                "enable_thinking".to_string(),
+                serde_json::json!(true),
+            )]))
             .with_runtime_skill_content("runtime-rust", "Runtime Rust", "runtime body")
             .with_skill_discovery_policy(SkillDiscoveryPolicy::RuntimeOnly)
             .with_selected_skills(["runtime-rust"])
@@ -530,6 +575,17 @@ mod tests {
         assert_eq!(cfg.output_format, OutputFormat::StreamJson);
         assert!(cfg.verbose);
         assert!(!cfg.log_events);
+        assert_eq!(cfg.openai_reasoning_effort.as_deref(), Some("high"));
+        assert!(!cfg.openai_include_usage);
+        assert_eq!(
+            cfg.openai_token_param,
+            OpenAiTokenParamConfig::MaxCompletionTokens
+        );
+        assert_eq!(cfg.openai_tool_choice, Some(serde_json::json!("auto")));
+        assert_eq!(
+            cfg.openai_extra_body["enable_thinking"],
+            serde_json::json!(true)
+        );
         assert_eq!(cfg.skills, vec!["runtime-rust"]);
         assert_eq!(cfg.mission_content.as_deref(), Some("mission"));
         assert!(cfg.tool_disable.disable_bash);
@@ -572,6 +628,15 @@ mod tests {
             runtime_config.session,
             SessionPolicy::UseOrCreate(ref value) if value == "via-config-mut"
         ));
+    }
+
+    #[test]
+    fn options_can_disable_openai_reasoning_effort() {
+        let runtime_config = AgentOptions::new("/tmp/mink-home", "/tmp/project")
+            .without_openai_reasoning_effort()
+            .into_runtime_config();
+
+        assert_eq!(runtime_config.config.openai_reasoning_effort, None);
     }
 
     #[test]

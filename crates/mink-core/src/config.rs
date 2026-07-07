@@ -147,6 +147,8 @@ pub struct MinkConfigFile {
     pub openai_reasoning_effort: Option<String>,
     pub openai_include_usage: Option<bool>,
     pub openai_token_param: Option<String>,
+    pub openai_tool_choice: Option<serde_json::Value>,
+    pub openai_extra_body: Option<BTreeMap<String, serde_json::Value>>,
     pub max_tokens: Option<i32>,
     pub max_turns: Option<i32>,
     pub max_context: Option<String>, // supports K/M suffix
@@ -271,6 +273,8 @@ pub struct Config {
     pub openai_reasoning_effort: Option<String>,
     pub openai_include_usage: bool,
     pub openai_token_param: OpenAiTokenParamConfig,
+    pub openai_tool_choice: Option<serde_json::Value>,
+    pub openai_extra_body: BTreeMap<String, serde_json::Value>,
     pub max_tokens: i32,
     pub tool_timeout_secs: i32,
     pub sub_agent_timeout_secs: i32,
@@ -345,6 +349,8 @@ impl Default for Config {
             openai_reasoning_effort: Some("max".to_string()),
             openai_include_usage: true,
             openai_token_param: OpenAiTokenParamConfig::MaxTokens,
+            openai_tool_choice: None,
+            openai_extra_body: BTreeMap::new(),
             max_tokens: 81920,
             tool_timeout_secs: 600,
             sub_agent_timeout_secs: 300,
@@ -641,6 +647,12 @@ fn apply_config_sources(
             } else {
                 eprintln!("[mink] Warning: ignoring openai_token_param={token_param:?}");
             }
+        }
+        if let Some(tool_choice) = &toml_cfg.openai_tool_choice {
+            cfg.openai_tool_choice = Some(tool_choice.clone());
+        }
+        if let Some(extra_body) = &toml_cfg.openai_extra_body {
+            cfg.openai_extra_body.extend(extra_body.clone());
         }
         if !cli_api_key && let Some(api_key) = &toml_cfg.api_key {
             cfg.api_key = api_key.clone();
@@ -1242,6 +1254,12 @@ llm_wait_heartbeat = 3
 openai_reasoning_effort = "off"
 openai_include_usage = false
 openai_token_param = "max_completion_tokens"
+openai_tool_choice = "auto"
+
+[openai_extra_body]
+enable_thinking = true
+thinking_budget = 8192
+temperature = 0.2
 "#;
         let parsed: MinkConfigFile = toml::from_str(toml_str).unwrap();
         assert_eq!(parsed.openai_reasoning_effort.unwrap(), "off");
@@ -1250,6 +1268,14 @@ openai_token_param = "max_completion_tokens"
             parsed.openai_token_param.unwrap(),
             "max_completion_tokens".to_string()
         );
+        assert_eq!(
+            parsed.openai_tool_choice.unwrap(),
+            serde_json::json!("auto")
+        );
+        let extra_body = parsed.openai_extra_body.unwrap();
+        assert_eq!(extra_body["enable_thinking"], serde_json::json!(true));
+        assert_eq!(extra_body["thinking_budget"], serde_json::json!(8192));
+        assert_eq!(extra_body["temperature"], serde_json::json!(0.2));
     }
 
     #[test]
@@ -1353,6 +1379,11 @@ Read = "allow"
             openai_reasoning_effort: Some("off".into()),
             openai_include_usage: Some(false),
             openai_token_param: Some("max_completion_tokens".into()),
+            openai_tool_choice: Some(serde_json::json!("auto")),
+            openai_extra_body: Some(BTreeMap::from([
+                ("enable_thinking".to_string(), serde_json::json!(true)),
+                ("thinking_budget".to_string(), serde_json::json!(8192)),
+            ])),
             ..Default::default()
         };
         let mut cfg = Config::default();
@@ -1362,6 +1393,15 @@ Read = "allow"
         assert_eq!(
             cfg.openai_token_param,
             OpenAiTokenParamConfig::MaxCompletionTokens
+        );
+        assert_eq!(cfg.openai_tool_choice, Some(serde_json::json!("auto")));
+        assert_eq!(
+            cfg.openai_extra_body["enable_thinking"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            cfg.openai_extra_body["thinking_budget"],
+            serde_json::json!(8192)
         );
     }
 

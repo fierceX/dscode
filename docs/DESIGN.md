@@ -883,7 +883,16 @@ OpenAI-compatible 请求还可通过顶层字段控制：
 openai_reasoning_effort = "max"       # off/none/false/disabled 表示不发送
 openai_include_usage = true
 openai_token_param = "max_tokens"     # max_tokens | max_completion_tokens
+openai_tool_choice = "auto"           # auto | none | required，或 JSON 对象
+
+[openai_extra_body]
+custom_boolean = true
+custom_budget = 8192
 ```
+
+`openai_extra_body` 仅补充 provider 扩展字段，不覆盖 `model`、`messages`、`stream`、
+`tools`、`tool_choice`、`max_tokens` 和 `max_completion_tokens`。非 OpenAI-compatible
+协议由 `LlmBackend` 注入处理。
 
 显式 CLI `--config <toml>` 解析失败必须 fail fast；用户级/项目级 `.minkrc` 解析失败只输出 warning 并继续。
 

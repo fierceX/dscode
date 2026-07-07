@@ -1,6 +1,6 @@
 # 架构说明
 
-更新日期：2026-07-01
+更新日期：2026-07-07
 
 本文描述 mink 当前代码结构、模块职责和运行时数据流。面向用户的命令、配置和工作流见
 [USAGE.md](USAGE.md)；完整工具协议见 [tools.md](tools.md)；设计取舍和不变式见
@@ -14,7 +14,7 @@ mink 是一个 Rust 实现的轻量 AI coding agent，默认面向 DeepSeek / Op
 
 - 单二进制分发，终端优先，REPL / TUI / stream-json 三种使用形态
 - 可作为 Rust 库嵌入：Rust 发布包名为 `mink-core`，库 crate 名为 `mink`，`mink::runtime` / `mink::prelude` 提供同进程调用
-- LLM backend 可注入：默认 OpenAI-compatible streaming backend，宿主可替换为私有模型、内网网关或厂商 SDK
+- LLM backend 可注入：默认 OpenAI-compatible streaming backend 支持兼容端点扩展请求字段，宿主也可替换为私有模型、内网网关或厂商 SDK
 - Session 是一等公民，使用 JSONL 追加持久化，支持恢复、重放和压缩
 - LLM 流式输出、工具执行、信号检测、决策恢复构成闭环
 - 工具边界明确：超时、输出大小、写入大小、副作用和禁用开关都可控
@@ -60,8 +60,8 @@ TurnExecutor (agent/turn.rs)
   │  PlanActionHandler / SubAgentCoordinator
   ▼
 ┌─────── LLM 层 ────────┐
-│ llm/client.rs         │ LlmBackend 注入、OpenAI-compatible 流式客户端、重试、usage 采集、模型名解析
-│ llm/transport.rs      │ OpenAI chat/completions 请求构造
+│ llm/client.rs         │ LlmBackend 注入、OpenAI-compatible 流式客户端、重试、usage 采集、模型名解析和请求选项
+│ llm/transport.rs      │ OpenAI chat/completions 请求构造、tool_choice 和 extra_body 合并
 │ sse/openai.rs         │ SSE 增量解析、usage、stop、tool call 合并
 │ sse/toolcall.rs       │ tool_call 字段归一化
 └───────────────────────┘

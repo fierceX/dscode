@@ -87,8 +87,14 @@ into `mink-core`.
 
 By default, `AgentRuntime` uses the built-in OpenAI-compatible streaming
 backend configured by `api_key`, `base_url`, model aliases, and OpenAI option
-fields. Embedded Rust applications can replace that backend without forking the
-agent loop:
+fields. The default backend supports `openai_tool_choice` and
+`openai_extra_body` for provider-specific Chat Completions extension fields.
+Use `AgentOptions::with_openai_reasoning_effort`,
+`with_openai_include_usage`, `with_openai_token_param`,
+`with_openai_tool_choice`, and `with_openai_extra_body` to configure the
+built-in backend from embedded Rust code.
+Embedded Rust applications can replace that backend without forking the agent
+loop when the protocol itself is not OpenAI-compatible:
 
 ```rust
 use std::sync::Arc;

@@ -206,6 +206,16 @@ skills = ["python", "debugging"]
 openai_reasoning_effort = "max"          # 设为 "off" 可不发送 reasoning_effort
 openai_include_usage = true              # stream_options.include_usage
 openai_token_param = "max_tokens"        # max_tokens / max_completion_tokens
+openai_tool_choice = "auto"              # auto / none / required，或 JSON 对象
+
+[openai_extra_body]
+custom_boolean = true                    # 兼容端点扩展字段
+custom_budget = 8192
+temperature = 0.2
+
+# 需要嵌套扩展参数时可使用子表：
+# [openai_extra_body.custom_options]
+# enabled = true
 
 [model_aliases]
 flash = "deepseek-v4-flash"
@@ -250,6 +260,7 @@ enabled_tools = ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]  # 工具白�
 openai_reasoning_effort = "max"           # OpenAI-compatible reasoning_effort；"off" 表示不发送
 openai_include_usage = true               # 是否请求 stream usage
 openai_token_param = "max_tokens"         # max_tokens | max_completion_tokens
+openai_tool_choice = "auto"               # auto | none | required，或 JSON 对象
 
 [model_aliases]
 flash = "deepseek-v4-flash"
@@ -262,6 +273,37 @@ approval_mode = "yolo"                    # yolo | write | always-ask
 [tools.approval]
 Bash = "prompt"                           # allow | deny | prompt
 Read = "allow"
+```
+
+`openai_extra_body` 会合并到默认 OpenAI-compatible `/chat/completions` 请求体中，用于
+兼容端点的扩展参数，例如采样参数、结构化输出参数、模型特定开关和嵌套选项等。为避免破坏
+agent 协议，`model`、`messages`、`stream`、`tools`、`tool_choice`、`max_tokens` 和
+`max_completion_tokens` 不会被 `openai_extra_body` 覆盖；工具策略请使用
+`openai_tool_choice`。
+
+通用示例：
+
+```toml
+openai_reasoning_effort = "off"
+openai_tool_choice = "auto"
+
+[openai_extra_body]
+custom_boolean = true
+custom_budget = 8192
+min_p = 0.05
+```
+
+嵌套扩展参数示例：
+
+```toml
+openai_reasoning_effort = "off"
+openai_tool_choice = "auto"
+
+[openai_extra_body]
+custom_budget = 4096
+
+[openai_extra_body.custom_options]
+enabled = true
 ```
 
 项目级 `.minkrc` 覆盖用户级，CLI 参数覆盖所有文件设置。
@@ -560,8 +602,32 @@ redb 只是示例依赖，业务可替换为其他同步嵌入式数据库。
 
 ### Rust 嵌入式自定义 LLM backend
 
-默认 LLM backend 是 OpenAI-compatible streaming client。Rust 嵌入时可以由业务服务注入
+默认 LLM backend 是 OpenAI-compatible streaming client，可通过 `openai_extra_body` 和
+`openai_tool_choice` 适配大多数 Chat Completions 兼容端点。Rust 嵌入时也可以由业务服务注入
 自己的后端，支持私有化部署、内网网关、自定义鉴权、非 HTTP transport 或模型厂商 SDK：
+
+```rust
+use std::collections::BTreeMap;
+use mink::prelude::{AgentOptions, AgentRuntime, TokenParamKind};
+use serde_json::json;
+
+let runtime = AgentRuntime::start_with_options(
+    AgentOptions::new("/tmp/mink-session", ".")
+        .with_model("local")
+        .with_openai_reasoning_effort("high")
+        .with_openai_include_usage(false)
+        .with_openai_token_param(TokenParamKind::MaxCompletionTokens)
+        .with_openai_tool_choice("auto")
+        .with_openai_extra_body(BTreeMap::from([
+            ("custom_boolean".to_string(), json!(true)),
+            ("custom_budget".to_string(), json!(8192)),
+        ])),
+).await?;
+```
+
+如果兼容端点不接受 `reasoning_effort`，可使用
+`without_openai_reasoning_effort()` 禁止发送该字段。非 OpenAI-compatible 协议再使用自定义
+LLM backend：
 
 ```rust
 use std::sync::Arc;
