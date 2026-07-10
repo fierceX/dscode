@@ -3,6 +3,7 @@ use grep_printer::StandardBuilder;
 use grep_regex::RegexMatcher;
 use grep_searcher::{BinaryDetection, SearcherBuilder};
 use ignore::overrides::OverrideBuilder;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 const MAX_OUTPUT_BYTES: usize = 100_000;
@@ -17,10 +18,10 @@ pub fn glob(pattern: &str, path: &str, max_files: usize) -> Result<String> {
         .build()
         .map_err(|e| anyhow!("Error: invalid glob pattern '{pattern}': {e}"))?;
 
-    let walker = ignore::WalkBuilder::new(base)
-        .standard_filters(true)
-        .overrides(overrides)
-        .build();
+    let mut walk_builder = ignore::WalkBuilder::new(base);
+    configure_search_walker(&mut walk_builder);
+    walk_builder.overrides(overrides);
+    let walker = walk_builder.build();
 
     let mut results = Vec::new();
     let mut total_bytes = 0usize;
@@ -67,7 +68,15 @@ pub fn glob(pattern: &str, path: &str, max_files: usize) -> Result<String> {
         ));
     }
 
+    if results.is_empty() {
+        results.extend(format_empty_glob_fallback(pattern, base));
+    }
+
     Ok(results.join("\n"))
+}
+
+fn configure_search_walker(builder: &mut ignore::WalkBuilder) {
+    builder.standard_filters(true).parents(false);
 }
 
 fn build_rg_overrides(
@@ -89,6 +98,45 @@ fn display_search_path(path: &Path) -> String {
         .to_string()
 }
 
+fn format_empty_glob_fallback(pattern: &str, base: &Path) -> Vec<String> {
+    const MAX_ROOT_ENTRIES: usize = 50;
+
+    let mut lines = vec![format!("... no files matched pattern '{pattern}'")];
+    let mut entries = match fs::read_dir(base) {
+        Ok(entries) => entries
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let file_type = entry.file_type().ok()?;
+                let mut name = entry.file_name().to_string_lossy().to_string();
+                if file_type.is_dir() {
+                    name.push('/');
+                }
+                Some((!file_type.is_dir(), name))
+            })
+            .collect::<Vec<_>>(),
+        Err(err) => {
+            lines.push(format!(
+                "... unable to list search root '{}': {err}",
+                display_search_path(base)
+            ));
+            return lines;
+        }
+    };
+
+    entries.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    lines.push(format!("... search root '{}':", display_search_path(base)));
+    for (_, name) in entries.iter().take(MAX_ROOT_ENTRIES) {
+        lines.push(format!("...   {name}"));
+    }
+    if entries.len() > MAX_ROOT_ENTRIES {
+        lines.push(format!(
+            "...   ... {} more entries",
+            entries.len() - MAX_ROOT_ENTRIES
+        ));
+    }
+    lines
+}
+
 pub fn grep(
     pattern: &str,
     path: &str,
@@ -106,7 +154,7 @@ pub fn grep(
     let base = Path::new(path);
 
     let mut walk_builder = ignore::WalkBuilder::new(base);
-    walk_builder.standard_filters(true);
+    configure_search_walker(&mut walk_builder);
     if !file_glob.is_empty() {
         let overrides = build_rg_overrides(base, file_glob)
             .map_err(|e| anyhow!("Error: invalid glob '{file_glob}': {e}"))?
@@ -391,6 +439,74 @@ mod tests {
     }
 
     #[test]
+    fn glob_matches_directory_prefixed_single_level_pattern() {
+        let dir = temp_dir("glob-dir-prefix");
+        fs::create_dir_all(dir.join("data/nested")).unwrap();
+        fs::create_dir_all(dir.join("other")).unwrap();
+        fs::write(dir.join("data/a.md"), "a\n").unwrap();
+        fs::write(dir.join("data/nested/b.md"), "b\n").unwrap();
+        fs::write(dir.join("other/a.md"), "other\n").unwrap();
+
+        let result = glob("data/*.md", &dir.display().to_string(), 5000).unwrap();
+
+        assert!(result.contains("data/a.md"), "{result}");
+        assert!(!result.contains("data/nested/b.md"), "{result}");
+        assert!(!result.contains("other/a.md"), "{result}");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn glob_pattern_is_relative_to_search_path() {
+        let dir = temp_dir("glob-path-relative");
+        fs::create_dir_all(dir.join("data")).unwrap();
+        fs::write(dir.join("data/a.md"), "a\n").unwrap();
+
+        let data_root = dir.join("data");
+
+        let result = glob("*.md", &data_root.display().to_string(), 5000).unwrap();
+        assert!(result.contains("data/a.md"), "{result}");
+
+        let repeated_prefix = glob("data/*.md", &data_root.display().to_string(), 5000).unwrap();
+        assert!(
+            repeated_prefix.contains("no files matched pattern 'data/*.md'"),
+            "pattern is relative to path and should not match repeated prefix: {repeated_prefix}"
+        );
+        assert!(repeated_prefix.contains("a.md"), "{repeated_prefix}");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn glob_ignores_parent_gitignore_rules() {
+        let parent = temp_dir("glob-parent-ignore");
+        let workspace = parent.join("workspace");
+        fs::create_dir_all(workspace.join("data")).unwrap();
+        fs::write(parent.join(".gitignore"), "data/\n").unwrap();
+        fs::write(workspace.join("data/a.md"), "a\n").unwrap();
+
+        let result = glob("data/*.md", &workspace.display().to_string(), 5000).unwrap();
+
+        assert!(result.contains("data/a.md"), "{result}");
+
+        fs::remove_dir_all(&parent).ok();
+    }
+
+    #[test]
+    fn glob_directory_prefixed_pattern_overrides_local_gitignore_like_rg() {
+        let dir = temp_dir("glob-dir-prefix-ignore");
+        fs::create_dir_all(dir.join("data")).unwrap();
+        fs::write(dir.join(".gitignore"), "data/\n").unwrap();
+        fs::write(dir.join("data/a.md"), "a\n").unwrap();
+
+        let result = glob("data/*.md", &dir.display().to_string(), 5000).unwrap();
+
+        assert!(result.contains("data/a.md"), "{result}");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn glob_plain_pattern_matches_file_names_recursively_like_rg() {
         let dir = temp_dir("glob-plain");
         fs::create_dir_all(dir.join("docs/specs")).unwrap();
@@ -421,13 +537,20 @@ mod tests {
     }
 
     #[test]
-    fn glob_empty_result_matches_rg_empty_stdout() {
+    fn glob_empty_result_includes_root_fallback() {
         let dir = temp_dir("glob-empty");
         fs::create_dir_all(&dir).unwrap();
+        fs::create_dir_all(dir.join("data")).unwrap();
+        fs::write(dir.join("type_result.json"), "{}\n").unwrap();
 
         let result = glob("*.docx", &dir.display().to_string(), 5000).unwrap();
 
-        assert!(result.is_empty(), "{result}");
+        assert!(
+            result.contains("no files matched pattern '*.docx'"),
+            "{result}"
+        );
+        assert!(result.contains("data/"), "{result}");
+        assert!(result.contains("type_result.json"), "{result}");
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -560,6 +683,29 @@ mod tests {
         assert!(!result.contains("nested/data.md"));
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn grep_ignores_parent_gitignore_rules() {
+        let parent = temp_dir("grep-parent-ignore");
+        let workspace = parent.join("workspace");
+        fs::create_dir_all(workspace.join("data")).unwrap();
+        fs::write(parent.join(".gitignore"), "data/\n").unwrap();
+        fs::write(workspace.join("data/a.md"), "secret\n").unwrap();
+
+        let result = grep(
+            "secret",
+            &workspace.display().to_string(),
+            "data/*.md",
+            None,
+            5000,
+            1000,
+        )
+        .unwrap();
+
+        assert!(result.contains("data/a.md:1:secret"), "{result}");
+
+        fs::remove_dir_all(&parent).ok();
     }
 
     #[test]
