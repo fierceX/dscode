@@ -194,7 +194,7 @@ impl SkillSnapshot {
         });
 
         let mut all = Vec::new();
-        let mut by_name = BTreeMap::new();
+        let mut by_name: BTreeMap<String, LoadedSkill> = BTreeMap::new();
         let mut seen_realpaths = BTreeSet::new();
         let mut warnings = Vec::new();
 
@@ -214,7 +214,16 @@ impl SkillSnapshot {
                 {
                     continue;
                 }
-                if by_name.contains_key(&skill.skill.name) {
+                if let Some(existing) = by_name.get(&skill.skill.name) {
+                    warnings.push(CapabilityWarning {
+                        provider_id: provider.id().to_string(),
+                        message: format!(
+                            "skill '{}' from {} is shadowed by {}",
+                            skill.skill.name,
+                            skill.source.model_display_label(),
+                            existing.source.model_display_label()
+                        ),
+                    });
                     continue;
                 }
                 if matches!(skill.exposure, CapabilityExposure::HostOnly) {
@@ -675,6 +684,34 @@ mod tests {
         assert_eq!(loaded.skill.description, "Local debugging");
         assert!(loaded.skill.content.contains("local body"));
         assert_eq!(loaded.source.level, SourceLevel::Project);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn skill_shadow_warning_is_reported() {
+        let root = temp_root("shadow-warning");
+        let home = root.join("home");
+        let cwd = root.join("workspace");
+        write_skill(
+            &cwd,
+            ".claude/skills/debugging",
+            "---\ndescription: \"Local debugging\"\n---\n\nlocal body",
+        );
+
+        let snapshot =
+            build_default_skill_snapshot(&cwd, &home, "session-1", "session-1", &[]).unwrap();
+
+        let warning = snapshot
+            .warnings
+            .iter()
+            .find(|warning| warning.message.contains("skill 'debugging'"))
+            .expect("debugging shadow warning");
+        assert_eq!(warning.provider_id, "built-in-skills");
+        assert!(
+            warning.message.contains("shadowed by .claude/skills"),
+            "{}",
+            warning.message
+        );
         let _ = fs::remove_dir_all(root);
     }
 

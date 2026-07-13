@@ -908,7 +908,7 @@ artifact、输出截断和每个工具的完整协议以 [工具参考](tools.md
 
 - `http(s)://...`：读取公开 URL，首次 fetch 后缓存到当前 session artifact，后续 selector 从缓存分页；cache 正文缺失时会重新 fetch
 - `artifact://<id>`：读取被截断工具输出
-- `skill://list` / `skill://<name>`：列出或读取可用 skill；列表与读取来自同一 capability snapshot
+- `skill://list` / `skill://list/all` / `skill://<name>` / `skill://<name>/<relative-path>`：列出、诊断或读取可用 skill；列表、正文和 filesystem-backed skill 子资源来自同一 capability snapshot。`skill://all` 是 `skill://list/all` 的兼容别名；built-in/runtime skill 只支持读取正文，不支持子资源
 - `rule://list` / `rule://<name>`：列出或读取可用 rule
 - `session://current`：当前 session 摘要
 - `session://current/stats`：stats JSON
@@ -921,6 +921,7 @@ artifact、输出截断和每个工具的完整协议以 [工具参考](tools.md
 {"path":"https://example.com:20-60"}
 {"path":"artifact://bash-0001:1-120"}
 {"path":"skill://debugging"}
+{"path":"skill://local-guide/references/checklist.md:1-40"}
 {"path":"session://current/messages:1-40"}
 ```
 
@@ -997,7 +998,7 @@ mink --list-skills
 ### 加载机制
 
 - Skill 通过 `.minkrc` 的 `skills` 字段或 `--config "skills=[\"name\"]"` 加载，加载后在 system prompt 的 `<selected-skills>` 段嵌入 SKILL.md 全文
-- `Read skill://<name>` 在运行时按需读取当前 capability snapshot 中的同一份 skill 视图，不修改后续轮次的 system prompt
+- `Read skill://<name>` 在运行时按需读取当前 capability snapshot 中的同一份 skill 视图，不修改后续轮次的 system prompt；filesystem-backed skill 可通过 `skill://<name>/<relative-path>` 读取同目录子资源
 - 内置技能即使在离线环境也可用（编译时已嵌入）
 
 ### 能力视图

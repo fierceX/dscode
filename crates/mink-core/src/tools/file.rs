@@ -1412,6 +1412,25 @@ mod tests {
     }
 
     #[test]
+    fn read_skill_resource_allows_trailing_slash() {
+        let ctx = temp_tool_context("skill-trailing-slash");
+        let result =
+            crate::resources::skill::read_skill_resource("skill://debugging/", &ctx).unwrap();
+        assert!(result.contains("# skill://debugging"));
+        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
+    }
+
+    #[test]
+    fn read_skill_resource_rejects_empty_authority_path() {
+        let ctx = temp_tool_context("skill-empty-authority");
+        let err = crate::resources::skill::read_skill_resource("skill:///debugging", &ctx)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("invalid skill resource"), "{err}");
+        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
+    }
+
+    #[test]
     fn read_skill_resource_prefers_filesystem_skill() {
         let mut ctx = temp_tool_context("skill-local");
         let skill_dir = ctx.cwd.join(".claude/skills/debugging");
@@ -1472,6 +1491,90 @@ mod tests {
     }
 
     #[test]
+    fn skill_list_all_includes_model_addressable_and_selected() {
+        let mut ctx = temp_tool_context("skill-list-all");
+        let skill_dir = ctx.cwd.join("skills/hidden-review");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: \"Hidden review\"\nhide: true\n---\n\nUse hidden steps.",
+        )
+        .unwrap();
+        ctx.capability_snapshot = Arc::new(
+            crate::capabilities::CapabilitySnapshot::load_default(
+                &ctx.cwd,
+                &ctx.home,
+                "session-1",
+                "session-1",
+                &["hidden-review".to_string()],
+            )
+            .unwrap(),
+        );
+
+        let result =
+            crate::resources::skill::read_skill_resource("skill://list/all", &ctx).unwrap();
+
+        assert!(result.contains("## Discoverable"));
+        assert!(result.contains("## Addressable"));
+        assert!(result.contains("## Selected"));
+        assert!(result.contains("- hidden-review [skills, model-addressable]: Hidden review"));
+        assert!(result.contains("- hidden-review [skills]: Hidden review"));
+        let alias = crate::resources::skill::read_skill_resource("skill://all", &ctx).unwrap();
+        assert_eq!(result, alias);
+        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
+    }
+
+    #[test]
+    fn skill_list_all_does_not_leak_host_only() {
+        let mut ctx = temp_tool_context("skill-list-all-host-only");
+        let loaded = crate::capabilities::skills::LoadedSkill {
+            skill: crate::capabilities::skills::SkillCapability {
+                name: "host-secret".to_string(),
+                description: "Do not leak this description".to_string(),
+                content: "secret body".to_string(),
+                base_dir: "/secret/base".to_string(),
+                disable_model_invocation: true,
+            },
+            source: crate::capabilities::SourceMeta {
+                provider_id: "test-provider".to_string(),
+                provider_name: "test provider".to_string(),
+                level: crate::capabilities::SourceLevel::Runtime,
+                source_path: None,
+                display_label: Some("test".to_string()),
+            },
+            exposure: crate::capabilities::CapabilityExposure::HostOnly,
+            revision: "rev".to_string(),
+        };
+        let mut by_name = std::collections::BTreeMap::new();
+        by_name.insert("host-secret".to_string(), loaded.clone());
+        ctx.capability_snapshot = Arc::new(crate::capabilities::CapabilitySnapshot {
+            skills: crate::capabilities::SkillSnapshot {
+                all: vec![loaded],
+                by_name,
+                warnings: vec![crate::capabilities::CapabilityWarning {
+                    provider_id: "test-provider".to_string(),
+                    message: "host-only skill 'host-secret' is hidden".to_string(),
+                }],
+                dependency_fingerprint: "deps".to_string(),
+                ..crate::capabilities::SkillSnapshot::default()
+            },
+            context_files: crate::capabilities::ContextFileSnapshot::default(),
+            rules: crate::capabilities::RuleSnapshot::default(),
+            warnings: Vec::new(),
+            dependency_fingerprint: "deps".to_string(),
+        });
+
+        let result =
+            crate::resources::skill::read_skill_resource("skill://list/all", &ctx).unwrap();
+
+        assert!(result.contains("host-only skill 'host-secret' is hidden"));
+        assert!(!result.contains("Do not leak this description"), "{result}");
+        assert!(!result.contains("secret body"), "{result}");
+        assert!(!result.contains("/secret/base"), "{result}");
+        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
+    }
+
+    #[test]
     fn host_only_skill_cannot_be_read() {
         let mut ctx = temp_tool_context("skill-host-only");
         let loaded = crate::capabilities::skills::LoadedSkill {
@@ -1516,12 +1619,264 @@ mod tests {
     }
 
     #[test]
-    fn read_skill_resource_rejects_nested_path() {
-        let ctx = temp_tool_context("skill-invalid");
-        let err = crate::resources::skill::read_skill_resource("skill://debugging/extra", &ctx)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("invalid skill resource"), "{err}");
+    fn read_skill_subresource_returns_file_content() {
+        let mut ctx = temp_tool_context("skill-subresource");
+        let skill_dir = ctx.cwd.join("skills/local-guide");
+        fs::create_dir_all(skill_dir.join("references")).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: \"Local guide\"\n---\n\nUse references/details.md.",
+        )
+        .unwrap();
+        fs::write(
+            skill_dir.join("references/details.md"),
+            "alpha\nbeta\ngamma\n",
+        )
+        .unwrap();
+        ctx.capability_snapshot = Arc::new(
+            crate::capabilities::CapabilitySnapshot::load_default(
+                &ctx.cwd,
+                &ctx.home,
+                "session-1",
+                "session-1",
+                &[],
+            )
+            .unwrap(),
+        );
+
+        let result = crate::resources::skill::read_skill_resource(
+            "skill://local-guide/references/details.md",
+            &ctx,
+        )
+        .unwrap();
+
+        assert!(result.contains("# skill://local-guide/references/details.md"));
+        assert!(result.contains("Content-Type: text/markdown"));
+        assert!(result.contains("alpha\nbeta\ngamma"));
+        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
+    }
+
+    #[test]
+    fn read_skill_subresource_applies_line_selector() {
+        let mut ctx = temp_tool_context("skill-subresource-selector");
+        let skill_dir = ctx.cwd.join("skills/local-guide");
+        fs::create_dir_all(skill_dir.join("references")).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: \"Local guide\"\n---\n\nUse references/details.txt.",
+        )
+        .unwrap();
+        fs::write(skill_dir.join("references/details.txt"), "a\nb\nc\nd\n").unwrap();
+        ctx.capability_snapshot = Arc::new(
+            crate::capabilities::CapabilitySnapshot::load_default(
+                &ctx.cwd,
+                &ctx.home,
+                "session-1",
+                "session-1",
+                &[],
+            )
+            .unwrap(),
+        );
+
+        let result = ReadTool
+            .execute(
+                &json!({"path":"skill://local-guide/references/details.txt:6-7"}),
+                &ctx,
+            )
+            .unwrap()
+            .content;
+
+        assert_eq!(result, "a\nb");
+        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
+    }
+
+    #[test]
+    fn read_skill_subresource_rejects_parent_dir() {
+        let mut ctx = temp_tool_context("skill-subresource-parent");
+        let skill_dir = ctx.cwd.join("skills/local-guide");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: \"Local guide\"\n---\n\nbody",
+        )
+        .unwrap();
+        ctx.capability_snapshot = Arc::new(
+            crate::capabilities::CapabilitySnapshot::load_default(
+                &ctx.cwd,
+                &ctx.home,
+                "session-1",
+                "session-1",
+                &[],
+            )
+            .unwrap(),
+        );
+
+        let err =
+            crate::resources::skill::read_skill_resource("skill://local-guide/../secret", &ctx)
+                .unwrap_err()
+                .to_string();
+
+        assert!(err.contains("escapes skill directory"), "{err}");
+        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
+    }
+
+    #[test]
+    fn read_skill_subresource_rejects_encoded_parent_dir() {
+        let mut ctx = temp_tool_context("skill-subresource-encoded-parent");
+        let skill_dir = ctx.cwd.join("skills/local-guide");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: \"Local guide\"\n---\n\nbody",
+        )
+        .unwrap();
+        ctx.capability_snapshot = Arc::new(
+            crate::capabilities::CapabilitySnapshot::load_default(
+                &ctx.cwd,
+                &ctx.home,
+                "session-1",
+                "session-1",
+                &[],
+            )
+            .unwrap(),
+        );
+
+        let err =
+            crate::resources::skill::read_skill_resource("skill://local-guide/%2E%2E/secret", &ctx)
+                .unwrap_err()
+                .to_string();
+
+        assert!(err.contains("escapes skill directory"), "{err}");
+        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
+    }
+
+    #[test]
+    fn read_skill_subresource_rejects_absolute_path() {
+        let mut ctx = temp_tool_context("skill-subresource-absolute");
+        let skill_dir = ctx.cwd.join("skills/local-guide");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: \"Local guide\"\n---\n\nbody",
+        )
+        .unwrap();
+        ctx.capability_snapshot = Arc::new(
+            crate::capabilities::CapabilitySnapshot::load_default(
+                &ctx.cwd,
+                &ctx.home,
+                "session-1",
+                "session-1",
+                &[],
+            )
+            .unwrap(),
+        );
+
+        let err =
+            crate::resources::skill::read_skill_resource("skill://local-guide/%2Ftmp/secret", &ctx)
+                .unwrap_err()
+                .to_string();
+
+        assert!(err.contains("must be relative"), "{err}");
+        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
+    }
+
+    #[test]
+    fn read_skill_subresource_rejects_builtin() {
+        let ctx = temp_tool_context("skill-subresource-builtin");
+        let err = crate::resources::skill::read_skill_resource(
+            "skill://debugging/references/foo.md",
+            &ctx,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("filesystem-backed skills"), "{err}");
+        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
+    }
+
+    #[test]
+    fn read_skill_subresource_rejects_host_only() {
+        let mut ctx = temp_tool_context("skill-subresource-host-only");
+        let loaded = crate::capabilities::skills::LoadedSkill {
+            skill: crate::capabilities::skills::SkillCapability {
+                name: "host-secret".to_string(),
+                description: "Host secret".to_string(),
+                content: "secret body".to_string(),
+                base_dir: "<runtime>".to_string(),
+                disable_model_invocation: true,
+            },
+            source: crate::capabilities::SourceMeta {
+                provider_id: "test".to_string(),
+                provider_name: "test".to_string(),
+                level: crate::capabilities::SourceLevel::Runtime,
+                source_path: None,
+                display_label: Some("test".to_string()),
+            },
+            exposure: crate::capabilities::CapabilityExposure::HostOnly,
+            revision: "rev".to_string(),
+        };
+        let mut by_name = std::collections::BTreeMap::new();
+        by_name.insert("host-secret".to_string(), loaded.clone());
+        ctx.capability_snapshot = Arc::new(crate::capabilities::CapabilitySnapshot {
+            skills: crate::capabilities::SkillSnapshot {
+                all: vec![loaded],
+                by_name,
+                dependency_fingerprint: "deps".to_string(),
+                ..crate::capabilities::SkillSnapshot::default()
+            },
+            context_files: crate::capabilities::ContextFileSnapshot::default(),
+            rules: crate::capabilities::RuleSnapshot::default(),
+            warnings: Vec::new(),
+            dependency_fingerprint: "deps".to_string(),
+        });
+
+        let err =
+            crate::resources::skill::read_skill_resource("skill://host-secret/secret.txt", &ctx)
+                .unwrap_err()
+                .to_string();
+
+        assert!(err.contains("host-only"), "{err}");
+        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_skill_subresource_rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let mut ctx = temp_tool_context("skill-subresource-symlink");
+        let skill_dir = ctx.cwd.join("skills/local-guide");
+        fs::create_dir_all(skill_dir.join("references")).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: \"Local guide\"\n---\n\nbody",
+        )
+        .unwrap();
+        fs::write(ctx.cwd.join("outside.txt"), "secret").unwrap();
+        symlink(
+            ctx.cwd.join("outside.txt"),
+            skill_dir.join("references/outside.txt"),
+        )
+        .unwrap();
+        ctx.capability_snapshot = Arc::new(
+            crate::capabilities::CapabilitySnapshot::load_default(
+                &ctx.cwd,
+                &ctx.home,
+                "session-1",
+                "session-1",
+                &[],
+            )
+            .unwrap(),
+        );
+
+        let err = crate::resources::skill::read_skill_resource(
+            "skill://local-guide/references/outside.txt",
+            &ctx,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("escapes skill directory"), "{err}");
         let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
     }
 

@@ -119,7 +119,7 @@ impl Builder {
              3. Path discovery → Glob (not find/ls/fd/tree in Bash)\n\
              4. File writes → Write (not shell redirection or heredoc)\n\
              5. Code edits → Edit with patch parameter (not sed/awk)\n\
-             6. Skills → Read with `skill://<name>` (first check skill-index section)\n\
+             6. Skills → Read with `skill://<name>`; skill-owned reference files use `skill://<name>/<relative-path>` (first check skill-index section)\n\
              7. Build/test/git/package-manager → Bash ✓ (shell-only operations)\n\
              8. All other shell needs → Bash ✓ (last resort)\n\
              WARNING: Bash commands matching patterns 1-6 above are DETECTED and REJECTED at runtime.\n\
@@ -132,7 +132,7 @@ impl Builder {
              - Use Glob and Grep for one pattern at a time.\n\
              - Grep supports a context parameter to identify the target range. Before editing, call Read on that range to get the @PATH#TAG snapshot header.\n\
              - Use multiple tool calls in one response when they are independent.\n\
-             - For skills, use Read with `skill://<name>` (see skill-index for available skills).\n\
+             - For skills, use Read with `skill://<name>` (see skill-index for available skills). For files referenced by a skill, use `skill://<name>/<relative-path>` rather than guessing local paths.\n\
              \n\
              EDIT PROTOCOL (anchored patch):\n\
              - Edit only modifies existing files. Use Write to create or fully replace a file.\n\
@@ -366,8 +366,8 @@ impl Builder {
         let mut sections = Vec::new();
         for resolved in &self.skill_snapshot.selected {
             let full = format!(
-                "Base directory: {}\n\n{}",
-                resolved.info.base_dir, resolved.content
+                "Base directory: {}\nFor files referenced by this skill, use Read with `skill://{}/<relative-path>`.\n\n{}",
+                resolved.info.base_dir, resolved.info.name, resolved.content
             );
             sections.push(wrap_section("skill", &full, Some(&resolved.info.name)));
         }
@@ -649,6 +649,13 @@ mod tests {
     }
 
     #[test]
+    fn build_system_prompt_mentions_skill_subresources() {
+        let prompt = test_builder().build_system_prompt().unwrap();
+        assert!(prompt.contains("skill://<name>/<relative-path>"));
+        assert!(prompt.contains("rather than guessing local paths"));
+    }
+
+    #[test]
     fn selected_model_addressable_skill_enters_prompt() {
         let root = temp_root("selected-hidden");
         let home = root.join("home");
@@ -678,6 +685,12 @@ mod tests {
         assert!(prompt.contains("<selected-skills>"));
         assert!(prompt.contains("<skill name=\"hidden-review\">"));
         assert!(prompt.contains("Hidden body"));
+        assert!(
+            prompt.contains(
+                "For files referenced by this skill, use Read with `skill://hidden-review/<relative-path>`."
+            ),
+            "{prompt}"
+        );
         assert!(!prompt.contains("- hidden-review: Hidden review"));
         let _ = fs::remove_dir_all(root);
     }

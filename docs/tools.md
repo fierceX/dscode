@@ -37,7 +37,7 @@ ToolCallEvent
 
 - `http(s)://...`：读取公开 URL，首次 fetch 后写入当前 session artifact cache，后续同 URL 的 selector 从缓存分页；如果 cache index 命中但正文 artifact 丢失，会重新 fetch 并写入新缓存。
 - `artifact://<id>`：读取被截断工具输出。
-- `skill://list` / `skill://<name>`：列出或读取可用 skill；列表与读取来自同一 capability snapshot。
+- `skill://list` / `skill://list/all` / `skill://<name>` / `skill://<name>/<relative-path>`：列出、诊断或读取可用 skill；列表、正文和子资源读取来自同一 capability snapshot。`skill://all` 是 `skill://list/all` 的兼容别名；只有 filesystem-backed skill 支持 `<relative-path>` 子资源。
 - `rule://list` / `rule://<name>`：列出或读取可用 rule。
 - `session://current`：读取当前 session 摘要。
 - `session://current/stats`：读取当前 session stats JSON。
@@ -138,7 +138,7 @@ cargo build --release
 - 注入 VFS 后，普通路径读取虚拟文件并显示只读标记，不生成 snapshot；selector 和 `:raw` 语义保持一致。
 - `http(s)://...` 可读取公开 URL。URL 输出不生成 editable snapshot；首次读取会保存为 `ReadUrl` artifact cache，后续同 URL selector 从缓存分页，不重复 fetch。损坏的 URL cache index 行会被跳过；cache 正文缺失时会重新 fetch。
 - `artifact://<id>` 可读取被截断工具输出，支持同样的行 selector。
-- `skill://list` / `skill://<name>` 可读取可用 skills，列表与读取来自同一 capability snapshot。
+- `skill://list` / `skill://list/all` / `skill://<name>` / `skill://<name>/<relative-path>` 可读取可用 skills，列表、诊断视图、正文和 filesystem-backed skill 子资源来自同一 capability snapshot。`skill://all` 是 `skill://list/all` 的兼容别名；built-in/runtime skill 只支持读取正文，不支持子资源。
 - `rule://list` / `rule://<name>` 可读取可用 rules。
 - `session://current`、`session://current/stats`、`session://current/messages`、`session://current/artifacts` 可读取当前 session 状态。
 - 默认可读整文件，但大文件会受到工具结果上限保护。
