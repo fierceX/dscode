@@ -351,7 +351,6 @@ fn system_prompt_contains_causal_reasoning() {
             crate::capabilities::ContextFileSnapshot::default(),
         ),
         rule_snapshot: std::sync::Arc::new(crate::capabilities::RuleSnapshot::default()),
-        summary_file: std::path::PathBuf::from("/tmp/_nonexistent_summary"),
         plan_file: std::path::PathBuf::from("/tmp/_nonexistent_plan"),
         plan_draft_file: std::path::PathBuf::from("/tmp/_nonexistent_draft"),
         mission_file: None,

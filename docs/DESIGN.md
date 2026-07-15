@@ -78,7 +78,7 @@ while turn < max_turns {
     
     match stop.as_str() {
         "tool_use" | "tool_calls" => {
-            messages = store.lines().await?;  // 刷新
+            messages = compaction.active_messages().await?;  // 刷新活跃投影
             continue;  // 继续下一轮 LLM 调用
         }
         "end_turn" | "stop" => return Stop,
@@ -88,7 +88,8 @@ while turn < max_turns {
 }
 ```
 
-`messages` 在 tool_use 路径末尾通过 `store.lines()` 刷新，确保下一轮 LLM 调用看到最新工具结果、信号注入消息、计划变更和子代理结果。
+`messages` 在 tool_use 路径末尾通过 `compaction.active_messages()` 刷新，确保下一轮 LLM 调用
+看到最新工具结果、信号注入消息、计划变更和子代理结果，同时不会把冷历史重新加载进模型上下文。
 
 ---
 
@@ -96,7 +97,7 @@ while turn < max_turns {
 
 ### 三层分离
 
-内存模型分为三个独立的部分，各自有不同的生命周期和变更路径：
+内存模型分为四个独立的部分，各自有不同的生命周期和变更路径：
 
 #### 1. ImmutablePrefix（不变前缀）
 
@@ -112,10 +113,11 @@ pub struct ImmutablePrefix {
 }
 ```
 
-**变更路径**（只有三条，每条都主动清除 fingerprint 缓存）：
-- 上下文压缩后（新摘要 → 新的 system prompt）
+**变更路径**：
 - PlanClear/PlanConfirm 后（计划内容变更）
 - SubAgent fork 模式继承
+
+压缩摘要始终作为活跃消息投影中的动态 system message，不修改 immutable system/tools prefix。
 
 **fingerprint 校验**（`verify_fingerprint()`）：重新计算指纹并与缓存值比对。如果 verbose 模式下发现不一致，直接 panic，防止缓存偏移 bug 潜入生产。
 
@@ -123,17 +125,24 @@ pub struct ImmutablePrefix {
 
 `src/session/store.rs`
 
-JSONL 格式的持久化消息存储。两类操作：
+JSONL 格式的持久化消息存储。正常运行只有追加操作：
 
 ```rust
-// 追加（正常路径——O(1)，不读盘）
-Append: OpenOptions::append → write → flush → 更新内存缓存
+// 追加（正常路径——O(1)，只检查文件尾部）
+Append: repair tail → single-buffer line write → flush → 更新内存缓存
 
-// 截断（压缩路径——O(n)，重写文件）
-Trim: 读取全量 → 保留末尾 N 条 → 写回 → 重建缓存
 ```
 
-**内存缓存**：`cache: RwLock<Option<Vec<Value>>>`，延迟加载，append 时增量更新，trim 时重建。缓存失效策略：写操作从不直接将缓存设为 None，而是保持一致性。
+**内存缓存**：`cache: RwLock<Option<CachedLines>>`，其中 `CachedLines` 保存全局消息起点
+`start` 和对应 `lines`。首次正常请求通过 `lines_from(active_start)` 流式解析并校验 JSONL，
+只保留和缓存活跃后缀；append 增量追加到该缓存。压缩状态提交成功后按新的 `active_start` 裁剪缓存，
+因此冷历史只保留在磁盘，不随 session 生命周期持续占用运行时内存。
+
+`lines()` 仍可显式读取完整历史，但当缓存已经裁剪时不会用完整结果替换活跃缓存。
+`last_assistant_message()` 优先从活跃缓存查找，必要时流式扫描磁盘，只保留最后一条 assistant，
+避免 SDK final 或子代理结果收集重新加载完整 session。
+
+续写前只反向扫描最后一条未换行记录：若它是完整 JSON，则先补换行；若它是崩溃留下的半截 JSON，则截断到上一条完整记录。新 JSON 与换行在同一个缓冲区中写入，避免再次制造可被后续记录拼接的尾部。
 
 **消息格式**：
 
@@ -167,60 +176,52 @@ assistant 消息使用 content 数组承载多种内容类型（thinking/text/to
 
 artifact 跟随 session 生命周期，不跨 session 共享。
 
+`ArtifactManager` 初始化时扫描有效 index 记录的数字后缀，从最大序号加一继续分配。
+正文文件使用 `create_new` 独占创建；即使存在未写入 index 的孤立文件也只会继续取下一个 ID，
+不会覆盖恢复或 fork 继承的历史 artifact。
+
 `Read` URL cache 复用同一 artifact 索引能力。缓存查找按 `tool + source` 反向扫描，跳过损坏的 index 行；如果记录存在但正文 artifact 已丢失，调用方会忽略该命中并重新 fetch。
 
 ---
 
 ## 主题三：上下文压缩
 
-### 触发条件
+### 显式策略参数
 
-```rust
-// src/session/compaction.rs
-fn should_compact(&self, trigger: &str, context_tokens: usize) -> bool {
-    if trigger == "plan_clear" || trigger == "plan_confirm" {
-        return true;  // 计划操作强制压缩
-    }
-    let pct = (context_tokens * 100) / self.config.max_context_tokens;
-    pct >= self.compact_pct as usize  // 默认 85%
-}
-```
+压缩行为由以下显式配置直接控制，不根据上下文窗口推断策略档位：
 
-`compact_pct` 通过 `.minkrc` 的 `context_compact_pct` 配置，默认 85%。
+| 参数 | 默认值 | 作用 |
+|------|-------:|------|
+| `context_compact_pct` | 94 | 自动压缩百分比 |
+| `context_reserve_tokens` | 64000 | 主请求响应预留，同时限制主请求 `max_tokens` |
+| `context_compact_tail_tokens` | 256000 | 压缩后原样保留的热尾部目标 |
+| `context_compact_max_output_tokens` | 8192 | 摘要请求输出上限 |
+| `context_compact_input_reduction` | false | 是否精简摘要请求输入 |
 
-### 三级 Tier
+自动触发点取“窗口百分比”和“窗口减去响应预留”中较早者。手动、preflight、overflow 和计划变更
+会绕过百分比判断，但使用同一个热尾部和摘要实现。`max_context_tokens=0` 禁用 auto/preflight
+压缩和本地请求预算上限，但保留手动压缩。
 
-`CompactionTier::from_ratio()` 根据当前上下文使用率选择压缩等级：
+### 非破坏式投影
 
-| 使用率 | Tier | Keep 比例 | 行数限制 |
-|-------|------|:---------:|:--------:|
-| <70% | Conservative（不触发） | 20% | — |
-| 70-80% | Aggressive（不触发） | 10% | — |
-| 80-95% | ForceSummary | 5% | — |
-| ≥95% | Emergency | 5% | 1-5 行 |
+`conversation.jsonl` 始终保存完整消息。压缩在 `context-state.json` 中提交
+`active_start + summary`，模型请求只投影动态摘要和边界后的热尾部。
+边界只选择字符串 user 消息或 assistant 消息，禁止从 tool result 开始，从而保持
+tool call/result 配对。`context-state.json` 是活跃投影状态的唯一来源；状态损坏或边界超过历史长度时直接报错。
+`context-state.json` 使用同目录临时文件写完后 rename，替换成功后才更新进程内状态并裁剪
+ConversationStore 的活跃缓存。主 turn、tool_use 循环刷新和压缩评估统一使用
+`active_messages()` / `lines_from(active_start)` 构建模型上下文。
 
-注意：默认 compact_pct=85%，所以首次压缩落在 ForceSummary 区间（80-95%）。Conservative 和 Aggressive 仅在 `context_compact_pct` 设为更低值时可达。
+### 摘要生成与输入降噪
 
-### turn 对齐截断
+所有压缩都将被折叠的活跃消息送入当前 LLM，并与已有摘要合并：
 
-`compact_turn_keep()` 按 user 消息边界截断，保留末尾符合 keep_ratio 比例的用户轮次。截断后必须从 user 消息开始：
-
-```rust
-for i in (0..lines.len()).rev() {
-    if found >= target { break; }
-    keep += 1;
-    if is_user[i] { found += 1; }
-}
-```
-
-### 摘要生成
-
-截断掉的会话被送入 LLM 生成摘要。摘要指令包含 fold marker：
+“当前 LLM”由调用方的活动模型决定：turn 内压缩使用当前 `LlmClient` 的真实模型名和别名，
+手动压缩使用 `OrchActor::resolve_active()` 的结果。摘要请求统一通过 runtime 注入的
+`Arc<dyn LlmBackend>` 发送。
 
 ```
-[CONVERSATION HISTORY SUMMARY — earlier turns compacted for context efficiency]
-
-Update the existing summary snapshot using the messages above.
+Merge the conversation turns above with the previous context snapshot.
 Use exactly these fields:
 Task focus:
 Latest request:
@@ -229,15 +230,47 @@ Tool evidence:
 Reflections:
 ```
 
-生成的摘要写入 `summary.txt`，在下一次 `build_system_prompt()` 时被读取为 `<context-snapshot>` 段。
+摘要请求使用独立的最小 system prompt，不加载主 agent 的 skills、rules、工具定义和 mission。
+输出预算由 `context_compact_max_output_tokens` 独立控制。摘要结果统一作为动态 system message，
+保持 immutable system/tools prefix；`summary.txt` 仅作为 session 元数据和人工检查缓存。
+
+开启 `context_compact_input_reduction` 时，`compaction_input.rs` 先把被折叠消息转换为紧凑
+transcript：用户和 assistant text 保留，thinking 删除，工具参数限制为 1000 字符，工具结果限制为
+2000 字符并保留头尾、错误/失败/退出状态和 artifact 证据。该转换只影响摘要请求，不修改
+`conversation.jsonl`、热尾部或历史资源。
+
+摘要输出按不透明文本处理。提示词要求固定字段，运行时只校验请求成功、正常 stop 和清洗后非空，
+不解析或强制校验字段标题。
 
 ### 防护措施
 
-**同轮防护**（`turn.rs:compacted_this_turn`）：同一用户输入中的多次 LLM 调用（tool_use 循环）只压缩一次。
+**同轮防护**（`TurnCompactor::compacted_this_turn`）：同一用户输入中的多次 LLM 调用（tool_use 循环）只压缩一次。
 
-**最小收益检查**（`compaction.rs:96-105`）：如果压缩节省的 token 不足当前总量的 10%，跳过压缩。防止小上下文场景下的无意义压缩。
+**最小收益检查**（`CompactionEngine::evaluate_and_compact`）：如果压缩节省的 token 不足当前总量的 10%，跳过压缩。防止小上下文场景下的无意义压缩。
 
-**Preflight 紧急压缩**（`turn.rs:128-148`）：基于 messages 的实际字节估算，如果 >95% max_context，在发送 LLM 请求前触发 Emergency 压缩。
+**Preflight 预算检查**：按转换后的 OpenAI messages、system prompt 和 tools schema 估算输入。
+超过 `max_context_tokens - effective_max_tokens` 时强制压缩；压缩后仍超预算则不发送请求。
+
+**摘要预算检查**：摘要请求按最小 system prompt、原始或降噪后的输入和独立输出预算估算；超出
+`max_context_tokens` 时在发送前失败，不依赖 provider 隐式截断。
+
+**Provider overflow 恢复**：如果 provider 在尚未输出文本、thinking 或工具调用前明确返回 context
+overflow，并且本轮尚未压缩，则执行一次相同的 LLM 压缩并重试一次；第二次失败直接返回重试请求的错误，
+不循环恢复。
+
+### 已知限制
+
+- `session://current/history` 会省略 thinking，并把工具结果缩减为状态和行数；仅存在于工具输出中的
+  细节无法从该 transcript 召回，必须直接读取原始 `conversation.jsonl` 或相关 artifact。
+- 最小收益检查只计算被折叠活跃消息的规模，没有把新摘要及被替换旧摘要计入净收益，因此不能保证
+  压缩后的活跃投影一定缩小或满足主请求预算。
+- runtime 组合校验尚未保证摘要输入至少容纳固定 prompt 和最小消息。极端的
+  `context_compact_max_output_tokens` 配置可能通过启动校验，却在首次摘要请求前必然失败。
+- Rust `AgentOptions` 对百分比和 token 参数执行静默钳制，调用方的无效值不会进入统一校验并得到明确错误。
+- provider overflow 分类包含宽泛的 `too many tokens` 文本，可能把 token 速率限制误判为上下文溢出，
+  从而触发无意义压缩和重试。
+- `PlanConfirm` / `PlanClear` 的压缩与文件写入错误，以及 `AgentRuntime::compact()` 的执行结果，无法
+  完整传播给调用方；命令确认协议尚未统一承载副作用执行结果。
 
 ---
 
@@ -413,7 +446,7 @@ Phase 4: stop = "tool_use"
   │   ├─ 引擎内部检查冷却 → 跳过注入
   │   ├─ Inject → store.add_user(...) + 激活冷却 + 恢复首步守卫
   │   └─ Abort  → 返回 Failed，中断本轮（绕过冷却）
-  └─ continue → 下一轮 LLM: messages = store.lines()（包含注入消息）
+  └─ continue → 下一轮 LLM: messages = compaction.active_messages()（包含注入消息）
 ```
 
 不在系统 prompt 中注入（保护前缀缓存），也不追加到用户输入末尾。而是作为一条独立的 User 消息（含 `[System note: ...]`）写入对话存储，LLM 在下一轮调用时自然看到。
@@ -648,9 +681,18 @@ CapabilitySnapshot
 - `session://current/stats`
 - `session://current/messages`
 - `session://current/messages/all`
+- `session://current/history`
 - `session://current/artifacts`
 
-这些资源默认 immutable，不产生可编辑 snapshot，也不经过 VFS。
+`session://current/history` 是从完整 `conversation.jsonl` 生成的有损 Markdown transcript：
+保留 user/assistant 文本，省略 thinking，将 tool call/result 配对折叠成状态行，不保留完整工具结果正文。
+它不暴露物理 session 路径，可先用
+`Grep(path="session://current/history")` 定位，再用 `Read` selector 读取命中范围。
+Grep 可搜索任意 registered resource 的文本；resource Grep 本身不接受 selector，避免相对行号
+被误认为完整资源行号。
+
+这些资源是只读内容，不产生可编辑 snapshot，也不经过 VFS；current session 资源会随会话更新，
+不声明为 immutable。
 
 ### Anchored Edit
 
@@ -740,6 +782,13 @@ OpenAI API 只在最后一个 chunk（标记为 `[DONE]`）中提供完整的 us
 `Arc<dyn LlmBackend>`，主代理、子代理和自动压缩共用同一个 backend trait，不复制 agent loop、
 tool runner、session 写入或 usage 统计。
 
+runtime 在构建阶段创建或接收共享 backend。主代理、子代理和压缩分别构造带有不同
+`LlmPurpose` 的 `LlmRequest`，并提交到该 backend。
+`TurnExecutor` 创建子代理协调器时，会从父配置克隆一份 child config，并把 `model` 设置为当前
+活动 `LlmClient` 的别名或真实模型名；存在别名时同时写入该别名到真实模型的映射，保证配置自洽。
+每个子代理使用这份显式配置构建 context，因此模型切换后的活动模型和父 runtime 注入的 backend
+会同时传递到子代理。
+
 `BackendLlmClient` 负责把当前上下文转换为 `LlmRequest`：
 
 - `model`：经过 `ModelResolver` 解析后的真实 provider 模型名。
@@ -777,6 +826,7 @@ CLI 默认使用 `project`，Python SDK 默认使用 `home`，Rust 嵌入式 `Ag
 ├── events.jsonl          ← 事件日志（每行一个事件）
 ├── session.json          ← session 元数据：alias、title、cwd、时间戳
 ├── summary.txt           ← 压缩后的上下文快照
+├── context-state.json    ← 活跃历史边界和滚动摘要
 ├── plan.md               ← 确认后的执行计划
 ├── plan.draft            ← 草稿计划
 ├── stats.json            ← Token 用量统计
@@ -791,11 +841,17 @@ CLI 默认使用 `project`，Python SDK 默认使用 `home`，Rust 嵌入式 `Ag
 
 ### JSONL 约束
 
-**追加**：`append_line()` 使用 `OpenOptions::append` 写入单行，并通过 store 内部写锁与 `trim_keep_last()` 串行化。同时更新内存缓存。
+**追加**：`append_line()` 使用 `OpenOptions::append`，通过 store 内部写锁串行化。写入前修复
+未换行尾记录，然后以包含换行的单缓冲区追加，并同步更新内存缓存。
 
-**读取**：`lines()` 延迟加载缓存，首次读盘后缓存到 `RwLock<Option<Vec<Value>>>`。如果文件末尾存在没有换行的半截 JSONL，会跳过这条不完整记录；已经以换行结束的坏 JSONL 仍按错误处理，避免静默吞掉真实损坏。
+**读取**：模型上下文使用 `lines_from(active_start)`。恢复已有 session 时流式解析并校验完整 JSONL，
+但只保留活跃边界后的消息并缓存为 `CachedLines { start, lines }`；后续 turn 直接复用该后缀。
+`lines()` 只用于显式完整历史读取，且不会扩大已经裁剪的活跃缓存。如果文件末尾存在没有换行的
+半截 JSONL，会跳过这条不完整记录；已经以换行结束的坏 JSONL 仍按错误处理，避免静默吞掉真实损坏。
 
-**截断**：`trim_keep_last(k)` 是压缩历史文件的路径。读入全量 → 截取末尾 k 条 → 覆写 → 重建缓存，并与追加写入共用同一把写锁。
+**压缩**：不重写 JSONL。`CompactionEngine` 从活跃缓存读取 `active_start` 后缀，选择新的安全边界；
+状态文件通过临时文件和 rename 原子替换，成功后同时推进内存状态并裁剪 store 缓存。
+session 恢复和重放仍可按需读取全部原始消息；`session://current/history` 提供有损检索视图。
 
 ### Session 恢复
 
@@ -813,39 +869,44 @@ CLI 默认使用 `project`，Python SDK 默认使用 `home`，Rust 嵌入式 `Ag
 
 ```rust
 pub async fn new(parent_ctx, session_id, fork) -> Result<Self> {
-    // 1. 创建子 session 目录 + 文件
-    // 2. fork 模式：复制父会话 conversation/summary/plan
-    // 3. 创建独立的 ConversationStore + StatsTracker
-    // 4. 创建独立的 CompactionEngine
+    // 1. 在父 session 的 subagents/<id>/ 创建 isolated home
+    // 2. fork 模式在 runtime 初始化前递归克隆父 session
+    // 3. 重置 child session identity、events、stats 和 usage 文件
+    // 4. 从 isolated home 正常初始化 store、compaction 和 artifacts
     // 5. 创建 linked child cancel token（父取消→子取消，子取消不影响父）
-    // 6. 独立的 immutable_prefix
 }
 ```
 
 ### 两种模式
 
-**独立模式（默认）**：子 session 从空白上下文开始。继承父 session 的模型、API URL、工具集，但不继承对话历史。
+**独立模式（默认）**：在父 session 的 `subagents/<session_id>/` 创建空的 isolated home。
+继承父 session 的模型、API URL、工具集和 capability snapshot，但不继承 session 历史。
 
-**Fork 模式**：复制父 session 的 conversation.jsonl、summary.txt、plan.md 到子 session 目录。子代理从父代理离开的地方继续执行。用于需要父会话上下文的延续性任务。
+**Fork 模式**：在构建子 runtime 之前递归克隆父 session 目录，跳过父 session 已有的
+`subagents/`。克隆后清除 `session.json`、`events.jsonl`、`stats.json` 和 `usage.jsonl`，
+使子代理拥有新的身份与用量统计；conversation、context state、plan、artifacts 以及未来新增的
+session 状态会整体继承。压缩引擎在正常初始化时直接加载克隆后的状态。ArtifactManager 同样从
+克隆后的 index 恢复下一个序号，并以独占创建方式写入，
+因此子代理继续产生 artifact 时不会覆盖父历史中的正文或破坏已有 `artifact://` 引用。
 
 如果父 runtime 注入了只读 VFS，子代理复用同一个 `Arc<dyn ReadOnlyFileSystem>`。两种模式都继承父代理的 `resource_session_id`，但 `agent_session_id` 使用子 session id；fork 只影响对话与 session 文件，不改变知识库分区。
 
 ### 结果收集
 
-子代理完成时，从子 session 的对话历史中读取最后一条 assistant 消息的 thinking 和 text，作为结果返回。不包含工具调用细节——只返回 LLM 的最终输出。
+子代理完成时，通过 `last_assistant_message()` 从活跃缓存读取最后一条 assistant；缓存中不存在时
+才流式扫描子 session，并且只保留最后一个匹配消息。返回 thinking 和 text，不包含工具调用细节。
 
 ```rust
-for line in child_store.lines().rev() {
-    if line.role == "assistant" {
-        // 提取第一个 thinking block 和第一个 text block
-        break;
-    }
+if let Some(message) = child_store.last_assistant_message().await? {
+    // 提取第一个 thinking block 和第一个 text block
 }
 ```
 
 ### 并发控制
 
 `SubAgentPool` 使用 `tokio::sync::Semaphore` 限制最大并发数（默认 8）。每个子代理占用一个 permit，完成后释放。
+首次并发启动时，共享 `subagents/` 父目录按 `AlreadyExists` 幂等创建，并在创建竞争结束后重新校验为
+实体目录；随机 session 子目录仍严格独占创建，冲突时直接失败。
 
 结果通过 `mpsc::UnboundedSender` 发送回 orchestrator，由 `handle_sub_agent_result()` 注入父会话。
 
@@ -922,7 +983,16 @@ custom_budget = 8192
 | 沙箱 | `MINK_LIMITS` | JSON 格式 sandbox 限制配置 |
 | 调试 | `LOG_EVENTS`, `MINK_HOME` | 日志和 session 路径 |
 
-`context_compact_pct`、`enabled_tools`、OpenAI-compatible 参数和 `[tools] approval_mode` 可通过 `.minkrc` 或 `--config` 配置。
+`context_compact_pct`、`context_reserve_tokens`、`context_compact_tail_tokens`、
+`context_compact_max_output_tokens`、`context_compact_input_reduction`、`enabled_tools`、
+OpenAI-compatible 参数和 `[tools] approval_mode` 可通过 `.minkrc` 或 `--config` 配置。
+Agent JSONL `SdkOptions` 和 Python `SandboxConfig` 同样直接暴露 `max_context` 及五个压缩参数，
+由 `runtime::sdk_adapter` 映射到共享的 `Config`。
+
+`validate_runtime_config()` 在 runtime 创建任何 session 文件前执行组合校验。有限窗口下要求
+`context_reserve_tokens < max_context`、`context_compact_max_output_tokens < max_context`，并要求
+`context_compact_tail_tokens` 小于 `max_context - min(max_tokens, context_reserve_tokens)` 得到的
+主请求输入预算。`max_context=0` 保留禁用自动压缩和本地输入预算限制的语义。
 
 ### 工具审批配置
 
@@ -1000,11 +1070,11 @@ enabled/disabled 和 approval 检查发生在 `ToolRunner::execute_all()` 中，
 <skill-index>             ← 可用 skill 列表
 <selected-skills>         ← 已选择的 skill 内容
 <current-plan>            ← plan.md（如果有）
-<context-snapshot>        ← summary.txt（如果有，压缩后写入）
 <output-language>         ← 输出语言要求
 ```
 
-每个段都是可选的（空内容跳过）。这种设计使得压缩只影响 `<context-snapshot>` 段，其他段保持不变。
+每个段都是可选的（空内容跳过）。压缩摘要位于动态消息投影中，不进入 system prompt，
+因此压缩不会改变 immutable system/tools prefix。
 
 ---
 
@@ -1042,12 +1112,21 @@ pub enum Event {
 | 不变式 | 位置 | 违反后果 |
 |--------|------|---------|
 | compact 后 messages 必须刷新 | `turn.rs:96` | LLM 发送过期数据 |
-| compact 后 system_prompt 必须重建 | `turn.rs:97` | 摘要信息丢失 |
+| compact 后必须重建消息投影 | `agent/compactor.rs` | LLM 发送完整冷历史或过期边界 |
+| 压缩摘要只能进入动态消息投影 | `session/compaction.rs` | prefix cache 因摘要变化失效 |
+| 输入降噪只能修改摘要请求 | `session/compaction_input.rs` | 完整历史或热尾部发生信息损失 |
+| 压缩使用调用方活动模型和共享 backend | `turn.rs`、`orchestrator.rs`、`session/compaction.rs` | 模型切换后摘要发往启动模型或绕过宿主 backend |
+| 子代理启动配置继承当前活动模型 | `turn.rs`、`sub_coordinator.rs`、`sub_executor.rs` | 模型切换后 child 请求退回父启动模型 |
+| 所有嵌入入口映射完整压缩参数 | `sdk_protocol.rs`、`sdk_adapter.rs`、`mink_agent/__init__.py` | 私有小窗口模型只能依赖外部 TOML |
+| runtime 在 session 创建前校验上下文预算组合 | `config.rs`、`runtime/builder.rs` | 首次请求才因零输入预算或不可压缩热尾部失败 |
 | StormBreaker 窗口每用户输入重置 | `turn.rs:87` | 跨意图抑制误判 |
 | TurnFailureTracker 每轮重置 | `orchestrator.rs:90` | 跨轮信号累积误升级 |
 | 同轮最多压缩一次 | `turn.rs:106,128` | 多次无用压缩 |
 | ImmutablePrefix 只能通过 `invalidate_prefix` 变更 | `turn.rs:68-69` | 缓存偏移不可检测 |
-| store 写操作不将缓存设为 None | `store.rs` | 读盘性能下降 |
+| store 只缓存活跃后缀，append 增量更新 | `store.rs` | 长 session 内存持续增长或读盘性能下降 |
+| compact 提交后按 active_start 裁剪 store 缓存 | `compaction.rs` | 冷历史继续常驻内存 |
+| 压缩不删除 conversation 历史 | `compaction.rs` | session 无法完整恢复或重放 |
+| artifact 序号恢复且正文独占创建 | `artifacts.rs` | fork/恢复后覆盖历史 artifact |
 
 ## 主题十五：Rust 库 API 设计
 

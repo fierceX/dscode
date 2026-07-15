@@ -1,27 +1,29 @@
-use crate::capabilities::CapabilitySnapshot;
 use crate::config::Config;
-use crate::llm::client::{LlmBackend, LlmPurpose, LlmRequest, MeteredStream};
-use crate::prompt;
+use crate::llm::client::{LlmBackend, LlmModelTarget, LlmPurpose, LlmRequest, MeteredStream};
 use crate::protocol::{ErrorEvent, Event, StopEvent, TextEvent, UsageEvent};
+use crate::session::compaction_input;
 use crate::session::stats::StatsTracker;
 use crate::session::store::ConversationStore;
 use crate::session::usage::{UsageJournal, UsageKind};
 use crate::ui::Display;
 use anyhow::{Result, bail};
 use futures::StreamExt;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::io::Write;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct CompactionState {
+    active_start: usize,
+    summary: String,
+}
 
 pub struct CompactionEngine {
     store: Arc<ConversationStore>,
     summary_path: PathBuf,
-    plan_path: PathBuf,
-    plan_draft_path: PathBuf,
-    cwd: PathBuf,
-    home: PathBuf,
-    capability_snapshot: Arc<CapabilitySnapshot>,
+    state_path: PathBuf,
     api_url: String,
     api_key: String,
     llm_backend: Arc<dyn LlmBackend>,
@@ -31,7 +33,8 @@ pub struct CompactionEngine {
     session_id: String,
     display: Arc<dyn Display>,
     cancel: crate::cancel::CancellationToken,
-    compact_pct: u8,
+    state: RwLock<std::result::Result<CompactionState, String>>,
+    compact_lock: tokio::sync::Mutex<()>,
 }
 
 impl CompactionEngine {
@@ -39,56 +42,6 @@ impl CompactionEngine {
     pub fn new(
         store: Arc<ConversationStore>,
         summary_path: PathBuf,
-        plan_path: PathBuf,
-        plan_draft_path: PathBuf,
-        cwd: PathBuf,
-        home: PathBuf,
-        skills: Vec<String>,
-        api_url: String,
-        config: &Config,
-        stats: Arc<StatsTracker>,
-    ) -> Self {
-        let usage = UsageJournal::new(summary_path.with_file_name("usage.jsonl"));
-        let capability_snapshot = Arc::new(
-            crate::capabilities::CapabilitySnapshot::load_default(
-                &cwd,
-                &home,
-                &config.session_id,
-                &config.session_id,
-                &skills,
-            )
-            .unwrap_or_default(),
-        );
-        Self::new_with_usage(
-            store,
-            summary_path,
-            plan_path,
-            plan_draft_path,
-            cwd,
-            home,
-            capability_snapshot,
-            api_url,
-            config,
-            stats,
-            usage,
-            config.session_id.clone(),
-            Arc::new(SilentDisplay),
-            crate::cancel::CancellationToken::new(),
-            Arc::new(crate::llm::client::OpenAiCompatibleBackend::from_config(
-                config,
-            )),
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_with_usage(
-        store: Arc<ConversationStore>,
-        summary_path: PathBuf,
-        plan_path: PathBuf,
-        plan_draft_path: PathBuf,
-        cwd: PathBuf,
-        home: PathBuf,
-        capability_snapshot: Arc<CapabilitySnapshot>,
         api_url: String,
         config: &Config,
         stats: Arc<StatsTracker>,
@@ -98,15 +51,12 @@ impl CompactionEngine {
         cancel: crate::cancel::CancellationToken,
         llm_backend: Arc<dyn LlmBackend>,
     ) -> Self {
-        let compact_pct = config.context_compact_pct;
+        let state_path = summary_path.with_file_name("context-state.json");
+        let state = load_state(&state_path).map_err(|error| error.to_string());
         Self {
             store,
             summary_path,
-            plan_path,
-            plan_draft_path,
-            cwd,
-            home,
-            capability_snapshot,
+            state_path,
             api_url,
             api_key: config.api_key.clone(),
             llm_backend,
@@ -116,173 +66,207 @@ impl CompactionEngine {
             session_id,
             display,
             cancel,
-            compact_pct,
+            state: RwLock::new(state),
+            compact_lock: tokio::sync::Mutex::new(()),
         }
     }
 
-    /// Path to the summary file written after each compaction.
-    pub fn summary_path(&self) -> &std::path::Path {
-        &self.summary_path
+    pub fn current_summary(&self) -> Result<Option<String>> {
+        let state = self.current_state()?;
+        Ok((!state.summary.trim().is_empty()).then_some(state.summary))
     }
 
-    /// Read the current summary file content, with DSML tags stripped.
     pub async fn read_summary(&self) -> Option<String> {
-        let raw = tokio::fs::read_to_string(&self.summary_path).await.ok()?;
-        Some(strip_dsml_tags(raw.trim()))
+        self.current_summary()
+            .ok()
+            .flatten()
+            .map(|summary| strip_dsml_tags(summary.trim()))
     }
 
-    fn should_compact(&self, trigger: &str, context_tokens: usize) -> bool {
-        if is_plan_trigger(trigger) {
-            return true;
-        }
-        if self.config.max_context_tokens == 0 {
-            return false;
-        }
-        let pct = (context_tokens * 100) / self.config.max_context_tokens;
-        pct >= self.compact_pct as usize
+    pub async fn active_messages(&self) -> Result<Vec<Value>> {
+        let state = self.current_state()?;
+        let mut messages = self.store.lines_from(state.active_start).await?;
+        self.prepend_dynamic_summary(&mut messages, &state.summary);
+        Ok(messages)
     }
 
     pub async fn evaluate_and_compact(
         &self,
         trigger: &str,
         context_tokens: usize,
+        target: LlmModelTarget<'_>,
     ) -> Result<(bool, String)> {
-        if !self.should_compact(trigger, context_tokens) {
+        let _guard = self.compact_lock.lock().await;
+        if self.config.max_context_tokens == 0 && matches!(trigger, "auto" | "preflight") {
+            return Ok((false, "automatic compaction disabled".into()));
+        }
+        if !is_forced_trigger(trigger) && context_tokens < compaction_trigger_tokens(&self.config) {
             return Ok((false, "below threshold".into()));
         }
 
-        let all = self.store.lines().await?;
-        let total_lines = all.len();
-        if total_lines == 0 {
+        let state = self.current_state()?;
+        let active = self.store.lines_from(state.active_start).await?;
+        if active.is_empty() {
             return Ok((false, "empty".into()));
         }
 
-        let tier = CompactionTier::from_ratio(context_tokens, self.config.max_context_tokens);
-        let keep_ratio = tier.tail_budget_ratio();
-
-        let keep_lines = match compact_turn_keep(&all, keep_ratio) {
-            Some(k) => k.min(total_lines),
-            None => return Ok((false, "keep=0".into())),
-        };
-
-        // Emergency: keep minimal context
-        let k = if tier == CompactionTier::Emergency {
-            keep_lines.clamp(1, 5)
-        } else {
-            keep_lines
-        };
-
-        if k >= total_lines && !is_plan_trigger(trigger) {
-            return Ok((false, "all kept".into()));
+        let tail_target = self.config.context_compact_tail_tokens.max(1);
+        let cut = find_compaction_cut_point(&active, tail_target);
+        if cut == 0 {
+            return Ok((false, "no safe boundary".into()));
         }
 
-        // Minimum savings check: skip if compaction won't free enough tokens
-        let kept_tokens: usize = all[total_lines - k..]
-            .iter()
-            .map(|m| serde_json::to_string(m).unwrap_or_default().len() / 4)
-            .sum();
-        let total_tokens: usize = all
-            .iter()
-            .map(|m| serde_json::to_string(m).unwrap_or_default().len() / 4)
-            .sum();
-        let savings_ratio = if total_tokens > 0 {
-            (total_tokens - kept_tokens) as f64 / total_tokens as f64
-        } else {
-            0.0
-        };
-        if savings_ratio < 0.10 && !is_plan_trigger(trigger) {
-            return Ok((
-                false,
-                format!("savings too small: {:.1}%", savings_ratio * 100.0),
-            ));
+        let dropped = &active[..cut];
+        let kept = &active[cut..];
+        let total_tokens = estimate_messages_tokens(&active);
+        let kept_tokens = estimate_messages_tokens(kept);
+        let saved_tokens = total_tokens.saturating_sub(kept_tokens);
+        if total_tokens == 0 || (saved_tokens as u128) * 10 < total_tokens as u128 {
+            return Ok((false, "savings too small".into()));
         }
 
-        let dropped_count = total_lines - k;
-        let dropped_lines = &all[..dropped_count];
-        let kept_lines = &all[dropped_count..];
+        let summary = self
+            .run_summary_call(
+                dropped,
+                (!state.summary.is_empty()).then_some(state.summary.as_str()),
+                target,
+            )
+            .await?;
 
-        let summary = self.run_summary_call(dropped_lines).await?;
-        self.validate_conversation_messages(kept_lines)?;
-        tokio::fs::write(&self.summary_path, format!("{summary}\n")).await?;
-        self.store.trim_keep_last(k).await?;
-        let remaining = self.store.lines().await?;
-        self.validate_conversation_messages(&remaining)?;
+        self.validate_conversation_messages(kept, target.model)?;
+        let next = CompactionState {
+            active_start: state.active_start + cut,
+            summary: summary.clone(),
+        };
+        self.commit_state(next).await?;
 
         Ok((
             true,
-            format!("compacted_at_trigger={trigger}_tier={tier:?}_kept={k}"),
+            format!(
+                "compacted_at_trigger={trigger}_kept={}_input_reduction={}",
+                kept.len(),
+                self.config.context_compact_input_reduction
+            ),
         ))
     }
 
-    fn validate_conversation_messages(&self, messages: &[Value]) -> Result<()> {
-        let system_prompt = "";
+    fn prepend_dynamic_summary(&self, messages: &mut Vec<Value>, summary: &str) {
+        if !summary.trim().is_empty() {
+            messages.insert(
+                0,
+                json!({
+                    "role": "system",
+                    "content": format!(
+                        "<context-snapshot>\n{}\n</context-snapshot>",
+                        summary.trim()
+                    )
+                }),
+            );
+        }
+    }
+
+    async fn commit_state(&self, state: CompactionState) -> Result<()> {
+        let data = serde_json::to_vec_pretty(&state)?;
+        let temp_path = self.state_path.with_extension("json.tmp");
+        if let Some(parent) = self.state_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        if let Err(error) = tokio::fs::write(&temp_path, &data).await {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            return Err(error.into());
+        }
+        if let Err(error) = tokio::fs::rename(&temp_path, &self.state_path).await {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            return Err(error.into());
+        }
+        *self
+            .state
+            .write()
+            .map_err(|_| anyhow::anyhow!("context state lock poisoned"))? = Ok(state.clone());
+        self.store.prune_cache_before(state.active_start).await;
+        let _ = tokio::fs::write(&self.summary_path, format!("{}\n", state.summary)).await;
+        Ok(())
+    }
+
+    fn current_state(&self) -> Result<CompactionState> {
+        self.state
+            .read()
+            .map_err(|_| anyhow::anyhow!("context state lock poisoned"))?
+            .clone()
+            .map_err(anyhow::Error::msg)
+    }
+
+    fn validate_conversation_messages(&self, messages: &[Value], model: &str) -> Result<()> {
         let _ = crate::llm::transport::build_openai_body(
-            &crate::config::model_resolver(&self.config)
-                .resolve(&self.config.model)
-                .actual,
+            model,
             messages,
             &[],
-            system_prompt,
-            self.config.max_tokens,
+            "",
+            effective_max_tokens(&self.config),
         )?;
         Ok(())
     }
 
-    async fn run_summary_call(&self, dropped_lines: &[Value]) -> Result<String> {
-        let summary_instruction = "\
-Summarise the conversation turns above into a concise context snapshot.
-Output exactly the 5 fields below, one field per line.
-After each colon, write the content — do not leave the field empty.
+    async fn run_summary_call(
+        &self,
+        dropped: &[Value],
+        previous_summary: Option<&str>,
+        target: LlmModelTarget<'_>,
+    ) -> Result<String> {
+        let previous = serde_json::to_string(&previous_summary)?;
+        let instruction = format!(
+            "Merge the conversation turns above with the previous context snapshot below.\n\
+             Preserve current facts, decisions, constraints, progress, and blockers.\n\
+             Previous context snapshot: {previous}\n\n\
+             Output these five non-empty fields:\n\
+             Task focus:\nLatest request:\nProgress:\nTool evidence:\nReflections:\n\
+             Start directly with Task focus: and do not use code fences."
+        );
+        let mut messages = if self.config.context_compact_input_reduction {
+            vec![json!({
+                "role": "user",
+                "content": compaction_input::reduce_for_summary(dropped),
+            })]
+        } else {
+            dropped.to_vec()
+        };
+        messages.push(json!({"role":"user","content":instruction}));
 
-Task focus:
-  (one sentence: what task or topic the user is working on)
-Latest request:
-  (the most recent user instruction or question)
-Progress:
-  (what has been completed, what remains, any blockers)
-Tool evidence:
-  (describe tool actions in plain language — do NOT write tool call syntax
-   like Read(path), Bash(cmd), [tool], Grep(pattern) etc.)
-Reflections:
-  (insights, decisions, open questions)
+        let system_prompt = "Summarize coding-agent history for a later model. Preserve user goals, constraints, decisions, progress, blockers, file changes, commands, errors, pending work, and exact identifiers. Do not continue the task.".to_string();
 
-Start directly with \"Task focus:\" — no preamble, no markdown, no code fences.";
-
-        let mut messages: Vec<Value> = dropped_lines.to_vec();
-        messages.push(json!({"role":"user","content":summary_instruction}));
-
-        let system_prompt = prompt::Builder {
-            cwd: self.cwd.clone(),
-            home: self.home.clone(),
-            skill_snapshot: Arc::new(self.capability_snapshot.skills.clone()),
-            context_file_snapshot: Arc::new(self.capability_snapshot.context_files.clone()),
-            rule_snapshot: Arc::new(self.capability_snapshot.rules.clone()),
-            summary_file: self.summary_path.clone(),
-            plan_file: self.plan_path.clone(),
-            plan_draft_file: self.plan_draft_path.clone(),
-            mission_file: None,
-            mission_content: None,
+        if self.config.max_context_tokens > 0 {
+            let input_tokens = crate::llm::transport::estimate_openai_context_tokens(
+                &messages,
+                &[],
+                &system_prompt,
+            )?;
+            let input_limit = self.config.max_context_tokens.saturating_sub(
+                usize::try_from(compaction_max_output_tokens(&self.config)).unwrap_or(0),
+            );
+            if input_tokens > input_limit {
+                bail!(
+                    "compaction summary input exceeds configured budget: {input_tokens} > {input_limit} tokens"
+                );
+            }
         }
-        .build_system_prompt()?;
 
-        let resolved = crate::config::model_resolver(&self.config).resolve(&self.config.model);
         let capture = self.usage.capture(
             self.usage
                 .scope(UsageKind::Compaction, self.session_id.clone()),
-            resolved.actual.clone(),
+            target.model.to_string(),
         );
         let response = match self
             .llm_backend
             .stream(LlmRequest {
                 purpose: LlmPurpose::Compaction,
-                model: resolved.actual.clone(),
-                model_alias: resolved.alias.clone(),
+                model: target.model.to_string(),
+                model_alias: target.alias.map(str::to_string),
                 api_url: self.api_url.clone(),
                 api_key: self.api_key.clone(),
                 system_prompt,
                 messages,
                 tools: Vec::new(),
-                max_tokens: self.config.max_tokens,
+                max_tokens: compaction_max_output_tokens(&self.config),
                 cancel: self.cancel.clone(),
                 verbose: self.config.verbose,
                 display: self.display.clone(),
@@ -291,9 +275,9 @@ Start directly with \"Task focus:\" — no preamble, no markdown, no code fences
         {
             Ok(response) => response,
             Err(error) => {
-                let attempt_count = crate::llm::client::request_failure_attempt_count(&error);
+                let attempts = crate::llm::client::request_failure_attempt_count(&error);
                 if let Err(record_error) =
-                    capture.unreported(attempt_count, format!("request_failed: {error}"))
+                    capture.unreported(attempts, format!("request_failed: {error}"))
                 {
                     self.display.render_error(&format!(
                         "Failed to record compaction usage failure: {record_error}"
@@ -302,45 +286,35 @@ Start directly with \"Task focus:\" — no preamble, no markdown, no code fences
                 return Err(error);
             }
         };
+
         let mut stream = MeteredStream::new(response.events, capture, response.attempt_count);
-        let mut out = String::new();
+        let mut output = String::new();
         let mut stop_reason = String::new();
         let mut last_error = String::new();
-
         while let Some(event) = stream.next().await {
             match event? {
-                Event::Text(TextEvent { content }) => out.push_str(&content),
+                Event::Text(TextEvent { content }) => output.push_str(&content),
                 Event::Usage(usage) => {
                     self.log_compact_event(&usage);
                     self.stats.record_compact(&usage).await;
                 }
                 Event::UsageUnavailable => {}
-                Event::Error(ErrorEvent { message }) => {
-                    last_error = message;
-                }
-                Event::Stop(StopEvent { reason }) => {
-                    stop_reason = reason;
-                }
+                Event::Error(ErrorEvent { message }) => last_error = message,
+                Event::Stop(StopEvent { reason }) => stop_reason = reason,
                 _ => {}
             }
         }
-
-        if out.is_empty() {
-            bail!(
-                "failed to generate context summary: empty text response (stop_reason={}, error={})",
-                if stop_reason.is_empty() {
-                    "none"
-                } else {
-                    &stop_reason
-                },
-                if last_error.is_empty() {
-                    "none"
-                } else {
-                    &last_error
-                }
-            );
+        if !last_error.is_empty() {
+            bail!("failed to generate context summary: {last_error}");
         }
-        Ok(strip_tool_labels(&strip_dsml_tags(&out)))
+        if !matches!(stop_reason.as_str(), "stop" | "end_turn") {
+            bail!("failed to generate context summary: invalid stop reason {stop_reason:?}");
+        }
+        let summary = strip_dsml_tags(&output);
+        if summary.trim().is_empty() {
+            bail!("failed to generate context summary: empty response");
+        }
+        Ok(summary.trim().to_string())
     }
 
     fn log_compact_event(&self, usage: &UsageEvent) {
@@ -350,7 +324,7 @@ Start directly with \"Task focus:\" — no preamble, no markdown, no code fences
             .append(true)
             .open(&events_path)
         {
-            let evt = json!({
+            let event = json!({
                 "type": "usage",
                 "input_tokens": usage.input_tokens,
                 "output_tokens": usage.output_tokens,
@@ -358,517 +332,535 @@ Start directly with \"Task focus:\" — no preamble, no markdown, no code fences
                 "cache_creation_input_tokens": usage.cache_creation_input_tokens,
                 "kind": "compact",
             });
-            if let Ok(line) = serde_json::to_string(&evt) {
+            if let Ok(line) = serde_json::to_string(&event) {
                 let _ = writeln!(file, "{line}");
             }
         }
     }
 }
 
-struct SilentDisplay;
-
-impl Display for SilentDisplay {
-    fn render_thinking(&self, _: &str) {}
-    fn render_text(&self, _: &str) {}
-    fn render_tool_call(&self, _: &str, _: &str) {}
-    fn render_tool_result(&self, _: &str, _: &str) {}
-    fn render_stop(&self) {}
-    fn render_error(&self, _: &str) {}
-    fn render_retry(&self) {}
-    fn render_info(&self, _: &str) {}
-    fn render_title_update(&self, _: &str, _: &crate::ui::StatsSnapshot) {}
-    fn render_sub_agent_status(&self, _: &str, _: &str, _: u64, _: u64) {}
-    fn render_prompt(&self) {}
-    fn render_clear_line(&self) {}
-}
-
-fn is_plan_trigger(trigger: &str) -> bool {
-    trigger == "plan_clear" || trigger == "plan_confirm" || trigger == "manual"
-}
-
-/// Strip DSML (DeepSeek Markup Language) and common XML-like tags
-/// that some models inject into generated text (e.g. `<ds_safety>`,
-/// `<ds_copyright>`, `<ds_suffix>`, etc.).
-fn strip_dsml_tags(text: &str) -> String {
-    // Pattern: <ds_...>...</ds_...> or <ds_.../> (self-closing)
-    let re = regex::Regex::new(r"</?ds_\w+[^>]*>").unwrap();
-    re.replace_all(text, "").into_owned()
-}
-
-/// Strip tool-call labels from summary text for clean user display.
-/// Removes [tool] prefixes and Name(args) patterns that look like raw
-/// tool-call syntax leaked by an LLM into the summary output.
-pub fn strip_tool_labels(text: &str) -> String {
-    let re_tool = regex::Regex::new(r"\[tool\]\s*").unwrap();
-    let re_call = regex::Regex::new(r"\b(Read|Bash|Grep|Edit|Write|Glob|WebSearch|WebFetch|Skill|TodoWrite|SubAgent|PlanConfirm|PlanClear)\([^)]*\)").unwrap();
-    let s = re_tool.replace_all(text, "");
-    re_call.replace_all(&s, "").into_owned()
-}
-
-// ====================================================================
-// CompactionTier + compact_turn_keep (原在 compact_dp.rs，现在内联)
-// ====================================================================
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CompactionTier {
-    Conservative,
-    Aggressive,
-    ForceSummary,
-    Emergency,
-}
-
-impl CompactionTier {
-    pub fn from_ratio(current_tokens: usize, max_tokens: usize) -> Self {
-        if max_tokens == 0 {
-            return CompactionTier::Conservative;
-        }
-        let ratio = (current_tokens * 100) / max_tokens;
-        if ratio >= 95 {
-            CompactionTier::Emergency
-        } else if ratio >= 80 {
-            CompactionTier::ForceSummary
-        } else if ratio >= 70 {
-            CompactionTier::Aggressive
-        } else {
-            CompactionTier::Conservative
-        }
+pub fn effective_max_tokens(config: &Config) -> i32 {
+    if config.max_context_tokens == 0 {
+        return config.max_tokens;
     }
-
-    pub fn tail_budget_ratio(&self) -> f64 {
-        match self {
-            CompactionTier::Conservative => 0.20,
-            CompactionTier::Aggressive => 0.10,
-            CompactionTier::ForceSummary => 0.05,
-            CompactionTier::Emergency => 0.05,
-        }
-    }
+    let reserve = config.context_reserve_tokens.max(1);
+    let requested = usize::try_from(config.max_tokens.max(1)).unwrap_or(1);
+    i32::try_from(requested.min(reserve)).unwrap_or(i32::MAX)
 }
 
-/// 按 turn 对齐计算需要保留的行数
-pub fn compact_turn_keep(lines: &[Value], min_keep_ratio: f64) -> Option<usize> {
-    if lines.is_empty() {
-        return None;
+pub fn compaction_max_output_tokens(config: &Config) -> i32 {
+    config.context_compact_max_output_tokens.max(1)
+}
+
+pub fn request_input_limit(config: &Config) -> usize {
+    if config.max_context_tokens == 0 {
+        return usize::MAX;
     }
+    config
+        .max_context_tokens
+        .saturating_sub(usize::try_from(effective_max_tokens(config)).unwrap_or(0))
+}
 
-    let mut is_user = Vec::with_capacity(lines.len());
-    let mut total_turns = 0usize;
-    for line in lines {
-        let user = line.get("role").and_then(Value::as_str) == Some("user")
-            && line.get("content").is_some_and(|c| c.is_string());
-        is_user.push(user);
-        if user {
-            total_turns += 1;
-        }
+fn load_state(path: &Path) -> Result<CompactionState> {
+    if !path.exists() {
+        return Ok(CompactionState::default());
     }
+    let data = std::fs::read(path)?;
+    if data.iter().all(u8::is_ascii_whitespace) {
+        return Ok(CompactionState::default());
+    }
+    Ok(serde_json::from_slice(&data)?)
+}
 
-    let target = {
-        let t = (total_turns as f64 * min_keep_ratio + 0.5) as usize;
-        t.max(1).min(total_turns)
-    };
+fn is_forced_trigger(trigger: &str) -> bool {
+    matches!(
+        trigger,
+        "manual" | "preflight" | "overflow" | "plan_clear" | "plan_confirm"
+    )
+}
 
-    let mut keep = 0usize;
-    let mut found = 0usize;
-    for i in (0..lines.len()).rev() {
-        if found >= target {
+fn compaction_trigger_tokens(config: &Config) -> usize {
+    let percentage = ((config.max_context_tokens as u128
+        * u128::from(config.context_compact_pct.clamp(1, 100)))
+        / 100)
+        .min(usize::MAX as u128) as usize;
+    percentage.min(
+        config
+            .max_context_tokens
+            .saturating_sub(config.context_reserve_tokens),
+    )
+}
+
+fn estimate_messages_tokens(messages: &[Value]) -> usize {
+    messages
+        .iter()
+        .map(|message| {
+            serde_json::to_vec(message)
+                .map_or(0, |value| value.len())
+                .div_ceil(3)
+                .max(1)
+        })
+        .fold(0, |total, tokens| total.saturating_add(tokens))
+}
+
+fn find_compaction_cut_point(messages: &[Value], tail_target: usize) -> usize {
+    if messages.len() < 2 {
+        return 0;
+    }
+    let mut tokens = 0usize;
+    let mut candidate = messages.len() - 1;
+    for index in (0..messages.len()).rev() {
+        tokens = tokens.saturating_add(estimate_messages_tokens(&messages[index..=index]));
+        candidate = index;
+        if tokens >= tail_target {
             break;
         }
-        keep += 1;
-        if is_user[i] {
-            found += 1;
-        }
     }
-    if keep == 0 { None } else { Some(keep) }
+    (1..=candidate)
+        .rev()
+        .find(|&index| is_safe_context_start(&messages[index]))
+        .unwrap_or(0)
+}
+
+fn is_safe_context_start(message: &Value) -> bool {
+    let role = message.get("role").and_then(Value::as_str);
+    role == Some("assistant")
+        || (role == Some("user") && message.get("content").is_some_and(Value::is_string))
+}
+
+fn strip_dsml_tags(text: &str) -> String {
+    let regex = regex::Regex::new(r"</?ds_\w+[^>]*>").unwrap();
+    regex.replace_all(text, "").into_owned()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, OutputFormat};
-    use crate::session::paths;
-    use crate::session::stats::StatsTracker;
-    use crate::session::store::ConversationStore;
+    use crate::llm::mock::MockLlmClient;
+    use crate::protocol::StopEvent;
     use serde_json::json;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
+    use std::sync::Mutex;
 
-    // Test should_compact logic inline (CompactionEngine requires async construction)
-
-    #[test]
-    fn compact_triggers_at_threshold() {
-        let pct = 85u8;
-        let max_ctx = 200_000usize;
-        let test = |ctx: usize| -> bool {
-            if max_ctx == 0 {
-                return false;
-            }
-            (ctx * 100) / max_ctx >= pct as usize
-        };
-        assert!(!test(100_000));
-        assert!(!test(169_999));
-        assert!(test(170_000));
-        assert!(test(200_000));
+    #[derive(Debug)]
+    struct CapturedSummaryRequest {
+        model: String,
+        model_alias: Option<String>,
+        system_prompt: String,
+        messages: Vec<Value>,
+        max_tokens: i32,
     }
 
-    #[test]
-    fn compact_triggers_for_plan_operations() {
-        let pct = 85u8;
-        let max_ctx = 200_000usize;
-        let should_compact = |trigger: &str, ctx: usize| -> bool {
-            if trigger == "plan_clear" || trigger == "plan_confirm" {
-                return true;
-            }
-            if max_ctx == 0 {
-                return false;
-            }
-            (ctx * 100) / max_ctx >= pct as usize
-        };
-        assert!(should_compact("plan_clear", 0));
-        assert!(should_compact("plan_confirm", 0));
-        assert!(!should_compact("auto", 100_000));
-        assert!(should_compact("auto", 200_000));
+    #[derive(Default)]
+    struct CapturingSummaryBackend {
+        requests: Mutex<Vec<CapturedSummaryRequest>>,
     }
 
-    #[test]
-    fn compact_skips_when_max_context_is_zero() {
-        let pct = 85u8;
-        let max_ctx = 0usize;
-        let should_compact = |trigger: &str, ctx: usize| -> bool {
-            if trigger == "plan_clear" || trigger == "plan_confirm" {
-                return true;
-            }
-            if max_ctx == 0 {
-                return false;
-            }
-            (ctx * 100) / max_ctx >= pct as usize
-        };
-        assert!(!should_compact("auto", 100));
-    }
-
-    #[test]
-    fn compact_pct_configurable() {
-        let test_pct = |pct: u8, ctx: usize, max_ctx: usize| -> bool {
-            if max_ctx == 0 {
-                return false;
-            }
-            (ctx * 100) / max_ctx >= pct as usize
-        };
-        assert!(test_pct(50, 100, 200));
-        assert!(!test_pct(50, 99, 200));
-        assert!(test_pct(70, 140, 200));
-        assert!(!test_pct(70, 139, 200));
-        assert!(test_pct(90, 180, 200));
-        assert!(!test_pct(90, 179, 200));
-    }
-
-    #[test]
-    fn compact_tier_from_ratio_emergency() {
-        use super::CompactionTier;
-        assert_eq!(
-            CompactionTier::from_ratio(95, 100),
-            CompactionTier::Emergency
-        );
-        assert_eq!(
-            CompactionTier::from_ratio(100, 100),
-            CompactionTier::Emergency
-        );
-    }
-
-    #[test]
-    fn compact_tier_from_ratio_force_summary() {
-        use super::CompactionTier;
-        assert_eq!(
-            CompactionTier::from_ratio(80, 100),
-            CompactionTier::ForceSummary
-        );
-        assert_eq!(
-            CompactionTier::from_ratio(94, 100),
-            CompactionTier::ForceSummary
-        );
-    }
-
-    #[test]
-    fn compact_tier_from_ratio_aggressive() {
-        use super::CompactionTier;
-        assert_eq!(
-            CompactionTier::from_ratio(70, 100),
-            CompactionTier::Aggressive
-        );
-        assert_eq!(
-            CompactionTier::from_ratio(79, 100),
-            CompactionTier::Aggressive
-        );
-    }
-
-    #[test]
-    fn compact_tier_from_ratio_conservative() {
-        use super::CompactionTier;
-        assert_eq!(
-            CompactionTier::from_ratio(0, 100),
-            CompactionTier::Conservative
-        );
-        assert_eq!(
-            CompactionTier::from_ratio(69, 100),
-            CompactionTier::Conservative
-        );
-    }
-
-    #[test]
-    fn compact_tier_zero_max_returns_conservative() {
-        use super::CompactionTier;
-        assert_eq!(
-            CompactionTier::from_ratio(100, 0),
-            CompactionTier::Conservative
-        );
-    }
-
-    #[tokio::test]
-    async fn evaluate_and_compact_skips_below_threshold_without_network() -> anyhow::Result<()> {
-        let (home, cwd, store, stats, summary, plan, draft) =
-            temp_compaction_session("below-threshold").await?;
-        store.add_user("hello").await?;
-        store.add_assistant("world", "", &[]).await?;
-        let cfg = test_compaction_config("https://example.invalid/v1/chat/completions", 85);
-        let engine = CompactionEngine::new(
-            store.clone(),
-            summary,
-            plan,
-            draft,
-            cwd,
-            home,
-            Vec::new(),
-            crate::config::api_url(&cfg),
-            &cfg,
-            stats,
-        );
-
-        let (did_compact, reason) = engine.evaluate_and_compact("auto", 10).await?;
-        assert!(!did_compact);
-        assert_eq!(reason, "below threshold");
-        assert_eq!(store.lines().await?.len(), 2);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn evaluate_and_compact_skips_empty_manual_without_network() -> anyhow::Result<()> {
-        let (home, cwd, store, stats, summary, plan, draft) =
-            temp_compaction_session("empty-manual").await?;
-        let cfg = test_compaction_config("https://example.invalid/v1/chat/completions", 100);
-        let engine = CompactionEngine::new(
-            store,
-            summary,
-            plan,
-            draft,
-            cwd,
-            home,
-            Vec::new(),
-            crate::config::api_url(&cfg),
-            &cfg,
-            stats,
-        );
-
-        let (did_compact, reason) = engine.evaluate_and_compact("manual", 0).await?;
-        assert!(!did_compact);
-        assert_eq!(reason, "empty");
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn evaluate_and_compact_skips_when_all_context_would_be_kept() -> anyhow::Result<()> {
-        let (home, cwd, store, stats, summary, plan, draft) =
-            temp_compaction_session("all-kept").await?;
-        store.add_user("only turn").await?;
-        store.add_assistant("small answer", "", &[]).await?;
-        let cfg = test_compaction_config("https://example.invalid/v1/chat/completions", 1);
-        let engine = CompactionEngine::new(
-            store.clone(),
-            summary,
-            plan,
-            draft,
-            cwd,
-            home,
-            Vec::new(),
-            crate::config::api_url(&cfg),
-            &cfg,
-            stats,
-        );
-
-        let (did_compact, reason) = engine.evaluate_and_compact("auto", 20_000).await?;
-        assert!(!did_compact);
-        assert_eq!(reason, "all kept");
-        assert_eq!(store.lines().await?.len(), 2);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn read_summary_strips_dsml_tags() -> anyhow::Result<()> {
-        let (home, cwd, store, stats, summary, plan, draft) =
-            temp_compaction_session("read-summary").await?;
-        let cfg = test_compaction_config("https://example.invalid/v1/chat/completions", 100);
-        let engine = CompactionEngine::new(
-            store,
-            summary.clone(),
-            plan,
-            draft,
-            cwd,
-            home,
-            Vec::new(),
-            crate::config::api_url(&cfg),
-            &cfg,
-            stats,
-        );
-        tokio::fs::write(&summary, "keep <ds_meta>drop</ds_meta> text\n").await?;
-
-        assert_eq!(
-            engine.read_summary().await.as_deref(),
-            Some("keep drop text")
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    #[ignore = "requires local loopback sockets"]
-    async fn evaluate_and_compact_writes_clean_summary_and_keeps_valid_conversation()
-    -> anyhow::Result<()> {
-        let (api_url, _server) = start_summary_server(
-            "Task focus: <ds_meta>drop</ds_meta>visible Read(secret.txt)\n\
-Latest request: keep working\n\
-Progress: compacted\n\
-Tool evidence: [tool] inspected files\n\
-Reflections: none",
-        )
-        .await?;
-        let (home, cwd, store, stats, summary, plan, draft) =
-            temp_compaction_session("e2e").await?;
-        for idx in 0..3 {
-            store.add_user(&format!("user {idx}")).await?;
-            store
-                .add_assistant(&format!("assistant {idx}"), "", &[])
-                .await?;
+    #[async_trait::async_trait]
+    impl LlmBackend for CapturingSummaryBackend {
+        fn name(&self) -> &str {
+            "capturing-summary"
         }
-        let cfg = Config {
-            model: "flash".into(),
-            api_key: "test-key".into(),
-            base_url: api_url.clone(),
-            max_context_tokens: 1_000_000,
-            context_compact_pct: 100,
-            output_format: OutputFormat::Human,
-            log_events: true,
-            ..Default::default()
-        };
-        let engine = CompactionEngine::new(
-            store.clone(),
-            summary.clone(),
-            plan,
-            draft,
-            cwd,
-            home,
-            Vec::new(),
-            api_url,
-            &cfg,
-            stats.clone(),
-        );
 
-        let (did_compact, reason) = engine.evaluate_and_compact("manual", 0).await?;
-        assert!(did_compact, "{reason}");
-        let summary_text = tokio::fs::read_to_string(summary).await?;
-        assert!(summary_text.contains("Task focus: dropvisible"));
-        assert!(!summary_text.contains("<ds_meta>"), "{summary_text}");
-        assert!(!summary_text.contains("Read(secret.txt)"), "{summary_text}");
-        assert!(!summary_text.contains("[tool]"), "{summary_text}");
-        let remaining = store.lines().await?;
-        assert_eq!(remaining.len(), 2);
-        crate::llm::transport::build_openai_body("deepseek-v4-flash", &remaining, &[], "", 1024)?;
-        assert_eq!(stats.snapshot().await.compact_request_count, 1);
-        Ok(())
+        async fn stream(
+            &self,
+            request: LlmRequest,
+        ) -> Result<crate::llm::client::LlmResponseStream> {
+            self.requests.lock().unwrap().push(CapturedSummaryRequest {
+                model: request.model,
+                model_alias: request.model_alias,
+                system_prompt: request.system_prompt,
+                messages: request.messages,
+                max_tokens: request.max_tokens,
+            });
+            Ok(crate::llm::client::LlmResponseStream {
+                events: Box::pin(futures::stream::iter(vec![
+                    Ok(Event::Text(TextEvent {
+                        content: "Task focus: test\nLatest request: compact\nProgress: retained\nTool evidence: cargo test\nReflections: none".into(),
+                    })),
+                    Ok(Event::Stop(StopEvent {
+                        reason: "end_turn".into(),
+                    })),
+                ])),
+                attempt_count: 1,
+            })
+        }
     }
 
-    async fn temp_compaction_session(
-        name: &str,
-    ) -> anyhow::Result<(
-        std::path::PathBuf,
-        std::path::PathBuf,
-        Arc<ConversationStore>,
-        Arc<StatsTracker>,
-        std::path::PathBuf,
-        std::path::PathBuf,
-        std::path::PathBuf,
-    )> {
-        static CNT: AtomicU64 = AtomicU64::new(0);
-        let n = CNT.fetch_add(1, Ordering::SeqCst);
-        let root = std::env::temp_dir().join(format!(
-            "mink-compact-test-{}-{name}-{n}",
-            std::process::id()
-        ));
-        let home = root.join("home");
-        let cwd = root.join("workspace");
-        tokio::fs::create_dir_all(&home).await?;
-        tokio::fs::create_dir_all(&cwd).await?;
-        let spaths = paths::paths_for(&home, &cwd, "compact");
-        let store = Arc::new(ConversationStore::new(spaths.conversation.clone()));
-        store.ensure().await?;
-        let stats = StatsTracker::load(&spaths.stats).await?;
-        Ok((
-            home,
-            cwd,
-            store,
-            stats,
-            spaths.summary,
-            spaths.plan,
-            spaths.plan_draft,
+    fn summary_backend() -> Arc<dyn LlmBackend> {
+        Arc::new(MockLlmClient::new(
+            "summary-model",
+            vec![vec![
+                Ok(Event::Text(TextEvent {
+                    content: "Task focus: test\nLatest request: compact\nProgress: retained\nTool evidence: none\nReflections: none".into(),
+                })),
+                Ok(Event::Stop(StopEvent {
+                    reason: "end_turn".into(),
+                })),
+            ]],
         ))
     }
 
-    fn test_compaction_config(base_url: &str, context_compact_pct: u8) -> Config {
-        Config {
-            model: "flash".into(),
-            api_key: "test-key".into(),
-            base_url: base_url.into(),
-            max_context_tokens: 1_000_000,
-            context_compact_pct,
-            output_format: OutputFormat::Human,
-            log_events: true,
-            ..Default::default()
-        }
+    async fn add_tool_history(ctx: &crate::context::AgentSharedContext) -> anyhow::Result<()> {
+        ctx.store.add_user("fix the test suite").await?;
+        ctx.store
+            .add_assistant(
+                "I will run the tests.",
+                "private reasoning",
+                &[crate::protocol::ToolCallEvent {
+                    name: "Bash".into(),
+                    id: "bash-1".into(),
+                    input_json: json!({"command":"cargo test"}),
+                    fields: Default::default(),
+                    order: Vec::new(),
+                }],
+            )
+            .await?;
+        ctx.store
+            .add_tool_results(&[crate::session::store::ToolResult {
+                tool_use_id: "bash-1".into(),
+                tool_name: "Bash".into(),
+                tool_args: Default::default(),
+                content: "Process completed with exit code 1.".into(),
+                conv_content: "Process completed with exit code 1.".into(),
+            }])
+            .await?;
+        ctx.store.add_user("keep the API stable").await?;
+        Ok(())
     }
 
-    async fn start_summary_server(
-        summary_text: &str,
-    ) -> anyhow::Result<(String, tokio::task::JoinHandle<()>)> {
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
-        let addr = listener.local_addr()?;
-        let summary_text = summary_text.to_string();
-        let handle = tokio::spawn(async move {
-            let Ok((mut socket, _)) = listener.accept().await else {
-                return;
-            };
-            let mut buf = Vec::new();
-            let mut chunk = [0u8; 1024];
-            loop {
-                let Ok(n) = socket.read(&mut chunk).await else {
-                    return;
-                };
-                if n == 0 {
-                    return;
-                }
-                buf.extend_from_slice(&chunk[..n]);
-                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                    break;
-                }
-            }
-            let body = format!(
-                "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
-                json!({"choices":[{"delta":{"content":summary_text}}]}),
-                json!({"choices":[{"finish_reason":"stop","delta":{}}],"usage":{"prompt_tokens":10,"completion_tokens":5}})
-            );
-            let response = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            let _ = socket.write_all(response.as_bytes()).await;
-        });
-        Ok((format!("http://{addr}/chat/completions"), handle))
+    async fn compact(
+        ctx: &crate::context::AgentSharedContext,
+        trigger: &str,
+        context_tokens: usize,
+    ) -> anyhow::Result<(bool, String)> {
+        let resolved = crate::config::model_resolver(&ctx.config).resolve(&ctx.config.model);
+        ctx.compaction
+            .evaluate_and_compact(
+                trigger,
+                context_tokens,
+                LlmModelTarget::new(&resolved.actual, resolved.alias.as_deref()),
+            )
+            .await
+    }
+
+    #[test]
+    fn output_tokens_use_explicit_reserve() {
+        let config = Config {
+            max_context_tokens: 64_000,
+            max_tokens: 81_920,
+            context_reserve_tokens: 12_000,
+            context_compact_max_output_tokens: 2_048,
+            ..Config::default()
+        };
+        assert_eq!(effective_max_tokens(&config), 12_000);
+        assert_eq!(request_input_limit(&config), 52_000);
+        assert_eq!(compaction_max_output_tokens(&config), 2_048);
+    }
+
+    #[test]
+    fn trigger_uses_explicit_percentage_and_reserve() {
+        let config = Config {
+            max_context_tokens: 64_000,
+            context_compact_pct: 90,
+            context_reserve_tokens: 12_000,
+            ..Config::default()
+        };
+        assert_eq!(compaction_trigger_tokens(&config), 52_000);
+    }
+
+    #[test]
+    fn zero_context_window_keeps_request_budget_unbounded() {
+        let config = Config {
+            max_context_tokens: 0,
+            max_tokens: 16_000,
+            ..Config::default()
+        };
+        assert_eq!(effective_max_tokens(&config), 16_000);
+        assert_eq!(request_input_limit(&config), usize::MAX);
+    }
+
+    #[test]
+    fn cut_point_can_compact_completed_tool_exchanges_in_one_user_turn() {
+        let messages = vec![
+            json!({"role":"user","content":"fix it"}),
+            json!({"role":"assistant","content":[{"type":"tool_use","id":"a","name":"Read","input":{"path":"a"}}]}),
+            json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":"x".repeat(2000)}]}),
+            json!({"role":"assistant","content":[{"type":"tool_use","id":"b","name":"Read","input":{"path":"b"}}]}),
+            json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"b","content":"new"}]}),
+        ];
+        let cut = find_compaction_cut_point(&messages, 10);
+        assert!(cut > 0);
+        assert_eq!(messages[cut]["role"], "assistant");
+    }
+
+    #[test]
+    fn compaction_state_rejects_boundary_beyond_history() {
+        let state = CompactionState {
+            active_start: 2,
+            ..CompactionState::default()
+        };
+        let messages = [json!({"role":"user","content":"only"})];
+        assert!(state.active_start > messages.len());
+    }
+
+    #[tokio::test]
+    async fn compaction_keeps_full_history_and_persists_state() -> anyhow::Result<()> {
+        let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+            "compact-keeps-history",
+            |config| {
+                config.max_context_tokens = 64_000;
+                config.context_compact_pct = 65;
+                config.context_reserve_tokens = 12_000;
+                config.context_compact_tail_tokens = 16_000;
+                config.context_compact_max_output_tokens = 2_048;
+            },
+            summary_backend(),
+        )
+        .await?;
+        for index in 0..4 {
+            ctx.store
+                .add_user(&format!("request {index}: {}", "x".repeat(8_000)))
+                .await?;
+            ctx.store
+                .add_assistant(&format!("progress {index}: {}", "y".repeat(8_000)), "", &[])
+                .await?;
+        }
+
+        let full_history = ctx.store.lines().await?;
+        let (compacted, _) = compact(&ctx, "manual", 50_000).await?;
+        assert!(compacted);
+        assert_eq!(ctx.store.lines().await?, full_history);
+
+        let projected = ctx.compaction.active_messages().await?;
+        assert!(projected.len() < full_history.len());
+        let persisted = load_state(&ctx.summary_path.with_file_name("context-state.json"))?;
+        assert!(persisted.active_start > 0);
+        assert!(!persisted.summary.is_empty());
+        assert!(
+            !ctx.summary_path
+                .with_file_name("context-state.json")
+                .with_extension("json.tmp")
+                .exists()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn enabled_input_reduction_changes_only_the_summary_request() -> anyhow::Result<()> {
+        let backend = Arc::new(CapturingSummaryBackend::default());
+        let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+            "compact-input-reduction",
+            |config| {
+                config.max_context_tokens = 64_000;
+                config.context_reserve_tokens = 8_000;
+                config.context_compact_tail_tokens = 1;
+                config.context_compact_max_output_tokens = 1_234;
+                config.context_compact_input_reduction = true;
+            },
+            backend.clone(),
+        )
+        .await?;
+        add_tool_history(&ctx).await?;
+
+        let full_history = ctx.store.lines().await?;
+        let (compacted, _) = ctx
+            .compaction
+            .evaluate_and_compact(
+                "manual",
+                0,
+                LlmModelTarget::new("active-summary-model", Some("active-summary")),
+            )
+            .await?;
+        assert!(compacted);
+        assert_eq!(ctx.store.lines().await?, full_history);
+
+        let guard = backend.requests.lock().unwrap();
+        let request = guard.first().expect("summary request captured");
+        assert_eq!(request.model, "active-summary-model");
+        assert_eq!(request.model_alias.as_deref(), Some("active-summary"));
+        assert_eq!(request.max_tokens, 1_234);
+        assert!(
+            request
+                .system_prompt
+                .starts_with("Summarize coding-agent history")
+        );
+        let serialized = serde_json::to_string(&request.messages)?;
+        assert!(serialized.contains("command=cargo test"));
+        assert!(serialized.contains("Process completed with exit code 1."));
+        assert!(!serialized.contains("private reasoning"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn disabled_input_reduction_sends_original_structured_history() -> anyhow::Result<()> {
+        let backend = Arc::new(CapturingSummaryBackend::default());
+        let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+            "compact-without-input-reduction",
+            |config| {
+                config.max_context_tokens = 64_000;
+                config.context_reserve_tokens = 8_000;
+                config.context_compact_tail_tokens = 1;
+                config.context_compact_max_output_tokens = 1_234;
+                config.context_compact_input_reduction = false;
+            },
+            backend.clone(),
+        )
+        .await?;
+        add_tool_history(&ctx).await?;
+
+        assert!(compact(&ctx, "manual", 0).await?.0);
+
+        let guard = backend.requests.lock().unwrap();
+        let request = guard.first().expect("summary request captured");
+        let serialized = serde_json::to_string(&request.messages)?;
+        assert!(serialized.contains("private reasoning"));
+        assert!(serialized.contains("\"type\":\"tool_use\""));
+        assert!(serialized.contains("cargo test"));
+        assert!(!serialized.contains("<conversation>"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn repeated_compaction_advances_boundary_and_merges_previous_summary()
+    -> anyhow::Result<()> {
+        let backend = Arc::new(CapturingSummaryBackend::default());
+        let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+            "compact-repeatedly",
+            |config| {
+                config.max_context_tokens = 64_000;
+                config.context_reserve_tokens = 8_000;
+                config.context_compact_tail_tokens = 1;
+                config.context_compact_max_output_tokens = 1_234;
+                config.context_compact_input_reduction = true;
+            },
+            backend.clone(),
+        )
+        .await?;
+        for index in 0..3 {
+            ctx.store
+                .add_user(&format!(
+                    "first batch request {index}: {}",
+                    "x".repeat(2_000)
+                ))
+                .await?;
+            ctx.store
+                .add_assistant(
+                    &format!("first batch progress {index}: {}", "y".repeat(2_000)),
+                    "",
+                    &[],
+                )
+                .await?;
+        }
+
+        assert!(compact(&ctx, "manual", 0).await?.0);
+        let state_path = ctx.summary_path.with_file_name("context-state.json");
+        let first_state = load_state(&state_path)?;
+        assert!(first_state.active_start > 0);
+
+        for index in 0..3 {
+            ctx.store
+                .add_user(&format!(
+                    "second batch request {index}: {}",
+                    "a".repeat(2_000)
+                ))
+                .await?;
+            ctx.store
+                .add_assistant(
+                    &format!("second batch progress {index}: {}", "b".repeat(2_000)),
+                    "",
+                    &[],
+                )
+                .await?;
+        }
+        let full_history = ctx.store.lines().await?;
+
+        assert!(compact(&ctx, "manual", 0).await?.0);
+
+        let second_state = load_state(&state_path)?;
+        assert!(second_state.active_start > first_state.active_start);
+        assert_eq!(ctx.store.lines().await?, full_history);
+        let projected = ctx.compaction.active_messages().await?;
+        assert_eq!(projected[0]["role"], "system");
+        assert!(projected.len() < full_history.len());
+
+        let guard = backend.requests.lock().unwrap();
+        assert_eq!(guard.len(), 2);
+        let second_instruction = guard[1]
+            .messages
+            .last()
+            .and_then(|message| message.get("content"))
+            .and_then(Value::as_str)
+            .expect("second summary instruction");
+        let encoded_previous = serde_json::to_string(&Some(first_state.summary.as_str()))?;
+        assert!(
+            second_instruction.contains(&format!("Previous context snapshot: {encoded_previous}"))
+        );
+        let second_request = serde_json::to_string(&guard[1].messages)?;
+        assert!(second_request.contains("second batch request"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn summary_preserves_tool_commands_and_paths() -> anyhow::Result<()> {
+        let backend = Arc::new(MockLlmClient::new(
+            "summary-model",
+            vec![vec![
+                Ok(Event::Text(TextEvent {
+                    content: "Task focus: fix build\nLatest request: continue\nProgress: Read(src/lib.rs)\nTool evidence: Bash(cargo test) failed\nReflections: none".into(),
+                })),
+                Ok(Event::Stop(StopEvent {
+                    reason: "end_turn".into(),
+                })),
+            ]],
+        ));
+        let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+            "compact-preserves-tool-evidence",
+            |config| {
+                config.max_context_tokens = 64_000;
+                config.context_compact_tail_tokens = 1;
+            },
+            backend,
+        )
+        .await?;
+        ctx.store.add_user("fix the build").await?;
+        ctx.store.add_assistant("checking", "", &[]).await?;
+
+        let (compacted, _) = compact(&ctx, "manual", 0).await?;
+
+        assert!(compacted);
+        let summary = ctx.compaction.current_summary()?.unwrap();
+        assert!(summary.contains("Read(src/lib.rs)"));
+        assert!(summary.contains("Bash(cargo test)"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn zero_context_window_disables_auto_but_allows_manual_compaction() -> anyhow::Result<()>
+    {
+        let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+            "compact-zero-window",
+            |config| {
+                config.max_context_tokens = 0;
+                config.context_compact_tail_tokens = 4_000;
+            },
+            summary_backend(),
+        )
+        .await?;
+        for index in 0..3 {
+            ctx.store
+                .add_user(&format!("request {index}: {}", "x".repeat(4_000)))
+                .await?;
+            ctx.store
+                .add_assistant(&format!("progress {index}: {}", "y".repeat(4_000)), "", &[])
+                .await?;
+        }
+
+        let (automatic, reason) = compact(&ctx, "auto", usize::MAX).await?;
+        assert!(!automatic);
+        assert_eq!(reason, "automatic compaction disabled");
+
+        let (manual, _) = compact(&ctx, "manual", usize::MAX).await?;
+        assert!(manual);
+        Ok(())
     }
 }

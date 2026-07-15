@@ -137,19 +137,21 @@ impl OrchActor {
                     }
                     Some(OrchCmd::Compact { done }) => {
                         self.ctx.display.render_info("Compressing...");
+                        let active_model = self.resolve_active();
 
-                        let stats = self.ctx.stats.snapshot().await;
                         let result = self.ctx.compaction.evaluate_and_compact(
                             "manual",
-                            stats.current_context_tokens as usize,
+                            0,
+                            crate::llm::client::LlmModelTarget::new(
+                                &active_model.actual,
+                                active_model.alias.as_deref(),
+                            ),
                         ).await;
 
                         match &result {
                             Ok((true, _reason)) => {
-                                *self.ctx.immutable_prefix.lock().unwrap_or_else(|e| e.into_inner()) = None;
                                 if let Some(summary) = self.ctx.compaction.read_summary().await {
-                                    let clean = crate::session::compaction::strip_tool_labels(&summary);
-                                    let trimmed = clean.trim();
+                                    let trimmed = summary.trim();
                                     if !trimmed.is_empty() {
                                         self.ctx.display.render_text(trimmed);
                                         if !trimmed.ends_with('\n') {

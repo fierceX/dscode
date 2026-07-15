@@ -231,10 +231,13 @@ impl AgentRuntime {
 }
 
 async fn last_assistant_text(store: &ConversationStore) -> (String, String) {
-    let Ok(messages) = store.lines().await else {
+    let Ok(message) = store.last_assistant_message().await else {
         return (String::new(), String::new());
     };
-    extract_text_thinking(&messages)
+    match message {
+        Some(message) => extract_text_thinking(std::slice::from_ref(&message)),
+        None => (String::new(), String::new()),
+    }
 }
 
 fn extract_text_thinking(messages: &[serde_json::Value]) -> (String, String) {

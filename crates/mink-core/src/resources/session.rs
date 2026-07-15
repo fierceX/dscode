@@ -4,6 +4,7 @@ use crate::resources::router::{
 };
 use anyhow::{Result, anyhow, bail};
 use serde_json::Value;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 pub struct SessionResourceHandler;
@@ -15,11 +16,22 @@ impl ResourceHandler for SessionResourceHandler {
 
     fn resolve(&self, req: &ResourceRequest, ctx: &ToolContext) -> Result<Resource> {
         let content = read_session_resource(&req.resource_url, ctx)?;
+        let total_lines = content.lines().count();
+        let total_bytes = content.len();
         Ok(Resource {
             canonical_url: req.resource_url.clone(),
-            content_type: ResourceContentType::PlainText,
-            immutable: Some(true),
-            metadata: ResourceMetadata::default(),
+            content_type: if req.resource_url == "session://current/history" {
+                ResourceContentType::Markdown
+            } else {
+                ResourceContentType::PlainText
+            },
+            immutable: Some(false),
+            metadata: ResourceMetadata {
+                source_label: Some("current session".to_string()),
+                total_lines: Some(total_lines),
+                total_bytes: Some(total_bytes),
+                notes: Vec::new(),
+            },
             content,
         })
     }
@@ -35,6 +47,7 @@ pub(crate) fn read_session_resource(url: &str, ctx: &ToolContext) -> Result<Stri
         "current/stats" => format_session_stats(ctx),
         "current/messages" => format_session_messages(ctx, 40),
         "current/messages/all" => format_session_messages(ctx, usize::MAX),
+        "current/history" => format_session_history(ctx),
         "current/artifacts" => format_session_artifacts(ctx),
         _ => bail!("Error: unsupported session resource: {url}"),
     }
@@ -89,6 +102,7 @@ Resources:\n\
 - session://current/stats\n\
 - session://current/messages\n\
 - session://current/messages/all\n\
+- session://current/history\n\
 - session://current/artifacts\n",
         ctx.cwd.display(),
         ctx.home.display(),
@@ -110,12 +124,7 @@ fn format_session_messages(ctx: &ToolContext, keep_last: usize) -> Result<String
     let dir = session_dir(ctx)?;
     let raw = read_optional_file(&dir.join("conversation.jsonl"))?;
     let mut rows = Vec::new();
-    for (idx, line) in raw.lines().enumerate() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let value: Value = serde_json::from_str(line)
-            .map_err(|e| anyhow!("Error: invalid conversation JSONL at line {}: {e}", idx + 1))?;
+    for (idx, value) in parse_conversation_rows(&raw)? {
         rows.push(format!("{} {}", idx + 1, summarize_message(&value)));
     }
 
@@ -135,6 +144,199 @@ fn format_session_messages(ctx: &ToolContext, keep_last: usize) -> Result<String
         out.push('\n');
     }
     Ok(out)
+}
+
+fn format_session_history(ctx: &ToolContext) -> Result<String> {
+    let dir = session_dir(ctx)?;
+    let raw = read_optional_file(&dir.join("conversation.jsonl"))?;
+    let messages = parse_conversation_rows(&raw)?
+        .into_iter()
+        .map(|(_, value)| value)
+        .collect::<Vec<_>>();
+
+    let mut results = HashMap::<String, String>::new();
+    for message in &messages {
+        let Some(blocks) = message.get("content").and_then(Value::as_array) else {
+            continue;
+        };
+        for block in blocks {
+            if block.get("type").and_then(Value::as_str) == Some("tool_result")
+                && let Some(id) = block.get("tool_use_id").and_then(Value::as_str)
+            {
+                results.insert(
+                    id.to_string(),
+                    block
+                        .get("content")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    let mut consumed_results = HashSet::new();
+    let mut out = String::from("# session://current/history\n\n");
+    for message in &messages {
+        let role = message.get("role").and_then(Value::as_str).unwrap_or("");
+        match (role, message.get("content")) {
+            ("user", Some(Value::String(text))) if !text.trim().is_empty() => {
+                out.push_str("## user\n\n");
+                out.push_str(text);
+                out.push_str("\n\n");
+            }
+            ("assistant", Some(content)) => {
+                let mut body = Vec::new();
+                match content {
+                    Value::String(text) if !text.trim().is_empty() => body.push(text.to_string()),
+                    Value::Array(blocks) => {
+                        for block in blocks {
+                            match block.get("type").and_then(Value::as_str) {
+                                Some("text") => {
+                                    let text =
+                                        block.get("text").and_then(Value::as_str).unwrap_or("");
+                                    if !text.trim().is_empty() {
+                                        body.push(text.to_string());
+                                    }
+                                }
+                                Some("tool_use") => {
+                                    let id = block.get("id").and_then(Value::as_str).unwrap_or("");
+                                    let name =
+                                        block.get("name").and_then(Value::as_str).unwrap_or("tool");
+                                    let result = results.get(id).map(String::as_str);
+                                    if result.is_some() {
+                                        consumed_results.insert(id.to_string());
+                                    }
+                                    body.push(format_tool_exchange(
+                                        name,
+                                        block.get("input"),
+                                        result,
+                                    ));
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                if !body.is_empty() {
+                    out.push_str("## assistant\n\n");
+                    out.push_str(&body.join("\n"));
+                    out.push_str("\n\n");
+                }
+            }
+            ("user", Some(Value::Array(blocks))) => {
+                for block in blocks {
+                    if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+                        continue;
+                    }
+                    let id = block
+                        .get("tool_use_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("<unknown>");
+                    if !consumed_results.contains(id) {
+                        let content = block.get("content").and_then(Value::as_str).unwrap_or("");
+                        out.push_str(&format!(
+                            "## tool result\n\n{}\n\n",
+                            format_tool_result_status(id, content)
+                        ));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
+fn parse_conversation_rows(raw: &str) -> Result<Vec<(usize, Value)>> {
+    let ends_with_newline = raw.ends_with('\n');
+    let lines = raw.lines().collect::<Vec<_>>();
+    let mut rows = Vec::new();
+    for (idx, line) in lines.iter().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str(line) {
+            Ok(value) => rows.push((idx, value)),
+            Err(_) if idx + 1 == lines.len() && !ends_with_newline => {}
+            Err(error) => {
+                bail!(
+                    "Error: invalid conversation JSONL at line {}: {error}",
+                    idx + 1
+                )
+            }
+        }
+    }
+    Ok(rows)
+}
+
+fn format_tool_exchange(name: &str, input: Option<&Value>, result: Option<&str>) -> String {
+    let arg = primary_tool_arg(input);
+    let head = format!("-> {name}({arg})");
+    match result {
+        Some(content) => format!("{head} => {}", format_result_summary(content)),
+        None => format!("{head} => pending"),
+    }
+}
+
+fn format_tool_result_status(id: &str, content: &str) -> String {
+    format!("-> {id} => {}", format_result_summary(content))
+}
+
+fn format_result_summary(content: &str) -> String {
+    let line_count = if content.is_empty() {
+        0
+    } else {
+        content.lines().count().max(1)
+    };
+    let status = if content.lines().any(|line| {
+        let line = line.trim();
+        line.starts_with("Error:")
+            || line.starts_with("Process completed with exit code ")
+            || line.starts_with("Python script exited with code ")
+    }) {
+        "error"
+    } else {
+        "ok"
+    };
+    format!("{status} - {line_count} lines")
+}
+
+fn primary_tool_arg(input: Option<&Value>) -> String {
+    const KEYS: &[&str] = &[
+        "path",
+        "command",
+        "pattern",
+        "url",
+        "query",
+        "prompt",
+        "description",
+        "name",
+        "id",
+    ];
+    let Some(input) = input.and_then(Value::as_object) else {
+        return String::new();
+    };
+    for key in KEYS {
+        if let Some(value) = input.get(*key).and_then(Value::as_str)
+            && !value.is_empty()
+        {
+            return one_line(value, 120);
+        }
+    }
+    one_line(&Value::Object(input.clone()).to_string(), 120)
+}
+
+fn one_line(text: &str, max_chars: usize) -> String {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = normalized.chars();
+    let mut out = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        out.pop();
+        out.push_str("...");
+    }
+    out
 }
 
 fn format_session_artifacts(ctx: &ToolContext) -> Result<String> {

@@ -48,6 +48,11 @@ print(result["text"])
 
 执行一个提示词并返回聚合结果。每次调用都会启动一个新的 `mink-core --agent-jsonl` 进程；持续交互通过相同的 `mink_home + session_id` 复用磁盘 session，而不是复用同一个进程。同一个 `AgentSession` 实例不支持并发调用；并发任务应创建多个实例或由外层应用排队。
 
+Rust core 会在 `conversation.jsonl` 中完整保留历史，并通过 `context-state.json` 只恢复当前活跃后缀。
+压缩不会删除旧消息；长 session 的冷历史留在磁盘，不会在每次调用中全部常驻内存。
+`session://current/history` 提供从完整 `conversation.jsonl` 生成的有损检索视图；原始 thinking
+和完整工具输出仍需读取 `conversation.jsonl` 或相关 artifact。
+
 默认情况下 `run()` 会消费 Rust 侧输出的过程事件并聚合 `text`、`thinking`、工具调用和最终状态。传入 `on_event` 时，每个归一化后的 `AgentStreamEvent` 会同步回调给调用方，适合在不直接迭代 stream 的场景里做 UI 增量更新。
 
 如果 `SandboxConfig.stream_events=False`，SDK 会在 Agent JSONL request 的 `options` 中传入 `stream_events=false`。Rust 侧不会向 stdout 输出 `thinking`、`text`、`tool_call`、`tool_result` 等过程事件，只输出最终 `final`；`run()` 会从 session `conversation.jsonl` 回读最后一条 assistant 消息，尽量补齐最终 `text` / `thinking`。这个模式用于不需要流式展示的长程任务，可减少 stdout 事件处理开销。
@@ -144,6 +149,12 @@ print(result["text"])
 | `llm_wait_heartbeat` | `30` | 等待模型响应的提示间隔；设为 `0` 关闭提示 |
 | `max_tokens` | `81920` | 输出 token 上限 |
 | `max_turns` | `40` | 最大循环轮数 |
+| `max_context` | `1000000` | 模型上下文 token 上限；设为 `0` 时禁用自动压缩和本地输入预算限制 |
+| `context_compact_pct` | `94` | 自动压缩触发百分比，范围 1-100 |
+| `context_reserve_tokens` | `64000` | 主请求响应预留，同时限制主请求输出预算 |
+| `context_compact_tail_tokens` | `256000` | 压缩后原样保留的热历史目标 |
+| `context_compact_max_output_tokens` | `8192` | 摘要请求输出上限 |
+| `context_compact_input_reduction` | `False` | 摘要前是否删除 thinking 并压缩工具噪声 |
 | `max_search_files` | `5000` | Glob/Grep 最大遍历文件数 |
 | `max_search_results` | `1000` | Grep 最大匹配结果行数 |
 | `max_memory_mb` | `1024` | 内存限制（仅 nsjail cgroup） |

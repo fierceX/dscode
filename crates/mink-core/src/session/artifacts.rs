@@ -1,5 +1,6 @@
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -26,7 +27,7 @@ impl ArtifactManager {
         Self {
             index_path: root.join("index.jsonl"),
             root,
-            counter: AtomicU64::new(1),
+            counter: AtomicU64::new(0),
         }
     }
 
@@ -34,6 +35,12 @@ impl ArtifactManager {
         std::fs::create_dir_all(&self.root)?;
         if !self.index_path.exists() {
             std::fs::File::create(&self.index_path)?;
+        }
+        if self.counter.load(Ordering::SeqCst) == 0 {
+            let next = self.next_counter_from_index()?;
+            let _ = self
+                .counter
+                .compare_exchange(0, next, Ordering::SeqCst, Ordering::SeqCst);
         }
         Ok(())
     }
@@ -46,10 +53,22 @@ impl ArtifactManager {
         content: &str,
     ) -> Result<ArtifactRecord> {
         self.ensure()?;
-        let id = self.next_id(tool);
-        let filename = format!("{id}.txt");
-        let path = self.root.join(&filename);
-        std::fs::write(&path, content)?;
+        let (id, filename, mut file) = loop {
+            let id = self.next_id(tool);
+            let filename = format!("{id}.txt");
+            let path = self.root.join(&filename);
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+            {
+                Ok(file) => break (id, filename, file),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error.into()),
+            }
+        };
+        file.write_all(content.as_bytes())?;
+        file.flush()?;
         let record = ArtifactRecord {
             id,
             tool: tool.to_string(),
@@ -120,8 +139,29 @@ impl ArtifactManager {
         format!("{}-{n:04}", sanitize_tool_name(tool))
     }
 
+    fn next_counter_from_index(&self) -> Result<u64> {
+        let index = std::fs::read_to_string(&self.index_path)?;
+        let mut max = 0u64;
+        for line in index.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let Ok(record) = serde_json::from_str::<ArtifactRecord>(line) else {
+                continue;
+            };
+            if let Some(number) = record
+                .id
+                .rsplit_once('-')
+                .and_then(|(_, suffix)| suffix.parse::<u64>().ok())
+            {
+                max = max.max(number);
+            }
+        }
+        max.checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("artifact id counter exhausted"))
+    }
+
     fn append_index(&self, record: &ArtifactRecord) -> Result<()> {
-        use std::io::Write;
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -191,6 +231,46 @@ mod tests {
     }
 
     #[test]
+    fn resumed_manager_continues_ids_without_overwriting() {
+        let manager = temp_manager("resume-counter");
+        let root = manager.root.clone();
+        let old = manager
+            .write_text("Bash", "old output", None, "inherited")
+            .unwrap();
+        drop(manager);
+
+        let resumed = ArtifactManager::new(root.clone());
+        resumed.ensure().unwrap();
+        let new = resumed
+            .write_text("Bash", "new output", None, "continued")
+            .unwrap();
+
+        assert_eq!(old.id, "bash-0001");
+        assert_eq!(new.id, "bash-0002");
+        assert_eq!(resumed.read_text(&old.id).unwrap(), "inherited");
+        assert_eq!(resumed.read_text(&new.id).unwrap(), "continued");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn orphan_artifact_file_is_not_overwritten() {
+        let manager = temp_manager("orphan-file");
+        manager.ensure().unwrap();
+        std::fs::write(manager.root.join("bash-0001.txt"), "orphaned content").unwrap();
+
+        let record = manager
+            .write_text("Bash", "new output", None, "new content")
+            .unwrap();
+
+        assert_eq!(record.id, "bash-0002");
+        assert_eq!(
+            std::fs::read_to_string(manager.root.join("bash-0001.txt")).unwrap(),
+            "orphaned content"
+        );
+        let _ = std::fs::remove_dir_all(manager.root);
+    }
+
+    #[test]
     fn finds_latest_artifact_by_tool_and_source() {
         let manager = temp_manager("find-source");
         manager
@@ -215,8 +295,6 @@ mod tests {
 
     #[test]
     fn source_lookup_skips_corrupt_index_lines() {
-        use std::io::Write;
-
         let manager = temp_manager("find-source-corrupt");
         let latest = manager
             .write_text("ReadUrl", "new", Some("https://example.com"), "new")

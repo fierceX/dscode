@@ -51,7 +51,11 @@ llm_idle_timeout = 90                       # LLM stream 空闲超时（秒）
 llm_wait_heartbeat = 30                     # 等待 LLM 响应时的提示间隔（秒，0=关闭）
 
 # ── 上下文压缩 ───────────────────────────────────────────────
-context_compact_pct = 85                    # 上下文使用率达到此百分比时触发压缩
+context_compact_pct = 94                    # 自动压缩百分比（1-100）
+context_reserve_tokens = 64000              # 主请求响应预留及 max_tokens 上限
+context_compact_tail_tokens = 256000        # 压缩后原样保留的热尾部目标
+context_compact_max_output_tokens = 8192    # 摘要请求输出上限
+context_compact_input_reduction = false     # 摘要前是否过滤 thinking 和工具噪声
 
 # ── 日志 ─────────────────────────────────────────────────────
 log_events = true                           # 是否记录 events.jsonl

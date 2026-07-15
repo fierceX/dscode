@@ -64,6 +64,110 @@ impl LlmBackend for IdleAfterTextLlmClient {
     }
 }
 
+#[derive(Debug, PartialEq)]
+struct CapturedModelTarget {
+    model: String,
+    alias: Option<String>,
+}
+
+struct RecordingCompactionBackend {
+    requests: Arc<Mutex<Vec<CapturedModelTarget>>>,
+}
+
+#[async_trait::async_trait]
+impl LlmBackend for RecordingCompactionBackend {
+    fn name(&self) -> &str {
+        "recording-compaction"
+    }
+
+    async fn stream(&self, request: LlmRequest) -> anyhow::Result<LlmResponseStream> {
+        assert!(matches!(request.purpose, LlmPurpose::Compaction));
+        self.requests.lock().unwrap().push(CapturedModelTarget {
+            model: request.model,
+            alias: request.model_alias,
+        });
+        Ok(LlmResponseStream {
+            events: Box::pin(futures::stream::iter(vec![
+                Ok(Event::Text(TextEvent {
+                    content: "Current objective and completed work retained.".into(),
+                })),
+                Ok(Event::Stop(StopEvent {
+                    reason: "end_turn".into(),
+                })),
+            ])),
+            attempt_count: 1,
+        })
+    }
+}
+
+#[derive(Debug, PartialEq)]
+struct CapturedRoutedRequest {
+    purpose: &'static str,
+    model: String,
+    alias: Option<String>,
+}
+
+struct ActiveModelRoutingBackend {
+    requests: Arc<Mutex<Vec<CapturedRoutedRequest>>>,
+    agent_request_count: AtomicU64,
+}
+
+#[async_trait::async_trait]
+impl LlmBackend for ActiveModelRoutingBackend {
+    fn name(&self) -> &str {
+        "active-model-routing"
+    }
+
+    async fn stream(&self, request: LlmRequest) -> anyhow::Result<LlmResponseStream> {
+        let purpose = match &request.purpose {
+            LlmPurpose::Agent => "agent",
+            LlmPurpose::SubAgent { .. } => "sub_agent",
+            LlmPurpose::Compaction => "compaction",
+        };
+        self.requests.lock().unwrap().push(CapturedRoutedRequest {
+            purpose,
+            model: request.model,
+            alias: request.model_alias,
+        });
+
+        let events = match request.purpose {
+            LlmPurpose::Agent if self.agent_request_count.fetch_add(1, Ordering::SeqCst) == 0 => {
+                vec![
+                    Ok(Event::ToolCall(tool_call(
+                        "SubAgent",
+                        "call_sub_agent",
+                        json!({"prompt":"complete the child task","fork":false}),
+                    ))),
+                    Ok(Event::Stop(StopEvent {
+                        reason: "tool_use".into(),
+                    })),
+                ]
+            }
+            LlmPurpose::Agent => vec![
+                Ok(Event::Text(TextEvent {
+                    content: "parent done".into(),
+                })),
+                Ok(Event::Stop(StopEvent {
+                    reason: "end_turn".into(),
+                })),
+            ],
+            LlmPurpose::SubAgent { .. } => vec![
+                Ok(Event::Text(TextEvent {
+                    content: "child done".into(),
+                })),
+                Ok(Event::Stop(StopEvent {
+                    reason: "end_turn".into(),
+                })),
+            ],
+            LlmPurpose::Compaction => unreachable!("test does not trigger compaction"),
+        };
+        Ok(LlmResponseStream {
+            events: Box::pin(futures::stream::iter(events)),
+            attempt_count: 1,
+        })
+    }
+}
+
 struct NoopDisplay {
     info: Mutex<Vec<String>>,
     title_models: Mutex<Vec<String>>,
@@ -117,7 +221,21 @@ pub(crate) async fn test_context_for_agent_with_config(
     name: &str,
     configure: impl FnOnce(&mut Config),
 ) -> anyhow::Result<Arc<AgentSharedContext>> {
-    Ok(harness_with_config(name, false, 300, configure).await?.ctx)
+    Ok(harness_with_config(name, false, 300, configure, None)
+        .await?
+        .ctx)
+}
+
+pub(crate) async fn test_context_for_agent_with_config_and_backend(
+    name: &str,
+    configure: impl FnOnce(&mut Config),
+    backend: Arc<dyn LlmBackend>,
+) -> anyhow::Result<Arc<AgentSharedContext>> {
+    Ok(
+        harness_with_config(name, false, 300, configure, Some(backend))
+            .await?
+            .ctx,
+    )
 }
 
 async fn harness_with(
@@ -125,7 +243,7 @@ async fn harness_with(
     is_sub_agent: bool,
     sub_agent_timeout_secs: i32,
 ) -> anyhow::Result<TestHarness> {
-    harness_with_config(name, is_sub_agent, sub_agent_timeout_secs, |_| {}).await
+    harness_with_config(name, is_sub_agent, sub_agent_timeout_secs, |_| {}, None).await
 }
 
 async fn harness_with_config(
@@ -133,6 +251,7 @@ async fn harness_with_config(
     is_sub_agent: bool,
     sub_agent_timeout_secs: i32,
     configure: impl FnOnce(&mut Config),
+    llm_backend: Option<Arc<dyn LlmBackend>>,
 ) -> anyhow::Result<TestHarness> {
     static CNT: AtomicU64 = AtomicU64::new(0);
     let n = CNT.fetch_add(1, Ordering::SeqCst);
@@ -173,15 +292,12 @@ async fn harness_with_config(
         &cfg.session_id,
         &cfg.skills,
     )?);
-    let llm_backend = Arc::new(crate::llm::client::OpenAiCompatibleBackend::deepseek_defaults());
-    let compaction = Arc::new(CompactionEngine::new_with_usage(
+    let llm_backend = llm_backend.unwrap_or_else(|| {
+        Arc::new(crate::llm::client::OpenAiCompatibleBackend::deepseek_defaults())
+    });
+    let compaction = Arc::new(CompactionEngine::new(
         store.clone(),
         spaths.summary.clone(),
-        spaths.plan.clone(),
-        spaths.plan_draft.clone(),
-        cwd.clone(),
-        home.clone(),
-        capability_snapshot.clone(),
         crate::config::api_url(&cfg),
         &cfg,
         stats.clone(),
@@ -573,11 +689,17 @@ async fn turn_stream_without_stop_event_fails_without_assistant_message() -> any
 
 #[tokio::test]
 async fn turn_llm_first_event_timeout_fails_with_clear_error() -> anyhow::Result<()> {
-    let h = harness_with_config("turn-first-event-timeout", false, 300, |cfg| {
-        cfg.llm_first_event_timeout_secs = 1;
-        cfg.llm_idle_timeout_secs = 10;
-        cfg.llm_wait_heartbeat_secs = 0;
-    })
+    let h = harness_with_config(
+        "turn-first-event-timeout",
+        false,
+        300,
+        |cfg| {
+            cfg.llm_first_event_timeout_secs = 1;
+            cfg.llm_idle_timeout_secs = 10;
+            cfg.llm_wait_heartbeat_secs = 0;
+        },
+        None,
+    )
     .await?;
     let mut executor = TurnExecutor::new(
         h.ctx.clone(),
@@ -604,11 +726,17 @@ async fn turn_llm_first_event_timeout_fails_with_clear_error() -> anyhow::Result
 
 #[tokio::test]
 async fn turn_llm_idle_timeout_fails_after_partial_stream() -> anyhow::Result<()> {
-    let h = harness_with_config("turn-idle-timeout", false, 300, |cfg| {
-        cfg.llm_first_event_timeout_secs = 10;
-        cfg.llm_idle_timeout_secs = 1;
-        cfg.llm_wait_heartbeat_secs = 0;
-    })
+    let h = harness_with_config(
+        "turn-idle-timeout",
+        false,
+        300,
+        |cfg| {
+            cfg.llm_first_event_timeout_secs = 10;
+            cfg.llm_idle_timeout_secs = 1;
+            cfg.llm_wait_heartbeat_secs = 0;
+        },
+        None,
+    )
     .await?;
     let mut executor = TurnExecutor::new(
         h.ctx.clone(),
@@ -635,9 +763,15 @@ async fn turn_llm_idle_timeout_fails_after_partial_stream() -> anyhow::Result<()
 
 #[tokio::test]
 async fn turn_max_turns_exhaustion_is_failed_not_stop() -> anyhow::Result<()> {
-    let h = harness_with_config("turn-max-turns", false, 300, |cfg| {
-        cfg.max_turns = 1;
-    })
+    let h = harness_with_config(
+        "turn-max-turns",
+        false,
+        300,
+        |cfg| {
+            cfg.max_turns = 1;
+        },
+        None,
+    )
     .await?;
     tokio::fs::write(h.cwd.join("fixture.txt"), "alpha\n").await?;
     let llm = Arc::new(MockLlmClient::new(
@@ -664,9 +798,15 @@ async fn turn_max_turns_exhaustion_is_failed_not_stop() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn disabled_tool_call_persists_error_result_instead_of_being_dropped() -> anyhow::Result<()> {
-    let h = harness_with_config("disabled-tool-result", false, 300, |cfg| {
-        cfg.tool_disable.disable_bash = true;
-    })
+    let h = harness_with_config(
+        "disabled-tool-result",
+        false,
+        300,
+        |cfg| {
+            cfg.tool_disable.disable_bash = true;
+        },
+        None,
+    )
     .await?;
     let llm = Arc::new(MockLlmClient::new(
         "flash",
@@ -958,11 +1098,17 @@ async fn stop_error_reasons_return_failed_and_unknown_reasons_stop() -> anyhow::
 }
 
 #[tokio::test]
-async fn preflight_compaction_path_runs_when_estimated_context_is_high() -> anyhow::Result<()> {
-    let h = harness_with_config("preflight-compact-path", false, 300, |cfg| {
-        cfg.max_context_tokens = 1;
-        cfg.context_compact_pct = 100;
-    })
+async fn preflight_rejects_context_that_cannot_fit_the_request_budget() -> anyhow::Result<()> {
+    let h = harness_with_config(
+        "preflight-compact-path",
+        false,
+        300,
+        |cfg| {
+            cfg.max_context_tokens = 1;
+            cfg.context_compact_pct = 100;
+        },
+        None,
+    )
     .await?;
     let llm = Arc::new(MockLlmClient::new(
         "flash",
@@ -971,17 +1117,25 @@ async fn preflight_compaction_path_runs_when_estimated_context_is_high() -> anyh
         }))]],
     ));
     let mut executor = TurnExecutor::new(h.ctx.clone(), llm_client_from_mock(llm));
-    let (decision, effects) = executor.execute("large context estimate", None).await?;
-    assert_eq!(decision, TurnDecision::Stop);
-    assert!(effects.is_empty());
+    let error = executor
+        .execute("large context estimate", None)
+        .await
+        .expect_err("an impossible request budget must fail before the LLM call");
+    assert!(error.to_string().contains("over the request input budget"));
     Ok(())
 }
 
 #[tokio::test]
 async fn clean_tool_call_with_belief_takes_decision_none_path() -> anyhow::Result<()> {
-    let h = harness_with_config("decision-none-path", false, 300, |cfg| {
-        cfg.max_turns = 1;
-    })
+    let h = harness_with_config(
+        "decision-none-path",
+        false,
+        300,
+        |cfg| {
+            cfg.max_turns = 1;
+        },
+        None,
+    )
     .await?;
     tokio::fs::write(h.cwd.join("clean.txt"), "clean\n").await?;
     let llm = Arc::new(MockLlmClient::new(
@@ -1272,6 +1426,58 @@ async fn orchestrator_forced_model_title_survives_turn_refreshes() -> anyhow::Re
 }
 
 #[tokio::test]
+async fn orchestrator_active_model_is_used_by_spawned_sub_agent() -> anyhow::Result<()> {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let backend = Arc::new(ActiveModelRoutingBackend {
+        requests: requests.clone(),
+        agent_request_count: AtomicU64::new(0),
+    });
+    let h = harness_with_config(
+        "orch-sub-agent-active-model",
+        false,
+        300,
+        |_| {},
+        Some(backend),
+    )
+    .await?;
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let actor = OrchActor::new(h.ctx.clone(), rx);
+    let handle = tokio::spawn(actor.run());
+    tx.send(OrchCmd::SetModel("pro".into()))?;
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    tx.send(OrchCmd::UserInput {
+        input: "delegate this task".into(),
+        done: done_tx,
+    })?;
+    let outcome = done_rx.await?;
+    drop(tx);
+    handle.await??;
+
+    assert_eq!(outcome.status, crate::agent::orchestrator::TurnStatus::Ok);
+    assert_eq!(
+        requests.lock().unwrap().as_slice(),
+        &[
+            CapturedRoutedRequest {
+                purpose: "agent",
+                model: "deepseek-v4-pro".into(),
+                alias: Some("pro".into()),
+            },
+            CapturedRoutedRequest {
+                purpose: "sub_agent",
+                model: "deepseek-v4-pro".into(),
+                alias: Some("pro".into()),
+            },
+            CapturedRoutedRequest {
+                purpose: "agent",
+                model: "deepseek-v4-pro".into(),
+                alias: Some("pro".into()),
+            },
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn orchestrator_flash_command_resets_forced_model_display() -> anyhow::Result<()> {
     let h = harness("orch-flash-command").await?;
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1378,6 +1584,51 @@ async fn orchestrator_manual_compact_empty_session_reports_skip() -> anyhow::Res
 }
 
 #[tokio::test]
+async fn orchestrator_manual_compact_uses_active_model_and_shared_backend() -> anyhow::Result<()> {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let backend = Arc::new(RecordingCompactionBackend {
+        requests: requests.clone(),
+    });
+    let h = harness_with_config(
+        "orch-compact-active-model",
+        false,
+        300,
+        |config| config.context_compact_tail_tokens = 1,
+        Some(backend),
+    )
+    .await?;
+    for index in 0..3 {
+        h.ctx
+            .store
+            .add_user(&format!("user history {index}: {}", "x".repeat(256)))
+            .await?;
+        h.ctx
+            .store
+            .add_assistant(&format!("assistant history {index}"), "", &[])
+            .await?;
+    }
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let actor = OrchActor::new(h.ctx.clone(), rx);
+    let handle = tokio::spawn(actor.run());
+    tx.send(OrchCmd::SetModel("pro".into()))?;
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    tx.send(OrchCmd::Compact { done: done_tx })?;
+    done_rx.await?;
+    drop(tx);
+    handle.await??;
+
+    assert_eq!(
+        requests.lock().unwrap().as_slice(),
+        &[CapturedModelTarget {
+            model: "deepseek-v4-pro".into(),
+            alias: Some("pro".into()),
+        }]
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn plan_confirm_and_clear_apply_file_side_effects_and_invalidate_prefix() -> anyhow::Result<()>
 {
     let h = harness("plan-actions").await?;
@@ -1389,7 +1640,14 @@ async fn plan_confirm_and_clear_apply_file_side_effects_and_invalidate_prefix() 
     let handler = PlanActionHandler::new(h.ctx.clone());
     let mut effects = Vec::new();
     let mut confirm = internal_result("PlanConfirm");
-    handler.handle(&mut confirm, &mut effects, &prefix).await;
+    handler
+        .handle(
+            &mut confirm,
+            &mut effects,
+            &prefix,
+            crate::llm::client::LlmModelTarget::new("test-model", None),
+        )
+        .await;
     assert_eq!(confirm.content, "Plan confirmed and locked in.");
     assert_eq!(
         tokio::fs::read_to_string(&h.ctx.plan_path).await?,
@@ -1401,7 +1659,14 @@ async fn plan_confirm_and_clear_apply_file_side_effects_and_invalidate_prefix() 
 
     let _ = prefix.ensure()?;
     let mut clear = internal_result("PlanClear");
-    handler.handle(&mut clear, &mut effects, &prefix).await;
+    handler
+        .handle(
+            &mut clear,
+            &mut effects,
+            &prefix,
+            crate::llm::client::LlmModelTarget::new("test-model", None),
+        )
+        .await;
     assert_eq!(clear.content, "Plan cleared.");
     assert_eq!(tokio::fs::read_to_string(&h.ctx.plan_path).await?, "");
     assert!(matches!(
@@ -1420,7 +1685,14 @@ async fn plan_confirm_without_draft_returns_error_result() -> anyhow::Result<()>
     let handler = PlanActionHandler::new(h.ctx.clone());
     let mut effects = Vec::new();
     let mut confirm = internal_result("PlanConfirm");
-    handler.handle(&mut confirm, &mut effects, &prefix).await;
+    handler
+        .handle(
+            &mut confirm,
+            &mut effects,
+            &prefix,
+            crate::llm::client::LlmModelTarget::new("test-model", None),
+        )
+        .await;
     assert_eq!(confirm.content, "Error: no plan draft found to confirm.");
     assert!(effects.is_empty());
     assert!(h.ctx.immutable_prefix.lock().unwrap().is_some());
@@ -1655,7 +1927,7 @@ async fn tool_runner_blocks_symlink_edit_escape() -> anyhow::Result<()> {
 #[tokio::test]
 async fn sub_agent_recursion_is_rejected_without_running_child() -> anyhow::Result<()> {
     let h = harness_with("sub-recursion", true, 300).await?;
-    let coordinator = SubAgentCoordinator::new(h.ctx.clone());
+    let coordinator = SubAgentCoordinator::new(h.ctx.clone(), h.ctx.config.clone());
     let mut result = internal_result("SubAgent");
     result.spawns_sub_agent = true;
     result.sub_agent_prompt = Some("nested task".into());
@@ -1673,7 +1945,7 @@ async fn sub_agent_recursion_is_rejected_without_running_child() -> anyhow::Resu
 #[tokio::test]
 async fn sub_agent_success_formats_result_and_records_usage() -> anyhow::Result<()> {
     let h = harness_with("sub-success", false, 300).await?;
-    let coordinator = SubAgentCoordinator::new(h.ctx.clone());
+    let coordinator = SubAgentCoordinator::new(h.ctx.clone(), h.ctx.config.clone());
     let mut result = internal_result("SubAgent");
     result.spawns_sub_agent = true;
     result.sub_agent_prompt = Some("task".into());
@@ -1711,7 +1983,7 @@ async fn sub_agent_success_formats_result_and_records_usage() -> anyhow::Result<
 #[tokio::test]
 async fn sub_agent_runner_panic_is_reported_as_failed_result() -> anyhow::Result<()> {
     let h = harness_with("sub-panic", false, 300).await?;
-    let coordinator = SubAgentCoordinator::new(h.ctx.clone());
+    let coordinator = SubAgentCoordinator::new(h.ctx.clone(), h.ctx.config.clone());
     let mut result = internal_result("SubAgent");
     result.spawns_sub_agent = true;
     result.sub_agent_prompt = Some("panic task".into());
@@ -1747,7 +2019,7 @@ async fn sub_agent_runner_panic_is_reported_as_failed_result() -> anyhow::Result
 #[tokio::test]
 async fn sub_agent_runner_sync_panic_is_reported_as_failed_result() -> anyhow::Result<()> {
     let h = harness_with("sub-sync-panic", false, 300).await?;
-    let coordinator = SubAgentCoordinator::new(h.ctx.clone());
+    let coordinator = SubAgentCoordinator::new(h.ctx.clone(), h.ctx.config.clone());
     let mut result = internal_result("SubAgent");
     result.spawns_sub_agent = true;
     result.sub_agent_prompt = Some("sync panic task".into());
@@ -1771,7 +2043,7 @@ async fn sub_agent_runner_sync_panic_is_reported_as_failed_result() -> anyhow::R
 #[tokio::test]
 async fn sub_agent_timeout_marks_incomplete() -> anyhow::Result<()> {
     let h = harness_with("sub-timeout", false, 0).await?;
-    let coordinator = SubAgentCoordinator::new(h.ctx.clone());
+    let coordinator = SubAgentCoordinator::new(h.ctx.clone(), h.ctx.config.clone());
     let mut result = internal_result("SubAgent");
     result.spawns_sub_agent = true;
     result.sub_agent_prompt = Some("slow task".into());
@@ -1795,7 +2067,7 @@ async fn sub_agent_timeout_marks_incomplete() -> anyhow::Result<()> {
 async fn sub_agent_collection_enters_timeout_even_when_more_than_limit_are_launched()
 -> anyhow::Result<()> {
     let h = harness_with("sub-timeout-many", false, 0).await?;
-    let coordinator = SubAgentCoordinator::new(h.ctx.clone());
+    let coordinator = SubAgentCoordinator::new(h.ctx.clone(), h.ctx.config.clone());
     let mut calls = Vec::new();
     for idx in 0..9 {
         let mut result = internal_result("SubAgent");
@@ -1849,10 +2121,12 @@ async fn sub_agent_executor_with_mock_llm_captures_child_output() -> anyhow::Res
             })),
         ]],
     ));
+    let parent = test_context_with_llm_backend(h.ctx.clone(), llm);
     let executor = SubAgentExecutor::new(
-        test_context_with_llm_backend(h.ctx.clone(), llm),
+        parent.clone(),
         "sub_mock".into(),
         true,
+        parent.config.clone(),
     )
     .await?;
     let result = executor.execute("child task".into()).await;

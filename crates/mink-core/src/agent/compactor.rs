@@ -1,5 +1,6 @@
 use crate::agent::prefix::PrefixManager;
 use crate::context::AgentSharedContext;
+use crate::llm::client::LlmModelTarget;
 use anyhow::Result;
 use std::sync::Arc;
 
@@ -31,23 +32,25 @@ impl TurnCompactor {
         system_prompt: &mut String,
         tools_json: &mut Vec<serde_json::Value>,
         prefix: &PrefixManager,
+        target: LlmModelTarget<'_>,
     ) -> Result<bool> {
         if self.compacted_this_turn {
             return Ok(false);
         }
-        let stats = self.ctx.stats.snapshot().await;
-        let compacted = self
+        let local_tokens = crate::llm::transport::estimate_openai_context_tokens(
+            messages,
+            tools_json,
+            system_prompt,
+        )?;
+        let (did_compact, _) = self
             .ctx
             .compaction
-            .evaluate_and_compact(trigger, stats.current_context_tokens as usize)
-            .await;
-        if let Ok((did_compact, _)) = compacted
-            && did_compact
-        {
+            .evaluate_and_compact(trigger, local_tokens, target)
+            .await?;
+        if did_compact {
             self.compacted_this_turn = true;
-            prefix.invalidate();
-            *messages = self.ctx.store.lines().await?;
             (*system_prompt, *tools_json) = prefix.ensure()?;
+            *messages = self.ctx.compaction.active_messages().await?;
             return Ok(true);
         }
         Ok(false)
@@ -79,6 +82,7 @@ mod tests {
                 &mut system_prompt,
                 &mut tools,
                 &prefix,
+                LlmModelTarget::new("test-model", None),
             )
             .await?;
 
@@ -115,12 +119,13 @@ mod tests {
                 &mut system_prompt,
                 &mut tools,
                 &prefix,
+                LlmModelTarget::new("test-model", None),
             )
             .await?;
 
         assert!(did_compact);
         assert!(compactor.compacted_this_turn());
-        assert_eq!(messages, ctx.store.lines().await?);
+        assert_eq!(messages, ctx.compaction.active_messages().await?);
         assert!(!system_prompt.is_empty());
         assert!(!tools.is_empty());
         Ok(())

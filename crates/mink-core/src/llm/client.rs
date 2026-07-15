@@ -15,11 +15,29 @@ const RETRY_MAX_TIME: Duration = Duration::from_secs(20);
 
 const MAX_STREAM_ERRORS: u32 = 5;
 
+#[derive(Debug, Clone, Copy)]
+pub struct LlmModelTarget<'a> {
+    pub model: &'a str,
+    pub alias: Option<&'a str>,
+}
+
+impl<'a> LlmModelTarget<'a> {
+    pub fn new(model: &'a str, alias: Option<&'a str>) -> Self {
+        Self { model, alias }
+    }
+}
+
 #[async_trait::async_trait]
 pub trait LlmClient: Send + Sync {
     fn model(&self) -> &str;
+    fn model_alias(&self) -> Option<&str> {
+        None
+    }
     fn model_label(&self) -> &str {
-        self.model()
+        self.model_alias().unwrap_or_else(|| self.model())
+    }
+    fn model_target(&self) -> LlmModelTarget<'_> {
+        LlmModelTarget::new(self.model(), self.model_alias())
     }
     async fn stream(
         &self,
@@ -446,8 +464,8 @@ impl LlmClient for BackendLlmClient {
         &self.model_name
     }
 
-    fn model_label(&self) -> &str {
-        self.model_alias.as_deref().unwrap_or(&self.model_name)
+    fn model_alias(&self) -> Option<&str> {
+        self.model_alias.as_deref()
     }
 
     async fn stream(
@@ -483,7 +501,7 @@ impl LlmClient for BackendLlmClient {
                 system_prompt: system_prompt.to_string(),
                 messages: messages_json.to_vec(),
                 tools: tools_json.to_vec(),
-                max_tokens: ctx.max_tokens(),
+                max_tokens: crate::session::compaction::effective_max_tokens(&ctx.config),
                 cancel: ctx.cancel.clone(),
                 verbose: ctx.verbose(),
                 display: ctx.display.clone(),
@@ -906,14 +924,9 @@ mod tests {
             &cfg.skills,
         )?);
         let llm_backend = Arc::new(OpenAiCompatibleBackend::deepseek_defaults());
-        let compaction = Arc::new(CompactionEngine::new_with_usage(
+        let compaction = Arc::new(CompactionEngine::new(
             store.clone(),
             spaths.summary.clone(),
-            spaths.plan.clone(),
-            spaths.plan_draft.clone(),
-            cwd.clone(),
-            home.clone(),
-            capability_snapshot.clone(),
             api_url.to_string(),
             &cfg,
             stats.clone(),

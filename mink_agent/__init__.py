@@ -269,6 +269,12 @@ class SandboxConfig:
     llm_wait_heartbeat: int = 30
     max_tokens: int = 81920
     max_turns: int = 40
+    max_context: int = 1_000_000
+    context_compact_pct: int = 94
+    context_reserve_tokens: int = 64_000
+    context_compact_tail_tokens: int = 256_000
+    context_compact_max_output_tokens: int = 8_192
+    context_compact_input_reduction: bool = False
     max_search_files: int = 5000
     max_search_results: int = 1000
     verbose: bool = False
@@ -795,6 +801,20 @@ class AgentSession:
             options["max_tokens"] = self._config.max_tokens
         if self._config.max_turns != 40:
             options["max_turns"] = self._config.max_turns
+        if self._config.max_context != 1_000_000:
+            options["max_context"] = self._config.max_context
+        if self._config.context_compact_pct != 94:
+            options["context_compact_pct"] = self._config.context_compact_pct
+        if self._config.context_reserve_tokens != 64_000:
+            options["context_reserve_tokens"] = self._config.context_reserve_tokens
+        if self._config.context_compact_tail_tokens != 256_000:
+            options["context_compact_tail_tokens"] = self._config.context_compact_tail_tokens
+        if self._config.context_compact_max_output_tokens != 8_192:
+            options["context_compact_max_output_tokens"] = (
+                self._config.context_compact_max_output_tokens
+            )
+        if self._config.context_compact_input_reduction:
+            options["context_compact_input_reduction"] = True
         if self._config.tool_timeout != 600:
             options["tool_timeout"] = self._config.tool_timeout
         if self._config.sub_agent_timeout != 300:
@@ -854,6 +874,18 @@ class AgentSession:
             "max_turns": cfg.max_turns,
         }
         for name, value in positive_fields.items():
+            if value <= 0:
+                raise ValueError(f"{name} must be greater than 0")
+        if cfg.max_context < 0:
+            raise ValueError("max_context must be zero or greater")
+        if not 1 <= cfg.context_compact_pct <= 100:
+            raise ValueError("context_compact_pct must be between 1 and 100")
+        compaction_positive_fields = {
+            "context_reserve_tokens": cfg.context_reserve_tokens,
+            "context_compact_tail_tokens": cfg.context_compact_tail_tokens,
+            "context_compact_max_output_tokens": cfg.context_compact_max_output_tokens,
+        }
+        for name, value in compaction_positive_fields.items():
             if value <= 0:
                 raise ValueError(f"{name} must be greater than 0")
         if cfg.llm_wait_heartbeat < 0:

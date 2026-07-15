@@ -37,7 +37,6 @@ impl PrefixManager {
                 skill_snapshot: Arc::new(self.ctx.capability_snapshot.skills.clone()),
                 context_file_snapshot: Arc::new(self.ctx.capability_snapshot.context_files.clone()),
                 rule_snapshot: Arc::new(self.ctx.capability_snapshot.rules.clone()),
-                summary_file: self.ctx.summary_path.clone(),
                 plan_file: self.ctx.plan_path.clone(),
                 plan_draft_file: self.ctx.plan_draft_path.clone(),
                 mission_file: self.ctx.config.mission_file.clone(),

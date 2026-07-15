@@ -1932,6 +1932,7 @@ mod tests {
         assert!(result.contains("conversation_messages: 2"));
         assert!(result.contains("turns: 2"));
         assert!(result.contains("session://current/messages"));
+        assert!(result.contains("session://current/history"));
         let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
     }
 
@@ -1957,6 +1958,39 @@ mod tests {
         assert!(result.contains("1 user: please read file"));
         assert!(result.contains("tool_use Read"));
         assert!(result.contains("tool_result u1 4 bytes"));
+        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
+    }
+
+    #[test]
+    fn read_session_history_preserves_text_and_collapses_tool_exchanges() {
+        let ctx = temp_tool_context("session-history");
+        let session = ctx.store.path().parent().unwrap().to_path_buf();
+        fs::write(
+            session.join("conversation.jsonl"),
+            format!(
+                "{}\n{}\n{}\n",
+                json!({"role":"user","content":"please inspect the parser"}),
+                json!({"role":"assistant","content":[
+                    {"type":"thinking","thinking":"private reasoning"},
+                    {"type":"text","text":"I will inspect it."},
+                    {"type":"tool_use","name":"Read","id":"u1","input":{"path":"src/parser.rs"}}
+                ]}),
+                json!({"role":"user","content":[
+                    {"type":"tool_result","tool_use_id":"u1","content":"line one\nline two"}
+                ]})
+            ),
+        )
+        .unwrap();
+
+        let result =
+            crate::resources::session::read_session_resource("session://current/history", &ctx)
+                .unwrap();
+
+        assert!(result.contains("## user\n\nplease inspect the parser"));
+        assert!(result.contains("## assistant\n\nI will inspect it."));
+        assert!(result.contains("-> Read(src/parser.rs) => ok - 2 lines"));
+        assert!(!result.contains("private reasoning"));
+        assert!(!result.contains("line one"));
         let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
     }
 

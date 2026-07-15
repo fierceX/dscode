@@ -1,11 +1,15 @@
 use crate::agent::turn::{TurnDecision, TurnExecutor};
+use crate::config::Config;
 use crate::context::AgentSharedContext;
 use crate::llm::client::{BackendLlmClient, LlmClient};
 use crate::runtime::context_build::{AgentContextBuild, build_agent_context};
+use crate::session::metadata::SessionSeed;
+use crate::session::paths::SessionLayout;
 use crate::session::stats::Stats;
 use crate::session::store::ConversationStore;
 use crate::ui::{Display, SubAgentStreamKind, SubAgentStreamSink};
-use anyhow::Result;
+use anyhow::{Result, bail};
+use std::path::{Component, Path};
 use std::sync::{Arc, Mutex};
 
 /// Result of a sub-agent execution.
@@ -82,28 +86,42 @@ impl SubAgentExecutor {
         parent_ctx: Arc<AgentSharedContext>,
         session_id: String,
         fork: bool,
+        config: Config,
     ) -> Result<Self> {
         let cancel = parent_ctx.cancel.linked_child_token();
-        Self::new_with_cancel(parent_ctx, session_id, fork, cancel).await
+        Self::new_with_cancel(parent_ctx, session_id, fork, config, cancel).await
     }
 
     pub(crate) async fn new_with_cancel(
         parent_ctx: Arc<AgentSharedContext>,
         session_id: String,
         fork: bool,
+        config: Config,
         cancel: crate::cancel::CancellationToken,
     ) -> Result<Self> {
+        let mut components = Path::new(&session_id).components();
+        if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
+            bail!("invalid sub-agent session id: {session_id}");
+        }
         let capture = Arc::new(CaptureDisplay::new(
             parent_ctx.sub_stream_tx.clone(),
             &session_id,
         ));
         let parent_display = parent_ctx.display.clone();
+        let parent_session_dir = parent_ctx
+            .store
+            .path()
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("parent conversation has no session directory"))?;
+        let child_home = parent_session_dir.join("subagents").join(&session_id);
+        prepare_child_home(parent_session_dir, &child_home, fork).await?;
+
         let built = build_agent_context(AgentContextBuild {
-            config: parent_ctx.config.clone(),
-            home: parent_ctx.home.clone(),
+            config,
+            home: child_home,
             cwd: parent_ctx.cwd.clone(),
             session_id: session_id.clone(),
-            session_layout: parent_ctx.session_layout,
+            session_layout: SessionLayout::Isolated,
             api_url: parent_ctx.api_url.clone(),
             display: capture.clone(),
             sub_stream_tx: None,
@@ -123,22 +141,17 @@ impl SubAgentExecutor {
         })
         .await?;
         let child_ctx = built.ctx;
-        let paths = built.paths;
+        crate::session::metadata::ensure_metadata(
+            &built.paths,
+            &parent_ctx.cwd,
+            SessionSeed {
+                alias: None,
+                title: Some(format!("Sub-agent {session_id}")),
+                first_prompt: None,
+            },
+        )
+        .await?;
         let child_store = child_ctx.store.clone();
-
-        if fork {
-            // Copy parent conversation, summary, plan to child session (ignore errors)
-            let parent_conv = parent_ctx.store.path();
-            if parent_conv.exists() {
-                let _ = tokio::fs::copy(parent_conv, &paths.conversation).await;
-            }
-            if parent_ctx.summary_path.exists() {
-                let _ = tokio::fs::copy(&parent_ctx.summary_path, &paths.summary).await;
-            }
-            if parent_ctx.plan_path.exists() {
-                let _ = tokio::fs::copy(&parent_ctx.plan_path, &paths.plan).await;
-            }
-        }
 
         Ok(Self {
             child_store,
@@ -224,34 +237,29 @@ impl SubAgentExecutor {
         match decision {
             TurnDecision::Stop | TurnDecision::Continue => {
                 // Read back the assistant text from the CHILD store
-                let lines = self.child_store.lines().await?;
                 let mut result_thinking = String::new();
                 let mut result_text = String::new();
-                for line in lines.iter().rev() {
-                    if line.get("role").and_then(|v| v.as_str()) == Some("assistant") {
-                        if let Some(content) = line.get("content").and_then(|v| v.as_array()) {
-                            for b in content {
-                                match b.get("type").and_then(|t| t.as_str()).unwrap_or("") {
-                                    "thinking" => {
-                                        if result_thinking.is_empty()
-                                            && let Some(t) =
-                                                b.get("thinking").and_then(|v| v.as_str())
-                                        {
-                                            result_thinking = t.to_string();
-                                        }
-                                    }
-                                    "text" => {
-                                        if result_text.is_empty()
-                                            && let Some(t) = b.get("text").and_then(|v| v.as_str())
-                                        {
-                                            result_text = t.to_string();
-                                        }
-                                    }
-                                    _ => {}
+                if let Some(line) = self.child_store.last_assistant_message().await?
+                    && let Some(content) = line.get("content").and_then(|v| v.as_array())
+                {
+                    for b in content {
+                        match b.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+                            "thinking" => {
+                                if result_thinking.is_empty()
+                                    && let Some(t) = b.get("thinking").and_then(|v| v.as_str())
+                                {
+                                    result_thinking = t.to_string();
                                 }
                             }
+                            "text" => {
+                                if result_text.is_empty()
+                                    && let Some(t) = b.get("text").and_then(|v| v.as_str())
+                                {
+                                    result_text = t.to_string();
+                                }
+                            }
+                            _ => {}
                         }
-                        break;
                     }
                 }
                 Ok((result_thinking, result_text))
@@ -265,9 +273,91 @@ impl SubAgentExecutor {
     }
 }
 
+async fn prepare_child_home(parent: &Path, child: &Path, fork: bool) -> Result<()> {
+    if child.exists() {
+        bail!("sub-agent home already exists: {}", child.display());
+    }
+    let child_parent = child
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("sub-agent home has no parent"))?;
+    ensure_real_directory(child_parent).await?;
+    if fork {
+        let parent = parent.to_path_buf();
+        let destination = child.to_path_buf();
+        let copy_destination = destination.clone();
+        tokio::task::spawn_blocking(move || clone_session_dir(&parent, &copy_destination))
+            .await??;
+        for name in ["events.jsonl", "stats.json", "usage.jsonl", "session.json"] {
+            let path = destination.join(name);
+            match tokio::fs::remove_file(&path).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    let _ = tokio::fs::remove_dir_all(&destination).await;
+                    return Err(error.into());
+                }
+            }
+        }
+    } else {
+        tokio::fs::create_dir(child).await?;
+    }
+    Ok(())
+}
+
+async fn ensure_real_directory(path: &Path) -> Result<()> {
+    match tokio::fs::create_dir(path).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    let metadata = tokio::fs::symlink_metadata(path).await?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        bail!(
+            "sub-agent directory is not a real directory: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn clone_session_dir(source: &Path, destination: &Path) -> Result<()> {
+    std::fs::create_dir(destination)?;
+    if let Err(error) = copy_session_entries(source, destination, true) {
+        let _ = std::fs::remove_dir_all(destination);
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn copy_session_entries(source: &Path, destination: &Path, root: bool) -> Result<()> {
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        if root && entry.file_name().to_string_lossy() == "subagents" {
+            continue;
+        }
+        let file_type = entry.file_type()?;
+        let target = destination.join(entry.file_name());
+        if file_type.is_dir() {
+            std::fs::create_dir(&target)?;
+            copy_session_entries(&entry.path(), &target, false)?;
+        } else if file_type.is_file() {
+            std::fs::copy(entry.path(), target)?;
+        } else {
+            bail!(
+                "unsupported entry in session fork: {}",
+                entry.path().display()
+            );
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::mock::MockLlmClient;
+    use crate::protocol::{Event, StopEvent, TextEvent};
 
     #[tokio::test]
     async fn child_inherits_resource_session_but_has_own_agent_session() {
@@ -280,7 +370,8 @@ mod tests {
             .resource_session_id = "tenant-knowledge".into();
 
         let parent_snapshot = parent.capability_snapshot.clone();
-        let child = SubAgentExecutor::new(parent, "sub-agent-session".into(), false)
+        let config = parent.config.clone();
+        let child = SubAgentExecutor::new(parent, "sub-agent-session".into(), false, config)
             .await
             .unwrap();
         assert_eq!(
@@ -295,5 +386,166 @@ mod tests {
             &child.child_ctx.capability_snapshot,
             &parent_snapshot
         ));
+        assert_eq!(child.child_ctx.session_layout, SessionLayout::Isolated);
+        assert!(
+            child
+                .child_ctx
+                .home
+                .ends_with("subagents/sub-agent-session")
+        );
+        assert!(child.child_store.lines().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn child_rejects_session_id_path_escape() {
+        let parent = crate::regression::test_context_for_agent("sub-invalid-id")
+            .await
+            .unwrap();
+        let config = parent.config.clone();
+        let error = SubAgentExecutor::new(parent, "../escape".into(), false, config)
+            .await
+            .err()
+            .expect("path-like session id must fail");
+        assert!(error.to_string().contains("invalid sub-agent session id"));
+    }
+
+    #[tokio::test]
+    async fn concurrent_children_idempotently_create_shared_parent() -> anyhow::Result<()> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "mink-subagent-parent-race-{}-{}",
+            std::process::id(),
+            NEXT_DIR.fetch_add(1, Ordering::Relaxed)
+        ));
+        let parent = root.join("parent-session");
+        tokio::fs::create_dir_all(&parent).await?;
+        let barrier = Arc::new(tokio::sync::Barrier::new(8));
+        let mut tasks = tokio::task::JoinSet::new();
+
+        for index in 0..8 {
+            let parent = parent.clone();
+            let barrier = barrier.clone();
+            tasks.spawn(async move {
+                let child = parent.join("subagents").join(format!("child-{index}"));
+                barrier.wait().await;
+                prepare_child_home(&parent, &child, false).await?;
+                anyhow::Ok(child)
+            });
+        }
+
+        while let Some(result) = tasks.join_next().await {
+            let child = result??;
+            assert!(child.is_dir());
+        }
+        let metadata = tokio::fs::symlink_metadata(parent.join("subagents")).await?;
+        assert!(metadata.is_dir());
+        assert!(!metadata.file_type().is_symlink());
+        tokio::fs::remove_dir_all(root).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fork_inherits_full_history_and_compacted_projection() -> anyhow::Result<()> {
+        let summary_backend = Arc::new(MockLlmClient::new(
+            "summary-model",
+            vec![vec![
+                Ok(Event::Text(TextEvent {
+                    content: "Task focus: fork\nLatest request: inherit\nProgress: compacted\nTool evidence: none\nReflections: none".into(),
+                })),
+                Ok(Event::Stop(StopEvent {
+                    reason: "end_turn".into(),
+                })),
+            ]],
+        ));
+        let parent = crate::regression::test_context_for_agent_with_config_and_backend(
+            "sub-fork-context-state",
+            |config| {
+                config.max_context_tokens = 64_000;
+                config.context_reserve_tokens = 12_000;
+                config.context_compact_tail_tokens = 4_000;
+                config.context_compact_max_output_tokens = 2_048;
+            },
+            summary_backend,
+        )
+        .await?;
+        for index in 0..3 {
+            parent
+                .store
+                .add_user(&format!("request {index}: {}", "x".repeat(6_000)))
+                .await?;
+            parent
+                .store
+                .add_assistant(&format!("progress {index}: {}", "y".repeat(6_000)), "", &[])
+                .await?;
+        }
+        let full_history = parent.store.lines().await?;
+        let resolved = crate::config::model_resolver(&parent.config).resolve(&parent.config.model);
+        assert!(
+            parent
+                .compaction
+                .evaluate_and_compact(
+                    "manual",
+                    0,
+                    crate::llm::client::LlmModelTarget::new(
+                        &resolved.actual,
+                        resolved.alias.as_deref(),
+                    ),
+                )
+                .await?
+                .0
+        );
+        let projected = parent.compaction.active_messages().await?;
+        let parent_dir = parent.store.path().parent().unwrap().to_path_buf();
+        let inherited_artifact = parent.artifacts.write_text(
+            "Bash",
+            "parent output",
+            Some("parent-command"),
+            "parent artifact content",
+        )?;
+        tokio::fs::write(parent_dir.join("future-state.bin"), b"preserved").await?;
+        tokio::fs::write(
+            parent_dir.join("stats.json"),
+            r#"{"total_input_tokens":999,"total_output_tokens":777}"#,
+        )
+        .await?;
+
+        let config = parent.config.clone();
+        let child = SubAgentExecutor::new(parent, "sub-fork-state".into(), true, config).await?;
+        assert_eq!(child.child_store.lines().await?, full_history);
+        assert_eq!(
+            child.child_ctx.compaction.active_messages().await?,
+            projected
+        );
+        assert_eq!(
+            tokio::fs::read(child.child_ctx.home.join("future-state.bin")).await?,
+            b"preserved"
+        );
+        let usage = child.child_ctx.stats.snapshot().await;
+        assert_eq!(usage.total_input_tokens, 0);
+        assert_eq!(usage.total_output_tokens, 0);
+        assert_eq!(
+            child
+                .child_ctx
+                .artifacts
+                .read_text(&inherited_artifact.id)?,
+            "parent artifact content"
+        );
+        let child_artifact = child.child_ctx.artifacts.write_text(
+            "Bash",
+            "child output",
+            Some("child-command"),
+            "child artifact content",
+        )?;
+        assert_ne!(child_artifact.id, inherited_artifact.id);
+        assert_eq!(
+            child
+                .child_ctx
+                .artifacts
+                .read_text(&inherited_artifact.id)?,
+            "parent artifact content"
+        );
+        Ok(())
     }
 }

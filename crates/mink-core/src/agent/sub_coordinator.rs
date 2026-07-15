@@ -1,5 +1,6 @@
 use crate::agent::sub_executor::{SubAgentExecutor, SubAgentResult};
 use crate::cancel::CancellationToken;
+use crate::config::Config;
 use crate::context::AgentSharedContext;
 use crate::tools::runner::ToolRunResult;
 use crate::util::truncate_str;
@@ -27,6 +28,7 @@ pub(crate) type SubAgentRunner = Arc<
 
 pub struct SubAgentCoordinator {
     ctx: Arc<AgentSharedContext>,
+    sub_agent_config: Config,
 }
 
 struct SubAgentLaunch {
@@ -37,13 +39,19 @@ struct SubAgentLaunch {
 }
 
 impl SubAgentCoordinator {
-    pub fn new(ctx: Arc<AgentSharedContext>) -> Self {
-        Self { ctx }
+    pub fn new(ctx: Arc<AgentSharedContext>, sub_agent_config: Config) -> Self {
+        Self {
+            ctx,
+            sub_agent_config,
+        }
     }
 
     pub async fn process(&self, results: Vec<ToolRunResult>) -> Vec<ToolRunResult> {
-        self.process_with_runner(results, default_sub_agent_runner())
-            .await
+        self.process_with_runner(
+            results,
+            default_sub_agent_runner(self.sub_agent_config.clone()),
+        )
+        .await
     }
 
     pub(crate) async fn process_with_runner(
@@ -338,10 +346,11 @@ async fn run_sub_agent_runner(
     }
 }
 
-fn default_sub_agent_runner() -> SubAgentRunner {
-    Arc::new(|ctx, sid, prompt, fork, cancel| {
+fn default_sub_agent_runner(config: Config) -> SubAgentRunner {
+    Arc::new(move |ctx, sid, prompt, fork, cancel| {
+        let config = config.clone();
         Box::pin(async move {
-            match SubAgentExecutor::new_with_cancel(ctx, sid, fork, cancel).await {
+            match SubAgentExecutor::new_with_cancel(ctx, sid, fork, config, cancel).await {
                 Ok(executor) => executor.execute(prompt).await,
                 Err(e) => SubAgentResult {
                     status: "failed".into(),

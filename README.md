@@ -16,10 +16,10 @@
 - **可注入 LLM backend** — Rust runtime 可由宿主注入私有化模型、内网网关、厂商 SDK 或非 HTTP transport
 - **两种终端模式** — REPL（`-i`，rustyline 行编辑）和 TUI（`--tui`，ratatui 全屏界面）
 - **信号驱动的信念系统** — 自动检测工具执行错误，低信念时注入修正提示并约束恢复首步；可用 `MINK_SIGNAL_MODE=off` 关闭
-- **自适应上下文压缩** — 三级压缩，自动摘要，保持上下文在窗口内
+- **可配置上下文压缩** — 显式控制阈值、响应预留、热尾部和摘要预算；可选摘要输入降噪
 - **维修流水线** — Scavenge → Truncation → Storm Breaker，三段自动修复
-- **Session 持久化** — JSONL 格式，`--continue` 无缝恢复
-- **子代理（SubAgent）** — 隔离或 fork 上下文，并发执行
+- **Session 持久化** — 完整 append-only JSONL 历史、活跃后缀内存缓存、`--continue` 恢复和按需历史检索
+- **子代理（SubAgent）** — 隔离或目录级 fork 完整 session 状态，并发执行
 - **嵌入式只读 VFS** — Rust runtime 可为 Read/Glob/Grep 注入数据库后端，并按 resource session 隔离知识库
 - **技能系统** — 按需加载 skill 文件，不污染后续 prompt
 - **注册式资源与能力快照** — `Read` 通过 ResourceRouter 读取 artifact/skill/rule/session 资源，prompt 和 SDK 注入共享同一 capability snapshot

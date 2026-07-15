@@ -97,11 +97,12 @@ TurnExecutor (agent/turn.rs)
 └───────────────────────┘
          │
 ┌─────── 持久化层 ──────┐
-│ session/store.rs      │ ConversationStore JSONL、缓存、tool_result 写入
-│ session/artifacts.rs  │ ArtifactManager、artifact index、完整工具输出
+│ session/store.rs      │ append-only JSONL、活跃后缀缓存、tool_result 写入
+│ session/artifacts.rs  │ artifact index、持久序号恢复、防覆盖完整输出
 │ session/stats.rs      │ token、费用、请求数统计
 │ session/usage.rs      │ LLM 请求级 Token 与费用明细 JSONL（UsageJournal / MeteredStream）
-│ session/compaction.rs │ 三级压缩、摘要生成、turn 对齐截断
+│ session/compaction.rs │ 显式策略、非破坏式投影、LLM 摘要和压缩状态
+│ session/compaction_input.rs │ 可选摘要输入降噪
 │ session/prefix.rs     │ ImmutablePrefix
 │ session/init.rs       │ session 目录和共享状态初始化
 └───────────────────────┘
@@ -269,7 +270,7 @@ Read.path
 | `artifact://` | session artifacts | 读取被截断工具输出或 URL cache 正文 |
 | `skill://` | `CapabilitySnapshot.skills` | 列出/读取当前 capability snapshot 中的 skill |
 | `rule://` | `CapabilitySnapshot.rules` | 列出/读取当前 capability snapshot 中的 rule |
-| `session://` | current session files | 读取当前 session 摘要、stats、messages、artifacts |
+| `session://` | current session files | 读取当前 session 摘要、stats、messages、从 conversation JSONL 生成的有损历史 transcript 和 artifacts |
 
 `CapabilitySnapshot` 是 prompt、selected skills、`skill://`、`rule://` 和 prefix fingerprint 的共享能力视图。它在 runtime 构建时由 provider 生成，并挂到 `AgentSharedContext`；子代理继承父代理的 snapshot，避免主代理和子代理看到不同能力集合。能力 snapshot 只描述可被模型看见或按名读取的内容，不负责工具执行、文件编辑或 VFS 数据访问。
 
@@ -297,7 +298,7 @@ Read / Glob / Grep
 
 注入链路为 `AgentOptions` / `AgentRuntimeConfig` → runtime builder → `AgentSharedContext` → `ToolContext`。未显式设置 `resource_session_id` 时使用当前 runtime session id。子代理复用同一个 `Arc<dyn ReadOnlyFileSystem>`，继承父代理的 `resource_session_id`，但使用自己的 `agent_session_id`，从而共享同一知识库作用域并保留调用方身份。
 
-VFS 只接管普通路径。`artifact://`、`skill://`、`rule://`、`session://` 和 `http(s)://` 仍先走资源读取路径。虚拟路径使用 POSIX 分隔符和词法规范化，拒绝越过虚拟根目录。Glob/regex 请求由工具层先校验，后端返回结构化路径或匹配行，`mink-core` 统一输出格式和 100KB 搜索输出保护。请求中的 `max_files` / `max_results` 是后端契约，后端必须自行遵守；核心不提供第二套 VFS 搜索实现。
+VFS 只接管普通路径。`artifact://`、`skill://`、`rule://`、`session://` 和 `http(s)://` 仍先走资源读取路径。Grep 对 registered resource 直接搜索 handler 返回的文本，不要求暴露底层物理路径。虚拟路径使用 POSIX 分隔符和词法规范化，拒绝越过虚拟根目录。Glob/regex 请求由工具层先校验，后端返回结构化路径或匹配行，`mink-core` 统一输出格式和 100KB 搜索输出保护。请求中的 `max_files` / `max_results` 是后端契约，后端必须自行遵守；核心不提供第二套 VFS 搜索实现。
 
 虚拟文件是只读资源，不创建 anchored Edit snapshot。具体数据库适配不进入核心依赖；`crates/mink-core/examples/redb_vfs.rs` 展示了按 `resource_session_id` 分区、惰性范围扫描的 redb 后端。
 
@@ -371,6 +372,7 @@ session 根目录如何由 `home`、`cwd`、`session_id` 推导。当前有四�
 ├── events.jsonl
 ├── session.json
 ├── summary.txt
+├── context-state.json
 ├── plan.md
 ├── plan.draft
 ├── stats.json
@@ -389,11 +391,25 @@ session 根目录如何由 `home`、`cwd`、`session_id` 推导。当前有四�
 
 - 每个用户输入开始时重置 StormBreaker、belief、decision cooldown 和 interrupt。
 - 同一用户输入的 tool_use 内循环最多压缩一次。
+- `conversation.jsonl` 是完整的 append-only 消息历史；压缩只推进 `context-state.json` 中的投影边界。
+- JSONL 续写先处理未换行尾部：完整 JSON 补换行，半截 JSON 截断后再以单缓冲区追加新记录。
+- `context-state.json` 通过同目录临时文件和 rename 原子替换，内存状态只在替换成功后更新。
+- `ConversationStore` 缓存由 `start + lines` 组成，只保留 `active_start` 之后的活跃后缀；压缩提交成功后同步裁剪缓存。
+- 正常 turn、压缩和最终回复提取不加载完整历史；恢复时流式解析并校验 JSONL，但只保留并缓存活跃后缀。
+- 投影边界必须位于完整历史内，并且不能拆开 tool call/result 协议。
+- 所有压缩统一调用 LLM 摘要；摘要作为动态消息加入活跃投影，不改变 immutable system/tools prefix。
+- 压缩请求使用 turn/编排器传入的活动真实模型名和别名，并通过 runtime 注入的共享 `LlmBackend` 发送。
+- 子代理启动时使用从父配置克隆并写入当前活动模型的 child config，LLM backend 复用父 runtime 实例。
+- 压缩阈值、响应预留、热尾部和摘要输出预算来自显式配置，不根据上下文窗口推断策略。
+- 开启输入降噪时，只精简摘要请求中的 thinking、工具参数和工具结果；完整历史和热尾部保持原样。
+- Agent JSONL、Python SDK 和 Rust runtime 暴露并映射同一组上下文压缩参数；runtime 在创建 session 前统一校验有限窗口的 reserve、tail、摘要输出和主请求输入预算关系。
+- `max_context_tokens=0` 禁用 auto/preflight 压缩和请求预算上限，但保留手动压缩；真实 context overflow 最多触发一次 LLM 压缩和一次重试。
+- 子代理始终使用父 session 下的 isolated home；fork 在 runtime 初始化前克隆完整 session 状态并重置身份与遥测文件。
 - `ImmutablePrefix` 变更必须通过 prefix manager / invalidate 路径。
-- `ConversationStore` append 时保持内存缓存一致，不靠读盘恢复正常路径性能。
+- `ConversationStore` append 时保持活跃后缀缓存一致；显式完整历史读取是一次性读盘操作，缓存继续保持为活跃后缀。
 - `ToolRunner::format_tool_result()` 是工具输出进入 LLM/UI 前的最大字节保护。
 - `ToolRunner::execute_all()` 在 StormBreaker 前执行 enabled/disabled 和 approval 检查；`enabled_tools` 既过滤工具 schema，也阻止真实执行。
-- 超长工具输出必须保存为当前 session artifact，而不是丢失全文。
+- 超长工具输出必须保存为当前 session artifact；初始化从索引最大序号继续，正文使用独占创建，恢复和 fork 后不得覆盖旧 artifact。
 - `Read` 本地非 raw 输出记录 snapshot；raw 和 immutable resource 不生成可编辑 snapshot。
 - registered resource 必须先于 VFS 处理；未知非 web scheme fail closed，不落入普通路径或 VFS。
 - 未注入 VFS 时，`Read` / `Glob` / `Grep` 必须继续执行原有本地实现；VFS 分支不得改变本地路径语义或测试。

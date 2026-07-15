@@ -97,6 +97,22 @@ pub(crate) fn build_openai_body_with_options_and_extensions(
     Ok(serde_json::to_vec(&body)?)
 }
 
+pub(crate) fn estimate_openai_context_tokens(
+    messages: &[Value],
+    tools: &[Value],
+    system_prompt: &str,
+) -> Result<usize> {
+    let converted = convert_messages_to_openai(messages)?;
+    let mut request_messages = Vec::with_capacity(converted.len() + 1);
+    if !system_prompt.is_empty() {
+        request_messages.push(json!({"role":"system","content":system_prompt}));
+    }
+    request_messages.extend(converted);
+    let message_bytes = serde_json::to_vec(&request_messages)?.len();
+    let tool_bytes = serde_json::to_vec(&convert_tools_to_openai(tools))?.len();
+    Ok(message_bytes.saturating_add(tool_bytes).div_ceil(3))
+}
+
 fn is_reserved_body_key(key: &str) -> bool {
     matches!(
         key,

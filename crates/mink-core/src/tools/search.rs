@@ -1,3 +1,4 @@
+use crate::resources::selector::split_read_path_selection;
 use anyhow::{Result, anyhow, bail};
 use grep_printer::StandardBuilder;
 use grep_regex::RegexMatcher;
@@ -253,6 +254,52 @@ pub fn grep(
     Ok(String::from_utf8_lossy(&output).into_owned())
 }
 
+fn grep_resource(
+    pattern: &str,
+    resource_url: &str,
+    content: &str,
+    context: Option<usize>,
+    max_results: usize,
+) -> Result<String> {
+    if pattern.is_empty() {
+        bail!("Error: no pattern provided");
+    }
+    if max_results == 0 {
+        bail!("Error: max search results must be greater than zero");
+    }
+    let matcher = RegexMatcher::new_line_matcher(pattern)
+        .map_err(|e| anyhow!("Error: invalid regex pattern '{pattern}': {e}"))?;
+    let mut output = Vec::new();
+    let mut searcher = SearcherBuilder::new()
+        .line_number(true)
+        .before_context(context.unwrap_or(0))
+        .after_context(context.unwrap_or(0))
+        .binary_detection(BinaryDetection::quit(b'\x00'))
+        .max_matches(Some(max_results as u64))
+        .build();
+    let mut printer_builder = StandardBuilder::new();
+    printer_builder.heading(false).path(true);
+    let match_count = {
+        let mut printer = printer_builder.build_no_color(&mut output);
+        let display_path = PathBuf::from(resource_url);
+        let mut sink = printer.sink_with_path(&matcher, &display_path);
+        searcher.search_slice(&matcher, content.as_bytes(), &mut sink)?;
+        sink.match_count() as usize
+    };
+    if output.len() > MAX_OUTPUT_BYTES {
+        output.truncate(MAX_OUTPUT_BYTES);
+        output.extend_from_slice(
+            format!("\n... truncated: output > {MAX_OUTPUT_BYTES} bytes").as_bytes(),
+        );
+    } else if match_count >= max_results {
+        append_tool_note(
+            &mut output,
+            &format!("... truncated at {max_results} results"),
+        );
+    }
+    Ok(String::from_utf8_lossy(&output).into_owned())
+}
+
 fn append_rg_output(output: &mut Vec<u8>, file_output: &[u8], with_context: bool) {
     if file_output.is_empty() {
         return;
@@ -345,10 +392,32 @@ impl super::runner::ToolExec for GrepTool {
             context: Option<usize>,
         }
         let args: Args = serde_json::from_value(input.clone())?;
+        let path = args.path.unwrap_or_else(|| ".".to_string());
+        let selection = split_read_path_selection(&path)?;
+        if ctx.resource_router.can_handle(&selection.path) {
+            if selection.offset.is_some() || selection.limit.is_some() {
+                bail!(
+                    "Error: Grep resource paths do not accept line selectors; search the full \
+                     resource and use the returned line numbers with Read"
+                );
+            }
+            if args.glob.as_deref().is_some_and(|glob| !glob.is_empty()) {
+                bail!("Error: Grep glob filters apply only to local or virtual files");
+            }
+            let resource = ctx.resource_router.resolve(&selection, ctx)?;
+            return grep_resource(
+                &args.pattern,
+                &resource.canonical_url,
+                &resource.content,
+                args.context,
+                ctx.tool_config.max_search_results,
+            )
+            .map(super::runner::ToolOutcome::text);
+        }
         if let Some(vfs) = &ctx.read_only_fs {
             let request = crate::tools::vfs::VfsGrepRequest {
                 pattern: args.pattern,
-                path: args.path.unwrap_or_else(|| ".".to_string()),
+                path,
                 file_glob: args.glob.unwrap_or_default(),
                 context: args.context,
                 max_files: ctx.tool_config.max_search_files,
@@ -360,7 +429,7 @@ impl super::runner::ToolExec for GrepTool {
                 crate::tools::vfs::format_virtual_grep(&result, &request),
             ));
         }
-        let root = resolve_search_root(&ctx.cwd, args.path.as_deref().unwrap_or("."));
+        let root = resolve_search_root(&ctx.cwd, &path);
         grep(
             &args.pattern,
             &root.display().to_string(),
@@ -385,6 +454,7 @@ fn resolve_search_root(cwd: &Path, raw: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::runner::ToolExec;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -558,6 +628,32 @@ mod tests {
     #[test]
     fn grep_empty_pattern_errors() {
         assert!(grep("", ".", "", None, 5000, 1000).is_err());
+    }
+
+    #[tokio::test]
+    async fn grep_searches_registered_resource_content() -> anyhow::Result<()> {
+        let ctx = crate::regression::test_context_for_agent("grep-session-history").await?;
+        ctx.store
+            .add_user("remember the cobalt migration decision")
+            .await?;
+        let tool_ctx = crate::context::ToolContext::from(ctx.as_ref());
+
+        let result = GrepTool.execute(
+            &serde_json::json!({
+                "pattern": "cobalt migration",
+                "path": "session://current/history",
+                "context": 1
+            }),
+            &tool_ctx,
+        )?;
+
+        assert!(result.content.contains("session://current/history"));
+        assert!(
+            result
+                .content
+                .contains("remember the cobalt migration decision")
+        );
+        Ok(())
     }
 
     #[test]

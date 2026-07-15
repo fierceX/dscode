@@ -21,6 +21,19 @@ struct StreamOutput {
     usage: Option<UsageEvent>,
 }
 
+#[derive(Debug)]
+struct ContextOverflowError {
+    message: String,
+}
+
+impl std::fmt::Display for ContextOverflowError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ContextOverflowError {}
+
 /// TurnExecutor runs a single "turn" of the agent loop:
 ///   Stream (LLM response) → Persist → Tools → Decide (continue/stop)
 pub struct TurnExecutor {
@@ -61,6 +74,15 @@ impl TurnExecutor {
             crate::context::ToolContext::from(ctx.as_ref()),
         )));
         let prefix = crate::agent::prefix::PrefixManager::new(ctx.clone());
+        let mut sub_agent_config = ctx.config.clone();
+        if let Some(alias) = llm.model_alias() {
+            sub_agent_config
+                .model_aliases
+                .insert(alias.to_string(), llm.model().to_string());
+            sub_agent_config.model = alias.to_string();
+        } else {
+            sub_agent_config.model = llm.model().to_string();
+        }
         Self {
             ctx: ctx.clone(),
             llm,
@@ -69,7 +91,10 @@ impl TurnExecutor {
             compactor: crate::agent::compactor::TurnCompactor::new(ctx.clone()),
             signal_processor: crate::agent::tool_signals::ToolSignalProcessor::new(),
             plan_actions: crate::agent::plan_actions::PlanActionHandler::new(ctx.clone()),
-            sub_agents: crate::agent::sub_coordinator::SubAgentCoordinator::new(ctx.clone()),
+            sub_agents: crate::agent::sub_coordinator::SubAgentCoordinator::new(
+                ctx.clone(),
+                sub_agent_config,
+            ),
             tool_call_count: 0,
             decision_engine: crate::agent::decision::DecisionEngine::new(),
             signal_recovery_guard: false,
@@ -105,7 +130,14 @@ impl TurnExecutor {
         tools_json: &mut Vec<serde_json::Value>,
     ) -> Result<bool> {
         self.compactor
-            .maybe_compact(trigger, messages, system_prompt, tools_json, &self.prefix)
+            .maybe_compact(
+                trigger,
+                messages,
+                system_prompt,
+                tools_json,
+                &self.prefix,
+                self.llm.model_target(),
+            )
             .await
     }
 
@@ -117,10 +149,19 @@ impl TurnExecutor {
         system_prompt: &str,
         tools_json: &[serde_json::Value],
     ) -> anyhow::Result<StreamOutput> {
-        let mut stream = self
+        let mut stream = match self
             .llm
             .stream(&self.ctx, messages, tools_json, system_prompt)
-            .await?;
+            .await
+        {
+            Ok(stream) => stream,
+            Err(error) if is_context_overflow_message(&error.to_string()) => {
+                return Err(anyhow::Error::new(ContextOverflowError {
+                    message: error.to_string(),
+                }));
+            }
+            Err(error) => return Err(error),
+        };
 
         let mut text = String::new();
         let mut thinking = String::new();
@@ -129,6 +170,7 @@ impl TurnExecutor {
         let mut usage: Option<UsageEvent> = None;
         let mut saw_stop = false;
         let mut saw_any_event = false;
+        let mut saw_visible_output = false;
         let stream_started = Instant::now();
         let mut last_event_at = stream_started;
         let mut last_heartbeat_at = stream_started;
@@ -181,18 +223,21 @@ impl TurnExecutor {
 
             match evt {
                 Event::Thinking(t) => {
+                    saw_visible_output = true;
                     self.ctx
                         .log_event(serde_json::json!({"type":"thinking","content":t.content}));
                     self.ctx.display.render_thinking(&t.content);
                     thinking.push_str(&t.content);
                 }
                 Event::Text(t) => {
+                    saw_visible_output = true;
                     self.ctx
                         .log_event(serde_json::json!({"type":"text","content":t.content}));
                     self.ctx.display.render_text(&t.content);
                     text.push_str(&t.content);
                 }
                 Event::ToolCall(call) => {
+                    saw_visible_output = true;
                     self.ctx.log_event(serde_json::json!({"type":"tool_call","name":call.name,"id":call.id,"input":call.input_json}));
                     let summary = build_tool_call_summary(&call.name, &call.fields);
                     self.ctx.display.render_tool_call(&call.name, &summary);
@@ -213,6 +258,11 @@ impl TurnExecutor {
                 Event::Error(e) => {
                     self.ctx
                         .log_event(serde_json::json!({"type":"error","message":e.message}));
+                    if !saw_visible_output && is_context_overflow_message(&e.message) {
+                        return Err(anyhow::Error::new(ContextOverflowError {
+                            message: e.message,
+                        }));
+                    }
                     anyhow::bail!("{}", e.message);
                 }
                 Event::Retry(_) => {
@@ -409,7 +459,7 @@ impl TurnExecutor {
                 .process(&mut result, belief.as_deref_mut(), &self.ctx, model_label)
                 .await;
             self.plan_actions
-                .handle(&mut result, effects, &self.prefix)
+                .handle(&mut result, effects, &self.prefix, self.llm.model_target())
                 .await;
             prepared_results.push(result);
         }
@@ -594,10 +644,11 @@ impl TurnExecutor {
 
         let mut turn = 0;
         let mut effects = Vec::new();
+        let mut overflow_recovery_attempted = false;
         let max_turns = self.ctx.max_turns() as usize;
 
         let (mut system_prompt, mut tools_json) = self.ensure_prefix()?;
-        let mut messages = self.ctx.store.lines().await?;
+        let mut messages = self.ctx.compaction.active_messages().await?;
 
         while turn < max_turns {
             turn += 1;
@@ -606,13 +657,14 @@ impl TurnExecutor {
             self.try_compact("auto", &mut messages, &mut system_prompt, &mut tools_json)
                 .await?;
             if !self.compactor.compacted_this_turn() {
-                let estimated_tokens: usize = messages
-                    .iter()
-                    .map(|m| serde_json::to_string(m).unwrap_or_default().len() / 4)
-                    .sum::<usize>()
-                    + system_prompt.len() / 4;
-                let max_ctx = self.ctx.config.max_context_tokens;
-                if max_ctx > 0 && estimated_tokens > max_ctx * 95 / 100 {
+                let estimated_tokens = crate::llm::transport::estimate_openai_context_tokens(
+                    &messages,
+                    &tools_json,
+                    &system_prompt,
+                )?;
+                if estimated_tokens
+                    > crate::session::compaction::request_input_limit(&self.ctx.config)
+                {
                     self.try_compact(
                         "preflight",
                         &mut messages,
@@ -622,17 +674,57 @@ impl TurnExecutor {
                     .await?;
                 }
             }
+            let estimated_tokens = crate::llm::transport::estimate_openai_context_tokens(
+                &messages,
+                &tools_json,
+                &system_prompt,
+            )?;
+            let input_limit = crate::session::compaction::request_input_limit(&self.ctx.config);
+            if estimated_tokens > input_limit {
+                anyhow::bail!(
+                    "context remains over the request input budget after compaction: \
+                     estimated {estimated_tokens} tokens, limit {input_limit}"
+                );
+            }
 
             // Phase 1: LLM 流式响应
+            let stream_output = loop {
+                match self
+                    .stream_llm_response(&messages, &system_prompt, &tools_json)
+                    .await
+                {
+                    Ok(output) => break output,
+                    Err(error)
+                        if error.downcast_ref::<ContextOverflowError>().is_some()
+                            && !overflow_recovery_attempted
+                            && !self.compactor.compacted_this_turn() =>
+                    {
+                        overflow_recovery_attempted = true;
+                        if !self
+                            .try_compact(
+                                "overflow",
+                                &mut messages,
+                                &mut system_prompt,
+                                &mut tools_json,
+                            )
+                            .await?
+                        {
+                            return Err(error);
+                        }
+                        self.ctx
+                            .display
+                            .render_info("Context overflow detected; compacted and retrying once.");
+                    }
+                    Err(error) => return Err(error),
+                }
+            };
             let StreamOutput {
                 text,
                 thinking,
                 mut calls,
                 mut stop,
                 usage,
-            } = self
-                .stream_llm_response(&messages, &system_prompt, &tools_json)
-                .await?;
+            } = stream_output;
 
             if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.load(Ordering::SeqCst) {
                 self.ctx.display.render_stop();
@@ -664,11 +756,29 @@ impl TurnExecutor {
                 return Ok((decision, effects));
             }
             // tool_use 路径：重新加载 messages 继续循环
-            messages = self.ctx.store.lines().await?;
+            messages = self.ctx.compaction.active_messages().await?;
         }
 
         Ok((TurnDecision::MaxTurnsExceeded, effects))
     }
+}
+
+fn is_context_overflow_message(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    [
+        "context_length_exceeded",
+        "maximum context length",
+        "maximum context size",
+        "context window exceeded",
+        "exceeds the context window",
+        "context length exceeded",
+        "too many tokens",
+        "prompt is too long",
+        "input is too long",
+        "max sequence length",
+    ]
+    .iter()
+    .any(|pattern| message.contains(pattern))
 }
 
 fn is_recovery_blocked_tool(name: &str) -> bool {
@@ -701,6 +811,38 @@ mod tests {
     use crate::llm::client::BackendLlmClient;
     use crate::llm::mock::MockLlmClient;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    struct OverflowOnceClient {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmClient for OverflowOnceClient {
+        fn model(&self) -> &str {
+            "private-64k"
+        }
+
+        async fn stream(
+            &self,
+            _ctx: &AgentSharedContext,
+            _messages_json: &[serde_json::Value],
+            _tools_json: &[serde_json::Value],
+            _system_prompt: &str,
+        ) -> Result<Box<dyn futures::Stream<Item = Result<Event>> + Unpin + Send>> {
+            if self.calls.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
+                anyhow::bail!("HTTP 400: maximum context length exceeded");
+            }
+            Ok(Box::new(futures::stream::iter(vec![
+                Ok(Event::Text(crate::protocol::TextEvent {
+                    content: "recovered".into(),
+                })),
+                Ok(Event::Stop(crate::protocol::StopEvent {
+                    reason: "stop".into(),
+                })),
+            ])))
+        }
+    }
 
     #[tokio::test]
     async fn signal_recovery_decision_noops_when_signal_mode_disabled() {
@@ -730,5 +872,100 @@ mod tests {
             .await
             .unwrap();
         assert!(decision.is_none());
+    }
+
+    #[tokio::test]
+    async fn context_overflow_compacts_and_retries_only_once() -> anyhow::Result<()> {
+        let summary_backend = Arc::new(MockLlmClient::new(
+            "summary-model",
+            vec![vec![
+                Ok(Event::Text(crate::protocol::TextEvent {
+                    content: "Task focus: recover\nLatest request: continue\nProgress: compacted\nTool evidence: none\nReflections: none".into(),
+                })),
+                Ok(Event::Stop(crate::protocol::StopEvent {
+                    reason: "end_turn".into(),
+                })),
+            ]],
+        ));
+        let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+            "turn-overflow-recovery",
+            |config| {
+                config.max_context_tokens = 64_000;
+                config.context_reserve_tokens = 12_000;
+                config.context_compact_tail_tokens = 1_000;
+                config.context_compact_max_output_tokens = 2_048;
+            },
+            summary_backend,
+        )
+        .await?;
+        for index in 0..3 {
+            ctx.store
+                .add_user(&format!("old request {index}: {}", "x".repeat(1_000)))
+                .await?;
+            ctx.store
+                .add_assistant(
+                    &format!("old response {index}: {}", "y".repeat(1_000)),
+                    "",
+                    &[],
+                )
+                .await?;
+        }
+        let llm = Arc::new(OverflowOnceClient {
+            calls: AtomicUsize::new(0),
+        });
+        let mut executor = TurnExecutor::new(ctx.clone(), llm.clone());
+
+        let (decision, _) = executor.execute("continue", None).await?;
+
+        assert_eq!(decision, TurnDecision::Stop);
+        assert_eq!(llm.calls.load(AtomicOrdering::SeqCst), 2);
+        assert_eq!(ctx.store.lines().await?.len(), 8);
+        assert!(ctx.compaction.current_summary()?.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn context_overflow_classifier_is_specific() {
+        assert!(is_context_overflow_message(
+            "HTTP 400: context_length_exceeded"
+        ));
+        assert!(is_context_overflow_message(
+            "This model's maximum context length is 65536 tokens"
+        ));
+        assert!(!is_context_overflow_message(
+            "HTTP 400: invalid tool schema"
+        ));
+        assert!(!is_context_overflow_message("request timed out"));
+    }
+
+    #[tokio::test]
+    async fn context_overflow_after_visible_output_is_not_recoverable() -> anyhow::Result<()> {
+        let ctx = crate::regression::test_context_for_agent("turn-partial-overflow").await?;
+        let backend = Arc::new(MockLlmClient::new(
+            "flash",
+            vec![vec![
+                Ok(Event::Text(crate::protocol::TextEvent {
+                    content: "partial".into(),
+                })),
+                Ok(Event::Retry(crate::protocol::RetryEvent {})),
+                Ok(Event::Error(crate::protocol::ErrorEvent {
+                    message: "maximum context length exceeded".into(),
+                })),
+            ]],
+        ));
+        let llm = Arc::new(BackendLlmClient::new(
+            backend,
+            "flash",
+            Some("flash".into()),
+        ));
+        let mut executor = TurnExecutor::new(ctx, llm);
+
+        let error = match executor.stream_llm_response(&[], "", &[]).await {
+            Ok(_) => panic!("overflow after partial output should fail"),
+            Err(error) => error,
+        };
+
+        assert!(error.downcast_ref::<ContextOverflowError>().is_none());
+        Ok(())
     }
 }

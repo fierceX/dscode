@@ -15,6 +15,25 @@
 - `mink::sandbox`：进程级沙箱 re-exec 能力。
 - `src/agent`、`src/tools`、`src/session`、`src/llm`：mink 的主循环、工具、持久化和 LLM 流式客户端核心。
 
+## 上下文与会话历史
+
+`conversation.jsonl` 以只追加方式完整保留对话。压缩只推进
+`context-state.json.active_start`，不重写历史。运行时只缓存活跃后缀，因此长期运行的嵌入式
+agent 在压缩后不会让冷历史持续驻留内存。恢复 session 时会流式解析并校验 JSONL，但只保留
+活跃消息。
+
+压缩策略由显式配置控制，包括触发百分比、主请求响应预留、压缩后热尾部和摘要输出预算。
+所有压缩统一调用 LLM 生成滚动摘要，并将摘要作为动态消息以保持 system/tools 前缀稳定。
+摘要请求使用当前活动模型，并通过 runtime 注入的共享 LLM backend 发送。
+Agent JSONL、Python SDK 和 Rust API 均可直接配置上下文窗口及五个压缩参数；runtime 会在创建
+session 前拒绝 reserve、热尾部或摘要输出预算与窗口不相容的组合。
+开启摘要输入降噪后，会在摘要请求前删除 thinking、压缩工具参数和结果，同时保留用户请求、
+assistant 文本、错误证据和 artifact 引用。Provider 在产生可见输出前报告上下文溢出时，最多
+触发一次压缩和一次重试。
+
+Fork 子代理会在 runtime 初始化前克隆父 session 的完整状态。Artifact ID 从克隆后的索引继续
+分配，正文文件使用独占创建，从而保持继承的 `artifact://` 引用稳定。
+
 ## 依赖方式
 
 ```toml

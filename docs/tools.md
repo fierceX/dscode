@@ -31,7 +31,7 @@ ToolCallEvent
 
 默认 `tool_result_max_bytes` 为 `100000`，可通过环境变量 `TOOL_RESULT_MAX_BYTES` 调整。
 
-当工具输出超过上限时，完整输出会保存到当前 session 的 `artifacts/` 目录，工具结果中追加 `artifact://<id>`。可用 `Read` 按需读取，例如 `artifact://bash-0001:1-120`。
+当工具输出超过上限时，完整输出会保存到当前 session 的 `artifacts/` 目录，工具结果中追加 `artifact://<id>`。可用 `Read` 按需读取，例如 `artifact://bash-0001:1-120`。ArtifactManager 从已有 index 的最大序号继续分配，并以独占创建写入正文；恢复 session 或 fork 后不会覆盖旧 artifact。
 
 `Read` 也承担轻量资源路由职责。内置轻量资源通过 `ResourceRouter` 注册分发：
 
@@ -43,6 +43,7 @@ ToolCallEvent
 - `session://current/stats`：读取当前 session stats JSON。
 - `session://current/messages`：读取最近 40 条 conversation 摘要。
 - `session://current/messages/all`：读取全部 conversation 摘要。
+- `session://current/history`：读取从完整 `conversation.jsonl` 生成的有损 transcript；省略 thinking 和完整工具结果正文。
 - `session://current/artifacts`：列出当前 session artifacts。
 
 这些资源都支持同样的行 selector，例如 `session://current/messages:1-20` 或 `https://example.com:20-60`。
@@ -137,10 +138,10 @@ cargo build --release
 - `:raw` 禁用 snapshot header 和行号。
 - 注入 VFS 后，普通路径读取虚拟文件并显示只读标记，不生成 snapshot；selector 和 `:raw` 语义保持一致。
 - `http(s)://...` 可读取公开 URL。URL 输出不生成 editable snapshot；首次读取会保存为 `ReadUrl` artifact cache，后续同 URL selector 从缓存分页，不重复 fetch。损坏的 URL cache index 行会被跳过；cache 正文缺失时会重新 fetch。
-- `artifact://<id>` 可读取被截断工具输出，支持同样的行 selector。
+- `artifact://<id>` 可读取被截断工具输出，支持同样的行 selector；恢复和 fork 后引用保持稳定。
 - `skill://list` / `skill://list/all` / `skill://<name>` / `skill://<name>/<relative-path>` 可读取可用 skills，列表、诊断视图、正文和 filesystem-backed skill 子资源来自同一 capability snapshot。`skill://all` 是 `skill://list/all` 的兼容别名；built-in/runtime skill 只支持读取正文，不支持子资源。
 - `rule://list` / `rule://<name>` 可读取可用 rules。
-- `session://current`、`session://current/stats`、`session://current/messages`、`session://current/artifacts` 可读取当前 session 状态。
+- `session://current`、`session://current/stats`、`session://current/messages`、`session://current/history`、`session://current/artifacts` 可读取当前 session 状态。
 - 默认可读整文件，但大文件会受到工具结果上限保护。
 - 搜索具体内容时优先用 `Grep`，定位后再用 `Read` path selector 读取目标范围。
 - UI 展示会额外加 `Read(path) [lines, bytes]` 摘要。
@@ -309,11 +310,12 @@ open("/absolute/path/to/project/output/f.txt", "w")  # 绝对路径 ✅
 | 参数 | 类型 | 说明 |
 |---|---|---|
 | `pattern` | string | 正则表达式 |
-| `path` | string | 文件或目录，可选 |
-| `glob` | string | 文件过滤，可选 |
+| `path` | string | 文件、目录或 registered resource URL，可选 |
+| `glob` | string | 本地/VFS 文件过滤，可选 |
 | `context` | integer | 匹配前后上下文行数，可选 |
 
 - 本地后端基于 ripgrep 的 `ignore::WalkBuilder`、`OverrideBuilder`、`grep-regex`、`grep-searcher` 和 `grep-printer`，语义和输出对齐 `rg -n/-C -g`，不依赖外部 `rg` 二进制；注入 VFS 后由后端搜索虚拟内容。
+- registered resource URL 由 `ResourceRouter` 解析后直接搜索返回文本，例如 `session://current/history`；resource path 不接受 selector 或 glob。
 - 优先用于定位编辑目标。
 - `path` 为空或相对路径时基于当前会话 `cwd` 解析；`glob` 过滤使用 `rg -g` override glob 语义。
 - VFS 模式下 `path` 是虚拟根路径，不与宿主 `cwd` 拼接；regex 和文件 glob 在调用后端前仍由工具层校验。
@@ -391,12 +393,14 @@ open("/absolute/path/to/project/output/f.txt", "w")  # 绝对路径 ✅
 | 模式 | 上下文 | 适用 |
 |------|--------|------|
 | 独立模式 | 新 session | 独立文件调查、搜索、隔离验证 |
-| Fork 模式 | 继承父会话 conversation / plan / skills | 需要父上下文的延续任务 |
+| Fork 模式 | 继承父会话完整 session 状态 | 需要父上下文的延续任务 |
 
 行为：
 
 - 同一批 SubAgent 最多 8 个并发。
 - 子代理不能递归启动子代理。
+- Fork 在 child runtime 初始化前克隆完整 session 目录（跳过已有 `subagents/`）；child 身份与遥测重新初始化。
+- Fork 后 artifact 从克隆 index 的最大序号继续写入，不覆盖父历史正文。
 - 子代理完成时会通过 parent display 发送完整 thinking/text。
 - tool result 会注入父会话，格式为 `[sub-agent <id>] <status> (in=<n>, out=<n>) ...`。
 - 超时后未完成项返回 `Sub-agent timed out after <n>s.`，并取消对应子代理。

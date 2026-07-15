@@ -39,6 +39,25 @@ pub fn apply_sdk_request_options(cfg: &mut Config, req: &SdkRequest) {
         cfg.max_turns = max_turns;
         cfg.cli_overrides.max_turns = true;
     }
+    if let Some(max_context) = opts.max_context {
+        cfg.max_context_tokens = max_context;
+        cfg.cli_overrides.max_context_tokens = true;
+    }
+    if let Some(pct) = opts.context_compact_pct {
+        cfg.context_compact_pct = pct;
+    }
+    if let Some(tokens) = opts.context_reserve_tokens {
+        cfg.context_reserve_tokens = tokens;
+    }
+    if let Some(tokens) = opts.context_compact_tail_tokens {
+        cfg.context_compact_tail_tokens = tokens;
+    }
+    if let Some(tokens) = opts.context_compact_max_output_tokens {
+        cfg.context_compact_max_output_tokens = tokens;
+    }
+    if let Some(enabled) = opts.context_compact_input_reduction {
+        cfg.context_compact_input_reduction = enabled;
+    }
     if let Some(tool_timeout) = opts.tool_timeout {
         cfg.tool_timeout_secs = tool_timeout;
         cfg.cli_overrides.tool_timeout_secs = true;
@@ -191,6 +210,12 @@ mod tests {
                     "model": "pro",
                     "max_tokens": 123,
                     "max_turns": 4,
+                    "max_context": 64000,
+                    "context_compact_pct": 65,
+                    "context_reserve_tokens": 12000,
+                    "context_compact_tail_tokens": 16000,
+                    "context_compact_max_output_tokens": 4096,
+                    "context_compact_input_reduction": true,
                     "tool_timeout": 5,
                     "sub_agent_timeout": 6,
                     "llm_first_event_timeout": 7,
@@ -225,6 +250,12 @@ mod tests {
         assert_eq!(cfg.model, "pro");
         assert_eq!(cfg.max_tokens, 123);
         assert_eq!(cfg.max_turns, 4);
+        assert_eq!(cfg.max_context_tokens, 64_000);
+        assert_eq!(cfg.context_compact_pct, 65);
+        assert_eq!(cfg.context_reserve_tokens, 12_000);
+        assert_eq!(cfg.context_compact_tail_tokens, 16_000);
+        assert_eq!(cfg.context_compact_max_output_tokens, 4_096);
+        assert!(cfg.context_compact_input_reduction);
         assert_eq!(cfg.tool_timeout_secs, 5);
         assert_eq!(cfg.sub_agent_timeout_secs, 6);
         assert_eq!(cfg.llm_first_event_timeout_secs, 7);
@@ -261,7 +292,27 @@ mod tests {
         assert!(cfg.cli_overrides.model);
         assert!(cfg.cli_overrides.max_tokens);
         assert!(cfg.cli_overrides.max_turns);
+        assert!(cfg.cli_overrides.max_context_tokens);
         assert!(cfg.cli_overrides.tool_timeout_secs);
+    }
+
+    #[test]
+    fn sdk_max_context_override_is_checked_with_merged_compaction_defaults() {
+        let req = crate::sdk_protocol::parse_agent_jsonl_request(
+            r#"{"prompt":"hi","options":{"max_context":64000}}"#,
+        )
+        .unwrap();
+        let mut cfg = Config::default();
+
+        apply_sdk_request_options(&mut cfg, &req);
+
+        let error = crate::config::validate_runtime_config(&cfg)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("context_reserve_tokens (64000) must be less than max_context (64000)"),
+            "{error}"
+        );
     }
 
     #[test]

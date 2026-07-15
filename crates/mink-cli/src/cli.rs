@@ -1,6 +1,8 @@
 use crate::agent::orchestrator::OrchCmd;
 use crate::cancel::CancellationToken;
-use crate::config::{apply_config_file, apply_provider_defaults, parse_args};
+use crate::config::{
+    apply_config_file, apply_provider_defaults, parse_args, validate_runtime_config,
+};
 use crate::runtime::{
     AgentRuntimeConfig, TurnOutcome, apply_sdk_request_options, exit_code_from_turn,
     final_from_outcome, runtime_skills_from_sdk_request, skill_discovery_policy_from_sdk_request,
@@ -100,6 +102,14 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
 
     if cfg.agent_jsonl {
         apply_provider_defaults(&mut cfg)?;
+    }
+
+    if let Err(error) = validate_runtime_config(&cfg) {
+        if cfg.agent_jsonl {
+            emit_failed_parse(&format!("invalid SDK request: {error}"));
+            return Ok(CliExit { code: 1 });
+        }
+        return Err(error);
     }
 
     let prompt_for_title = sdk_request
@@ -706,6 +716,7 @@ fn print_usage() {
     println!("  --config <toml>         Set config via TOML string");
     println!("                          Example: --config \"max_tokens=4096\\ntool_timeout=300\"");
     println!("                          Supports: model, max_tokens, max_turns, max_context,");
+    println!("                          context_compact_*, context_reserve_tokens,");
     println!("                          tool_timeout, sub_agent_timeout, llm_*_timeout,");
     println!("                          output_format, approval_mode, skills, verbose,");
     println!("                          and [sandbox_python] section");

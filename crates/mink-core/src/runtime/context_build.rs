@@ -100,14 +100,9 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
         }
         Arc::new(router)
     };
-    let compaction = Arc::new(CompactionEngine::new_with_usage(
+    let compaction = Arc::new(CompactionEngine::new(
         store.clone(),
         paths.summary.clone(),
-        paths.plan.clone(),
-        paths.plan_draft.clone(),
-        params.cwd.clone(),
-        params.home.clone(),
-        capability_snapshot.clone(),
         params.api_url.clone(),
         &config,
         stats.clone(),

@@ -160,6 +160,10 @@ pub struct MinkConfigFile {
     pub llm_idle_timeout: Option<i32>,
     pub llm_wait_heartbeat: Option<i32>,
     pub context_compact_pct: Option<u8>,
+    pub context_reserve_tokens: Option<usize>,
+    pub context_compact_tail_tokens: Option<usize>,
+    pub context_compact_max_output_tokens: Option<i32>,
+    pub context_compact_input_reduction: Option<bool>,
     pub log_events: Option<bool>,
     pub output_format: Option<String>,
     pub approval_mode: Option<String>,
@@ -294,6 +298,10 @@ pub struct Config {
     pub max_turns: i32,
     pub max_context_tokens: usize,
     pub context_compact_pct: u8,
+    pub context_reserve_tokens: usize,
+    pub context_compact_tail_tokens: usize,
+    pub context_compact_max_output_tokens: i32,
+    pub context_compact_input_reduction: bool,
     pub skills: Vec<String>,
     pub interactive: bool,
     pub session_id: String,
@@ -369,7 +377,11 @@ impl Default for Config {
             prompt: String::new(),
             max_turns: 40,
             max_context_tokens: 1_000_000,
-            context_compact_pct: 85,
+            context_compact_pct: 94,
+            context_reserve_tokens: 64_000,
+            context_compact_tail_tokens: 256_000,
+            context_compact_max_output_tokens: 8_192,
+            context_compact_input_reduction: false,
             skills: Vec::new(),
             interactive: false,
             session_id: String::new(),
@@ -706,7 +718,37 @@ fn apply_config_sources(
             );
         }
         if let Some(context_compact_pct) = toml_cfg.context_compact_pct {
-            cfg.context_compact_pct = context_compact_pct;
+            if (1..=100).contains(&context_compact_pct) {
+                cfg.context_compact_pct = context_compact_pct;
+            } else {
+                eprintln!(
+                    "[mink] Warning: ignoring context_compact_pct={context_compact_pct}; expected 1-100"
+                );
+            }
+        }
+        if let Some(tokens) = toml_cfg.context_reserve_tokens {
+            if tokens > 0 {
+                cfg.context_reserve_tokens = tokens;
+            } else {
+                eprintln!("[mink] Warning: ignoring context_reserve_tokens=0");
+            }
+        }
+        if let Some(tokens) = toml_cfg.context_compact_tail_tokens {
+            if tokens > 0 {
+                cfg.context_compact_tail_tokens = tokens;
+            } else {
+                eprintln!("[mink] Warning: ignoring context_compact_tail_tokens=0");
+            }
+        }
+        if let Some(tokens) = toml_cfg.context_compact_max_output_tokens {
+            apply_positive_i32_config(
+                &mut cfg.context_compact_max_output_tokens,
+                tokens,
+                "context_compact_max_output_tokens",
+            );
+        }
+        if let Some(enabled) = toml_cfg.context_compact_input_reduction {
+            cfg.context_compact_input_reduction = enabled;
         }
         if let Some(log_events) = toml_cfg.log_events {
             cfg.log_events = log_events;
@@ -907,6 +949,54 @@ pub fn api_url(cfg: &Config) -> String {
 
 pub fn model_resolver(cfg: &Config) -> ModelResolver {
     ModelResolver::new(&cfg.model_aliases)
+}
+
+pub fn validate_runtime_config(cfg: &Config) -> Result<()> {
+    if cfg.max_tokens <= 0 {
+        bail!("max_tokens must be greater than 0");
+    }
+    if !(1..=100).contains(&cfg.context_compact_pct) {
+        bail!("context_compact_pct must be between 1 and 100");
+    }
+    if cfg.context_reserve_tokens == 0 {
+        bail!("context_reserve_tokens must be greater than 0");
+    }
+    if cfg.context_compact_tail_tokens == 0 {
+        bail!("context_compact_tail_tokens must be greater than 0");
+    }
+    if cfg.context_compact_max_output_tokens <= 0 {
+        bail!("context_compact_max_output_tokens must be greater than 0");
+    }
+    if cfg.max_context_tokens == 0 {
+        return Ok(());
+    }
+
+    let max_context = cfg.max_context_tokens;
+    if cfg.context_reserve_tokens >= max_context {
+        bail!(
+            "context_reserve_tokens ({}) must be less than max_context ({max_context})",
+            cfg.context_reserve_tokens
+        );
+    }
+    let compact_output = usize::try_from(cfg.context_compact_max_output_tokens)
+        .map_err(|_| anyhow::anyhow!("context_compact_max_output_tokens is too large"))?;
+    if compact_output >= max_context {
+        bail!(
+            "context_compact_max_output_tokens ({compact_output}) must be less than max_context ({max_context})"
+        );
+    }
+
+    let requested_output =
+        usize::try_from(cfg.max_tokens).map_err(|_| anyhow::anyhow!("max_tokens is too large"))?;
+    let response_budget = requested_output.min(cfg.context_reserve_tokens);
+    let request_input_budget = max_context - response_budget;
+    if cfg.context_compact_tail_tokens >= request_input_budget {
+        bail!(
+            "context_compact_tail_tokens ({}) must be less than the request input budget ({request_input_budget} = max_context {max_context} - response budget {response_budget})",
+            cfg.context_compact_tail_tokens
+        );
+    }
+    Ok(())
 }
 
 /// Resolve the actual API model name from a Config model string with default aliases.
@@ -1361,15 +1451,88 @@ Read = "allow"
     }
 
     #[test]
-    fn config_file_sets_context_compact_pct() {
+    fn config_file_sets_compaction_policy() {
         let defaults = Config::default();
         let user = MinkConfigFile {
             context_compact_pct: Some(72),
+            context_reserve_tokens: Some(8_000),
+            context_compact_tail_tokens: Some(12_000),
+            context_compact_max_output_tokens: Some(2_048),
+            context_compact_input_reduction: Some(true),
             ..Default::default()
         };
         let mut cfg = Config::default();
         apply_config_sources(&mut cfg, &defaults, Some(&user), None, None);
         assert_eq!(cfg.context_compact_pct, 72);
+        assert_eq!(cfg.context_reserve_tokens, 8_000);
+        assert_eq!(cfg.context_compact_tail_tokens, 12_000);
+        assert_eq!(cfg.context_compact_max_output_tokens, 2_048);
+        assert!(cfg.context_compact_input_reduction);
+    }
+
+    #[test]
+    fn invalid_compaction_policy_keeps_defaults() {
+        let defaults = Config::default();
+        let user = MinkConfigFile {
+            context_compact_pct: Some(0),
+            context_reserve_tokens: Some(0),
+            context_compact_tail_tokens: Some(0),
+            context_compact_max_output_tokens: Some(0),
+            ..Default::default()
+        };
+        let mut cfg = Config::default();
+        apply_config_sources(&mut cfg, &defaults, Some(&user), None, None);
+        assert_eq!(cfg.context_compact_pct, defaults.context_compact_pct);
+        assert_eq!(cfg.context_reserve_tokens, defaults.context_reserve_tokens);
+        assert_eq!(
+            cfg.context_compact_tail_tokens,
+            defaults.context_compact_tail_tokens
+        );
+        assert_eq!(
+            cfg.context_compact_max_output_tokens,
+            defaults.context_compact_max_output_tokens
+        );
+    }
+
+    #[test]
+    fn runtime_config_rejects_unusable_context_budget_combinations() {
+        let mut cfg = Config {
+            max_context_tokens: 64_000,
+            ..Config::default()
+        };
+        let error = validate_runtime_config(&cfg).unwrap_err().to_string();
+        assert!(
+            error.contains("context_reserve_tokens (64000) must be less than max_context (64000)"),
+            "{error}"
+        );
+
+        cfg.context_reserve_tokens = 12_000;
+        let error = validate_runtime_config(&cfg).unwrap_err().to_string();
+        assert!(
+            error.contains("context_compact_tail_tokens (256000) must be less than"),
+            "{error}"
+        );
+
+        cfg.context_compact_tail_tokens = 16_000;
+        validate_runtime_config(&cfg).unwrap();
+
+        cfg.context_compact_max_output_tokens = 64_000;
+        let error = validate_runtime_config(&cfg).unwrap_err().to_string();
+        assert!(
+            error.contains(
+                "context_compact_max_output_tokens (64000) must be less than max_context (64000)"
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn runtime_config_allows_zero_context_window() {
+        let cfg = Config {
+            max_context_tokens: 0,
+            ..Config::default()
+        };
+        validate_runtime_config(&cfg).unwrap();
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use crate::agent::prefix::PrefixManager;
 use crate::agent::turn::TurnEffect;
 use crate::context::AgentSharedContext;
+use crate::llm::client::LlmModelTarget;
 use crate::tools::runner::ToolRunResult;
 use std::sync::Arc;
 
@@ -18,13 +19,14 @@ impl PlanActionHandler {
         result: &mut ToolRunResult,
         effects: &mut Vec<TurnEffect>,
         prefix: &PrefixManager,
+        target: LlmModelTarget<'_>,
     ) {
         match result.tool_name.as_str() {
             "PlanClear" => {
                 let _ = self
                     .ctx
                     .compaction
-                    .evaluate_and_compact("plan_clear", 0)
+                    .evaluate_and_compact("plan_clear", 0, target)
                     .await;
                 let _ = tokio::fs::write(&self.ctx.plan_path, "").await;
                 result.content = "Plan cleared.".to_string();
@@ -37,7 +39,7 @@ impl PlanActionHandler {
                         let _ = self
                             .ctx
                             .compaction
-                            .evaluate_and_compact("plan_confirm", 0)
+                            .evaluate_and_compact("plan_confirm", 0, target)
                             .await;
                         let _ = tokio::fs::write(&self.ctx.plan_path, &data).await;
                         let _ = tokio::fs::write(&self.ctx.plan_draft_path, "").await;

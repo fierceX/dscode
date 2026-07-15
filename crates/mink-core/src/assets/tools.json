@@ -1,13 +1,13 @@
 [
   {
     "name": "Read",
-    "description": "Read a local file, web URL, or lightweight resource. Use multiple Read calls if you need multiple files/resources. Local file output includes a @PATH#TAG snapshot header and line numbers unless :raw is used. Use path selectors to read specific line ranges. URL reads are fetched once into a session artifact cache, then selectors page over cached text without refetching.\n\nSupported resource paths:\n- local files, e.g. src/main.rs or src/main.rs:10-30\n- http(s) URLs, e.g. https://example.com or https://example.com:20-60\n- artifact://<id> for full truncated tool output\n- skill://list, skill://list/all, skill://<name>, and skill://<name>/<relative-path> for available skills from the current capability snapshot\n- rule://list and rule://<name> for available rules\n- session://current, session://current/stats, session://current/messages, session://current/messages/all, session://current/artifacts\n\nIMPORTANT - Prefer Grep over Read:\n- When searching for specific local content, ALWAYS use Grep first \u2014 it returns only matching lines, never truncates, and keeps context small.\n- Read loads entire files/resources into context, which rapidly inflates token usage. Use it ONLY when you already know exactly which lines you need (e.g. after a Grep located the target), or when you must understand the full file/resource structure.\n- Grep with context provides enough surrounding lines to decide the target range before editing; then use Read path selectors to get the @PATH#TAG header for Edit.patch.\n- If a Read result is truncated (you see a truncation notice), do NOT re-read the same range \u2014 use Grep for local search, or use a narrower Read selector for URL/resource pagination.\n- Use path selectors only when you already know the target line range (e.g. from a prior Grep or cached URL read).",
+    "description": "Read a local file, web URL, or lightweight resource. Use multiple Read calls if you need multiple files/resources. Local file output includes a @PATH#TAG snapshot header and line numbers unless :raw is used. Use path selectors to read specific line ranges. URL reads are fetched once into a session artifact cache, then selectors page over cached text without refetching.\n\nSupported resource paths:\n- local files, e.g. src/main.rs or src/main.rs:10-30\n- http(s) URLs, e.g. https://example.com or https://example.com:20-60\n- artifact://<id> for full truncated tool output\n- skill://list, skill://list/all, skill://<name>, and skill://<name>/<relative-path> for available skills from the current capability snapshot\n- rule://list and rule://<name> for available rules\n- session://current, session://current/stats, session://current/messages, session://current/messages/all, session://current/history, session://current/artifacts\n\nIMPORTANT - Prefer Grep over Read:\n- When searching for specific local or resource content, ALWAYS use Grep first \u2014 it returns only matching lines and keeps context small.\n- Read loads entire files/resources into context, which rapidly inflates token usage. Use it ONLY when you already know exactly which lines you need (e.g. after a Grep located the target), or when you must understand the full file/resource structure.\n- Grep with context provides enough surrounding lines to decide the target range before editing; then use Read path selectors to get the @PATH#TAG header for Edit.patch.\n- If a Read result is truncated (you see a truncation notice), do NOT re-read the same range \u2014 use Grep, or use a narrower Read selector for URL/resource pagination.\n- Use path selectors only when you already know the target line range (e.g. from a prior Grep or cached URL read).",
     "input_schema": {
       "type": "object",
       "properties": {
         "path": {
           "type": "string",
-          "description": "File path, http(s) URL, or resource URL to read. Supports local paths, web URLs, artifact://<id>, skill://list, skill://list/all, skill://<name>, skill://<name>/<relative-path>, rule://<name>, and session://current resources. Append path selectors such as :10-20, :10+5, or :raw for ranges/raw output."
+          "description": "File path, http(s) URL, or resource URL to read. Supports local paths, web URLs, artifact://<id>, skill://list, skill://list/all, skill://<name>, skill://<name>/<relative-path>, rule://<name>, and session://current resources including session://current/history. Append path selectors such as :10-20, :10+5, or :raw for ranges/raw output."
         }
       },
       "required": [
@@ -37,7 +37,7 @@
   },
   {
     "name": "Grep",
-    "description": "Default tool for searching code and file contents. Use this instead of Bash commands like rg, grep, or find | xargs grep. Uses ripgrep's regex/search/printer components and returns rg-style output: path:line:match, path-line-context with context, and -- between context groups.\n- Use context to identify the target range before editing\n- Grep output does NOT authorize Edit; call Read on the exact target range to get the @PATH#TAG header\n- Use glob as a single rg -g override glob to restrict file types or directories\n- Use multiple Grep calls if you need multiple patterns",
+    "description": "Default tool for searching code, file contents, and registered resource URLs such as session://current/history. Use this instead of Bash commands like rg, grep, or find | xargs grep. Uses ripgrep's regex/search/printer components and returns rg-style output: path:line:match, path-line-context with context, and -- between context groups.\n- Use context to identify the target range before editing\n- Grep output does NOT authorize Edit; call Read on the exact local-file target range to get the @PATH#TAG header\n- Use glob as a single rg -g override glob to restrict local file types or directories\n- Use multiple Grep calls if you need multiple patterns",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -47,7 +47,7 @@
         },
         "path": {
           "type": "string",
-          "description": "File or directory to search in. Defaults to ."
+          "description": "File, directory, or registered resource URL to search. Defaults to ."
         },
         "glob": {
           "type": "string",

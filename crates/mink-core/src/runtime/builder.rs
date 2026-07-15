@@ -32,6 +32,8 @@ pub async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRuntime> {
         resource_session_id,
     } = config;
 
+    crate::config::validate_runtime_config(&config)?;
+
     let (sid, session_ref, session_alias) =
         resolve_session(&home, &cwd, session, session_layout).await?;
     config.session_id = sid.clone();
@@ -230,6 +232,25 @@ mod tests {
         runtime.shutdown().await.unwrap();
         let _ = tokio::fs::remove_dir_all(session.home).await;
         let _ = tokio::fs::remove_dir_all(session.cwd).await;
+    }
+
+    #[tokio::test]
+    async fn build_runtime_rejects_unusable_context_budget_before_session_creation() {
+        let home = unique_temp_dir("invalid-context-home");
+        let cwd = unique_temp_dir("invalid-context-cwd");
+        let cfg = Config {
+            max_context_tokens: 64_000,
+            ..Config::default()
+        };
+
+        let error = build_runtime(AgentRuntimeConfig::from_config(cfg, home.clone(), cwd))
+            .await
+            .err()
+            .expect("invalid context budget must fail")
+            .to_string();
+
+        assert!(error.contains("context_reserve_tokens"), "{error}");
+        assert!(!home.exists());
     }
 
     #[tokio::test]

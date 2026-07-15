@@ -295,7 +295,27 @@ impl AgentOptions {
     }
 
     pub fn with_context_compact_pct(mut self, pct: u8) -> Self {
-        self.config.context_compact_pct = pct;
+        self.config.context_compact_pct = pct.clamp(1, 100);
+        self
+    }
+
+    pub fn with_context_reserve_tokens(mut self, tokens: usize) -> Self {
+        self.config.context_reserve_tokens = tokens.max(1);
+        self
+    }
+
+    pub fn with_context_compact_tail_tokens(mut self, tokens: usize) -> Self {
+        self.config.context_compact_tail_tokens = tokens.max(1);
+        self
+    }
+
+    pub fn with_context_compact_max_output_tokens(mut self, tokens: i32) -> Self {
+        self.config.context_compact_max_output_tokens = tokens.max(1);
+        self
+    }
+
+    pub fn with_context_compact_input_reduction(mut self, enabled: bool) -> Self {
+        self.config.context_compact_input_reduction = enabled;
         self
     }
 
@@ -508,6 +528,10 @@ mod tests {
             .with_max_turns(7)
             .with_max_context_tokens(456)
             .with_context_compact_pct(70)
+            .with_context_reserve_tokens(71)
+            .with_context_compact_tail_tokens(72)
+            .with_context_compact_max_output_tokens(73)
+            .with_context_compact_input_reduction(true)
             .with_tool_timeout_secs(10)
             .with_sub_agent_timeout_secs(11)
             .with_llm_timeouts(12, 13, 14)
@@ -563,6 +587,10 @@ mod tests {
         assert_eq!(cfg.max_turns, 7);
         assert_eq!(cfg.max_context_tokens, 456);
         assert_eq!(cfg.context_compact_pct, 70);
+        assert_eq!(cfg.context_reserve_tokens, 71);
+        assert_eq!(cfg.context_compact_tail_tokens, 72);
+        assert_eq!(cfg.context_compact_max_output_tokens, 73);
+        assert!(cfg.context_compact_input_reduction);
         assert_eq!(cfg.tool_timeout_secs, 10);
         assert_eq!(cfg.sub_agent_timeout_secs, 11);
         assert_eq!(cfg.llm_first_event_timeout_secs, 12);

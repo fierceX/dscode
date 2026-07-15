@@ -1,5 +1,6 @@
 pub mod artifacts;
 pub mod compaction;
+pub mod compaction_input;
 pub mod init;
 pub mod metadata;
 pub mod paths;

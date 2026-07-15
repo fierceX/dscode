@@ -192,6 +192,11 @@ prompt 为空且 stdin 是终端时自动进入交互模式。非终端 stdin �
 max_tokens = 4096
 max_turns = 20
 max_context = "500K"
+context_compact_pct = 94
+context_reserve_tokens = 64000
+context_compact_tail_tokens = 256000
+context_compact_max_output_tokens = 8192
+context_compact_input_reduction = false
 tool_timeout = 300
 sub_agent_timeout = 120
 llm_first_event_timeout = 60
@@ -231,7 +236,10 @@ read_dirs = ["./data"]
 等价于旧版独立的 CLI 参数。也支持设置 `model`、`api_key`、`base_url`，但推荐使用独立参数以便 SDK 控制。显式传入的 `--config <toml>` 解析失败会直接退出；用户级/项目级 `.minkrc` 解析失败只输出 warning 并继续。
 `model_aliases` 可覆盖默认别名；没有命中别名的 `model` 会作为真实模型名原样发送。
 
-`--agent-jsonl` 模式不会读取用户级/项目级 `.minkrc`，以避免 SDK 调用产生额外文件 I/O；但仍会应用同一命令行传入的 `--config <toml>`。因此 SDK 可以通过 `--config` 精确传入 `max_search_files`、`max_search_results`、`enabled_tools` 等 per-call 配置。
+`--agent-jsonl` 模式不会读取用户级/项目级 `.minkrc`，以避免 SDK 调用产生额外文件 I/O；但仍会应用同一命令行传入的 `--config <toml>`。Agent JSONL `options` 可直接传入
+`max_context`、`context_compact_pct`、`context_reserve_tokens`、
+`context_compact_tail_tokens`、`context_compact_max_output_tokens` 和
+`context_compact_input_reduction`，Python `SandboxConfig` 暴露同名字段，不需要额外 TOML。
 ---
 
 ## 配置文件
@@ -252,7 +260,11 @@ sub_agent_timeout = 120                   # 子代理超时（秒）
 llm_first_event_timeout = 60              # 等待首个模型 stream event 的秒数
 llm_idle_timeout = 90                     # 模型 stream 空闲超时（秒）
 llm_wait_heartbeat = 30                   # 等待模型响应的提示间隔（秒，0=关闭）
-context_compact_pct = 85                  # 压缩触发百分比
+context_compact_pct = 94                  # 自动压缩百分比（1-100）
+context_reserve_tokens = 64000            # 主请求响应预留及 max_tokens 上限
+context_compact_tail_tokens = 256000      # 压缩后原样保留的热尾部目标
+context_compact_max_output_tokens = 8192  # 摘要请求输出上限
+context_compact_input_reduction = false   # 摘要前是否过滤 thinking 和工具噪声
 log_events = true                         # 事件日志
 max_search_files = 5000                     # Glob/Grep 最大遍历文件数
 max_search_results = 1000                   # Grep 最大匹配结果行数
@@ -733,10 +745,14 @@ CLI 的历史目录结构是 `project` layout：
         ├── events.jsonl       ← 事件日志
         ├── session.json       ← session 元数据：alias、title、created_at、updated_at
         ├── summary.txt        ← 压缩后的上下文快照
+        ├── context-state.json ← 当前投影边界和滚动摘要
         ├── plan.md            ← 确认后的计划
         ├── plan.draft         ← 草稿计划
         ├── stats.json         ← Token 用量统计
-        └── usage.jsonl        ← LLM 请求级 Token 与费用明细
+        ├── usage.jsonl        ← LLM 请求级 Token 与费用明细
+        └── artifacts/         ← 超长工具输出和 URL cache
+            ├── index.jsonl
+            └── <tool>-0001.txt
 ```
 
 ### 操作
@@ -808,33 +824,66 @@ mink --list-sessions
 
 ## 上下文压缩
 
-### 三级阈值
+### 显式策略
 
-| 上下文使用率 | 压缩等级 | 保留比例 | 触发方式 |
-|-------------|---------|:--------:|---------|
-| <85% | — | 100% | 不压缩 |
-| 85-95% | ForceSummary | 5% | 默认压缩点 |
-| ≥95% | Emergency | 1-5 行 | preflight 紧急保护 |
+mink 的压缩行为由显式配置直接控制，不根据窗口大小推断压缩档位。所有压缩统一使用 LLM 滚动摘要：
+
+| 参数 | 默认值 | 作用 |
+|------|-------:|------|
+| `context_compact_pct` | 94 | 自动压缩百分比，范围 1-100 |
+| `context_reserve_tokens` | 64000 | 主请求响应预留，同时限制主请求 `max_tokens` |
+| `context_compact_tail_tokens` | 256000 | 压缩后原样保留的热尾部目标 |
+| `context_compact_max_output_tokens` | 8192 | 摘要请求独立输出上限 |
+| `context_compact_input_reduction` | false | 是否精简发送给摘要模型的历史 |
+
+实际触发点取百分比阈值和 `max_context - context_reserve_tokens` 中较早者。
+`max_context_tokens=0` 禁用 auto/preflight 压缩和本地请求输入预算上限，但不禁用 `/compact`。
 
 压缩触发后：
-1. 按 user 消息边界保留末尾 5% 会话
-2. 截断部分送入 LLM 生成摘要（含 fold marker 标记）
-3. 摘要写入 `summary.txt`，纳入 system prompt
-4. conversation.jsonl 截断保留末尾
+1. 从当前活跃窗口选择不破坏 tool call/result 配对的边界
+2. 可选地删除 thinking，并压缩工具参数和结果，形成紧凑摘要输入
+3. 使用最小摘要 system prompt，将新历史与旧摘要交给当前 LLM 合并
+4. 通过临时文件 + rename 原子提交投影边界和摘要到 `context-state.json`
+5. 裁剪运行时消息缓存到新的活跃边界；模型只接收动态摘要和热尾部
+6. `conversation.jsonl` 保持完整且只追加，冷历史仍可恢复、重放和搜索
+
+`summary.txt` 是供 session 列表和人工检查使用的摘要缓存，不是上下文投影的事实源。
 
 ### 防护
 
 - **同轮只压缩一次**：同一用户输入内多次 LLM 调用不重复压缩
 - **最小收益检查**：节省不足 10% token 时跳过
-- **preflight 预判**：发送前估算 token 量，>95% 时提前压缩
+- **preflight 预判**：发送前按实际 OpenAI request 形态估算 messages、system prompt 和 tools；超过输入预算时先压缩，仍超预算则拒绝请求
+- **摘要预算**：摘要请求使用独立输出上限，并在发送前校验最小 system prompt、摘要输入和输出预算能否装入窗口
+- **配置组合校验**：runtime 创建 session 前校验 reserve 小于上下文窗口、摘要输出小于窗口、热尾部小于主请求输入预算；无效组合直接返回包含参数关系的错误
+- **降噪边界**：输入降噪只作用于摘要请求；用户/assistant 文本保留，thinking 删除，工具结果保留头尾和错误/artifact 证据
+- **完整历史**：压缩不删除或改写已经提交的消息，恢复和重放仍可读取全部历史
+- **有界运行时缓存**：正常 turn 只缓存 `active_start` 后的活跃消息；显式读取完整历史不会重新扩大该缓存
+- **恢复成本**：恢复超长 session 时会流式解析并校验一次 JSONL 以定位边界，但只保留和缓存活跃后缀
+- **状态校验**：投影边界超过历史长度或状态文件损坏时 fail closed
+- **overflow 恢复**：provider 在输出前明确报告 context overflow 时，本轮最多执行一次 LLM 压缩并重试一次
 
 ### 调优
 
 ```toml
-# .minkrc
-context_compact_pct = 70   # 70% 触发（更频繁）
-max_context = "1M"         # 1M 上下文窗口
+# 1M DeepSeek，尽量延后压缩
+max_context = "1M"
+context_compact_pct = 94
+context_reserve_tokens = 64000
+context_compact_tail_tokens = 256000
+context_compact_max_output_tokens = 8192
+context_compact_input_reduction = true
+
+# 64k 私有模型
+# max_context = "64K"
+# context_compact_pct = 65
+# context_reserve_tokens = 12000
+# context_compact_tail_tokens = 16000
+# context_compact_max_output_tokens = 4096
+# context_compact_input_reduction = true
 ```
+
+仅修改 `max_context` 为 64K 会与 1M 默认的 reserve/tail 冲突并在 runtime 启动时失败；小窗口必须像上例一样同时显式配置相关预算。
 
 ```bash
 mink -m flash --config 'max_context="1M"' -i
@@ -907,13 +956,18 @@ artifact、输出截断和每个工具的完整协议以 [工具参考](tools.md
 可读取的轻量资源：
 
 - `http(s)://...`：读取公开 URL，首次 fetch 后缓存到当前 session artifact，后续 selector 从缓存分页；cache 正文缺失时会重新 fetch
-- `artifact://<id>`：读取被截断工具输出
+- `artifact://<id>`：读取被截断工具输出；session 恢复和 fork 后新 artifact 会从已有最大序号继续，旧正文不会被覆盖
 - `skill://list` / `skill://list/all` / `skill://<name>` / `skill://<name>/<relative-path>`：列出、诊断或读取可用 skill；列表、正文和 filesystem-backed skill 子资源来自同一 capability snapshot。`skill://all` 是 `skill://list/all` 的兼容别名；built-in/runtime skill 只支持读取正文，不支持子资源
 - `rule://list` / `rule://<name>`：列出或读取可用 rule
 - `session://current`：当前 session 摘要
 - `session://current/stats`：stats JSON
 - `session://current/messages` / `session://current/messages/all`：conversation 摘要
+- `session://current/history`：从完整 `conversation.jsonl` 生成的有损 transcript；保留 user/assistant 文本，省略 thinking，并将工具调用与结果折叠为状态行，不包含完整工具结果正文
 - `session://current/artifacts`：artifact 列表
+
+`Grep.path` 也可直接使用 registered resource URL。历史召回建议先搜索
+`session://current/history`，再按返回的行号用 `Read` selector 读取局部；Grep 的 resource
+路径本身不接受 selector 或 glob。
 
 示例：
 
@@ -922,6 +976,7 @@ artifact、输出截断和每个工具的完整协议以 [工具参考](tools.md
 {"path":"artifact://bash-0001:1-120"}
 {"path":"skill://debugging"}
 {"path":"skill://local-guide/references/checklist.md:1-40"}
+{"path":"session://current/history:120-180"}
 {"path":"session://current/messages:1-40"}
 ```
 
@@ -1084,7 +1139,11 @@ LLM 自动调用 SubAgent 工具。支持并发执行（最多 8 个并发）。
 | 模式 | 上下文 | 适用 |
 |------|--------|------|
 | 独立（默认） | 全新空会话 | 文件调查、搜索、隔离的假设验证 |
-| Fork（`fork=true`） | 继承父会话对话/计划/技能 | 需要父上下文的延续性任务 |
+| Fork（`fork=true`） | 继承完整 session 状态，包括对话、压缩边界、摘要、计划和 artifacts | 需要父上下文的延续性任务 |
+
+Fork 会在子 runtime 初始化前复制父 session 目录，并清除 child 的身份、事件、统计和 usage 文件。
+子代理从克隆的 `context-state.json` 恢复同一活跃投影；artifact 序号从克隆 index 继续，已有
+`artifact://<id>` 引用保持指向原正文。技能和规则来自父代理的 capability snapshot，不依赖目录复制。
 
 ### 结果格式
 

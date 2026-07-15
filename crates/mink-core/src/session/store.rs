@@ -2,7 +2,7 @@ use crate::protocol::ToolCallEvent;
 use anyhow::Result;
 use serde_json::{Value, json};
 use std::path::PathBuf;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
 use tokio::sync::{Mutex, RwLock};
 
 /// Result of executing a single tool call, persisted in the conversation store.
@@ -18,9 +18,15 @@ pub struct ToolResult {
 /// ConversationStore provides async JSONL conversation persistence.
 pub struct ConversationStore {
     path: PathBuf,
-    /// In-memory cache of parsed lines, lazily loaded and invalidated on write.
-    cache: RwLock<Option<Vec<Value>>>,
+    /// Parsed active suffix. Complete history remains authoritative on disk.
+    cache: RwLock<Option<CachedLines>>,
     write_lock: Mutex<()>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedLines {
+    start: usize,
+    lines: Vec<Value>,
 }
 
 impl ConversationStore {
@@ -86,23 +92,97 @@ impl ConversationStore {
     pub async fn lines(&self) -> Result<Vec<Value>> {
         {
             let cache = self.cache.read().await;
-            if let Some(ref lines) = *cache {
-                return Ok(lines.clone());
+            if let Some(cache) = cache.as_ref()
+                && cache.start == 0
+            {
+                return Ok(cache.lines.clone());
             }
         }
 
         let _guard = self.write_lock.lock().await;
         {
             let cache = self.cache.read().await;
-            if let Some(ref lines) = *cache {
-                return Ok(lines.clone());
+            if let Some(cache) = cache.as_ref()
+                && cache.start == 0
+            {
+                return Ok(cache.lines.clone());
             }
         }
 
-        let lines = self.read_lines_from_disk().await?;
+        let lines = self.read_lines_from_disk(0).await?;
         let mut cache = self.cache.write().await;
-        *cache = Some(lines.clone());
+        if cache.is_none() {
+            *cache = Some(CachedLines {
+                start: 0,
+                lines: lines.clone(),
+            });
+        }
         Ok(lines)
+    }
+
+    pub async fn lines_from(&self, start: usize) -> Result<Vec<Value>> {
+        {
+            let cache = self.cache.read().await;
+            if let Some(cache) = cache.as_ref()
+                && start >= cache.start
+            {
+                let offset = start - cache.start;
+                if offset <= cache.lines.len() {
+                    return Ok(cache.lines[offset..].to_vec());
+                }
+            }
+        }
+
+        let _guard = self.write_lock.lock().await;
+        {
+            let cache = self.cache.read().await;
+            if let Some(cache) = cache.as_ref()
+                && start >= cache.start
+            {
+                let offset = start - cache.start;
+                if offset <= cache.lines.len() {
+                    return Ok(cache.lines[offset..].to_vec());
+                }
+            }
+        }
+
+        let lines = self.read_lines_from_disk(start).await?;
+        let mut cache = self.cache.write().await;
+        if cache.is_none() || cache.as_ref().is_some_and(|cached| start >= cached.start) {
+            *cache = Some(CachedLines {
+                start,
+                lines: lines.clone(),
+            });
+        }
+        Ok(lines)
+    }
+
+    pub async fn prune_cache_before(&self, start: usize) {
+        let mut cache = self.cache.write().await;
+        let Some(cache) = cache.as_mut() else {
+            return;
+        };
+        if start <= cache.start {
+            return;
+        }
+        let remove = (start - cache.start).min(cache.lines.len());
+        cache.lines.drain(..remove);
+        cache.start = start;
+    }
+
+    pub async fn last_assistant_message(&self) -> Result<Option<Value>> {
+        {
+            let cache = self.cache.read().await;
+            if let Some(cache) = cache.as_ref()
+                && let Some(message) = cache.lines.iter().rev().find(|message| {
+                    message.get("role").and_then(Value::as_str) == Some("assistant")
+                })
+            {
+                return Ok(Some(message.clone()));
+            }
+        }
+        let _guard = self.write_lock.lock().await;
+        self.read_last_assistant_from_disk().await
     }
 
     pub async fn lines_lossy(&self) -> Result<Vec<Value>> {
@@ -132,76 +212,150 @@ impl ConversationStore {
         Ok(lines)
     }
 
-    async fn read_lines_from_disk(&self) -> Result<Vec<Value>> {
-        let data = tokio::fs::read_to_string(&self.path).await?;
+    async fn read_lines_from_disk(&self, start: usize) -> Result<Vec<Value>> {
+        let file = tokio::fs::File::open(&self.path).await?;
+        let mut reader = BufReader::new(file);
         let mut lines = Vec::new();
-        let ends_with_newline = data.ends_with('\n');
-        let rows: Vec<&str> = data.lines().collect();
-        for (idx, line) in rows.iter().enumerate() {
+        let mut physical_line = 0usize;
+        let mut message_index = 0usize;
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let bytes = reader.read_line(&mut line).await?;
+            if bytes == 0 {
+                break;
+            }
+            physical_line += 1;
             if line.trim().is_empty() {
                 continue;
             }
-            let value = match serde_json::from_str(line) {
+            let terminated = line.ends_with('\n');
+            let value = match serde_json::from_str(&line) {
                 Ok(value) => value,
-                Err(_) if idx + 1 == rows.len() && !ends_with_newline => continue,
+                Err(_) if !terminated => break,
                 Err(e) => {
                     return Err(anyhow::anyhow!(
                         "invalid JSONL in {} at line {}: {}",
                         self.path.display(),
-                        idx + 1,
+                        physical_line,
                         e
                     ));
                 }
             };
-            lines.push(value);
+            if message_index >= start {
+                lines.push(value);
+            }
+            message_index += 1;
+        }
+        if start > message_index {
+            return Err(anyhow::anyhow!(
+                "conversation start index {} exceeds history length {}",
+                start,
+                message_index
+            ));
         }
         Ok(lines)
     }
 
-    pub async fn trim_keep_last(&self, keep_lines: usize) -> Result<()> {
-        let _guard = self.write_lock.lock().await;
-        let lines = if let Some(lines) = self.cache.read().await.clone() {
-            lines
-        } else {
-            let lines = self.read_lines_from_disk().await?;
-            let mut cache = self.cache.write().await;
-            *cache = Some(lines.clone());
-            lines
-        };
-        if keep_lines >= lines.len() {
-            return Ok(());
+    async fn read_last_assistant_from_disk(&self) -> Result<Option<Value>> {
+        let file = tokio::fs::File::open(&self.path).await?;
+        let mut reader = BufReader::new(file);
+        let mut latest = None;
+        let mut physical_line = 0usize;
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let bytes = reader.read_line(&mut line).await?;
+            if bytes == 0 {
+                break;
+            }
+            physical_line += 1;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let terminated = line.ends_with('\n');
+            let value: Value = match serde_json::from_str(&line) {
+                Ok(value) => value,
+                Err(_) if !terminated => break,
+                Err(error) => {
+                    return Err(anyhow::anyhow!(
+                        "invalid JSONL in {} at line {}: {}",
+                        self.path.display(),
+                        physical_line,
+                        error
+                    ));
+                }
+            };
+            if value.get("role").and_then(Value::as_str) == Some("assistant") {
+                latest = Some(value);
+            }
         }
-        let kept = &lines[lines.len() - keep_lines..];
-        let mut out = String::new();
-        for v in kept {
-            out.push_str(&serde_json::to_string(v)?);
-            out.push('\n');
-        }
-        tokio::fs::write(&self.path, out.as_bytes()).await?;
-        // Invalidate cache
-        let mut cache = self.cache.write().await;
-        *cache = Some(kept.to_vec());
-        Ok(())
+        Ok(latest)
     }
 
     async fn append_line(&self, value: &Value) -> Result<()> {
         let _guard = self.write_lock.lock().await;
-        let line = serde_json::to_string(value)?;
+        let mut line = serde_json::to_vec(value)?;
+        line.push(b'\n');
         let mut file = tokio::fs::OpenOptions::new()
             .create(true)
+            .read(true)
+            .write(true)
             .append(true)
             .open(&self.path)
             .await?;
-        file.write_all(line.as_bytes()).await?;
-        file.write_all(b"\n").await?;
+        repair_unterminated_tail(&mut file).await?;
+        file.write_all(&line).await?;
         file.flush().await?;
         // Append to cache instead of invalidating
         let mut cache = self.cache.write().await;
-        if let Some(ref mut lines) = *cache {
-            lines.push(value.clone());
+        if let Some(cache) = cache.as_mut() {
+            cache.lines.push(value.clone());
         }
         Ok(())
     }
+}
+
+async fn repair_unterminated_tail(file: &mut tokio::fs::File) -> Result<()> {
+    const SCAN_CHUNK_BYTES: u64 = 8 * 1024;
+
+    let len = file.metadata().await?.len();
+    if len == 0 {
+        return Ok(());
+    }
+
+    file.seek(std::io::SeekFrom::End(-1)).await?;
+    let mut last = [0u8; 1];
+    file.read_exact(&mut last).await?;
+    if last[0] == b'\n' {
+        return Ok(());
+    }
+
+    let mut scan_end = len;
+    let mut tail_start = 0;
+    while scan_end > 0 {
+        let scan_start = scan_end.saturating_sub(SCAN_CHUNK_BYTES);
+        let chunk_len = usize::try_from(scan_end - scan_start)?;
+        let mut chunk = vec![0u8; chunk_len];
+        file.seek(std::io::SeekFrom::Start(scan_start)).await?;
+        file.read_exact(&mut chunk).await?;
+        if let Some(index) = chunk.iter().rposition(|byte| *byte == b'\n') {
+            tail_start = scan_start + index as u64 + 1;
+            break;
+        }
+        scan_end = scan_start;
+    }
+
+    let tail_len = usize::try_from(len - tail_start)?;
+    let mut tail = vec![0u8; tail_len];
+    file.seek(std::io::SeekFrom::Start(tail_start)).await?;
+    file.read_exact(&mut tail).await?;
+    if serde_json::from_slice::<Value>(&tail).is_ok() {
+        file.write_all(b"\n").await?;
+    } else {
+        file.set_len(tail_start).await?;
+    }
+    Ok(())
 }
 
 pub fn first_line(s: &str) -> &str {
@@ -338,20 +492,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn trim_keep_last_removes_prefix() {
-        let store = temp_store();
-        store.ensure().await.unwrap();
-        store.add_user("msg1").await.unwrap();
-        store.add_user("msg2").await.unwrap();
-        store.add_user("msg3").await.unwrap();
-        store.trim_keep_last(2).await.unwrap();
-        let lines = store.lines().await.unwrap();
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0]["content"], "msg2");
-        assert_eq!(lines[1]["content"], "msg3");
-    }
-
-    #[tokio::test]
     async fn cache_appended_not_invalidated() {
         let store = temp_store();
         store.ensure().await.unwrap();
@@ -361,6 +501,54 @@ mod tests {
         // cache should be updated, not None
         let lines = store.lines().await.unwrap();
         assert_eq!(lines.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn active_suffix_cache_stays_pruned_when_full_history_is_read() {
+        let store = temp_store();
+        store.ensure().await.unwrap();
+        for value in ["a", "b", "c", "d"] {
+            store.add_user(value).await.unwrap();
+        }
+        assert_eq!(store.lines_from(0).await.unwrap().len(), 4);
+
+        store.prune_cache_before(2).await;
+        let active = store.lines_from(2).await.unwrap();
+        assert_eq!(active.len(), 2);
+        assert_eq!(active[0]["content"], "c");
+
+        assert_eq!(store.lines().await.unwrap().len(), 4);
+        let cache = store.cache.read().await;
+        let cache = cache.as_ref().unwrap();
+        assert_eq!(cache.start, 2);
+        assert_eq!(cache.lines.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn active_suffix_cache_accepts_new_messages() {
+        let store = temp_store();
+        store.ensure().await.unwrap();
+        store.add_user("old").await.unwrap();
+        store.add_user("active").await.unwrap();
+        let _ = store.lines_from(0).await.unwrap();
+        store.prune_cache_before(1).await;
+
+        store.add_user("new").await.unwrap();
+
+        let active = store.lines_from(1).await.unwrap();
+        assert_eq!(active.len(), 2);
+        assert_eq!(active[0]["content"], "active");
+        assert_eq!(active[1]["content"], "new");
+    }
+
+    #[tokio::test]
+    async fn lines_from_rejects_boundary_beyond_history() {
+        let store = temp_store();
+        store.ensure().await.unwrap();
+        store.add_user("only").await.unwrap();
+
+        let error = store.lines_from(2).await.unwrap_err().to_string();
+        assert!(error.contains("exceeds history length 1"), "{error}");
     }
 
     #[tokio::test]
@@ -423,6 +611,43 @@ mod tests {
         let lines = store.lines().await.unwrap();
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0]["content"], "ok");
+    }
+
+    #[tokio::test]
+    async fn append_repairs_partial_trailing_record_before_writing() {
+        let store = temp_store();
+        store.ensure().await.unwrap();
+        tokio::fs::write(
+            store.path(),
+            "{\"role\":\"user\",\"content\":\"kept\"}\n{\"role\":\"assistant\"",
+        )
+        .await
+        .unwrap();
+        assert_eq!(store.lines().await.unwrap().len(), 1);
+
+        store.add_user("next").await.unwrap();
+
+        let lines = store.lines().await.unwrap();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0]["content"], "kept");
+        assert_eq!(lines[1]["content"], "next");
+    }
+
+    #[tokio::test]
+    async fn append_preserves_valid_record_without_final_newline() {
+        let store = temp_store();
+        store.ensure().await.unwrap();
+        tokio::fs::write(store.path(), "{\"role\":\"user\",\"content\":\"kept\"}")
+            .await
+            .unwrap();
+        assert_eq!(store.lines().await.unwrap().len(), 1);
+
+        store.add_user("next").await.unwrap();
+
+        let lines = store.lines().await.unwrap();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0]["content"], "kept");
+        assert_eq!(lines[1]["content"], "next");
     }
 
     #[test]

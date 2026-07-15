@@ -39,6 +39,12 @@ pub struct SdkOptions {
     pub model: Option<String>,
     pub max_tokens: Option<i32>,
     pub max_turns: Option<i32>,
+    pub max_context: Option<usize>,
+    pub context_compact_pct: Option<u8>,
+    pub context_reserve_tokens: Option<usize>,
+    pub context_compact_tail_tokens: Option<usize>,
+    pub context_compact_max_output_tokens: Option<i32>,
+    pub context_compact_input_reduction: Option<bool>,
     pub tool_timeout: Option<i32>,
     pub sub_agent_timeout: Option<i32>,
     pub llm_first_event_timeout: Option<i32>,
@@ -182,6 +188,35 @@ pub fn validate_sdk_request(req: &SdkRequest) -> Result<(), String> {
     {
         return Err("invalid SDK request: max_turns must be greater than 0".to_string());
     }
+    if let Some(pct) = opts.context_compact_pct
+        && !(1..=100).contains(&pct)
+    {
+        return Err(
+            "invalid SDK request: context_compact_pct must be between 1 and 100".to_string(),
+        );
+    }
+    if let Some(tokens) = opts.context_reserve_tokens
+        && tokens == 0
+    {
+        return Err(
+            "invalid SDK request: context_reserve_tokens must be greater than 0".to_string(),
+        );
+    }
+    if let Some(tokens) = opts.context_compact_tail_tokens
+        && tokens == 0
+    {
+        return Err(
+            "invalid SDK request: context_compact_tail_tokens must be greater than 0".to_string(),
+        );
+    }
+    if let Some(tokens) = opts.context_compact_max_output_tokens
+        && tokens <= 0
+    {
+        return Err(
+            "invalid SDK request: context_compact_max_output_tokens must be greater than 0"
+                .to_string(),
+        );
+    }
     if let Some(tool_timeout) = opts.tool_timeout
         && tool_timeout <= 0
     {
@@ -260,6 +295,8 @@ mod tests {
         assert_eq!(req.options.skills, None);
         assert_eq!(req.options.inline_skills, None);
         assert_eq!(req.options.skill_discovery_policy, None);
+        assert_eq!(req.options.max_context, None);
+        assert_eq!(req.options.context_compact_pct, None);
     }
 
     #[test]
@@ -367,6 +404,57 @@ mod tests {
             parse_agent_jsonl_request(r#"{"prompt":"hi","options":{"max_tokens":0}}"#).unwrap();
         let err = validate_sdk_request(&req).unwrap_err();
         assert!(err.contains("max_tokens must be greater than 0"));
+
+        let req =
+            parse_agent_jsonl_request(r#"{"prompt":"hi","options":{"context_compact_pct":0}}"#)
+                .unwrap();
+        let err = validate_sdk_request(&req).unwrap_err();
+        assert!(err.contains("context_compact_pct must be between 1 and 100"));
+
+        let req =
+            parse_agent_jsonl_request(r#"{"prompt":"hi","options":{"context_reserve_tokens":0}}"#)
+                .unwrap();
+        let err = validate_sdk_request(&req).unwrap_err();
+        assert!(err.contains("context_reserve_tokens must be greater than 0"));
+
+        let req = parse_agent_jsonl_request(
+            r#"{"prompt":"hi","options":{"context_compact_tail_tokens":0}}"#,
+        )
+        .unwrap();
+        let err = validate_sdk_request(&req).unwrap_err();
+        assert!(err.contains("context_compact_tail_tokens must be greater than 0"));
+
+        let req = parse_agent_jsonl_request(
+            r#"{"prompt":"hi","options":{"context_compact_max_output_tokens":0}}"#,
+        )
+        .unwrap();
+        let err = validate_sdk_request(&req).unwrap_err();
+        assert!(err.contains("context_compact_max_output_tokens must be greater than 0"));
+    }
+
+    #[test]
+    fn sdk_request_accepts_explicit_compaction_policy() {
+        let req = parse_agent_jsonl_request(
+            r#"{
+                "prompt":"hi",
+                "options":{
+                    "max_context":64000,
+                    "context_compact_pct":65,
+                    "context_reserve_tokens":12000,
+                    "context_compact_tail_tokens":16000,
+                    "context_compact_max_output_tokens":4096,
+                    "context_compact_input_reduction":true
+                }
+            }"#,
+        )
+        .unwrap();
+        validate_sdk_request(&req).unwrap();
+        assert_eq!(req.options.max_context, Some(64_000));
+        assert_eq!(req.options.context_compact_pct, Some(65));
+        assert_eq!(req.options.context_reserve_tokens, Some(12_000));
+        assert_eq!(req.options.context_compact_tail_tokens, Some(16_000));
+        assert_eq!(req.options.context_compact_max_output_tokens, Some(4_096));
+        assert_eq!(req.options.context_compact_input_reduction, Some(true));
     }
 
     #[test]

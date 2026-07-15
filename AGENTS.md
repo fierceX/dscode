@@ -9,15 +9,15 @@ mink 是一个 Rust 实现的轻量 AI coding agent，专为 DeepSeek/OpenAI-com
 - LLM 流式请求 -> 工具执行 -> 决策的内循环
 - **Rust 库 API**：`AgentRuntime::start() → run_turn() / stream_turn() → shutdown()`，无需子进程
 - 信号驱动的信念系统：自动错误检测、注入修正、恢复首步守卫，可用 `MINK_SIGNAL_MODE=off` 关闭
-- 上下文自适应压缩：三级 Tier，尽量保持 prefix-cache 命中
+- 上下文自适应压缩：显式阈值、响应预留、热尾部和摘要预算；可选摘要输入降噪
 - 维修流水线：Scavenge 回收、Truncation 修复、StormBreaker 重复调用抑制
 - Session 持久化：JSONL 追加写入，支持恢复和重放
-- Artifact 持久化：超长工具输出落到 session `artifacts/`，可通过 `Read artifact://<id>` 读取
+- Artifact 持久化：超长工具输出落到 session `artifacts/`，序号可恢复且禁止覆盖已有正文，可通过 `Read artifact://<id>` 读取
 - 工具元数据与审批策略：每个工具声明 approval tier、结果类型、副作用和 discoverable 状态
 - 轻量资源读取：`Read` 支持本地文件、artifact、skill、rule 和 session introspection URL，并通过 `ResourceRouter` 分发 registered scheme
 - Anchored Edit：`Read` 生成 snapshot header，`Edit.patch` 可按行锚定修改并检测 stale snapshot
 - 两种终端交互模式：REPL + TUI
-- 子代理：SubAgent 支持隔离上下文或 fork 当前上下文并发执行
+- 子代理：统一使用父 session 下的 isolated home；可从空目录启动或目录级 fork 当前 session 状态
 
 ---
 
@@ -152,10 +152,11 @@ TurnExecutor (agent/turn.rs)
 └───────────────────────┘
          │
 ┌─────── 持久化层 ──────┐
-│ session/store.rs      │ JSONL ConversationStore
-│ session/artifacts.rs  │ session artifacts 读写与 artifact:// 索引
+│ session/store.rs      │ append-only JSONL、活跃后缀缓存和尾部修复
+│ session/artifacts.rs  │ artifact 索引、持久序号恢复和防覆盖写入
 │ session/stats.rs      │ Token/费用统计
-│ session/compaction.rs │ 三级上下文压缩
+│ session/compaction.rs │ 显式压缩策略、非破坏式历史投影和 LLM 摘要
+│ session/compaction_input.rs │ 可选摘要输入降噪
 │ session/prefix.rs     │ ImmutablePrefix 缓存
 │ session/init.rs       │ Session 初始化
 └───────────────────────┘
@@ -314,6 +315,7 @@ DecisionEngine.decide()
 - `session://current`：当前 session 摘要
 - `session://current/stats`：stats JSON
 - `session://current/messages` / `session://current/messages/all`：conversation 摘要
+- `session://current/history`：从完整 `conversation.jsonl` 生成的有损检索 transcript，可由 Grep 直接搜索；不包含 thinking 和完整工具结果正文
 - `session://current/artifacts`：artifact 列表
 
 本地文件非 raw `Read` 输出带 snapshot header：
@@ -346,10 +348,11 @@ Anchored patch 只修改 snapshot 覆盖且未漂移的行。tag 缺失、行 ha
 
 | 文件 | 职责 |
 |------|------|
-| `session/store.rs` | ConversationStore JSONL |
-| `session/artifacts.rs` | ArtifactManager、artifact index、完整工具输出落盘 |
+| `session/store.rs` | ConversationStore append-only JSONL、活跃后缀缓存、流式后缀读取和尾部修复 |
+| `session/artifacts.rs` | ArtifactManager、artifact index、持久序号恢复和完整工具输出防覆盖落盘 |
 | `session/stats.rs` | token 和费用统计 |
-| `session/compaction.rs` | 三级压缩 |
+| `session/compaction.rs` | 显式压缩策略、非破坏式历史投影和 LLM 摘要 |
+| `session/compaction_input.rs` | 可选摘要输入降噪：删除 thinking、压缩工具参数和结果 |
 | `session/prefix.rs` | ImmutablePrefix |
 | `session/paths.rs` | session 路径 |
 | `session/init.rs` | session 初始化 |
@@ -365,8 +368,24 @@ Anchored patch 只修改 snapshot 覆盖且未漂移的行。tag 缺失、行 ha
 
 - `TurnCompactor`：同一用户输入的内循环最多压缩一次上下文
 - `ImmutablePrefix`：system prompt/tools 变更必须 invalidate prefix
-- `ConversationStore` 写操作不把内存缓存设为 None
-- `ConversationStore` append/trim 写入通过内部写锁串行化；读盘只容忍文件末尾未换行的半截 JSONL
+- `ConversationStore` 内存缓存只保留当前活跃后缀；append 增量更新该缓存，完整历史读取作为一次性读盘操作
+- `conversation.jsonl` 完整保留且只追加；压缩只推进 `context-state.json` 中的活跃投影边界
+- `ConversationStore` 续写前修复未换行尾记录，并以包含换行的单缓冲区追加
+- `context-state.json` 必须通过同目录临时文件 + rename 原子替换，成功后再更新内存状态
+- 压缩状态提交成功后必须按新的 `active_start` 裁剪 ConversationStore 缓存；模型请求只能通过 `active_messages()` 读取活跃投影
+- 投影边界必须位于完整历史内，且不能拆开 tool call/result 协议
+- 所有压缩统一调用 LLM 摘要；摘要始终作为动态消息，不修改 immutable system/tools prefix
+- 压缩请求使用当前 turn/编排器传入的活动真实模型名和别名，并复用 runtime 的共享 `LlmBackend`
+- `TurnExecutor` 启动子代理时传入包含当前活动模型的 child config，子代理复用父 runtime 的 `LlmBackend`
+- `context_compact_input_reduction=true` 时只精简摘要请求，不能改写完整历史或热尾部
+- Agent JSONL `SdkOptions`、Python `SandboxConfig` 和 Rust `AgentOptions` 必须覆盖同一组 `max_context`/压缩参数，并映射到唯一 `Config`
+- runtime 必须在创建 session 前调用 `validate_runtime_config()`；有限窗口的 reserve 和摘要输出必须小于窗口，热尾部必须小于主请求输入预算
+- 压缩百分比、响应预留、热尾部和摘要输出预算必须来自显式配置，不根据上下文窗口推断隐式档位
+- `max_context_tokens=0` 禁用 auto/preflight 和本地输入预算上限，但保留手动压缩
+- provider context overflow 只允许在无部分输出且本轮尚未压缩时触发一次 LLM 压缩和一次重试
+- 子代理 fork 在 runtime 初始化前以目录级克隆继承父 session 状态
+- `ArtifactManager` 初始化必须从已有 index 的最大序号继续，正文文件必须使用独占创建，禁止覆盖恢复或 fork 继承的 artifact
+- `ConversationStore` append 写入通过内部写锁串行化；读盘只容忍文件末尾未换行的半截 JSONL
 - `StormBreaker` 每个新用户输入重置
 - `BeliefTracker` 每个新用户输入 reset，初始信念为 0.75
 - `DecisionEngine` 每个新用户输入 reset cooldown
@@ -378,6 +397,7 @@ Anchored patch 只修改 snapshot 覆盖且未漂移的行。tag 缺失、行 ha
 - `TurnExecutor` 写入 LLM conversation 使用 `conv_content`，为空时使用 `content`
 - `Read` 本地非 raw 输出会记录 snapshot；raw 或 immutable resource 不生成可编辑 snapshot
 - registered resource URL 先于 VFS 处理；未知非 web scheme 必须 fail closed
+- Grep 可搜索 registered resource 文本；resource path 不接受 selector/glob，返回行号用于后续 Read selector
 - prompt skill index、selected skills、`skill://` 和 `rule://` 必须来自同一 `CapabilitySnapshot`
 - 嵌入式 runtime 可为普通路径注入同步只读 VFS，仅替换 Read/Glob/Grep 后端；未注入时必须严格保持原有本地执行路径
 - VFS 调用同时携带继承的 `resource_session_id` 和当前 `agent_session_id`；虚拟 Read 不生成 snapshot，Edit/Write 始终操作本地文件
