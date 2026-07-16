@@ -1,6 +1,35 @@
 # Changelog
 
-## v0.1.13 (2026-07-07)
+ ## v0.1.14 (2026-07-16)
+ 
+ ### Context and sessions
+ 
+ - 上下文压缩改为非破坏式投影：`conversation.jsonl` 完整追加保留，`context-state.json` 持久化活跃边界和摘要。
+ - 压缩统一使用 LLM 摘要，阈值、响应预留、热尾部和摘要输出预算改为显式配置；摘要作为动态消息保持 immutable prefix。
+ - 新增可开关的摘要输入降噪：保留用户与 assistant 文本，删除 thinking，压缩工具参数和结果并提取错误证据。
+ - Agent JSONL 和 Python SDK 补齐上下文窗口及压缩参数，并在 runtime 启动时校验参数组合。
+ - 正常 turn 只缓存活跃历史后缀；压缩提交后裁剪冷历史缓存，恢复时流式解析 JSONL 并只保留活跃消息。
+ - Provider context overflow 在无可见输出且本轮尚未压缩时，最多执行一次 LLM 压缩和一次重试。
+ - 新增从 `conversation.jsonl` 生成的有损 `session://current/history` transcript，并支持通过 registered-resource `Grep` 定位；thinking 和完整工具输出仍需读取原始 JSONL 或 artifact。
+ - SubAgent fork 在 runtime 初始化前克隆完整 session 状态；artifact 从已有索引恢复序号并禁止覆盖继承正文。
+ 
+ ### Resources
+ 
+ - `skill://<name>/<relative-path>` 支持读取文件系统技能的子资源文件（如参考文档），路径经过规范化、真实路径检查和遍历防护。
+ 
+ ### Tools
+ 
+ - 本地搜索改进：Glob/Grep 在工作区中排除无关目录的行为优化，减少误报和不必要的结果截断。
+ - `tool_result_max_bytes` 限制在注册资源搜索中也生效，避免大型 resource 内容溢出。
+ 
+ ### Refactor
+ 
+ - 移除过度抽象的 infrastructure trait：`SafetyApprover`、`ContextFileProvider`、`RuleProvider`。
+ - 内联小文件：`agent/signal_mode.rs` → `config.rs`，`runtime/llm.rs` → `runtime/mod.rs`。
+ - `plan_actions.rs` 保持独立文件。
+ - 更新文档中 `agent/signal_mode.rs` 的文件路径引用。
+ 
+ ## v0.1.13 (2026-07-07)
 
 ### Features
 
