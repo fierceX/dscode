@@ -148,7 +148,7 @@ TurnExecutor (agent/turn.rs)
 │ guard/collector.rs    │ ToolFailed/ToolError/EditLoop 信号采集
 │ agent/belief.rs       │ 信念度计算
 │ agent/decision.rs     │ 注入/中止决策
-│ agent/signal_mode.rs  │ 信号系统开关
+ │ config.rs             │ MINK_SIGNAL_MODE 开关 / SignalMode 枚举
 └───────────────────────┘
          │
 ┌─────── 持久化层 ──────┐
@@ -276,7 +276,7 @@ DecisionEngine.decide()
 | `agent/plan_actions.rs` | PlanConfirm / PlanClear 副作用处理 |
 | `agent/belief.rs` | 信念度追踪 |
 | `agent/decision.rs` | 注入/中止决策 |
-| `agent/signal_mode.rs` | 信号模式开关 |
+ | `config.rs` | `SignalMode` / 信号模式开关 |
 | `agent/tool_signals.rs` | 工具信号处理 |
 | `agent/sub_coordinator.rs` | 子代理启动、并发限制、结果收集 |
 | `agent/sub_executor.rs` | 子代理执行 |

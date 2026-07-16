@@ -38,7 +38,7 @@ impl ToolSignalProcessor {
         ctx: &Arc<AgentSharedContext>,
         model_label: &str,
     ) {
-        let signal_enabled = crate::agent::signal_mode::SignalMode::from_env().enabled();
+        let signal_enabled = crate::config::SignalMode::from_env().enabled();
         self.process_with_mode(result, belief, ctx, model_label, signal_enabled)
             .await;
     }

@@ -1,14 +1,6 @@
-use crate::capabilities::source::{CapabilityExposure, SourceLevel, SourceMeta};
-use anyhow::{Result, anyhow};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-
-pub struct LoadContext<'a> {
-    pub cwd: &'a Path,
-    pub home: &'a Path,
-    pub session_id: &'a str,
-    pub resource_session_id: &'a str,
-}
+ use crate::capabilities::source::{CapabilityExposure, SourceLevel, SourceMeta};
+ use anyhow::Result;
+ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct ContextFileCapability {
@@ -24,12 +16,6 @@ pub struct LoadedContextFile {
     pub revision: String,
 }
 
-pub trait ContextFileProvider: Send + Sync {
-    fn id(&self) -> &'static str;
-    fn display_name(&self) -> &'static str;
-    fn priority(&self) -> i32;
-    fn load_context_files(&self, ctx: &LoadContext<'_>) -> Result<Vec<LoadedContextFile>>;
-}
 
 #[derive(Debug, Clone, Default)]
 pub struct ContextFileSnapshot {
@@ -39,160 +25,50 @@ pub struct ContextFileSnapshot {
     pub dependency_fingerprint: String,
 }
 
-pub fn build_default_context_file_snapshot(
-    cwd: &Path,
-    home: &Path,
-    session_id: &str,
-    resource_session_id: &str,
-) -> Result<ContextFileSnapshot> {
-    let providers = default_context_file_providers();
-    ContextFileSnapshot::load(
-        &providers,
-        &LoadContext {
-            cwd,
-            home,
-            session_id,
-            resource_session_id,
-        },
-    )
-}
-
-pub fn default_context_file_providers() -> Vec<Arc<dyn ContextFileProvider>> {
-    vec![
-        Arc::new(InstructionFileProvider::new(
-            "user-instructions",
-            "user instructions",
-            SourceLevel::User,
-            200,
-            InstructionBase::UserMink,
-        )),
-        Arc::new(InstructionFileProvider::new(
-            "project-instructions",
-            "project instructions",
-            SourceLevel::Project,
-            100,
-            InstructionBase::Project,
-        )),
-    ]
-}
-
-impl ContextFileSnapshot {
-    pub fn load(providers: &[Arc<dyn ContextFileProvider>], ctx: &LoadContext<'_>) -> Result<Self> {
-        let mut order: Vec<usize> = (0..providers.len()).collect();
-        order.sort_by(|a, b| {
-            providers[*b]
-                .priority()
-                .cmp(&providers[*a].priority())
-                .then_with(|| a.cmp(b))
-        });
-
-        let mut all = Vec::new();
-        for idx in order {
-            let provider = &providers[idx];
-            let mut loaded = provider.load_context_files(ctx).map_err(|e| {
-                anyhow!(
-                    "Error: context file provider {} failed to load files: {e}",
-                    provider.id()
-                )
-            })?;
-            loaded.sort_by(|a, b| a.context_file.name.cmp(&b.context_file.name));
-            all.extend(loaded);
-        }
-        let always_apply = all
-            .iter()
-            .filter(|file| !matches!(file.exposure, CapabilityExposure::HostOnly))
-            .cloned()
-            .collect::<Vec<_>>();
-        let dependency_fingerprint = compute_dependency_fingerprint(&always_apply);
-        Ok(Self {
-            all,
-            always_apply,
-            warnings: Vec::new(),
-            dependency_fingerprint,
-        })
-    }
-}
-
-#[derive(Clone, Copy)]
-enum InstructionBase {
-    Project,
-    UserMink,
-}
-
-struct InstructionFileProvider {
-    id: &'static str,
-    display_name: &'static str,
-    level: SourceLevel,
-    priority: i32,
-    base: InstructionBase,
-}
-
-impl InstructionFileProvider {
-    fn new(
-        id: &'static str,
-        display_name: &'static str,
-        level: SourceLevel,
-        priority: i32,
-        base: InstructionBase,
-    ) -> Self {
-        Self {
-            id,
-            display_name,
-            level,
-            priority,
-            base,
-        }
-    }
-
-    fn base_dir(&self, ctx: &LoadContext<'_>) -> PathBuf {
-        match self.base {
-            InstructionBase::Project => ctx.cwd.to_path_buf(),
-            InstructionBase::UserMink => ctx.home.join(".mink"),
-        }
-    }
-}
-
-impl ContextFileProvider for InstructionFileProvider {
-    fn id(&self) -> &'static str {
-        self.id
-    }
-
-    fn display_name(&self) -> &'static str {
-        self.display_name
-    }
-
-    fn priority(&self) -> i32 {
-        self.priority
-    }
-
-    fn load_context_files(&self, ctx: &LoadContext<'_>) -> Result<Vec<LoadedContextFile>> {
-        let base = self.base_dir(ctx);
-        let Some(path) = find_instruction_file_in_dir(&base) else {
-            return Ok(Vec::new());
-        };
-        let content = std::fs::read_to_string(&path)?;
-        if content.trim().is_empty() {
-            return Ok(Vec::new());
-        }
-        let name = match self.base {
-            InstructionBase::Project => "project",
-            InstructionBase::UserMink => "global",
-        }
-        .to_string();
-        Ok(vec![LoadedContextFile {
-            revision: crate::util::sha256_hex(&content),
-            context_file: ContextFileCapability { name, content },
-            source: SourceMeta {
-                provider_id: self.id.to_string(),
-                provider_name: self.display_name.to_string(),
-                level: self.level.clone(),
-                source_path: Some(path),
-                display_label: Some(display_label(&base, ctx.cwd, ctx.home)),
-            },
-            exposure: CapabilityExposure::ModelDiscoverable,
-        }])
-    }
-}
+ pub fn build_default_context_file_snapshot(
+     cwd: &Path,
+     home: &Path,
+     _session_id: &str,
+     _resource_session_id: &str,
+ ) -> Result<ContextFileSnapshot> {
+     let mut all = Vec::new();
+     for (base, name, provider_id, provider_name, level) in [
+         (home.join(".mink"), "global", "user-instructions", "user instructions", SourceLevel::User),
+         (cwd.to_path_buf(), "project", "project-instructions", "project instructions", SourceLevel::Project),
+     ] {
+         let Some(path) = find_instruction_file_in_dir(&base) else {
+             continue;
+         };
+         let content = std::fs::read_to_string(&path)?;
+         if content.trim().is_empty() {
+             continue;
+         }
+         all.push(LoadedContextFile {
+             revision: crate::util::sha256_hex(&content),
+             context_file: ContextFileCapability { name: name.to_string(), content },
+             source: SourceMeta {
+                 provider_id: provider_id.to_string(),
+                 provider_name: provider_name.to_string(),
+                 level,
+                 source_path: Some(path),
+                 display_label: Some(display_label(&base, cwd, home)),
+             },
+             exposure: CapabilityExposure::ModelDiscoverable,
+         });
+     }
+     let always_apply = all
+         .iter()
+         .filter(|file| !matches!(file.exposure, CapabilityExposure::HostOnly))
+         .cloned()
+         .collect::<Vec<_>>();
+     let dependency_fingerprint = compute_dependency_fingerprint(&always_apply);
+     Ok(ContextFileSnapshot {
+         all,
+         always_apply,
+         warnings: Vec::new(),
+         dependency_fingerprint,
+     })
+ }
 
 fn find_instruction_file_in_dir(dir: &Path) -> Option<PathBuf> {
     let candidates = [

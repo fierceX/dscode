@@ -15,17 +15,6 @@ pub enum SafetyDecision {
     Block(&'static str),
 }
 
-pub trait SafetyApprover {
-    fn approve(&self, decision: &SafetyDecision, context: &str) -> bool;
-}
-
-pub struct DefaultSafetyApprover;
-
-impl SafetyApprover for DefaultSafetyApprover {
-    fn approve(&self, decision: &SafetyDecision, _context: &str) -> bool {
-        matches!(decision, SafetyDecision::Allow | SafetyDecision::Warn(_))
-    }
-}
 
 pub fn deny_bash_command_reason(command: &str) -> Option<&'static str> {
     let trimmed = command.trim();

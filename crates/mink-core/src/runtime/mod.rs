@@ -3,7 +3,6 @@ mod config;
 pub(crate) mod context_build;
 mod events;
 mod handle;
-pub mod llm;
 mod options;
 mod sdk_adapter;
 
@@ -30,12 +29,12 @@ pub use builder::build_runtime;
 pub use config::{AgentRuntimeConfig, SessionInfo, SessionPolicy};
 pub use events::{AgentEvent, EventSink};
 pub use handle::{AgentEventStream, AgentRuntime, TurnOutcome};
-pub use llm::{
-    BackendLlmClient, LlmBackend, LlmCancelToken, LlmErrorEvent, LlmEvent, LlmEventStream,
-    LlmPurpose, LlmRequest, LlmRequestFailure, LlmResponseStream, LlmRetryEvent, LlmStopEvent,
-    LlmTextEvent, LlmThinkingEvent, LlmToolCallEvent, LlmUsageEvent, OpenAiCompatibleBackend,
-    OpenAiCompatibleOptions, TokenParamKind,
-};
+ pub use crate::llm::client::{
+     BackendLlmClient, LlmBackend, LlmCancelToken, LlmErrorEvent, LlmEvent, LlmEventStream,
+     LlmPurpose, LlmRequest, LlmRequestFailure, LlmResponseStream, LlmRetryEvent, LlmStopEvent,
+     LlmTextEvent, LlmThinkingEvent, LlmToolCallEvent, LlmUsageEvent, OpenAiCompatibleBackend,
+     OpenAiCompatibleOptions, TokenParamKind,
+ };
 pub use options::AgentOptions;
 pub use sdk_adapter::{
     apply_sdk_request_options, exit_code_from_turn, final_from_outcome,

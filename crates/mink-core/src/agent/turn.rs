@@ -43,7 +43,7 @@ pub struct TurnExecutor {
     prefix: crate::agent::prefix::PrefixManager,
     compactor: crate::agent::compactor::TurnCompactor,
     signal_processor: crate::agent::tool_signals::ToolSignalProcessor,
-    plan_actions: crate::agent::plan_actions::PlanActionHandler,
+     plan_actions: crate::agent::plan_actions::PlanActionHandler,
     sub_agents: crate::agent::sub_coordinator::SubAgentCoordinator,
     tool_call_count: u32,
     /// 决策引擎（含冷却逻辑，由引擎内部管理）。
@@ -90,7 +90,7 @@ impl TurnExecutor {
             prefix,
             compactor: crate::agent::compactor::TurnCompactor::new(ctx.clone()),
             signal_processor: crate::agent::tool_signals::ToolSignalProcessor::new(),
-            plan_actions: crate::agent::plan_actions::PlanActionHandler::new(ctx.clone()),
+             plan_actions: crate::agent::plan_actions::PlanActionHandler::new(ctx.clone()),
             sub_agents: crate::agent::sub_coordinator::SubAgentCoordinator::new(
                 ctx.clone(),
                 sub_agent_config,
@@ -553,7 +553,7 @@ impl TurnExecutor {
         match stop {
             "tool_use" | "tool_calls" => {
                 // DecisionEngine 决策是否注入（含内部冷却逻辑）
-                let signal_enabled = crate::agent::signal_mode::SignalMode::from_env().enabled();
+        let signal_enabled = crate::config::SignalMode::from_env().enabled();
                 if let Some(decision) = self
                     .decide_signal_recovery(signal_enabled, belief.as_deref())
                     .await?

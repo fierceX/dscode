@@ -78,7 +78,7 @@ impl Builder {
             None,
         ));
 
-        if crate::agent::signal_mode::SignalMode::from_env().enabled() {
+         if crate::config::SignalMode::from_env().enabled() {
             // Belief awareness — static protocol for runtime signal injection.
             let belief_awareness = "This agent has a belief tracking system that monitors tool execution quality.\n\
                  - Each tool call is evaluated for errors (compile failures, test failures, edit loops)\n\

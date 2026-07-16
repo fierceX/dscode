@@ -5,7 +5,7 @@ use crate::config::{
 };
 use crate::resources::ResourceHandler;
 use crate::runtime::config::{first_prompt_from_config, session_policy_from_config};
-use crate::runtime::llm::{LlmBackend, TokenParamKind};
+ use crate::llm::client::{LlmBackend, TokenParamKind};
 use crate::runtime::{AgentRuntimeConfig, EventSink, SessionPolicy};
 use crate::session::paths::SessionLayout;
 use crate::tools::vfs::ReadOnlyFileSystem;

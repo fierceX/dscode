@@ -92,7 +92,7 @@ TurnExecutor (agent/turn.rs)
 │ guard/storm.rs        │ 重复工具调用抑制
 │ agent/belief.rs       │ belief 滑动窗口和平滑
 │ agent/decision.rs     │ Inject / Abort / cooldown / recovery guard
-│ agent/signal_mode.rs  │ MINK_SIGNAL_MODE 开关
+ │ config.rs             │ MINK_SIGNAL_MODE 开关 / SignalMode 枚举
 │ safety.rs             │ 危险 Bash 命令过滤
 └───────────────────────┘
          │
@@ -232,7 +232,7 @@ ToolRunResult
 | `agent/sub_executor.rs` | 子代理独立 session / fork session 执行 |
 | `agent/belief.rs` | `BeliefTracker` |
 | `agent/decision.rs` | `DecisionEngine` |
-| `agent/signal_mode.rs` | 信号系统开关 |
+ | `config.rs` | `SignalMode` / 信号系统开关 |
 
 ### 工具系统
 
