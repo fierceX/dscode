@@ -1,6 +1,6 @@
 use crate::agent::belief::BeliefTracker;
 use crate::agent::orchestrator::{OrchActor, OrchCmd};
- use crate::agent::plan_actions::PlanActionHandler;
+use crate::agent::plan_actions::PlanActionHandler;
 use crate::agent::prefix::PrefixManager;
 use crate::agent::sub_coordinator::{SubAgentCoordinator, SubAgentRunner};
 use crate::agent::sub_executor::{SubAgentExecutor, SubAgentResult};
@@ -307,6 +307,9 @@ async fn harness_with_config(
         crate::cancel::CancellationToken::new(),
         llm_backend.clone(),
     ));
+    let tool_config = ToolConfig::from_config(&cfg);
+    let (tool_resolution_context, tool_surface, tool_capabilities) =
+        crate::context::resolve_tool_runtime(&tool_config, is_sub_agent, false)?;
     let ctx = Arc::new(AgentSharedContext {
         config: cfg.clone(),
         cwd: cwd.clone(),
@@ -332,7 +335,10 @@ async fn harness_with_config(
         },
         resource_router: Arc::new(crate::resources::ResourceRouter::with_builtin_handlers()),
         capability_snapshot,
-        tool_config: ToolConfig::from_config(&cfg),
+        tool_config,
+        tool_resolution_context,
+        tool_surface,
+        tool_capabilities,
         events_path: spaths.events,
         summary_path: spaths.summary,
         plan_path: spaths.plan,
@@ -414,6 +420,9 @@ fn test_context_with_llm_backend(
         resource_router: ctx.resource_router.clone(),
         capability_snapshot: ctx.capability_snapshot.clone(),
         tool_config: ctx.tool_config.clone(),
+        tool_resolution_context: ctx.tool_resolution_context,
+        tool_surface: ctx.tool_surface.clone(),
+        tool_capabilities: ctx.tool_capabilities.clone(),
         events_path: ctx.events_path.clone(),
         summary_path: ctx.summary_path.clone(),
         plan_path: ctx.plan_path.clone(),

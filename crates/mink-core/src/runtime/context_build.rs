@@ -51,6 +51,13 @@ pub(crate) struct BuiltAgentContext {
 pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<BuiltAgentContext> {
     let mut config = params.config.clone();
     config.session_id = params.session_id.clone();
+    let tool_config = ToolConfig::from_config(&config);
+    let (tool_resolution_context, tool_surface, tool_capabilities) =
+        crate::context::resolve_tool_runtime(
+            &tool_config,
+            params.is_sub_agent,
+            params.read_only_fs.is_some(),
+        )?;
     let paths = paths::paths_for_layout(
         &params.home,
         &params.cwd,
@@ -133,7 +140,10 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
         vfs_scope,
         resource_router,
         capability_snapshot,
-        tool_config: ToolConfig::from_config(&config),
+        tool_config,
+        tool_resolution_context,
+        tool_surface,
+        tool_capabilities,
         events_path: paths.events.clone(),
         summary_path: paths.summary.clone(),
         plan_path: paths.plan.clone(),
@@ -143,6 +153,29 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
         interrupt: params.interrupt,
         event_log_warned: AtomicBool::new(false),
     });
+    ctx.log_event(serde_json::json!({
+        "type": "tool_surface",
+        "role": format!("{:?}", ctx.tool_resolution_context.role()),
+        "filesystem_backend": format!("{:?}", ctx.tool_resolution_context.filesystem_backend()),
+        "active": ctx.tool_surface.names().collect::<Vec<_>>(),
+        "hidden": ctx.tool_surface.hidden().iter().map(|(name, reason)| {
+            serde_json::json!({"name": name, "reason": format!("{reason:?}")})
+        }).collect::<Vec<_>>(),
+        "surface_fingerprint": ctx.tool_surface.fingerprint(),
+    }));
+    ctx.log_event(serde_json::json!({
+        "type": "tool_capability_resolution",
+        "bindings": ctx.tool_capabilities.iter().map(|(capability, binding)| {
+            serde_json::json!({
+                "capability": format!("{capability:?}"),
+                "primary": binding.primary.tool,
+                "tier": format!("{:?}", binding.primary.tier),
+                "alternatives": binding.alternatives.iter().map(|provider| provider.tool).collect::<Vec<_>>(),
+                "use_scope": format!("{:?}", binding.primary.use_scope),
+            })
+        }).collect::<Vec<_>>(),
+        "capability_fingerprint": ctx.tool_capabilities.fingerprint(),
+    }));
 
     Ok(BuiltAgentContext { ctx, paths, is_new })
 }

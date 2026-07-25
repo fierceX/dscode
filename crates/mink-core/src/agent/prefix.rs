@@ -41,31 +41,29 @@ impl PrefixManager {
                 plan_draft_file: self.ctx.plan_draft_path.clone(),
                 mission_file: self.ctx.config.mission_file.clone(),
                 mission_content: self.ctx.config.mission_content.clone(),
+                tool_surface: self.ctx.tool_surface.clone(),
+                tool_capabilities: self.ctx.tool_capabilities.clone(),
             }
             .build_system_prompt()?;
-            let tools_json =
-                serde_json::from_str::<Vec<serde_json::Value>>(crate::assets::TOOLS_JSON)
-                    .unwrap_or_default();
-            let available_tools: std::collections::BTreeSet<&'static str> =
-                crate::tools::runner::tool_registry()
-                    .iter()
-                    .map(|tool| tool.metadata().name)
-                    .collect();
-            let tools_json = tools_json
-                .into_iter()
-                .filter(|tool| {
-                    tool.get("name")
-                        .and_then(serde_json::Value::as_str)
-                        .is_some_and(|name| available_tools.contains(name))
-                })
-                .collect();
-
-            // Filter tools: combine disable flags + enabled whitelist at config layer
-            let tools_json = self.ctx.tool_config.filter_tools_json(tools_json);
+            let tools_json = self.ctx.tool_surface.schemas();
+            let workflows = crate::prompt::workflows::PromptWorkflowResolver::builtin()
+                .resolve(&self.ctx.tool_capabilities)?;
+            self.ctx.log_event(serde_json::json!({
+                "type": "prompt_workflow_resolution",
+                "active_workflows": workflows.ordered().iter().map(|spec| spec.id).collect::<Vec<_>>(),
+                "workflow_fingerprint": workflows.fingerprint(),
+            }));
+            let dependency_fingerprint = format!(
+                "mink-prefix-dependencies-v2\0{}\0{}\0{}\0{}",
+                self.ctx.capability_snapshot.dependency_fingerprint,
+                self.ctx.tool_surface.fingerprint(),
+                self.ctx.tool_capabilities.fingerprint(),
+                workflows.fingerprint(),
+            );
             *guard = Some(ImmutablePrefix::new(
                 system_prompt.clone(),
                 tools_json.clone(),
-                self.ctx.capability_snapshot.dependency_fingerprint.clone(),
+                dependency_fingerprint,
             ));
             return Ok((system_prompt, tools_json));
         }
@@ -90,6 +88,15 @@ mod tests {
         let ctx = crate::regression::test_context_for_agent("prefix-cache-hit").await?;
         let manager = PrefixManager::new(ctx.clone());
         let (first_prompt, first_tools) = manager.ensure()?;
+        let first_names: Vec<_> = first_tools
+            .iter()
+            .filter_map(|schema| schema.get("name").and_then(serde_json::Value::as_str))
+            .collect();
+        assert_eq!(
+            first_names,
+            ctx.tool_surface.names().collect::<Vec<_>>(),
+            "request schemas must come from the resolved surface"
+        );
         let cached_fingerprint = ctx
             .immutable_prefix
             .lock()

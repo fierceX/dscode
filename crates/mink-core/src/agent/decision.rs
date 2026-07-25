@@ -8,8 +8,21 @@ pub const DEFAULT_COOLDOWN_TURNS: usize = 3;
 
 pub enum Decision {
     None,
-    Inject(String),
+    Inject(RecoveryDirective),
     Abort,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoverySeverity {
+    Reminder,
+    Warning,
+}
+
+#[derive(Debug, Clone)]
+pub struct RecoveryDirective {
+    pub belief: f64,
+    pub severity: RecoverySeverity,
+    pub errors: Vec<String>,
 }
 
 pub struct DecisionEngine {
@@ -52,14 +65,20 @@ impl DecisionEngine {
         }
 
         if belief < self.warn_threshold {
-            let msg = Self::format_warning(belief, errors);
             self.cooldown_remaining = DEFAULT_COOLDOWN_TURNS;
-            return Decision::Inject(msg);
+            return Decision::Inject(RecoveryDirective {
+                belief,
+                severity: RecoverySeverity::Warning,
+                errors: errors.iter().rev().take(5).cloned().collect(),
+            });
         }
         if belief < self.remind_threshold {
-            let msg = Self::format_reminder(belief, errors);
             self.cooldown_remaining = DEFAULT_COOLDOWN_TURNS;
-            return Decision::Inject(msg);
+            return Decision::Inject(RecoveryDirective {
+                belief,
+                severity: RecoverySeverity::Reminder,
+                errors: errors.iter().rev().take(3).cloned().collect(),
+            });
         }
         Decision::None
     }
@@ -73,46 +92,6 @@ impl DecisionEngine {
     pub fn cooldown_remaining(&self) -> usize {
         self.cooldown_remaining
     }
-
-    fn format_reminder(b: f64, errors: &[String]) -> String {
-        let error_section = if errors.is_empty() {
-            String::new()
-        } else {
-            format!(
-                "\nRecent reliability signals:\n{}",
-                format_errors(errors, 3)
-            )
-        };
-        format!(
-            "[System note: belief {:.2} is below the recovery threshold. Enter SIGNAL_RECOVERY mode as defined in the system instructions. Your next tool call must inspect current state with Read, Grep, Glob, or a focused Bash verification/state command; do not start with Edit or Write.{}]",
-            b, error_section,
-        )
-    }
-
-    fn format_warning(b: f64, errors: &[String]) -> String {
-        let error_section = if errors.is_empty() {
-            String::new()
-        } else {
-            format!(
-                "\nRecent reliability signals:\n{}",
-                format_errors(errors, 5)
-            )
-        };
-        format!(
-            "[System note: belief {:.2} indicates repeated tool failure. Enter SIGNAL_RECOVERY mode as defined in the system instructions before any further repair momentum. Your next tool call must inspect current state with Read, Grep, Glob, or a focused Bash verification/state command; do not start with Edit or Write.{}]",
-            b, error_section,
-        )
-    }
-}
-
-fn format_errors(errors: &[String], n: usize) -> String {
-    errors
-        .iter()
-        .rev()
-        .take(n)
-        .map(|e| format!("- {}", e))
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 impl Default for DecisionEngine {
@@ -143,12 +122,10 @@ mod tests {
         let mut de = DecisionEngine::new();
         let d = de.decide(0.4, &["Rust error".into()]);
         assert!(matches!(d, Decision::Inject(_)));
-        if let Decision::Inject(msg) = d {
-            assert!(msg.starts_with("[System note:"));
-            assert!(msg.contains("SIGNAL_RECOVERY mode"));
-            assert!(msg.contains("Your next tool call must inspect current state"));
-            assert!(msg.contains("Recent reliability signals"));
-            assert!(!msg.contains("Then make at most one minimal edit"));
+        if let Decision::Inject(directive) = d {
+            assert_eq!(directive.severity, RecoverySeverity::Warning);
+            assert_eq!(directive.errors, vec!["Rust error"]);
+            assert_eq!(directive.belief, 0.4);
         }
     }
 
@@ -227,8 +204,8 @@ mod tests {
         let mut de = DecisionEngine::new();
         let d = de.decide(0.4, &[]);
         assert!(matches!(d, Decision::Inject(_)));
-        if let Decision::Inject(msg) = d {
-            assert!(!msg.contains("Recent reliability signals"));
+        if let Decision::Inject(directive) = d {
+            assert!(directive.errors.is_empty());
         }
     }
 

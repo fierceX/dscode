@@ -12,10 +12,10 @@ use super::python;
 use super::sandbox_python;
 use super::search;
 use super::web;
-use crate::config::{ToolApprovalMode, ToolApprovalPolicy};
 use crate::context::{ToolConfig, ToolContext};
 use crate::guard::storm::{StormBreaker, StormDecision};
 use crate::protocol::ToolCallEvent;
+use crate::tools::approval::{ToolAuthorization, authorize_tool, denied_message};
 
 pub struct ToolOutcome {
     pub content: String,
@@ -272,12 +272,12 @@ impl ToolPolicyGate<'_> {
             ));
         }
         let metadata = metadata?;
-        if let Some(reason) = approval_block_reason(metadata, self.config) {
+        if let ToolAuthorization::Denied { reason } = authorize_tool(metadata, self.config) {
             return Some(blocked_tool_result(
                 call.id.clone(),
                 call.name.clone(),
                 call.fields.clone(),
-                reason,
+                denied_message(metadata, reason),
             ));
         }
         if metadata.storm_exempt {
@@ -478,42 +478,6 @@ fn blocked_tool_result(
         sub_agent_fork: false,
         exit_code: None,
         signals: Vec::new(),
-    }
-}
-
-fn approval_block_reason(metadata: ToolMetadata, config: &ToolConfig) -> Option<String> {
-    match config.tool_approval.get(metadata.name).copied() {
-        Some(ToolApprovalPolicy::Allow) => return None,
-        Some(ToolApprovalPolicy::Deny) => {
-            return Some(format!(
-                "Tool '{}' blocked by approval policy: deny",
-                metadata.name
-            ));
-        }
-        Some(ToolApprovalPolicy::Prompt) => {
-            return Some(format!(
-                "Tool '{}' requires approval, but interactive approval prompts are not implemented yet.",
-                metadata.name
-            ));
-        }
-        None => {}
-    }
-
-    let allowed = match config.tool_approval_mode {
-        ToolApprovalMode::Yolo => true,
-        ToolApprovalMode::Write => {
-            matches!(metadata.approval, ApprovalTier::Read | ApprovalTier::Write)
-        }
-        ToolApprovalMode::AlwaysAsk => matches!(metadata.approval, ApprovalTier::Read),
-    };
-
-    if allowed {
-        None
-    } else {
-        Some(format!(
-            "Tool '{}' requires {:?} approval in {:?} mode, but interactive approval prompts are not implemented yet.",
-            metadata.name, metadata.approval, config.tool_approval_mode
-        ))
     }
 }
 
@@ -785,6 +749,7 @@ fn filter_bash_noise(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{ToolApprovalMode, ToolApprovalPolicy};
 
     #[test]
     fn todo_write_outputs_checklist() {
@@ -895,7 +860,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_schema_prioritizes_search_tools_before_bash() {
+    fn tool_schema_order_is_stable_and_descriptions_are_self_contained() {
         let schema: Vec<serde_json::Value> =
             serde_json::from_str(crate::assets::TOOLS_JSON).expect("tools schema should parse");
         let names: Vec<&str> = schema
@@ -916,22 +881,22 @@ mod tests {
         assert!(pos("Glob") < pos("Bash"));
         assert!(pos("Grep") < pos("Bash"));
 
-        let bash_desc = schema
-            .iter()
-            .find(|tool| tool.get("name").and_then(serde_json::Value::as_str) == Some("Bash"))
-            .and_then(|tool| tool.get("description"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-        assert!(bash_desc.contains("Do NOT use Bash for file discovery"));
-
-        let grep_desc = schema
-            .iter()
-            .find(|tool| tool.get("name").and_then(serde_json::Value::as_str) == Some("Grep"))
-            .and_then(|tool| tool.get("description"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-        assert!(grep_desc.contains("Default tool for searching code"));
-        assert!(grep_desc.contains("Use this instead of Bash commands"));
+        for tool in &schema {
+            let own_name = tool["name"].as_str().unwrap();
+            let serialized = serde_json::to_string(tool).unwrap();
+            for peer in &names {
+                if *peer == own_name {
+                    continue;
+                }
+                assert!(
+                    !serialized.contains(&format!("`{peer}`"))
+                        && !serialized.contains(&format!("use {peer}"))
+                        && !serialized.contains(&format!("Use {peer}"))
+                        && !serialized.contains(&format!("{peer} tool")),
+                    "schema '{own_name}' contains peer-tool routing for '{peer}'"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1000,7 +965,7 @@ mod tests {
             .find(|tool| tool.metadata().name == "Bash")
             .unwrap()
             .metadata();
-        assert!(approval_block_reason(bash, &config).is_none());
+        assert_eq!(authorize_tool(bash, &config), ToolAuthorization::Allowed);
     }
 
     #[test]
@@ -1014,9 +979,18 @@ mod tests {
                 .metadata()
         };
 
-        assert!(approval_block_reason(meta("Read"), &config).is_none());
-        assert!(approval_block_reason(meta("Write"), &config).is_none());
-        assert!(approval_block_reason(meta("Bash"), &config).is_some());
+        assert_eq!(
+            authorize_tool(meta("Read"), &config),
+            ToolAuthorization::Allowed
+        );
+        assert_eq!(
+            authorize_tool(meta("Write"), &config),
+            ToolAuthorization::Allowed
+        );
+        assert!(matches!(
+            authorize_tool(meta("Bash"), &config),
+            ToolAuthorization::Denied { .. }
+        ));
     }
 
     #[test]
@@ -1036,8 +1010,14 @@ mod tests {
                 .metadata()
         };
 
-        assert!(approval_block_reason(meta("Bash"), &config).is_none());
-        let reason = approval_block_reason(meta("Read"), &config).unwrap();
+        assert_eq!(
+            authorize_tool(meta("Bash"), &config),
+            ToolAuthorization::Allowed
+        );
+        let reason = match authorize_tool(meta("Read"), &config) {
+            ToolAuthorization::Denied { reason } => denied_message(meta("Read"), reason),
+            ToolAuthorization::Allowed => panic!("Read should be denied"),
+        };
         assert!(reason.contains("deny"), "{reason}");
     }
 

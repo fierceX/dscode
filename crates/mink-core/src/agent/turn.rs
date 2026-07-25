@@ -43,11 +43,12 @@ pub struct TurnExecutor {
     prefix: crate::agent::prefix::PrefixManager,
     compactor: crate::agent::compactor::TurnCompactor,
     signal_processor: crate::agent::tool_signals::ToolSignalProcessor,
-     plan_actions: crate::agent::plan_actions::PlanActionHandler,
+    plan_actions: crate::agent::plan_actions::PlanActionHandler,
     sub_agents: crate::agent::sub_coordinator::SubAgentCoordinator,
     tool_call_count: u32,
     /// 决策引擎（含冷却逻辑，由引擎内部管理）。
     decision_engine: crate::agent::decision::DecisionEngine,
+    recovery_policy: crate::agent::recovery_policy::RecoveryPolicy,
     /// Set after a signal injection. The next tool batch must observe before mutating.
     signal_recovery_guard: bool,
 }
@@ -90,13 +91,18 @@ impl TurnExecutor {
             prefix,
             compactor: crate::agent::compactor::TurnCompactor::new(ctx.clone()),
             signal_processor: crate::agent::tool_signals::ToolSignalProcessor::new(),
-             plan_actions: crate::agent::plan_actions::PlanActionHandler::new(ctx.clone()),
+            plan_actions: crate::agent::plan_actions::PlanActionHandler::new(ctx.clone()),
             sub_agents: crate::agent::sub_coordinator::SubAgentCoordinator::new(
                 ctx.clone(),
                 sub_agent_config,
             ),
             tool_call_count: 0,
             decision_engine: crate::agent::decision::DecisionEngine::new(),
+            recovery_policy: crate::agent::recovery_policy::RecoveryPolicy::from_resolved(
+                &ctx.tool_capabilities,
+                crate::tools::catalog::ToolCatalog::builtin()
+                    .expect("built-in tool catalog was validated during context construction"),
+            ),
             signal_recovery_guard: false,
         }
     }
@@ -514,24 +520,41 @@ impl TurnExecutor {
             return (calls, Vec::new());
         }
 
-        self.signal_recovery_guard = false;
         let mut iter = calls.into_iter();
         let first = iter
             .next()
             .expect("signal recovery guard already checked calls is non-empty");
-
-        if is_recovery_blocked_tool(&first.name) {
+        let call_context = crate::tools::semantic_capabilities::CapabilityCallContext {
+            tool_name: &first.name,
+            input: &first.input_json,
+            resource_router: &self.ctx.resource_router,
+            filesystem_backend: self.ctx.tool_resolution_context.filesystem_backend(),
+        };
+        let decision = self.recovery_policy.classify_first_call(
+            &call_context,
+            crate::tools::catalog::ToolCatalog::builtin()
+                .expect("built-in tool catalog was validated during context construction"),
+        );
+        if let crate::agent::recovery_policy::RecoveryFirstCallDecision::Blocked(guidance) =
+            decision
+        {
+            guidance
+                .validate(&self.ctx.tool_surface)
+                .expect("RecoveryPolicy emitted an inactive tool reference");
             self.ctx.log_event(serde_json::json!({
                 "type": "signal_recovery_guard",
-                "action": "blocked_first_mutation",
+                "action": "blocked_non_inspection",
                 "tool": first.name.clone(),
                 "tool_use_id": first.id.clone(),
-                "reason": "SIGNAL_RECOVERY requires inspection before the first file mutation",
+                "reason": guidance.content,
             }));
-            let remaining: Vec<ToolCallEvent> = iter.collect();
-            return (remaining, vec![blocked_by_signal_recovery(first)]);
+            return (
+                Vec::new(),
+                vec![blocked_by_signal_recovery(first, guidance.content)],
+            );
         }
 
+        self.signal_recovery_guard = false;
         let mut allowed = Vec::new();
         allowed.push(first);
         allowed.extend(iter);
@@ -553,7 +576,7 @@ impl TurnExecutor {
         match stop {
             "tool_use" | "tool_calls" => {
                 // DecisionEngine 决策是否注入（含内部冷却逻辑）
-        let signal_enabled = crate::config::SignalMode::from_env().enabled();
+                let signal_enabled = crate::config::SignalMode::from_env().enabled();
                 if let Some(decision) = self
                     .decide_signal_recovery(signal_enabled, belief.as_deref())
                     .await?
@@ -588,7 +611,7 @@ impl TurnExecutor {
         if let Some(bt) = belief {
             let b = bt.belief();
             match self.decision_engine.decide(b, &bt.recent_errors) {
-                crate::agent::decision::Decision::Inject(msg) => {
+                crate::agent::decision::Decision::Inject(directive) => {
                     let recent = if bt.recent_errors.is_empty() {
                         String::new()
                     } else {
@@ -606,7 +629,9 @@ impl TurnExecutor {
                     self.ctx
                         .display
                         .render_info(&format!("Injecting hint (belief {:.2}){}", b, recent));
-                    self.ctx.store.add_user(&msg).await?;
+                    let guidance = self.recovery_policy.render(&directive);
+                    guidance.validate(&self.ctx.tool_surface)?;
+                    self.ctx.store.add_user(&guidance.content).await?;
                     self.signal_recovery_guard = true;
                 }
                 crate::agent::decision::Decision::Abort => {
@@ -781,20 +806,19 @@ fn is_context_overflow_message(message: &str) -> bool {
     .any(|pattern| message.contains(pattern))
 }
 
-fn is_recovery_blocked_tool(name: &str) -> bool {
-    matches!(name, "Edit" | "Write")
-}
-
 fn positive_duration(seconds: i32) -> Option<Duration> {
     (seconds > 0).then(|| Duration::from_secs(seconds as u64))
 }
 
-fn blocked_by_signal_recovery(call: ToolCallEvent) -> crate::tools::runner::ToolRunResult {
+fn blocked_by_signal_recovery(
+    call: ToolCallEvent,
+    content: String,
+) -> crate::tools::runner::ToolRunResult {
     crate::tools::runner::ToolRunResult {
         tool_use_id: call.id,
         tool_name: "SignalRecoveryGuard".to_string(),
         tool_args: call.fields,
-        content: "SIGNAL_RECOVERY guard: the requested Edit/Write was not executed. Inspect current state first with Read, Grep, Glob, or a focused Bash verification/state command before mutating.".to_string(),
+        content,
         conv_content: String::new(),
         spawns_sub_agent: false,
         sub_agent_prompt: None,

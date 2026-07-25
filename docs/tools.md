@@ -1,10 +1,12 @@
 # 内置工具
 
-更新日期：2026-07-01
+更新日期：2026-07-25
 
 本文是 mink 内置工具的协议参考，面向需要理解工具参数、执行模型、结果通道、资源 URL、
 审批和构建裁剪的使用者与开发者。CLI 参数、session、沙箱、技能和常见工作流见
-[使用手册](USAGE.md)；模块分层和内部数据流见 [ARCHITECTURE.md](ARCHITECTURE.md)。
+[使用手册](USAGE.md)；模块分层和内部数据流见 [ARCHITECTURE.md](ARCHITECTURE.md)；工具
+surface、语义能力和跨工具 workflow 的设计见
+[工具能力与提示词解耦设计文档](设计哲学-工具能力与提示词解耦.md)。
 
 ## 执行模型
 
@@ -33,11 +35,12 @@ ToolCallEvent
 
 当工具输出超过上限时，完整输出会保存到当前 session 的 `artifacts/` 目录，工具结果中追加 `artifact://<id>`。可用 `Read` 按需读取，例如 `artifact://bash-0001:1-120`。ArtifactManager 从已有 index 的最大序号继续分配，并以独占创建写入正文；恢复 session 或 fork 后不会覆盖旧 artifact。
 
-`Read` 也承担轻量资源路由职责。内置轻量资源通过 `ResourceRouter` 注册分发：
+`Read` 当前是轻量资源的内置调用 provider。具体协议由 `ResourceRouter` 和各 scheme
+handler 拥有，不能把 `skill://`、`rule://` 等协议视为 `Read` 工具自身合同：
 
 - `http(s)://...`：读取公开 URL，首次 fetch 后写入当前 session artifact cache，后续同 URL 的 selector 从缓存分页；如果 cache index 命中但正文 artifact 丢失，会重新 fetch 并写入新缓存。
 - `artifact://<id>`：读取被截断工具输出。
-- `skill://list` / `skill://list/all` / `skill://<name>` / `skill://<name>/<relative-path>`：列出、诊断或读取可用 skill；列表、正文和子资源读取来自同一 capability snapshot。`skill://all` 是 `skill://list/all` 的兼容别名；只有 filesystem-backed skill 支持 `<relative-path>` 子资源。
+- `skill://list` / `skill://list/all` / `skill://<name>` / `skill://<name>/<relative-path>`：通过当前 `Read` provider 列出、诊断或读取可用 skill；列表、正文和子资源读取来自同一 capability snapshot。`skill://all` 是 `skill://list/all` 的兼容别名；只有 filesystem-backed skill 支持 `<relative-path>` 子资源。
 - `rule://list` / `rule://<name>`：列出或读取可用 rule。
 - `session://current`：读取当前 session 摘要。
 - `session://current/stats`：读取当前 session stats JSON。
@@ -58,7 +61,8 @@ ToolCallEvent
 - 每次调用收到 `VfsScope { resource_session_id, agent_session_id }`。前者用于数据库分区，后者标识当前主代理或子代理。
 - 未指定 `resource_session_id` 时默认使用 runtime session id；子代理继承父代理的 resource scope，但拥有自己的 agent session id。
 - 虚拟路径按 POSIX 规则规范化，拒绝 `..` 越过虚拟根目录和 NUL 字节。
-- 虚拟 Read 不生成可供 `Edit` 使用的 snapshot；`Write` 和 `Edit` 始终操作本地文件。
+- 虚拟 Read 不生成 editable snapshot，因此 VFS runtime 不向模型暴露 `Edit`；白名单显式包含
+  `Edit` 时启动失败。`Write` 仍操作本地文件，不修改 VFS。
 - Glob/Grep 后端返回结构化结果。glob/regex 校验、文本格式和 100KB 搜索输出保护由 `mink-core` 保持。
 - 后端必须自行实现 `glob` / `grep` 并遵守请求中的 `max_files` / `max_results`；`mink-core` 不提供第二套 VFS 搜索实现。
 
@@ -82,17 +86,20 @@ ToolCallEvent
 | `write` | Read / Write | Exec |
 | `always-ask` | Read | Write / Exec |
 
-当前版本还没有交互式审批 prompt；需要审批的调用会 fail closed，并返回工具错误。可用 `[tools.approval]` 为单个工具设置 `allow`、`deny` 或 `prompt`。
+当前版本还没有交互式审批 prompt；必然需要 prompt 的工具不会进入模型可见 surface，历史或
+异常调用仍会在 runner 中 fail closed。可用 `[tools.approval]` 为单个工具设置 `allow`、
+`deny` 或 `prompt`。
 
 ### 工具白名单
 
 工具列表可通过两种方式过滤，减少 LLM 可见的工具数量以节省 token 并提升遵循率，同时作为执行层边界：
 
 1. **禁用开关**（CLI `--disable-bash` 等，或 SDK `options.disable_*`）：按类别禁用，如 Bash、Python、SubAgent、Web 工具。
-2. **白名单 `enabled_tools`**（`.minkrc` 或 `--config` 或 SDK `options.enabled_tools`）：精确指定允许的工具名称列表。未在列表中的工具对 LLM 不可见，且即使模型或历史上下文产生了该工具调用，也会在 `ToolRunner` 执行前返回错误结果。`None` 或未设置表示全部启用（受禁用开关约束）。
+2. **白名单 `enabled_tools`**（`.minkrc` 或 `--config` 或 SDK `options.enabled_tools`）：精确指定允许的工具名称列表。未知、重复或本构建 feature 不可用的名称会在创建 session 前报错。未在列表中的工具对 LLM 不可见，且即使模型或历史上下文产生了该工具调用，也会在 `ToolRunner` 执行前返回错误结果。`None` 或未设置表示全部启用（受禁用开关约束）。
 
-两种方式可同时使用：白名单先限定可见工具集，禁用开关进一步从中移除。执行层使用同一个
-`ToolConfig::is_tool_enabled()` 判断，避免 prompt schema 与真实执行策略分裂。
+两种方式可同时使用。最终 surface 还会同时考虑 approval、主/子代理 role、filesystem backend
+和硬依赖；schema、语义能力、workflow 和运行时引导都从同一个解析结果收缩。执行层保留
+`ToolConfig::is_tool_enabled()` 和同源 approval gate 作为纵深防御。
 
 ### 按需编译（PythonSandbox）
 
@@ -139,7 +146,7 @@ cargo build --release
 - 注入 VFS 后，普通路径读取虚拟文件并显示只读标记，不生成 snapshot；selector 和 `:raw` 语义保持一致。
 - `http(s)://...` 可读取公开 URL。URL 输出不生成 editable snapshot；首次读取会保存为 `ReadUrl` artifact cache，后续同 URL selector 从缓存分页，不重复 fetch。损坏的 URL cache index 行会被跳过；cache 正文缺失时会重新 fetch。
 - `artifact://<id>` 可读取被截断工具输出，支持同样的行 selector；恢复和 fork 后引用保持稳定。
-- `skill://list` / `skill://list/all` / `skill://<name>` / `skill://<name>/<relative-path>` 可读取可用 skills，列表、诊断视图、正文和 filesystem-backed skill 子资源来自同一 capability snapshot。`skill://all` 是 `skill://list/all` 的兼容别名；built-in/runtime skill 只支持读取正文，不支持子资源。
+- `skill://list` / `skill://list/all` / `skill://<name>` / `skill://<name>/<relative-path>` 可通过当前 `Read` provider 读取可用 skills，列表、诊断视图、正文和 filesystem-backed skill 子资源来自同一 capability snapshot。`skill://all` 是 `skill://list/all` 的兼容别名；built-in/runtime skill 只支持读取正文，不支持子资源。selected skill 正文直接进入 prompt，不依赖此 provider。
 - `rule://list` / `rule://<name>` 可读取可用 rules。
 - `session://current`、`session://current/stats`、`session://current/messages`、`session://current/history`、`session://current/artifacts` 可读取当前 session 状态。
 - 默认可读整文件，但大文件会受到工具结果上限保护。
@@ -215,6 +222,9 @@ replace 2..5:
 - 命令在当前会话 `cwd` 下通过 `bash -lc` 执行。
 - 空命令和危险命令会被安全策略拒绝。
 - 用于读文件、搜索内容或发现路径的 Bash 命令会被拦截，提示改用 `Read`、`Grep` 或 `Glob`。
+- 当 `Write` 或 `Edit` 同时位于模型工具 surface 时，系统提示词要求文件创建、完整覆盖和锚定修改优先使用专用 provider，不使用 Bash 重定向、heredoc、sed 或 awk 代替。
+- `SIGNAL_RECOVERY` 注入后的首个 Bash 调用还要单独满足 `FocusedVerificationExec`。这只是
+  Recovery 首步资格，不改变普通 Bash 是否可以执行；
 - 显式 `timeout` 优先；未设置时使用全局 `tool_timeout`（`--config` 或 `.minkrc` 设置），默认超时会稳定夹在 5 到 600 秒之间，不再根据历史执行耗时自适应调整。
 - Ctrl+C / interrupt 会尝试中断子进程，返回 exit code 130 语义。
 - stdout 和 stderr 合并返回，非零退出码会追加提示。

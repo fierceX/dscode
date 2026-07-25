@@ -1,7 +1,7 @@
 [
   {
     "name": "Read",
-    "description": "Read a local file, web URL, or lightweight resource. Use multiple Read calls if you need multiple files/resources. Local file output includes a @PATH#TAG snapshot header and line numbers unless :raw is used. Use path selectors to read specific line ranges. URL reads are fetched once into a session artifact cache, then selectors page over cached text without refetching.\n\nSupported resource paths:\n- local files, e.g. src/main.rs or src/main.rs:10-30\n- http(s) URLs, e.g. https://example.com or https://example.com:20-60\n- artifact://<id> for full truncated tool output\n- skill://list, skill://list/all, skill://<name>, and skill://<name>/<relative-path> for available skills from the current capability snapshot\n- rule://list and rule://<name> for available rules\n- session://current, session://current/stats, session://current/messages, session://current/messages/all, session://current/history, session://current/artifacts\n\nIMPORTANT - Prefer Grep over Read:\n- When searching for specific local or resource content, ALWAYS use Grep first \u2014 it returns only matching lines and keeps context small.\n- Read loads entire files/resources into context, which rapidly inflates token usage. Use it ONLY when you already know exactly which lines you need (e.g. after a Grep located the target), or when you must understand the full file/resource structure.\n- Grep with context provides enough surrounding lines to decide the target range before editing; then use Read path selectors to get the @PATH#TAG header for Edit.patch.\n- If a Read result is truncated (you see a truncation notice), do NOT re-read the same range \u2014 use Grep, or use a narrower Read selector for URL/resource pagination.\n- Use path selectors only when you already know the target line range (e.g. from a prior Grep or cached URL read).",
+    "description": "Read one local or configured virtual-filesystem path, public web URL, or registered lightweight resource. Use multiple calls for multiple targets. Local non-raw reads include numbered lines and an @PATH#TAG editable snapshot header; raw, virtual-filesystem, web, and registered-resource reads never create an editable snapshot. Path selectors select line ranges. Web content is fetched once into the session artifact cache and later selectors page over that cached text.\n\nSupported targets include local paths, http(s) URLs, artifact://<id>, skill:// resources, rule:// resources, and session://current resources. A full result may be truncated; request a narrower selector when exact lines are known.",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -17,7 +17,7 @@
   },
   {
     "name": "Glob",
-    "description": "Find files with ripgrep-style rg --files -g semantics. Default tool for file discovery. Use this instead of Bash commands like find, ls, or rg --files when you need file paths. Patterns are passed as a single rg -g override glob: *.rs matches Rust files recursively by file name, src/*.rs matches one level under src, src/**/*.rs matches recursively under src, and !pattern excludes matches. Use multiple Glob calls if you need multiple independent patterns.",
+    "description": "Discover paths through the configured filesystem backend with ripgrep-style rg --files -g semantics. Patterns are passed as a single rg -g override glob: *.rs matches recursively by file name, src/*.rs matches one level under src, src/**/*.rs matches recursively, and !pattern excludes matches. Use multiple calls for independent patterns.",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -37,7 +37,7 @@
   },
   {
     "name": "Grep",
-    "description": "Default tool for searching code, file contents, and registered resource URLs such as session://current/history. Use this instead of Bash commands like rg, grep, or find | xargs grep. Uses ripgrep's regex/search/printer components and returns rg-style output: path:line:match, path-line-context with context, and -- between context groups.\n- Use context to identify the target range before editing\n- Grep output does NOT authorize Edit; call Read on the exact local-file target range to get the @PATH#TAG header\n- Use glob as a single rg -g override glob to restrict local file types or directories\n- Use multiple Grep calls if you need multiple patterns",
+    "description": "Search content through the configured filesystem backend or a registered resource URL such as session://current/history. Uses ripgrep-compatible regex/search/printer behavior and returns path:line:match output, context lines, and -- between context groups. Resource paths do not accept selectors or globs. Use context to identify exact target ranges, a single rg -g override glob to restrict filesystem targets, and multiple calls for independent patterns.",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -55,7 +55,7 @@
         },
         "context": {
           "type": "integer",
-          "description": "Number of lines before and after each match. Use this to choose the Read range for Edit.patch; Grep output itself does not provide an editable @PATH#TAG."
+          "description": "Number of lines before and after each match. Search output never provides an editable @PATH#TAG."
         }
       },
       "required": [
@@ -65,7 +65,7 @@
   },
   {
     "name": "Write",
-    "description": "Write a file to the local filesystem. Parent directories are created automatically if they don't exist (mkdir -p).",
+    "description": "Create or fully overwrite a file on the local filesystem. Parent directories are created automatically. This operation never writes to an injected read-only virtual filesystem.",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -86,7 +86,7 @@
   },
   {
     "name": "Edit",
-    "description": "Edit an existing file using an anchored patch after a fresh non-raw Read. Edit requires patch; old_string/new_string is not supported. Copy the @PATH#TAG header from the latest Read of that file, or from the fresh header returned by the previous successful Edit. A snapshot tag becomes stale after any successful Edit or Write to the same file. Successful Edit returns a fresh @PATH#TAG and numbered lines around the change; use that new header for immediate follow-up edits in the shown range, or re-read the next target range. If modifying multiple ranges from one snapshot, combine them into one patch with multiple hunks. Keep ranges tight: cover only lines that actually change. Body rows are final content only, each prefixed with +; never include -old rows, original lines, or bare context lines. Do not use Edit for formatting, import sorting, whitespace cleanup, or reindent-only changes; run the project formatter once after semantic edits.",
+    "description": "Apply an anchored patch to an existing local file. The patch must begin with a fresh @PATH#TAG editable snapshot header for the same path; stale, missing, uncovered, overlapping, or no-op patches fail closed. A successful operation returns a fresh header and numbered lines around the change. Combine multiple ranges grounded in one snapshot into one patch, keep ranges tight, and prefix every final body row with +. old_string/new_string and context-diff rows are not supported.",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -96,7 +96,7 @@
         },
         "patch": {
           "type": "string",
-          "description": "Anchored line patch. The first non-blank line must be @PATH#TAG from a fresh Read output or from the previous successful Edit result. Supports replace N..M:, replace N:, delete N..M, delete N, insert before N:, insert after N:, insert head:, and insert tail:. Numbers refer to ORIGINAL snapshot lines and do not shift within one patch. Body rows are ONLY final new lines, each prefixed with +. NEVER include original lines, -old rows, or bare context lines. Example: @src/foo.rs#0A3B\\nreplace 5..5:\\n+    return result\\nCombine same-file changes into one multi-hunk patch when they come from the same snapshot, and keep each range tight."
+          "description": "Anchored line patch. The first non-blank line must be a fresh @PATH#TAG editable snapshot header for the same path. Supports replace N..M:, replace N:, delete N..M, delete N, insert before N:, insert after N:, insert head:, and insert tail:. Numbers refer to original snapshot lines and do not shift within one patch. Body rows are final new lines prefixed with +; never include original lines, -old rows, or bare context lines. Example: @src/foo.rs#0A3B\\nreplace 5..5:\\n+    return result"
         }
       },
       "required": [
@@ -107,13 +107,13 @@
   },
   {
     "name": "Bash",
-    "description": "Execute a focused shell command in the current session working directory for build, test, git, package-manager, server, or other shell-only tasks. Do NOT use Bash for file discovery, code content search, or reading files when a dedicated tool fits: use Glob for paths, Grep for content search, and Read for known files or line ranges. Returns stdout and stderr.",
+    "description": "Execute a focused shell command in the current session working directory for build, test, version-control, package-manager, server, or other shell-only tasks. Returns stdout and stderr. Commands classified as ordinary file reading, content search, or path discovery may be rejected by runtime policy.",
     "input_schema": {
       "type": "object",
       "properties": {
         "command": {
           "type": "string",
-          "description": "The focused bash command to execute. Avoid search/read commands such as rg, grep, find, ls, or cat when Glob/Grep/Read can do the job."
+          "description": "The focused shell command to execute."
         },
         "timeout": {
           "type": "integer",
@@ -127,7 +127,7 @@
   },
   {
     "name": "Python",
-    "description": "Execute Python code directly on the host system with full capabilities — network, subprocess, file system, and C extensions are all available. Returns stdout and stderr. Use this for data processing, analysis, or running helper scripts that need full Python ecosystem access. For sandboxed execution with restricted permissions, use PythonSandbox tool instead.",
+    "description": "Execute Python code directly on the host system with network, subprocess, filesystem, and C-extension access. Returns stdout and stderr. Suitable for data processing, analysis, or helper scripts that require the host Python ecosystem.",
     "input_schema": {
       "type": "object",
       "properties": {

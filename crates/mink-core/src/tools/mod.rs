@@ -1,12 +1,17 @@
+pub mod approval;
 pub mod bash;
+pub mod catalog;
 pub mod file;
 pub mod hashline;
 pub mod metadata;
 pub mod python;
 pub mod runner;
+pub mod runtime_guidance;
 #[cfg(feature = "python-sandbox")]
 pub mod sandbox_python;
 pub mod search;
+pub mod semantic_capabilities;
 pub mod snapshot;
+pub mod surface;
 pub mod vfs;
 pub mod web;

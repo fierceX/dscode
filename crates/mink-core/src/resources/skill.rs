@@ -25,10 +25,6 @@ impl ResourceHandler for SkillResourceHandler {
     }
 }
 
-pub(crate) fn read_skill_resource(url: &str, ctx: &ToolContext) -> Result<String> {
-    resolve_skill_resource(url, ctx).map(|resource| resource.content)
-}
-
 struct ResolvedSkillResource {
     content: String,
     content_type: ResourceContentType,

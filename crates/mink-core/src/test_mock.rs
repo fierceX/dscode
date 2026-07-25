@@ -220,41 +220,34 @@ fn decision_good_belief_is_none() {
 fn decision_warn_belief_is_inject() {
     let mut de = DecisionEngine::new();
     let d = de.decide(0.55, &[]);
-    let msg = match d {
+    let directive = match d {
         Decision::Inject(m) => m,
         _ => panic!("expected Inject"),
     };
-    assert!(
-        msg.contains("SIGNAL_RECOVERY mode"),
-        "reminder should enter SIGNAL_RECOVERY mode, got: {}",
-        msg
+    assert_eq!(
+        directive.severity,
+        crate::agent::decision::RecoverySeverity::Reminder
     );
-    assert!(
-        !msg.contains("Then make at most one minimal edit"),
-        "v5 reminder should not include minimal-edit text, got: {}",
-        msg
-    );
+    assert!(directive.errors.is_empty());
 }
 
 #[test]
 fn decision_low_belief_is_inject_warning() {
     let mut de = DecisionEngine::new();
     let d = de.decide(0.35, &["Rust error[E0308]".into()]);
-    let msg = match d {
+    let directive = match d {
         Decision::Inject(m) => m,
         _ => panic!("expected Inject for warning"),
     };
-    assert!(
-        msg.contains("repeated tool failure"),
-        "warning should mention repeated tool failure"
+    assert_eq!(
+        directive.severity,
+        crate::agent::decision::RecoverySeverity::Warning
     );
     assert!(
-        msg.contains("Your next tool call must inspect current state"),
-        "warning should constrain the next tool call"
-    );
-    assert!(
-        msg.contains("Rust error"),
-        "injection should include specific error details"
+        directive
+            .errors
+            .iter()
+            .any(|error| error.contains("Rust error"))
     );
 }
 
@@ -343,6 +336,9 @@ fn full_chain_edit_loop_triggers_belief_drop() {
 
 #[test]
 fn system_prompt_contains_causal_reasoning() {
+    let tool_config = crate::context::ToolConfig::from_config(&crate::config::Config::default());
+    let (_, tool_surface, tool_capabilities) =
+        crate::context::resolve_tool_runtime(&tool_config, false, false).unwrap();
     let builder = crate::prompt::Builder {
         cwd: std::path::PathBuf::from("/tmp"),
         home: std::path::PathBuf::from("/tmp"),
@@ -355,6 +351,8 @@ fn system_prompt_contains_causal_reasoning() {
         plan_draft_file: std::path::PathBuf::from("/tmp/_nonexistent_draft"),
         mission_file: None,
         mission_content: None,
+        tool_surface,
+        tool_capabilities,
     };
     let prompt = builder.build_system_prompt().unwrap();
     assert!(

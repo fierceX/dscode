@@ -936,6 +936,9 @@ mod tests {
             CancellationToken::new(),
             llm_backend.clone(),
         ));
+        let tool_config = ToolConfig::from_config(&cfg);
+        let (tool_resolution_context, tool_surface, tool_capabilities) =
+            crate::context::resolve_tool_runtime(&tool_config, false, false)?;
         Ok(Arc::new(AgentSharedContext {
             config: cfg.clone(),
             cwd: cwd.clone(),
@@ -961,7 +964,10 @@ mod tests {
             },
             resource_router: Arc::new(crate::resources::ResourceRouter::with_builtin_handlers()),
             capability_snapshot,
-            tool_config: ToolConfig::from_config(&cfg),
+            tool_config,
+            tool_resolution_context,
+            tool_surface,
+            tool_capabilities,
             events_path: spaths.events,
             summary_path: spaths.summary,
             plan_path: spaths.plan,

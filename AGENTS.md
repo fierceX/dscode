@@ -275,7 +275,8 @@ DecisionEngine.decide()
 | `agent/compactor.rs` | turn 内压缩封装和同轮压缩防护 |
 | `agent/plan_actions.rs` | PlanConfirm / PlanClear 副作用处理 |
 | `agent/belief.rs` | 信念度追踪 |
-| `agent/decision.rs` | 注入/中止决策 |
+| `agent/decision.rs` | 结构化注入/中止决策 |
+| `agent/recovery_policy.rs` | 从 resolved semantic capabilities 渲染恢复提示并校验恢复首个调用 |
  | `config.rs` | `SignalMode` / 信号模式开关 |
 | `agent/tool_signals.rs` | 工具信号处理 |
 | `agent/sub_coordinator.rs` | 子代理启动、并发限制、结果收集 |
@@ -287,6 +288,9 @@ DecisionEngine.decide()
 | 文件 | 职责 |
 |------|------|
 | `tools/metadata.rs` | ToolMetadata、ApprovalTier、ToolResultKind |
+| `tools/catalog.rs` | schema、executor registry 和 build availability 的统一目录 |
+| `tools/surface.rs` | 模型可见工具面解析 |
+| `tools/semantic_capabilities.rs` | 语义能力 offer、provider binding 和参数级 scope classifier |
 | `tools/runner.rs` | ToolExec registry、approval、批量分发、结果格式化、artifact spill、TodoWrite/Plan/SubAgent tools |
 | `tools/file.rs` | Read/Write/Edit、path selector、resource URL、anchored patch |
 | `tools/snapshot.rs` | FileSnapshotStore、hashline 轻量校验 |
@@ -389,6 +393,7 @@ Anchored patch 只修改 snapshot 覆盖且未漂移的行。tag 缺失、行 ha
 - `StormBreaker` 每个新用户输入重置
 - `BeliefTracker` 每个新用户输入 reset，初始信念为 0.75
 - `DecisionEngine` 每个新用户输入 reset cooldown
+- Recovery 首步资格来自 resolved semantic capabilities；Bash 的 `FocusedVerificationExec` classifier 与普通 Bash 安全/误用策略相互独立
 - `ToolRunner::execute_all()` 在 StormBreaker 前执行 approval 检查
 - `ToolRunner::execute_all()` 只并发连续只读工具；写入、执行、控制和 SubAgent 工具必须按调用顺序串行执行
 - 默认 approval mode 是 `yolo`；`prompt` 目前没有交互式 UI，会 fail closed
@@ -399,6 +404,8 @@ Anchored patch 只修改 snapshot 覆盖且未漂移的行。tag 缺失、行 ha
 - registered resource URL 先于 VFS 处理；未知非 web scheme 必须 fail closed
 - Grep 可搜索 registered resource 文本；resource path 不接受 selector/glob，返回行号用于后续 Read selector
 - prompt skill index、selected skills、`skill://` 和 `rule://` 必须来自同一 `CapabilitySnapshot`
+- selected skill 正文不依赖资源读取 provider；skill index 和子资源访问由已解析的 `ResourceRead` provider 与 `ResourceRouter` handler 共同提供
+- MISSION 只能覆盖 allowlisted core；runtime-owned section fail fast，普通自定义规则不得使用 reserved 的 `# rules`
 - 嵌入式 runtime 可为普通路径注入同步只读 VFS，仅替换 Read/Glob/Grep 后端；未注入时必须严格保持原有本地执行路径
 - VFS 调用同时携带继承的 `resource_session_id` 和当前 `agent_session_id`；虚拟 Read 不生成 snapshot，Edit/Write 始终操作本地文件
 - `Edit.patch` 的 header path 必须和 `Edit.path` 一致，snapshot stale 时拒绝编辑
@@ -467,6 +474,7 @@ grep '"Injecting hint"' events.jsonl
 | `docs/DESIGN.md` | 设计哲学：执行循环、内存、压缩、维修、信号、工具 |
 | `docs/USAGE.md` | CLI 参数、环境变量、会话管理、工具参考 |
 | `docs/tools.md` | 内置工具参数与行为 |
+| `docs/设计哲学-工具能力与提示词解耦.md` | 工具 surface、语义能力、自由组合、前向求值和 prompt 所有权 |
 | `docs/设计哲学-信号系统.md` | 信号系统完整设计 |
 | `docs/TUI_OPTIMIZATION_ROADMAP.md` | TUI 当前实现和维护建议 |
 

@@ -111,6 +111,15 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
         }
         return Err(error);
     }
+    if let Err(error) =
+        mink::tools::catalog::validate_tool_config(&mink::context::ToolConfig::from_config(&cfg))
+    {
+        if cfg.agent_jsonl {
+            emit_failed_parse(&format!("invalid SDK request: {error}"));
+            return Ok(CliExit { code: 1 });
+        }
+        return Err(error);
+    }
 
     let prompt_for_title = sdk_request
         .as_ref()

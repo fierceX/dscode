@@ -13,13 +13,27 @@ pub fn glob(pattern: &str, path: &str, max_files: usize) -> Result<String> {
     if pattern.is_empty() {
         bail!("Error: no pattern provided");
     }
-    let base = Path::new(path);
-    let overrides = build_rg_overrides(base, pattern)
-        .map_err(|e| anyhow!("Error: invalid glob pattern '{pattern}': {e}"))?
-        .build()
-        .map_err(|e| anyhow!("Error: invalid glob pattern '{pattern}': {e}"))?;
+    let mut base = Path::new(path).to_path_buf();
+    let mut effective_pattern = pattern.to_string();
 
-    let mut walk_builder = ignore::WalkBuilder::new(base);
+    // Lift "../" prefix from pattern into base so that
+    // Glob("../sibling_dir/*.rs") works without requiring the caller
+    // to split path and pattern manually.
+    while effective_pattern.starts_with("../") {
+        if let Some(parent) = base.parent() {
+            base = parent.to_path_buf();
+            effective_pattern = effective_pattern[3..].to_string();
+        } else {
+            break;
+        }
+    }
+
+    let overrides = build_rg_overrides(&base, &effective_pattern)
+        .map_err(|e| anyhow!("Error: invalid glob pattern '{effective_pattern}': {e}"))?
+        .build()
+        .map_err(|e| anyhow!("Error: invalid glob pattern '{effective_pattern}': {e}"))?;
+
+    let mut walk_builder = ignore::WalkBuilder::new(&base);
     configure_search_walker(&mut walk_builder);
     walk_builder.overrides(overrides);
     let walker = walk_builder.build();
@@ -70,7 +84,7 @@ pub fn glob(pattern: &str, path: &str, max_files: usize) -> Result<String> {
     }
 
     if results.is_empty() {
-        results.extend(format_empty_glob_fallback(pattern, base));
+        results.extend(format_empty_glob_fallback(pattern, &base));
     }
 
     Ok(results.join("\n"))

@@ -1,10 +1,11 @@
 # 架构说明
 
-更新日期：2026-07-07
+更新日期：2026-07-25
 
 本文描述 mink 当前代码结构、模块职责和运行时数据流。面向用户的命令、配置和工作流见
 [USAGE.md](USAGE.md)；完整工具协议见 [tools.md](tools.md)；设计取舍和不变式见
-[DESIGN.md](DESIGN.md)。
+[DESIGN.md](DESIGN.md)。工具 surface、语义能力、自由组合和前向求值算法见
+[工具能力与提示词解耦设计文档](设计哲学-工具能力与提示词解耦.md)。
 
 ## 项目定位
 
@@ -20,7 +21,7 @@ mink 是一个 Rust 实现的轻量 AI coding agent，默认面向 DeepSeek / Op
 - 工具边界明确：超时、输出大小、写入大小、副作用和禁用开关都可控
 - 工具有统一 metadata 和 approval tier，支持基础审批策略
 - 超长工具输出落 session artifact，可通过 `Read artifact://<id>` 恢复
-- `Read` 是轻量资源入口，支持本地文件、artifact、skill、rule 和 session introspection
+- `Read` 当前是内置轻量资源 provider，支持本地文件、artifact、skill、rule 和 session introspection；资源协议所有权属于 `ResourceRouter`
 - registered resource 与 capability snapshot 分离：资源读取走 `ResourceRouter`，prompt/skill/rule/context 能力视图走 `CapabilitySnapshot`
 - `Edit` 支持 snapshot anchored patch，降低精确字符串替换失败率
 - 上下文预算是硬约束，通过摘要压缩和 immutable prefix 尽量保留 prefix cache 命中
@@ -197,7 +198,7 @@ ToolRunResult
 | `context.rs` | `AgentSharedContext` 和工具层 `ToolContext` |
 | `assets.rs` | 编译期嵌入的 `tools.json` 和 skill 索引 |
 | `capabilities/` | model-visible 能力 snapshot：skills、instruction files、rules，以及 source/exposure 元数据 |
-| `resources/` | `Read` 轻量资源 URL 的注册式 router 和内置 handler |
+| `resources/` | 轻量资源 URL 的注册式 router 和内置 handler；`Read` 是当前内置 provider，不拥有具体 resource scheme |
 | `cancel.rs` | 父子 cancellation token |
 | `safety.rs` | Bash 危险命令拦截 |
 | `sandbox/` | Linux nsjail/bwrap 与 macOS sandbox-exec 自举 |
@@ -232,6 +233,7 @@ ToolRunResult
 | `agent/sub_executor.rs` | 子代理独立 session / fork session 执行 |
 | `agent/belief.rs` | `BeliefTracker` |
 | `agent/decision.rs` | `DecisionEngine` |
+| `agent/recovery_policy.rs` | 基于已解析语义能力生成恢复提示并校验恢复首个调用；与普通 Bash 执行策略相互独立 |
  | `config.rs` | `SignalMode` / 信号系统开关 |
 
 ### 工具系统
@@ -239,6 +241,11 @@ ToolRunResult
 | 文件 | 职责 |
 |------|------|
 | `tools/metadata.rs` | `ToolMetadata`、approval tier、结果类型、副作用标记 |
+| `tools/catalog.rs` | `tools.json`、executor registry 和 feature availability 的唯一目录 |
+| `tools/surface.rs` | 按 whitelist、disable、approval、role、backend 和硬依赖解析模型可见工具面 |
+| `tools/approval.rs` | surface 与 runner 共用的非交互审批判定 |
+| `tools/semantic_capabilities.rs` | 工具语义能力 offer、provider binding、scope classifier 和 fingerprint |
+| `tools/runtime_guidance.rs` | 带结构化工具引用的运行时引导消息 |
 | `tools/runner.rs` | `ToolExec` trait、`TOOL_REGISTRY`、enabled/disabled gate、approval、并发调度、结果截断、artifact spill 和内置控制工具 |
 | `tools/file.rs` | `ReadTool`、`WriteTool`、`EditTool`、selector、resource URL、anchored patch |
 | `tools/snapshot.rs` | 文件 snapshot、tag、行 hash 校验 |
@@ -249,11 +256,44 @@ ToolRunResult
 | `tools/web.rs` | `WebSearchTool`、`WebFetchTool` |
 | `assets/tools.json` | 提供给模型的工具 schema |
 
-新增工具时需要同时实现 `ToolExec::metadata()`、注册 `TOOL_REGISTRY`、更新 `assets/tools.json`，并在 metadata 中声明 approval tier、result kind、副作用、`storm_exempt`、`internal` 或 `spawns_sub_agent`。
+新增工具时需要同时实现 `ToolExec::metadata()`、注册 `TOOL_REGISTRY`、更新 `assets/tools.json`，并在 metadata 中声明 approval tier、result kind、副作用、`storm_exempt`、`internal` 或 `spawns_sub_agent`。若工具参与跨工具工作流，还必须在 `semantic_capabilities.rs` 显式声明受支持的语义能力和调用 scope；schema 只描述该工具自身合同，不得静态推荐其他工具。
+
+模型可见工具只有一条构造链：
+
+```text
+ToolCatalog -> ModelToolSurface -> ResolvedToolCapabilities
+                                      ├── runtime policies
+                                      └── PromptWorkflowResolver -> prompt
+```
+
+`AgentSharedContext` 和 `ToolContext` 共享同一个 `ToolResolutionContext`、surface 和 capability
+bindings。发给 provider 的 schemas 直接来自 surface；prefix 不再独立解析或过滤 `tools.json`。
+
+### Prompt document
+
+系统提示词先构造成带 section ID、来源和工具引用元数据的 `PromptDocument`，再统一渲染：
+
+```text
+Core sections
+  -> allowlisted MISSION core overrides
+  -> active tool fragments
+  -> resolved capability workflows
+  -> runtime/external/session sections
+  -> validate generated tool references
+  -> render
+```
+
+MISSION 只能覆盖 `agent-identity`、`environment`、`execution-codes`、
+`belief-awareness` 和 `output-language` 中当前实际存在的 core section。工具 prompt、
+workflow、`runtime-capabilities`、`rules`、instruction files、索引、selected skills 和
+current plan 属于 runtime-reserved section；普通自定义一级标题作为外部 section 追加。
+runtime-reserved section 冲突会在启动时 fail fast，不保留旧 alias。
 
 ### Registered Resources and Capabilities
 
-`Read` 负责承载两类读取：普通路径和轻量资源 URL。普通路径保持本地文件/VFS 后端语义；轻量资源 URL 由 `ResourceRouter` 按 scheme 分发。`tools/file.rs` 只承担读取入口和 selector 处理，具体 resource 协议由 handler 表达。
+`Read` 当前承载两类读取：普通路径和轻量资源 URL。普通路径保持本地文件/VFS 后端语义；
+轻量资源 URL 由 `ResourceRouter` 按 scheme 分发。`tools/file.rs` 只承担读取入口和 selector
+处理，具体 resource 协议由 handler 表达，因此 `skill://` 等协议不归属于 `Read` 工具本身。
 
 ```text
 Read.path
@@ -274,6 +314,11 @@ Read.path
 
 `CapabilitySnapshot` 是 prompt、selected skills、`skill://`、`rule://` 和 prefix fingerprint 的共享能力视图。它在 runtime 构建时由 provider 生成，并挂到 `AgentSharedContext`；子代理继承父代理的 snapshot，避免主代理和子代理看到不同能力集合。能力 snapshot 只描述可被模型看见或按名读取的内容，不负责工具执行、文件编辑或 VFS 数据访问。
 
+selected skill 的 SKILL.md 正文是显式外部能力内容，即使没有资源读取 provider 也会进入
+`<selected-skills>`。skill index 和 `skill://` 子资源访问由已解析的 `ResourceRead`
+binding 提供，当前内置 provider 是 `Read`；具体 scheme 语义仍由 `ResourceRouter` handler
+拥有。selected skill、索引和资源读取共享同一份 `CapabilitySnapshot`。
+
 这套拆分的边界是：
 
 - `resources/*` 只做 URL 到文本资源的适配，不重新发现 skill/rule。
@@ -283,7 +328,8 @@ Read.path
 
 ### Read-only VFS hook
 
-VFS 不是新增工具，也不改变模型可见的工具 schema。它只是嵌入式 runtime 对普通文件路径读取后端的可选替换：
+VFS 不是新增工具。它是嵌入式 runtime 对普通文件路径读取后端的可选替换，同时也是 surface
+解析的 backend 输入：
 
 ```text
 Read / Glob / Grep
@@ -300,7 +346,10 @@ Read / Glob / Grep
 
 VFS 只接管普通路径。`artifact://`、`skill://`、`rule://`、`session://` 和 `http(s)://` 仍先走资源读取路径。Grep 对 registered resource 直接搜索 handler 返回的文本，不要求暴露底层物理路径。虚拟路径使用 POSIX 分隔符和词法规范化，拒绝越过虚拟根目录。Glob/regex 请求由工具层先校验，后端返回结构化路径或匹配行，`mink-core` 统一输出格式和 100KB 搜索输出保护。请求中的 `max_files` / `max_results` 是后端契约，后端必须自行遵守；核心不提供第二套 VFS 搜索实现。
 
-虚拟文件是只读资源，不创建 anchored Edit snapshot。具体数据库适配不进入核心依赖；`crates/mink-core/examples/redb_vfs.rs` 展示了按 `resource_session_id` 分区、惰性范围扫描的 redb 后端。
+虚拟文件是只读资源，不创建 anchored Edit snapshot。因此 VFS runtime 不向模型暴露 `Edit`；
+若白名单显式包含 `Edit`，启动会因缺少本地 editable snapshot provider 而失败。`Write` 仍是
+本地文件操作，不会修改 VFS 内容。具体数据库适配不进入核心依赖；`crates/mink-core/examples/redb_vfs.rs`
+展示了按 `resource_session_id` 分区、惰性范围扫描的 redb 后端。
 
 ### UI
 
@@ -408,13 +457,13 @@ session 根目录如何由 `home`、`cwd`、`session_id` 推导。当前有四�
 - `ImmutablePrefix` 变更必须通过 prefix manager / invalidate 路径。
 - `ConversationStore` append 时保持活跃后缀缓存一致；显式完整历史读取是一次性读盘操作，缓存继续保持为活跃后缀。
 - `ToolRunner::format_tool_result()` 是工具输出进入 LLM/UI 前的最大字节保护。
-- `ToolRunner::execute_all()` 在 StormBreaker 前执行 enabled/disabled 和 approval 检查；`enabled_tools` 既过滤工具 schema，也阻止真实执行。
+- `ModelToolSurface` 在 session/prefix 构造前统一决定 schema 可见性；`ToolRunner::execute_all()` 仍在 StormBreaker 前保留 enabled/disabled 和同源 approval 纵深防线。
 - 超长工具输出必须保存为当前 session artifact；初始化从索引最大序号继续，正文使用独占创建，恢复和 fork 后不得覆盖旧 artifact。
 - `Read` 本地非 raw 输出记录 snapshot；raw 和 immutable resource 不生成可编辑 snapshot。
 - registered resource 必须先于 VFS 处理；未知非 web scheme fail closed，不落入普通路径或 VFS。
 - 未注入 VFS 时，`Read` / `Glob` / `Grep` 必须继续执行原有本地实现；VFS 分支不得改变本地路径语义或测试。
-- prompt skill index、selected skills、`skill://` 和 `rule://` 必须来自同一 `CapabilitySnapshot`，其 dependency fingerprint 进入 `ImmutablePrefix`。
-- 虚拟 `Read` 永远不生成可编辑 snapshot；`Edit` 和 `Write` 始终针对本地文件系统。
+- prompt skill index、selected skills、`skill://` 和 `rule://` 必须来自同一 `CapabilitySnapshot`；`ImmutablePrefix` 的依赖 fingerprint 同时包含 capability snapshot、tool surface、provider bindings 和 active prompt workflows。
+- 虚拟 `Read` 永远不生成可编辑 snapshot；VFS surface 隐藏 `Edit`，`Write` 仍只针对本地文件系统。
 - VFS 后端必须使用 `resource_session_id` 隔离数据；`agent_session_id` 只标识具体调用代理。
 - `Edit.patch` 必须校验 snapshot tag 和目标行 hash，stale 时 fail closed。
 - `render_tool_result_detail()` 必须保留默认实现。

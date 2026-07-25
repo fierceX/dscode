@@ -2,7 +2,9 @@
 
 本文面向 mink 使用者，覆盖 CLI、Rust 嵌入、Python SDK 相关的运行方式、配置、沙箱、
 session、技能和常见工作流。内置工具的完整参数、结果格式和边界行为见
-[工具参考](tools.md)；架构和内部模块职责见 [ARCHITECTURE.md](ARCHITECTURE.md)。
+[工具参考](tools.md)；架构和内部模块职责见 [ARCHITECTURE.md](ARCHITECTURE.md)；工具与
+提示词解耦、自由组合和算法策略见
+[工具能力与提示词解耦设计文档](设计哲学-工具能力与提示词解耦.md)。
 
 ## 快速开始
 
@@ -163,7 +165,7 @@ prompt 为空且 stdin 是终端时自动进入交互模式。非终端 stdin �
 |------|--------|------|
 | `PROMPT` | — | 用户输入（位置参数） |
 | `-m` / `--model` | `flash` | 模型名。`flash` / `pro` 是默认别名，也可以直接指定任意 OpenAI-compatible 模型名 |
-| `--mission PATH` | — | 加载 MISSION.md 文件替换默认系统提示词 |
+| `--mission PATH` | — | 加载 MISSION.md：覆盖允许的 core section，并追加自定义 section |
 | `--session [NAME]` | 自动生成 | 命名会话。提供名称可恢复 |
 | `--continue` | — | 恢复最近的 session |
 | `--list-sessions` | — | 列出所有 session |
@@ -320,8 +322,13 @@ enabled = true
 
 项目级 `.minkrc` 覆盖用户级，CLI 参数覆盖所有文件设置。
 所有字段可选，未设置的字段使用默认值或环境变量。
-当前版本尚未实现交互式审批 prompt；需要审批的工具调用会 fail closed。默认 `yolo` 保持旧行为。
-`enabled_tools` 同时作用于工具 schema 和执行层：未在白名单内的工具不会暴露给模型；即使模型或历史上下文产生该工具调用，也会在执行前返回错误结果。
+当前版本尚未实现交互式审批 prompt；必然需要 prompt 的工具不会暴露给模型，历史调用仍会在
+执行层 fail closed。默认 `yolo` 允许所有 approval tiers。
+
+`enabled_tools` 是模型工具 surface 的输入。未知名称、重复名称、当前构建未包含的 feature 工具、
+缺少硬依赖（例如显式启用 anchored editing 却没有 snapshot reader），都会在创建 session 前
+报错。最终 schemas、按需 tool/workflow prompt、Bash 路由和 Signal Recovery 同时依据该
+surface 收缩；执行层继续阻止白名单外或被禁用的历史调用。
 
 ---
 
@@ -428,8 +435,6 @@ package_dirs = ["./packages"]            # Python 包目录（挂载到 /package
 | **资源限制** `max_memory_mb` | ✅ cgroup | ❌ 不生效 |
 | **后台自动启用** | ✅ | ✅（写入限制） |
 
-macOS 上的读取限制应该在应用层通过路径规范化解引用 + 白名单检查实现（计划后续版本添加）。
-
 ### 启动机制
 
 mink 启动时检测 `[sandbox] enabled = true`，自动通过 `exec()` 将自身重新装入沙箱：
@@ -466,6 +471,12 @@ mink --tui
 ---
 
 搜索相关上限分为多层：`MAX_SEARCH_FILES` 控制 Glob/Grep 最多遍历的文件数，`MAX_SEARCH_RESULTS` 控制 Grep 最多返回的匹配行数；搜索工具自身还有 100KB 输出保护，最终工具结果还会受 `TOOL_RESULT_MAX_BYTES` 保护。看到 `scanned first N files` 表示文件遍历上限触发，看到 `truncated at N results` 表示匹配结果数上限触发，看到 `output > 100000 bytes` 或 artifact 提示则表示输出字节数保护触发。
+
+### SIGNAL_RECOVERY 与 Bash
+
+`MINK_SIGNAL_MODE=full` 时，低 belief 注入会要求下一次工具调用先检查当前状态。这个
+Recovery 首步资格是独立的参数级能力判断，不等同于普通 Bash 安全策略：一个命令可以在正常
+流程中合法执行，但不适合作为 Recovery 的首个检查动作。
 
 ## Token 用量与费用
 
@@ -787,15 +798,16 @@ mink --list-sessions
 
 ```
 ┌─ LLM 提议制定计划
-│  → LLM 使用 TodoWrite 创建 checklist
-│  → LLM 使用 Edit 编辑 plan.draft 文件
+│  → LLM 使用当前可用的 Edit 或 Write 更新 plan.draft
+│  → 用户反馈会先同步到草稿，再次请求确认
+│  → 用户取消时清空 plan.draft，不调用 PlanClear
 ├─ 用户确认计划
 │  → LLM 调用 PlanConfirm 工具
 │    → plan.draft → plan.md（锁定）
 │    → 触发上下文压缩
 │    → system prompt 中出现 <current-plan> 段
 ├─ 执行阶段
-│  → LLM 逐步完成任务，更新 TodoWrite
+│  → LLM 创建 TodoWrite checklist，逐步完成并更新状态
 └─ 计划完成
    → LLM 调用 PlanClear 工具
      → plan.md 清空
@@ -957,7 +969,7 @@ artifact、输出截断和每个工具的完整协议以 [工具参考](tools.md
 
 - `http(s)://...`：读取公开 URL，首次 fetch 后缓存到当前 session artifact，后续 selector 从缓存分页；cache 正文缺失时会重新 fetch
 - `artifact://<id>`：读取被截断工具输出；session 恢复和 fork 后新 artifact 会从已有最大序号继续，旧正文不会被覆盖
-- `skill://list` / `skill://list/all` / `skill://<name>` / `skill://<name>/<relative-path>`：列出、诊断或读取可用 skill；列表、正文和 filesystem-backed skill 子资源来自同一 capability snapshot。`skill://all` 是 `skill://list/all` 的兼容别名；built-in/runtime skill 只支持读取正文，不支持子资源
+- `skill://list` / `skill://list/all` / `skill://<name>` / `skill://<name>/<relative-path>`：通过当前内置 `Read` provider 列出、诊断或读取可用 skill；列表、正文和 filesystem-backed skill 子资源来自同一 capability snapshot。`skill://all` 是 `skill://list/all` 的兼容别名；built-in/runtime skill 只支持读取正文，不支持子资源
 - `rule://list` / `rule://<name>`：列出或读取可用 rule
 - `session://current`：当前 session 摘要
 - `session://current/stats`：stats JSON
@@ -1053,7 +1065,8 @@ mink --list-skills
 ### 加载机制
 
 - Skill 通过 `.minkrc` 的 `skills` 字段或 `--config "skills=[\"name\"]"` 加载，加载后在 system prompt 的 `<selected-skills>` 段嵌入 SKILL.md 全文
-- `Read skill://<name>` 在运行时按需读取当前 capability snapshot 中的同一份 skill 视图，不修改后续轮次的 system prompt；filesystem-backed skill 可通过 `skill://<name>/<relative-path>` 读取同目录子资源
+- selected skill 正文的加载不依赖 `Read`；`Read skill://<name>` 只是当前内置的按需资源 provider，不修改后续轮次的 system prompt
+- filesystem-backed skill 当前可通过 `Read skill://<name>/<relative-path>` 读取同目录子资源
 - 内置技能即使在离线环境也可用（编译时已嵌入）
 
 ### 能力视图
@@ -1066,17 +1079,25 @@ Rust runtime 和 Agent JSONL / Python SDK 可注入 inline skills，并可通过
 
 ## MISSION（自定义系统提示词）
 
-通过 `--mission PATH` 加载一个 MISSION.md 文件，替换默认系统提示词的对应段。
+通过 `--mission PATH` 加载 MISSION.md。MISSION 可以覆盖少量稳定的 core section，也可以追加
+业务自定义 section；不能覆盖工具、workflow 或其他 runtime-owned 内容。
 
 ### 机制
 
-MISSION.md 使用一级标题（`# heading-name`）映射到系统提示词的段名。加载后自动替换同名的默认段，未在文件中定义的段保持默认内容。
+MISSION.md 使用必须从行首开始的一级标题（`# section-id`）分段。首个一级标题之前的文本不会
+形成 section；空正文不会形成 section。section 分为三类：
+
+| 类型 | section ID | 行为 |
+|------|------------|------|
+| 可覆盖 core | `agent-identity`、`environment`、`execution-codes`、`belief-awareness`、`output-language` | 替换当前 runtime 中已存在的同名 core |
+| runtime-reserved | 工具 prompt、workflow、`runtime-capabilities`、`rules`、`instruction-files`、`rule-index`、`skill-index`、`selected-skills`、`current-plan` 等 | 启动时 fail fast |
+| 普通自定义 | 不属于以上两类的唯一 ID | 作为 `mission:<section-id>` 外部 section 追加 |
 
 ```markdown
 # agent-identity
 你是文档处理助手，负责根据素材文件生成结构化文档。
 
-# rules
+# mission-rules
 - 严格遵循素材内容，不得额外杜撰
 - 输出格式必须符合要求
 
@@ -1112,10 +1133,19 @@ SandboxConfig(signal_mode="off")
 
 `signal_mode=None` 时继承进程环境中的 `MINK_SIGNAL_MODE`；如果环境变量也未设置，mink 默认使用 `full`。
 
+### 迁移规则
+
+- 旧 MISSION 中的 `# rules` 改为 `# mission-rules` 或其他业务专属 ID。
+- 不再支持 `using-your-tools`、`anchored-edit-protocol`、`rationalization-table` 等旧 alias。
+- 依赖项目直接更新 MISSION 文件；核心不会添加 alias、warning-only 或双格式兼容路径。
+- section ID 必须唯一。重复 heading 或占用 runtime-reserved ID 会导致启动失败。
+
 ### 注意事项
 
-- MISSION.md 替换的是 prompt 文本，不影响工具定义。禁用工具仍需 `--disable-bash` 等参数。
-- 未在 MISSION.md 中定义的段保持默认内容；当 `MINK_SIGNAL_MODE=off` 时，默认 prompt 不包含 `belief-awareness` 信号协议段。
+- MISSION.md 只影响 prompt 文本，不改变工具 surface。禁用工具仍需 `--disable-bash`、白名单或 approval 配置。
+- 未覆盖的 core 保持默认内容；普通自定义 section 原样加入，不进行工具名清洗。
+- 当 `MINK_SIGNAL_MODE=off` 时，默认 prompt 不存在 `belief-awareness`；MISSION 也不能创建或覆盖该 core。
+- `# rules` 是 runtime-reserved，不是自定义规则的推荐名称。
 - 建议将 MISSION.md 置于项目目录下，纳入版本管理。
 
 ---

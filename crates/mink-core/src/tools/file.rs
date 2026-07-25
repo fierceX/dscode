@@ -1,4 +1,5 @@
 use crate::resources::selector::{select_text_lines, split_read_path_selection};
+use crate::tools::surface::FilesystemBackend;
 use anyhow::{Result, anyhow, bail};
 use similar::{ChangeTag, TextDiff};
 use std::collections::BTreeSet;
@@ -231,6 +232,45 @@ pub struct ReadTool;
 pub struct WriteTool;
 pub struct EditTool;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReadTargetClass {
+    Filesystem {
+        backend: FilesystemBackend,
+        raw: bool,
+    },
+    RegisteredResource,
+    WebUrl,
+}
+
+pub(crate) fn classify_read_target(
+    input: &serde_json::Value,
+    router: &crate::resources::ResourceRouter,
+    filesystem_backend: FilesystemBackend,
+) -> anyhow::Result<ReadTargetClass> {
+    let path = input
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("tool input is missing a string path"))?;
+    let selection = split_read_path_selection(path)?;
+    if router.can_handle(&selection.path) {
+        return Ok(ReadTargetClass::RegisteredResource);
+    }
+    if router.is_url_like(&selection.path) && !is_web_url(&selection.path) {
+        let scheme = selection
+            .path
+            .split_once("://")
+            .map_or("", |(scheme, _)| scheme);
+        anyhow::bail!("unknown resource scheme: {scheme}");
+    }
+    if is_web_url(&selection.path) {
+        return Ok(ReadTargetClass::WebUrl);
+    }
+    Ok(ReadTargetClass::Filesystem {
+        backend: filesystem_backend,
+        raw: selection.raw,
+    })
+}
+
 fn resolve_tool_path(cwd: &Path, raw: &str) -> Result<PathBuf> {
     if raw.is_empty() {
         bail!("Error: no path provided");
@@ -283,6 +323,12 @@ impl super::runner::ToolExec for ReadTool {
         }
         let args: Args = serde_json::from_value(input.clone())?;
         let mut selection = split_read_path_selection(&args.path)?;
+        let filesystem_backend = if ctx.read_only_fs.is_some() {
+            FilesystemBackend::ReadOnlyVfs
+        } else {
+            FilesystemBackend::Local
+        };
+        let target_class = classify_read_target(input, &ctx.resource_router, filesystem_backend)?;
         // Prefer path selector range, fall back to JSON offset/limit
         if selection.offset.is_none() && args.offset.is_some() {
             selection.offset = args.offset;
@@ -290,19 +336,12 @@ impl super::runner::ToolExec for ReadTool {
         if selection.limit.is_none() && args.limit.is_some() {
             selection.limit = args.limit;
         }
-        if ctx.resource_router.can_handle(&selection.path) {
+        if target_class == ReadTargetClass::RegisteredResource {
             let resource = ctx.resource_router.resolve(&selection, ctx)?;
             let text = select_text_lines(&resource.content, selection.offset, selection.limit);
             return Ok(super::runner::ToolOutcome::text(text));
         }
-        if ctx.resource_router.is_url_like(&selection.path) && !is_web_url(&selection.path) {
-            let scheme = selection
-                .path
-                .split_once("://")
-                .map_or("", |(scheme, _)| scheme);
-            bail!("Error: unknown resource scheme: {scheme}");
-        }
-        if is_web_url(&selection.path) {
+        if target_class == ReadTargetClass::WebUrl {
             return read_url_resource(&selection.path, ctx)
                 .map(|text| select_text_lines(&text, selection.offset, selection.limit))
                 .map(super::runner::ToolOutcome::text);
@@ -981,6 +1020,9 @@ mod tests {
             )
             .unwrap(),
         );
+        let tool_config = ToolConfig::from_config(&crate::config::Config::default());
+        let (tool_resolution_context, tool_surface, tool_capabilities) =
+            crate::context::resolve_tool_runtime(&tool_config, false, false).unwrap();
         ToolContext {
             vfs_scope: crate::tools::vfs::VfsScope {
                 resource_session_id: "session-1".into(),
@@ -994,11 +1036,21 @@ mod tests {
             snapshots: Arc::new(Mutex::new(
                 crate::tools::snapshot::FileSnapshotStore::default(),
             )),
-            tool_config: ToolConfig::from_config(&crate::config::Config::default()),
+            tool_config,
             interrupt: Arc::new(AtomicBool::new(false)),
             resource_router: Arc::new(crate::resources::ResourceRouter::with_builtin_handlers()),
             capability_snapshot,
+            tool_resolution_context,
+            tool_surface,
+            tool_capabilities,
         }
+    }
+
+    fn read_skill_resource(url: &str, ctx: &ToolContext) -> anyhow::Result<String> {
+        let selection = split_read_path_selection(url)?;
+        ctx.resource_router
+            .resolve(&selection, ctx)
+            .map(|resource| resource.content)
     }
 
     struct VirtualReadOnlyFs;
@@ -1394,7 +1446,7 @@ mod tests {
     #[test]
     fn read_skill_resource_lists_skills() {
         let ctx = temp_tool_context("skill-list");
-        let result = crate::resources::skill::read_skill_resource("skill://list", &ctx).unwrap();
+        let result = read_skill_resource("skill://list", &ctx).unwrap();
         assert!(result.contains("# Skills"));
         assert!(result.contains("debugging"));
         let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
@@ -1403,8 +1455,7 @@ mod tests {
     #[test]
     fn read_skill_resource_returns_skill_content() {
         let ctx = temp_tool_context("skill-content");
-        let result =
-            crate::resources::skill::read_skill_resource("skill://debugging", &ctx).unwrap();
+        let result = read_skill_resource("skill://debugging", &ctx).unwrap();
         assert!(result.contains("# skill://debugging"));
         assert!(result.contains("Base directory: <built-in>"));
         assert!(result.contains("Phase 1"));
@@ -1414,8 +1465,7 @@ mod tests {
     #[test]
     fn read_skill_resource_allows_trailing_slash() {
         let ctx = temp_tool_context("skill-trailing-slash");
-        let result =
-            crate::resources::skill::read_skill_resource("skill://debugging/", &ctx).unwrap();
+        let result = read_skill_resource("skill://debugging/", &ctx).unwrap();
         assert!(result.contains("# skill://debugging"));
         let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
     }
@@ -1423,7 +1473,7 @@ mod tests {
     #[test]
     fn read_skill_resource_rejects_empty_authority_path() {
         let ctx = temp_tool_context("skill-empty-authority");
-        let err = crate::resources::skill::read_skill_resource("skill:///debugging", &ctx)
+        let err = read_skill_resource("skill:///debugging", &ctx)
             .unwrap_err()
             .to_string();
         assert!(err.contains("invalid skill resource"), "{err}");
@@ -1451,8 +1501,7 @@ mod tests {
             .unwrap(),
         );
 
-        let result =
-            crate::resources::skill::read_skill_resource("skill://debugging", &ctx).unwrap();
+        let result = read_skill_resource("skill://debugging", &ctx).unwrap();
 
         assert!(result.contains("Description: Local debugging"));
         assert!(result.contains("Use local steps."));
@@ -1481,11 +1530,10 @@ mod tests {
             .unwrap(),
         );
 
-        let result = crate::resources::skill::read_skill_resource("skill://list", &ctx).unwrap();
+        let result = read_skill_resource("skill://list", &ctx).unwrap();
 
         assert!(!result.contains("hidden-review"), "{result}");
-        let hidden =
-            crate::resources::skill::read_skill_resource("skill://hidden-review", &ctx).unwrap();
+        let hidden = read_skill_resource("skill://hidden-review", &ctx).unwrap();
         assert!(hidden.contains("Use hidden steps."));
         let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
     }
@@ -1511,15 +1559,14 @@ mod tests {
             .unwrap(),
         );
 
-        let result =
-            crate::resources::skill::read_skill_resource("skill://list/all", &ctx).unwrap();
+        let result = read_skill_resource("skill://list/all", &ctx).unwrap();
 
         assert!(result.contains("## Discoverable"));
         assert!(result.contains("## Addressable"));
         assert!(result.contains("## Selected"));
         assert!(result.contains("- hidden-review [skills, model-addressable]: Hidden review"));
         assert!(result.contains("- hidden-review [skills]: Hidden review"));
-        let alias = crate::resources::skill::read_skill_resource("skill://all", &ctx).unwrap();
+        let alias = read_skill_resource("skill://all", &ctx).unwrap();
         assert_eq!(result, alias);
         let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
     }
@@ -1564,8 +1611,7 @@ mod tests {
             dependency_fingerprint: "deps".to_string(),
         });
 
-        let result =
-            crate::resources::skill::read_skill_resource("skill://list/all", &ctx).unwrap();
+        let result = read_skill_resource("skill://list/all", &ctx).unwrap();
 
         assert!(result.contains("host-only skill 'host-secret' is hidden"));
         assert!(!result.contains("Do not leak this description"), "{result}");
@@ -1610,7 +1656,7 @@ mod tests {
             dependency_fingerprint: "deps".to_string(),
         });
 
-        let err = crate::resources::skill::read_skill_resource("skill://host-secret", &ctx)
+        let err = read_skill_resource("skill://host-secret", &ctx)
             .unwrap_err()
             .to_string();
 
@@ -1644,11 +1690,8 @@ mod tests {
             .unwrap(),
         );
 
-        let result = crate::resources::skill::read_skill_resource(
-            "skill://local-guide/references/details.md",
-            &ctx,
-        )
-        .unwrap();
+        let result =
+            read_skill_resource("skill://local-guide/references/details.md", &ctx).unwrap();
 
         assert!(result.contains("# skill://local-guide/references/details.md"));
         assert!(result.contains("Content-Type: text/markdown"));
@@ -1711,10 +1754,9 @@ mod tests {
             .unwrap(),
         );
 
-        let err =
-            crate::resources::skill::read_skill_resource("skill://local-guide/../secret", &ctx)
-                .unwrap_err()
-                .to_string();
+        let err = read_skill_resource("skill://local-guide/../secret", &ctx)
+            .unwrap_err()
+            .to_string();
 
         assert!(err.contains("escapes skill directory"), "{err}");
         let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
@@ -1741,10 +1783,9 @@ mod tests {
             .unwrap(),
         );
 
-        let err =
-            crate::resources::skill::read_skill_resource("skill://local-guide/%2E%2E/secret", &ctx)
-                .unwrap_err()
-                .to_string();
+        let err = read_skill_resource("skill://local-guide/%2E%2E/secret", &ctx)
+            .unwrap_err()
+            .to_string();
 
         assert!(err.contains("escapes skill directory"), "{err}");
         let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
@@ -1771,10 +1812,9 @@ mod tests {
             .unwrap(),
         );
 
-        let err =
-            crate::resources::skill::read_skill_resource("skill://local-guide/%2Ftmp/secret", &ctx)
-                .unwrap_err()
-                .to_string();
+        let err = read_skill_resource("skill://local-guide/%2Ftmp/secret", &ctx)
+            .unwrap_err()
+            .to_string();
 
         assert!(err.contains("must be relative"), "{err}");
         let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
@@ -1783,12 +1823,9 @@ mod tests {
     #[test]
     fn read_skill_subresource_rejects_builtin() {
         let ctx = temp_tool_context("skill-subresource-builtin");
-        let err = crate::resources::skill::read_skill_resource(
-            "skill://debugging/references/foo.md",
-            &ctx,
-        )
-        .unwrap_err()
-        .to_string();
+        let err = read_skill_resource("skill://debugging/references/foo.md", &ctx)
+            .unwrap_err()
+            .to_string();
 
         assert!(err.contains("filesystem-backed skills"), "{err}");
         let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
@@ -1830,10 +1867,9 @@ mod tests {
             dependency_fingerprint: "deps".to_string(),
         });
 
-        let err =
-            crate::resources::skill::read_skill_resource("skill://host-secret/secret.txt", &ctx)
-                .unwrap_err()
-                .to_string();
+        let err = read_skill_resource("skill://host-secret/secret.txt", &ctx)
+            .unwrap_err()
+            .to_string();
 
         assert!(err.contains("host-only"), "{err}");
         let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
@@ -1869,12 +1905,9 @@ mod tests {
             .unwrap(),
         );
 
-        let err = crate::resources::skill::read_skill_resource(
-            "skill://local-guide/references/outside.txt",
-            &ctx,
-        )
-        .unwrap_err()
-        .to_string();
+        let err = read_skill_resource("skill://local-guide/references/outside.txt", &ctx)
+            .unwrap_err()
+            .to_string();
 
         assert!(err.contains("escapes skill directory"), "{err}");
         let _ = fs::remove_dir_all(ctx.home.parent().unwrap());

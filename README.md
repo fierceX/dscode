@@ -23,7 +23,7 @@
 - **嵌入式只读 VFS** — Rust runtime 可为 Read/Glob/Grep 注入数据库后端，并按 resource session 隔离知识库
 - **技能系统** — 按需加载 skill 文件，不污染后续 prompt
 - **注册式资源与能力快照** — `Read` 通过 ResourceRouter 读取 artifact/skill/rule/session 资源，prompt 和 SDK 注入共享同一 capability snapshot
-- **自定义提示词** — `--mission` 加载 MISSION.md 文件，替换默认系统提示词，自由定义 agent 目标和行为
+- **自定义提示词** — `--mission` 加载 MISSION.md，覆盖允许的 core section 并追加业务自定义 section
 - **Python SDK** — `mink-agent` pip 包，内置无 TUI 的 `mink-core` 二进制，支持沙箱控制和全参数配置
 - **沙箱防护** — Linux nsjail/bubblewrap（完整文件系统隔离）、macOS sandbox-exec（写入隔离）
 - **CPython WASI 沙箱** — `PythonSandbox` 工具，在 wasmtime + CPython WASI 中执行 Python 代码，WASI 级进程隔离
@@ -115,8 +115,8 @@ Chat Completions 兼容端点的扩展请求参数；`reasoning_effort`、usage 
 对应的 `AgentOptions` builder。非标准协议再使用自定义 `LlmBackend`。
 完整示例见 [custom_llm_backend.rs](crates/mink-core/examples/custom_llm_backend.rs)。
 
-库使用方应优先从 `mink::prelude`、`mink::runtime`、`mink::config`、`mink::sandbox`
-和 `mink::sdk_protocol` 导入类型。其他公开模块目前主要服务于内部 runtime 复用和过渡期测试，不建议作为稳定 API 依赖。
+库使用方应只把 `mink::prelude`、`mink::runtime`、`mink::config`、`mink::sandbox`
+和 `mink::sdk_protocol` 视为稳定入口；其他公开模块不承诺稳定 API。
 
 ---
 
@@ -164,6 +164,7 @@ print(result["status"], result["events_path"])
 | [工具参考](docs/tools.md) | 面向工具协议：内置工具参数、结果通道、资源 URL、审批和构建裁剪 |
 | [架构说明](docs/ARCHITECTURE.md) | 运行时分层、模块职责、资源/能力系统、核心数据流 |
 | [设计文档](docs/DESIGN.md) | 设计哲学、关键不变式、注册式资源、能力快照、运行时和库化边界 |
+| [工具能力与提示词解耦](docs/设计哲学-工具能力与提示词解耦.md) | 工具 surface、语义能力、自由组合和前向求值算法 |
 | [信号系统设计](docs/设计哲学-信号系统.md) | 控制论 + 贝叶斯、冷却机制、信念度展示 |
 | [Agent 开发指南](AGENTS.md) | 面向 AI agent：项目结构、模块索引、开发惯例 |
 

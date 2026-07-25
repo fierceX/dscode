@@ -33,6 +33,7 @@ pub async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRuntime> {
     } = config;
 
     crate::config::validate_runtime_config(&config)?;
+    crate::tools::catalog::validate_tool_config(&crate::context::ToolConfig::from_config(&config))?;
 
     let (sid, session_ref, session_alias) =
         resolve_session(&home, &cwd, session, session_layout).await?;
@@ -200,6 +201,13 @@ mod tests {
         std::env::temp_dir().join(format!("mink-runtime-{name}-{nanos}"))
     }
 
+    fn read_skill_resource(url: &str, ctx: &crate::context::ToolContext) -> anyhow::Result<String> {
+        let selection = crate::resources::split_read_path_selection(url)?;
+        ctx.resource_router
+            .resolve(&selection, ctx)
+            .map(|resource| resource.content)
+    }
+
     #[tokio::test]
     async fn build_runtime_initializes_session_paths() {
         let home = unique_temp_dir("home");
@@ -250,6 +258,23 @@ mod tests {
             .to_string();
 
         assert!(error.contains("context_reserve_tokens"), "{error}");
+        assert!(!home.exists());
+    }
+
+    #[tokio::test]
+    async fn build_runtime_rejects_unknown_tool_before_session_creation() {
+        let home = unique_temp_dir("invalid-tool-home");
+        let cwd = unique_temp_dir("invalid-tool-cwd");
+        let cfg = Config {
+            enabled_tools: Some(vec!["NoSuchTool".into()]),
+            ..Config::default()
+        };
+        let error = build_runtime(AgentRuntimeConfig::from_config(cfg, home.clone(), cwd))
+            .await
+            .err()
+            .expect("unknown tool must fail")
+            .to_string();
+        assert!(error.contains("unknown tool 'NoSuchTool'"), "{error}");
         assert!(!home.exists());
     }
 
@@ -421,9 +446,7 @@ mod tests {
 
         let runtime = build_runtime(runtime_config).await.unwrap();
         let tool_ctx = crate::context::ToolContext::from(&*runtime.ctx);
-        let content =
-            crate::resources::skill::read_skill_resource("skill://runtime-guide", &tool_ctx)
-                .unwrap();
+        let content = read_skill_resource("skill://runtime-guide", &tool_ctx).unwrap();
 
         assert!(content.contains("# skill://runtime-guide"));
         assert!(content.contains("Runtime body"));
@@ -486,9 +509,7 @@ mod tests {
 
         let runtime = build_runtime(runtime_config).await.unwrap();
         let tool_ctx = crate::context::ToolContext::from(&*runtime.ctx);
-        let content =
-            crate::resources::skill::read_skill_resource("skill://company-policy", &tool_ctx)
-                .unwrap();
+        let content = read_skill_resource("skill://company-policy", &tool_ctx).unwrap();
 
         assert!(content.contains("private policy"));
         assert_eq!(runtime.ctx.capability_snapshot.skills.selected.len(), 1);
@@ -594,9 +615,7 @@ mod tests {
 
         let runtime = build_runtime(runtime_config).await.unwrap();
         let tool_ctx = crate::context::ToolContext::from(&*runtime.ctx);
-        let content =
-            crate::resources::skill::read_skill_resource("skill://provider-guide", &tool_ctx)
-                .unwrap();
+        let content = read_skill_resource("skill://provider-guide", &tool_ctx).unwrap();
 
         assert!(content.contains("provider body"));
         assert!(

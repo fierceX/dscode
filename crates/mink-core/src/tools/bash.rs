@@ -191,27 +191,94 @@ impl super::runner::ToolExec for BashTool {
             timeout: Option<u64>,
         }
         let args: Args = serde_json::from_value(input.clone())?;
-        if let Some(reason) = bash_misuse_reason(&args.command) {
-            bail!("Error: {reason}");
+        if let Some(guidance) =
+            bash_misuse_guidance(&args.command, &ctx.tool_surface, &ctx.tool_capabilities)
+        {
+            guidance.validate(&ctx.tool_surface)?;
+            bail!("Error: {}", guidance.content);
         }
         Self::execute_with_context(&args.command, args.timeout, ctx)
     }
 }
 
-fn bash_misuse_reason(command: &str) -> Option<&'static str> {
+fn bash_misuse_guidance(
+    command: &str,
+    surface: &crate::tools::surface::ModelToolSurface,
+    capabilities: &crate::tools::semantic_capabilities::ResolvedToolCapabilities,
+) -> Option<crate::tools::runtime_guidance::RenderedRuntimeGuidance> {
+    use crate::tools::semantic_capabilities::ToolSemanticCapability;
+    let capability = bash_misuse_capability(command)?;
+    let binding = capabilities.binding(capability)?;
+    if binding.primary.tool == "Bash"
+        || !binding
+            .alternatives
+            .iter()
+            .any(|provider| provider.tool == "Bash")
+    {
+        return None;
+    }
+    let primary = binding.primary.tool;
+    let purpose = match capability {
+        ToolSemanticCapability::PathRead => "file reading",
+        ToolSemanticCapability::ContentSearch => "content search",
+        ToolSemanticCapability::PathDiscovery => "file discovery",
+        _ => return None,
+    };
+    let guidance = crate::tools::runtime_guidance::RenderedRuntimeGuidance {
+        content: format!(
+            "Bash command looks like {purpose}. Use {primary}, the active specialized provider, instead."
+        ),
+        referenced_tools: [primary].into_iter().collect(),
+    };
+    guidance.validate(surface).ok()?;
+    Some(guidance)
+}
+
+fn bash_misuse_capability(
+    command: &str,
+) -> Option<crate::tools::semantic_capabilities::ToolSemanticCapability> {
+    use crate::tools::semantic_capabilities::ToolSemanticCapability;
     let trimmed = command.trim();
     if RE_BASH_READ_MISUSE.is_match(trimmed) {
-        return Some(
-            "Bash command looks like file reading. Use Read with an optional line selector instead.",
-        );
+        return Some(ToolSemanticCapability::PathRead);
     }
     if RE_BASH_RG_FILES_MISUSE.is_match(trimmed) || RE_BASH_FIND_MISUSE.is_match(trimmed) {
-        return Some("Bash command looks like file discovery. Use Glob instead.");
+        return Some(ToolSemanticCapability::PathDiscovery);
     }
     if RE_BASH_SEARCH_MISUSE.is_match(trimmed) {
-        return Some("Bash command looks like content search. Use Grep instead.");
+        return Some(ToolSemanticCapability::ContentSearch);
     }
     None
+}
+
+pub(crate) fn is_focused_verification_command(command: &str) -> bool {
+    let trimmed = command.trim();
+    if crate::safety::deny_bash_command_reason(trimmed).is_some()
+        || [";", "&&", "||", "\n", ">", "<", "`", "$(", "&"]
+            .iter()
+            .any(|operator| trimmed.contains(operator))
+    {
+        return false;
+    }
+    let words: Vec<&str> = trimmed.split_ascii_whitespace().collect();
+    match words.as_slice() {
+        ["cargo", action, ..] => matches!(*action, "build" | "check" | "test" | "clippy" | "fmt"),
+        ["git", action, ..] => matches!(*action, "status" | "diff" | "show" | "log"),
+        ["make", action, ..] => {
+            let action = action.to_ascii_lowercase();
+            action.contains("test")
+                || action.contains("check")
+                || action.contains("build")
+                || action.contains("lint")
+        }
+        ["npm" | "pnpm" | "yarn", "test", ..] => true,
+        ["npm" | "pnpm" | "yarn", "run", action, ..] => {
+            matches!(*action, "test" | "check" | "build" | "lint")
+        }
+        ["go", "test", ..] => true,
+        ["pytest" | "ruff", ..] => true,
+        _ => false,
+    }
 }
 
 impl BashTool {
@@ -265,28 +332,86 @@ mod tests {
 
     #[test]
     fn misuse_detector_routes_file_reading_to_read() {
-        let reason = bash_misuse_reason("cat src/main.rs").unwrap();
-        assert!(reason.contains("Read"));
+        assert_eq!(
+            bash_misuse_capability("cat src/main.rs"),
+            Some(crate::tools::semantic_capabilities::ToolSemanticCapability::PathRead)
+        );
     }
 
     #[test]
     fn misuse_detector_routes_search_to_grep() {
-        let reason = bash_misuse_reason("rg TODO src").unwrap();
-        assert!(reason.contains("Grep"));
+        assert_eq!(
+            bash_misuse_capability("rg TODO src"),
+            Some(crate::tools::semantic_capabilities::ToolSemanticCapability::ContentSearch)
+        );
     }
 
     #[test]
     fn misuse_detector_routes_discovery_to_glob() {
-        let reason = bash_misuse_reason("find . -name '*.rs'").unwrap();
-        assert!(reason.contains("Glob"));
-        let reason = bash_misuse_reason("rg --files").unwrap();
-        assert!(reason.contains("Glob"));
+        assert_eq!(
+            bash_misuse_capability("find . -name '*.rs'"),
+            Some(crate::tools::semantic_capabilities::ToolSemanticCapability::PathDiscovery)
+        );
+        assert_eq!(
+            bash_misuse_capability("rg --files"),
+            Some(crate::tools::semantic_capabilities::ToolSemanticCapability::PathDiscovery)
+        );
     }
 
     #[test]
     fn misuse_detector_allows_build_commands() {
-        assert!(bash_misuse_reason("cargo test").is_none());
-        assert!(bash_misuse_reason("git status --short").is_none());
+        assert!(bash_misuse_capability("cargo test").is_none());
+        assert!(bash_misuse_capability("git status --short").is_none());
+        assert!(is_focused_verification_command("cargo test"));
+        assert!(is_focused_verification_command("git status --short"));
+        assert!(!is_focused_verification_command("cargo test; rm file"));
+        assert!(!is_focused_verification_command("cargo test > out"));
+    }
+
+    fn routing_state(
+        names: &[&str],
+    ) -> (
+        crate::tools::surface::ModelToolSurface,
+        crate::tools::semantic_capabilities::ResolvedToolCapabilities,
+    ) {
+        let mut config = crate::context::ToolConfig::from_config(&crate::config::Config::default());
+        config.enabled_tools = Some(names.iter().map(|name| (*name).to_string()).collect());
+        let resolution = crate::tools::surface::ToolResolutionContext::from_runtime(
+            crate::tools::surface::AgentRole::Primary,
+            &config,
+            false,
+        );
+        let surface = crate::tools::surface::ModelToolSurface::resolve(
+            crate::tools::catalog::ToolCatalog::builtin().unwrap(),
+            &config,
+            &resolution,
+        )
+        .unwrap();
+        let capabilities = crate::tools::semantic_capabilities::ToolCapabilityRegistry::builtin()
+            .resolve(&surface, &resolution)
+            .unwrap();
+        (surface, capabilities)
+    }
+
+    #[test]
+    fn misuse_guidance_follows_resolved_provider_matrix() {
+        let (bash, bash_caps) = routing_state(&["Bash"]);
+        assert!(bash_misuse_guidance("cat file", &bash, &bash_caps).is_none());
+        assert!(bash_misuse_guidance("rg term", &bash, &bash_caps).is_none());
+        assert!(bash_misuse_guidance("find .", &bash, &bash_caps).is_none());
+
+        let (read, read_caps) = routing_state(&["Bash", "Read"]);
+        let guidance = bash_misuse_guidance("cat file", &read, &read_caps).unwrap();
+        assert_eq!(guidance.referenced_tools, ["Read"].into_iter().collect());
+        assert!(bash_misuse_guidance("rg term", &read, &read_caps).is_none());
+
+        let (grep, grep_caps) = routing_state(&["Bash", "Grep"]);
+        assert!(bash_misuse_guidance("rg term", &grep, &grep_caps).is_some());
+        assert!(bash_misuse_guidance("cat file", &grep, &grep_caps).is_none());
+
+        let (glob, glob_caps) = routing_state(&["Bash", "Glob"]);
+        assert!(bash_misuse_guidance("find .", &glob, &glob_caps).is_some());
+        assert!(bash_misuse_guidance("cat file", &glob, &glob_caps).is_none());
     }
 
     #[test]

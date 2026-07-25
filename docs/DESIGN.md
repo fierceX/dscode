@@ -258,20 +258,6 @@ transcript：用户和 assistant text 保留，thinking 删除，工具参数限
 overflow，并且本轮尚未压缩，则执行一次相同的 LLM 压缩并重试一次；第二次失败直接返回重试请求的错误，
 不循环恢复。
 
-### 已知限制
-
-- `session://current/history` 会省略 thinking，并把工具结果缩减为状态和行数；仅存在于工具输出中的
-  细节无法从该 transcript 召回，必须直接读取原始 `conversation.jsonl` 或相关 artifact。
-- 最小收益检查只计算被折叠活跃消息的规模，没有把新摘要及被替换旧摘要计入净收益，因此不能保证
-  压缩后的活跃投影一定缩小或满足主请求预算。
-- runtime 组合校验尚未保证摘要输入至少容纳固定 prompt 和最小消息。极端的
-  `context_compact_max_output_tokens` 配置可能通过启动校验，却在首次摘要请求前必然失败。
-- Rust `AgentOptions` 对百分比和 token 参数执行静默钳制，调用方的无效值不会进入统一校验并得到明确错误。
-- provider overflow 分类包含宽泛的 `too many tokens` 文本，可能把 token 速率限制误判为上下文溢出，
-  从而触发无意义压缩和重试。
-- `PlanConfirm` / `PlanClear` 的压缩与文件写入错误，以及 `AgentRuntime::compact()` 的执行结果，无法
-  完整传播给调用方；命令确认协议尚未统一承载副作用执行结果。
-
 ---
 
 ## 主题四：维修流水线
@@ -451,19 +437,24 @@ Phase 4: stop = "tool_use"
 
 不在系统 prompt 中注入（保护前缀缓存），也不追加到用户输入末尾。而是作为一条独立的 User 消息（含 `[System note: ...]`）写入对话存储，LLM 在下一轮调用时自然看到。
 
-**注入内容包含具体可靠性信号**：LLM 收到进入 `SIGNAL_RECOVERY` 的短控制消息和最近信号：
+**注入内容包含具体可靠性信号**：`DecisionEngine` 只返回结构化
+`RecoveryDirective`；`RecoveryPolicy` 再根据当前 capability bindings 生成短控制消息和最近信号。
+消息只列当前 surface 中可执行、且满足检查 scope 的 primary providers：
 
 ```
-[System note: belief 0.37 indicates repeated tool failure. Enter SIGNAL_RECOVERY mode as defined in the system instructions before any further repair momentum. Your next tool call must inspect current state with Read, Grep, Glob, or a focused Bash verification/state command; do not start with Edit or Write.
+[System note: belief 0.37 indicates repeated tool failure. Enter SIGNAL_RECOVERY mode. Your next tool call must be a current-state inspection using one of these active providers: <resolved providers>.
 Recent reliability signals:
-- Bash(cargo build): process exited with code 1
-- Bash(cargo build): Rust compilation error (error[E0308])
-- Grep(pattern="xxx"): No such file]
+- process exited with code 1
+- Rust compilation error (error[E0308])]
 ```
 
 **信念度感知**：默认情况下系统提示词包含 `<belief-awareness>` 区块，提前告知模型存在信念度机制、注入触发条件和 `SIGNAL_RECOVERY` 协议。模型在被注入时能理解上下文，按指引先读后写，而不是继续盲目操作。区块位于 `<execution-codes>` 之后，纯英文。设置 `MINK_SIGNAL_MODE=off` 时，该区块不会出现在系统提示词中，信号采集、注入、Abort 和恢复守卫也不会运行。
 
-**恢复首步守卫**：注入后，下一轮首个工具调用如果是 `Edit` 或 `Write`，`TurnExecutor` 会拒绝执行并返回 `SignalRecoveryGuard` 结果，要求先使用 `Read`、`Grep`、`Glob` 或聚焦的 `Bash` 检查当前状态。该守卫只约束注入后的第一步，避免模型忽略信号后继续盲改。
+**恢复首步守卫**：注入后，下一轮首个工具调用必须通过同一 capability policy 的参数级
+scope classifier。只有已登记的读取、搜索、发现、资源/Web 检查或聚焦 verification 命令可通过。
+这套资格判定只决定能否解除 Recovery 首步守卫，不替代普通 Bash 的危险命令检查和误用拦截。
+若 surface 没有检查能力，守卫保持 pending 并阻止所有工具调用，模型只能报告限制并结束当前
+turn。
 
 ### 错误分类
 
@@ -648,6 +639,11 @@ CapabilitySnapshot
 5. context files 和 rules 作为 capability snapshot 的组成部分进入 prompt、resource 读取和 prefix fingerprint；`rule://` 是 rules 的按需读取入口。
 
 项目保持显式模块边界，而不是用一个泛型 `CapabilityProvider<T>` 覆盖所有能力类型。skills、rules、context files 的去重、exposure 和 prompt 消费方式并不完全相同，显式模块能更清楚地表达各自约束。
+
+Skill 必须区分“显式选择的正文”和“按需子资源访问”。selected skill 的 SKILL.md 正文由
+`SkillSnapshot.selected` 直接进入 prompt，不依赖读取工具；skill index 和
+`skill://<name>/<relative-path>` 则由已解析的 `ResourceRead` binding 提供。当前内置
+provider 是 `Read`，但 Skill scheme 的协议和内容解析属于 `ResourceRouter` handler。
 
 设计不变式：
 
@@ -884,7 +880,7 @@ pub async fn new(parent_ctx, session_id, fork) -> Result<Self> {
 
 **Fork 模式**：在构建子 runtime 之前递归克隆父 session 目录，跳过父 session 已有的
 `subagents/`。克隆后清除 `session.json`、`events.jsonl`、`stats.json` 和 `usage.jsonl`，
-使子代理拥有新的身份与用量统计；conversation、context state、plan、artifacts 以及未来新增的
+使子代理拥有新的身份与用量统计；conversation、context state、plan、artifacts 及同目录
 session 状态会整体继承。压缩引擎在正常初始化时直接加载克隆后的状态。ArtifactManager 同样从
 克隆后的 index 恢复下一个序号，并以独占创建方式写入，
 因此子代理继续产生 artifact 时不会覆盖父历史中的正文或破坏已有 `artifact://` 引用。
@@ -1053,28 +1049,37 @@ enabled/disabled 和 approval 检查发生在 `ToolRunner::execute_all()` 中，
 
 ## 主题十二：系统提示词构建
 
-`prompt.rs` 的 `Builder::build_system_prompt()` 按固定顺序组装系统提示词段：
+`prompt.rs` 协调 `PromptDocument`，但不再拥有具体工具清单。提示词按所有权分层：
 
 ```
-<agent-identity>          ← 你是谁（中/英根据 locale）
-<environment>             ← 当前工作目录、shell、平台
-<rules>                   ← 行为规则
-<execution-codes>         ← 因果验证、验证门控、停止条件
-<belief-awareness>        ← 信号系统协议、常见错误对照表
-<tool-usage>              ← 工具优先级、Read 用法、锚定编辑协议
-<sub-agent-guidance>      ← 子代理使用指引
-<todo-guidance>           ← Todo 操作指引
-<plan-lifecycle-guidance> ← Plan 生命周期
-<instruction-files>       ← AGENTS.md / CLAUDE.md
-<rule-index>              ← 可用 rule 列表
-<skill-index>             ← 可用 skill 列表
-<selected-skills>         ← 已选择的 skill 内容
-<current-plan>            ← plan.md（如果有）
-<output-language>         ← 输出语言要求
+Core sections                 ← 通用行为，不含具体工具名
+MISSION core overrides        ← 仅允许覆盖 allowlist core，标记 ExternalOverride
+Tool prompt fragments         ← 仅随对应 active tool 加载
+Capability workflow packs     ← 由正向事实求值并从 provider bindings 渲染
+Rules/instruction/skills      ← 外部内容，不纳入生成内容工具引用保证
+Current plan                  ← session state
+Output language               ← core
 ```
 
-每个段都是可选的（空内容跳过）。压缩摘要位于动态消息投影中，不进入 system prompt，
-因此压缩不会改变 immutable system/tools prefix。
+跨工具规则依赖 `ToolSemanticCapability`，不枚举工具 pair。专用 provider 按 tier、priority、
+catalog order 和名称稳定决胜；fallback 只填补未绑定能力。workflow 只使用正向事实，并在互斥
+winner 决定后提交上游 workflow fact。所有生成 section 都携带 `referenced_tools` 和
+`consumed_facts`，装配时校验其属于当前 surface/事实闭包。
+
+MISSION 不再支持旧 section alias。它只能覆盖 allowlist 中当前存在的 core：
+`agent-identity`、`environment`、`execution-codes`、`belief-awareness` 和
+`output-language`。tool/workflow、`runtime-capabilities`、`rules`、instruction files、
+rule/skill index、selected skills 和 current plan 等 runtime-owned section 均不可覆盖；
+冲突直接 fail fast。其他一级标题作为 `mission:<id>` 外部 section 追加，例如自定义规则使用
+`# mission-rules`，不能使用 reserved 的 `# rules`。压缩摘要仍位于动态消息投影中，不进入
+immutable system/tools prefix。
+
+`belief-awareness` 仅在 signal mode 为 `full` 时存在；signal mode 为 `off` 时不能通过
+MISSION 创建该 core section。依赖项目直接迁移到新 section 格式，不保留 alias 或双格式
+兼容路径。
+
+完整的 surface 解析、语义能力、工具自由组合和受约束前向求值算法见
+[工具能力与提示词解耦设计文档](设计哲学-工具能力与提示词解耦.md)。
 
 ---
 

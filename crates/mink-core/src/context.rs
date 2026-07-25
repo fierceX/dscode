@@ -10,7 +10,9 @@ use crate::session::prefix::ImmutablePrefix;
 use crate::session::stats::StatsTracker;
 use crate::session::store::ConversationStore;
 use crate::session::usage::{UsageJournal, UsageKind, UsageScope};
+use crate::tools::semantic_capabilities::ResolvedToolCapabilities;
 use crate::tools::snapshot::FileSnapshotStore;
+use crate::tools::surface::{AgentRole, ModelToolSurface, ToolResolutionContext};
 use crate::tools::vfs::{ReadOnlyFileSystem, VfsScope};
 use crate::ui::{Display, SubAgentStreamSink};
 use serde_json::Value;
@@ -72,20 +74,36 @@ impl ToolConfig {
         }
         true
     }
+}
 
-    /// Filter tool JSON definitions by combining disable flags and enabled whitelist.
-    pub fn filter_tools_json(&self, tools: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
-        tools
-            .into_iter()
-            .filter(|tool| {
-                let name = match tool.get("name").and_then(|v| v.as_str()) {
-                    Some(n) => n,
-                    None => return false,
-                };
-                self.is_tool_enabled(name)
-            })
-            .collect()
-    }
+pub(crate) fn resolve_tool_runtime(
+    config: &ToolConfig,
+    is_sub_agent: bool,
+    read_only_fs_present: bool,
+) -> anyhow::Result<(
+    ToolResolutionContext,
+    Arc<ModelToolSurface>,
+    Arc<ResolvedToolCapabilities>,
+)> {
+    let resolution = ToolResolutionContext::from_runtime(
+        if is_sub_agent {
+            AgentRole::SubAgent
+        } else {
+            AgentRole::Primary
+        },
+        config,
+        read_only_fs_present,
+    );
+    let surface = Arc::new(crate::tools::surface::ModelToolSurface::resolve(
+        crate::tools::catalog::ToolCatalog::builtin()?,
+        config,
+        &resolution,
+    )?);
+    let capabilities = Arc::new(
+        crate::tools::semantic_capabilities::ToolCapabilityRegistry::builtin()
+            .resolve(&surface, &resolution)?,
+    );
+    Ok((resolution, surface, capabilities))
 }
 
 /// ToolContext — 工具层只需要这些字段，不依赖 LLM、cancel、compaction 等。
@@ -103,6 +121,9 @@ pub struct ToolContext {
     pub vfs_scope: VfsScope,
     pub resource_router: Arc<ResourceRouter>,
     pub capability_snapshot: Arc<CapabilitySnapshot>,
+    pub tool_resolution_context: ToolResolutionContext,
+    pub tool_surface: Arc<ModelToolSurface>,
+    pub tool_capabilities: Arc<ResolvedToolCapabilities>,
 }
 
 impl From<&AgentSharedContext> for ToolContext {
@@ -119,6 +140,9 @@ impl From<&AgentSharedContext> for ToolContext {
             vfs_scope: ctx.vfs_scope.clone(),
             resource_router: ctx.resource_router.clone(),
             capability_snapshot: ctx.capability_snapshot.clone(),
+            tool_resolution_context: ctx.tool_resolution_context,
+            tool_surface: ctx.tool_surface.clone(),
+            tool_capabilities: ctx.tool_capabilities.clone(),
         }
     }
 }
@@ -146,6 +170,9 @@ pub struct AgentSharedContext {
     pub resource_router: Arc<ResourceRouter>,
     pub capability_snapshot: Arc<CapabilitySnapshot>,
     pub tool_config: ToolConfig,
+    pub tool_resolution_context: ToolResolutionContext,
+    pub tool_surface: Arc<ModelToolSurface>,
+    pub tool_capabilities: Arc<ResolvedToolCapabilities>,
     pub events_path: PathBuf,
     pub summary_path: PathBuf,
     pub plan_path: PathBuf,
@@ -273,109 +300,5 @@ fn should_flush_stream_event(value: &Value) -> bool {
         true
     } else {
         false
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    fn tool_names(tools: &[serde_json::Value]) -> Vec<&str> {
-        tools
-            .iter()
-            .filter_map(|tool| tool.get("name").and_then(|name| name.as_str()))
-            .collect()
-    }
-
-    fn sample_tools() -> Vec<serde_json::Value> {
-        vec![
-            json!({"name": "Read"}),
-            json!({"name": "Bash"}),
-            json!({"name": "Python"}),
-            json!({"name": "WebSearch"}),
-            json!({"name": "WebFetch"}),
-            json!({"name": "SubAgent"}),
-            json!({"name": "PythonSandbox"}),
-        ]
-    }
-
-    fn tool_config() -> ToolConfig {
-        ToolConfig::from_config(&Config::default())
-    }
-
-    #[test]
-    fn filter_tools_json_applies_disable_flags() {
-        let mut cfg = tool_config();
-        cfg.tool_disable.disable_bash = true;
-        cfg.tool_disable.disable_web = true;
-        cfg.tool_disable.disable_sub_agent = true;
-
-        let filtered = cfg.filter_tools_json(sample_tools());
-        let names = tool_names(&filtered);
-
-        assert!(names.contains(&"Read"));
-        assert!(!names.contains(&"Bash"));
-        assert!(!names.contains(&"WebSearch"));
-        assert!(!names.contains(&"WebFetch"));
-        assert!(!names.contains(&"SubAgent"));
-    }
-
-    #[test]
-    fn filter_tools_json_applies_enabled_whitelist() {
-        let mut cfg = tool_config();
-        cfg.enabled_tools = Some(vec!["Read".into(), "Bash".into()]);
-
-        let filtered = cfg.filter_tools_json(sample_tools());
-        let names = tool_names(&filtered);
-
-        assert_eq!(names, vec!["Read", "Bash"]);
-    }
-
-    #[test]
-    fn filter_tools_json_disable_wins_over_whitelist() {
-        let mut cfg = tool_config();
-        cfg.enabled_tools = Some(vec!["Read".into(), "Bash".into()]);
-        cfg.tool_disable.disable_bash = true;
-
-        let filtered = cfg.filter_tools_json(sample_tools());
-        let names = tool_names(&filtered);
-
-        assert_eq!(names, vec!["Read"]);
-    }
-
-    #[test]
-    fn is_tool_enabled_matches_filtering_rules() {
-        let mut cfg = tool_config();
-        cfg.enabled_tools = Some(vec!["Read".into(), "Bash".into()]);
-
-        assert!(cfg.is_tool_enabled("Read"));
-        assert!(cfg.is_tool_enabled("Bash"));
-        assert!(!cfg.is_tool_enabled("Write"));
-
-        cfg.tool_disable.disable_bash = true;
-        assert!(!cfg.is_tool_enabled("Bash"));
-    }
-
-    #[test]
-    fn python_sandbox_default_disabled() {
-        let cfg = tool_config();
-
-        let filtered = cfg.filter_tools_json(sample_tools());
-        let names = tool_names(&filtered);
-
-        assert!(!names.contains(&"PythonSandbox"));
-    }
-
-    #[test]
-    fn python_sandbox_can_be_enabled_for_tool_filtering() {
-        let mut cfg = tool_config();
-        cfg.tool_disable.disable_python_sandbox = false;
-        cfg.enabled_tools = Some(vec!["PythonSandbox".into()]);
-
-        let filtered = cfg.filter_tools_json(sample_tools());
-        let names = tool_names(&filtered);
-
-        assert_eq!(names, vec!["PythonSandbox"]);
     }
 }
