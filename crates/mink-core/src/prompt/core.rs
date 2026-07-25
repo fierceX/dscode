@@ -139,18 +139,22 @@ pub(super) fn append_external_and_session_sections(
         }
     }
     if !builder.skill_snapshot.selected.is_empty() {
+        let resource_read_available = builder
+            .tool_capabilities
+            .has(crate::tools::semantic_capabilities::ToolSemanticCapability::ResourceRead);
         let content = builder
             .skill_snapshot
             .selected
             .iter()
             .map(|skill| {
+                let mut location = format!("Base directory: {}", skill.info.base_dir);
+                if resource_read_available {
+                    location.push_str(&format!("\nResource base: skill://{}/", skill.info.name));
+                }
                 nested_named(
                     "skill",
                     &skill.info.name,
-                    &format!(
-                        "Base directory: {}\nResource base: skill://{}/\n\n{}",
-                        skill.info.base_dir, skill.info.name, skill.content
-                    ),
+                    &format!("{location}\n\n{}", skill.content),
                 )
             })
             .collect::<Vec<_>>()

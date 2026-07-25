@@ -1,35 +1,62 @@
 # Changelog
 
- ## v0.1.14 (2026-07-16)
- 
- ### Context and sessions
- 
- - 上下文压缩改为非破坏式投影：`conversation.jsonl` 完整追加保留，`context-state.json` 持久化活跃边界和摘要。
- - 压缩统一使用 LLM 摘要，阈值、响应预留、热尾部和摘要输出预算改为显式配置；摘要作为动态消息保持 immutable prefix。
- - 新增可开关的摘要输入降噪：保留用户与 assistant 文本，删除 thinking，压缩工具参数和结果并提取错误证据。
- - Agent JSONL 和 Python SDK 补齐上下文窗口及压缩参数，并在 runtime 启动时校验参数组合。
- - 正常 turn 只缓存活跃历史后缀；压缩提交后裁剪冷历史缓存，恢复时流式解析 JSONL 并只保留活跃消息。
- - Provider context overflow 在无可见输出且本轮尚未压缩时，最多执行一次 LLM 压缩和一次重试。
- - 新增从 `conversation.jsonl` 生成的有损 `session://current/history` transcript，并支持通过 registered-resource `Grep` 定位；thinking 和完整工具输出仍需读取原始 JSONL 或 artifact。
- - SubAgent fork 在 runtime 初始化前克隆完整 session 状态；artifact 从已有索引恢复序号并禁止覆盖继承正文。
- 
- ### Resources
- 
- - `skill://<name>/<relative-path>` 支持读取文件系统技能的子资源文件（如参考文档），路径经过规范化、真实路径检查和遍历防护。
- 
- ### Tools
- 
- - 本地搜索改进：Glob/Grep 在工作区中排除无关目录的行为优化，减少误报和不必要的结果截断。
- - `tool_result_max_bytes` 限制在注册资源搜索中也生效，避免大型 resource 内容溢出。
- 
- ### Refactor
- 
- - 移除过度抽象的 infrastructure trait：`SafetyApprover`、`ContextFileProvider`、`RuleProvider`。
- - 内联小文件：`agent/signal_mode.rs` → `config.rs`，`runtime/llm.rs` → `runtime/mod.rs`。
- - `plan_actions.rs` 保持独立文件。
- - 更新文档中 `agent/signal_mode.rs` 的文件路径引用。
- 
- ## v0.1.13 (2026-07-07)
+## v0.1.15 (2026-07-25)
+
+### Tool capabilities
+
+- 新增 `ToolCatalog` 和 `ModelToolSurface`，统一解析工具 schema、白名单、禁用开关、approval、agent 角色、文件系统后端和编译 feature 可用性。
+- 新增与具体工具名解耦的语义能力模型，支持 provider 优先级、替代 provider、参数级使用范围、硬依赖和受约束的前向求值。
+- 工具组合工作流根据解析后的能力集合确定性加载；不可用工具不再出现在模型 schema、工具提示词或组合工作流中。
+- `ToolRunner` 在真正执行前再次校验 resolved model tool surface，阻止模型或修复流程调用因角色、后端等原因未暴露的工具。
+
+### Prompt architecture
+
+- 将 system prompt 重构为结构化 `PromptDocument`，分离 core、工具片段、能力工作流、外部 instructions、MISSION 覆盖和 session state。
+- 工具说明和组合约束改为按需加载，覆盖 anchored edit、search-then-inspect、Python 路由、专用写入路由、计划、Todo 和 SubAgent。
+- 生成阶段校验 prompt 中的工具引用和工作流依赖，避免提示词引用当前 session 不可调用的工具。
+- MISSION 使用明确的 section contract：只允许覆盖白名单 core section，runtime 保留 section 必须 fail closed，不保留旧格式兼容分支。
+
+### Recovery and skills
+
+- Signal Recovery 根据 resolved capabilities 渲染当前可用的检查 provider，并将 focused verification 与普通 Bash 执行、安全检查及误用拦截解耦。
+- selected skill 正文不再依赖 `Read` 工具；只有解析出 `ResourceRead` 能力时才展示 skill/rule 索引和 `skill://` 子资源提示。
+- 集中 approval 判定和 runtime guidance，清理旧 prompt 拼装逻辑及不再使用的 skill helper。
+
+### Documentation and tests
+
+- 更新架构、设计、使用、工具、信号系统和 agent 文档，新增工具能力、提示词解耦与自由组合的正式设计文档。
+- 新增工具面组合不变式、能力解析、prompt 引用、MISSION 边界、恢复策略、执行门禁和 skill 资源提示测试。
+
+## v0.1.14 (2026-07-16)
+
+### Context and sessions
+
+- 上下文压缩改为非破坏式投影：`conversation.jsonl` 完整追加保留，`context-state.json` 持久化活跃边界和摘要。
+- 压缩统一使用 LLM 摘要，阈值、响应预留、热尾部和摘要输出预算改为显式配置；摘要作为动态消息保持 immutable prefix。
+- 新增可开关的摘要输入降噪：保留用户与 assistant 文本，删除 thinking，压缩工具参数和结果并提取错误证据。
+- Agent JSONL 和 Python SDK 补齐上下文窗口及压缩参数，并在 runtime 启动时校验参数组合。
+- 正常 turn 只缓存活跃历史后缀；压缩提交后裁剪冷历史缓存，恢复时流式解析 JSONL 并只保留活跃消息。
+- Provider context overflow 在无可见输出且本轮尚未压缩时，最多执行一次 LLM 压缩和一次重试。
+- 新增从 `conversation.jsonl` 生成的有损 `session://current/history` transcript，并支持通过 registered-resource `Grep` 定位；thinking 和完整工具输出仍需读取原始 JSONL 或 artifact。
+- SubAgent fork 在 runtime 初始化前克隆完整 session 状态；artifact 从已有索引恢复序号并禁止覆盖继承正文。
+
+### Resources
+
+- `skill://<name>/<relative-path>` 支持读取文件系统技能的子资源文件（如参考文档），路径经过规范化、真实路径检查和遍历防护。
+
+### Tools
+
+- 本地搜索改进：Glob/Grep 在工作区中排除无关目录的行为优化，减少误报和不必要的结果截断。
+- `tool_result_max_bytes` 限制在注册资源搜索中也生效，避免大型 resource 内容溢出。
+
+### Refactor
+
+- 移除过度抽象的 infrastructure trait：`SafetyApprover`、`ContextFileProvider`、`RuleProvider`。
+- 内联小文件：`agent/signal_mode.rs` → `config.rs`，`runtime/llm.rs` → `runtime/mod.rs`。
+- `plan_actions.rs` 保持独立文件。
+- 更新文档中 `agent/signal_mode.rs` 的文件路径引用。
+
+## v0.1.13 (2026-07-07)
 
 ### Features
 

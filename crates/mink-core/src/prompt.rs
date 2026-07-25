@@ -188,6 +188,45 @@ mod tests {
     }
 
     #[test]
+    fn selected_skill_resource_hint_requires_resource_read_capability() {
+        fn selected_skill_builder(names: &[&str]) -> Builder {
+            let mut builder = builder_for(names);
+            builder.skill_snapshot = Arc::new(SkillSnapshot {
+                selected: vec![crate::capabilities::ResolvedSkill {
+                    info: crate::capabilities::SkillInfo {
+                        name: "review".into(),
+                        description: "review code".into(),
+                        source: crate::capabilities::SkillSource::FileSystem,
+                        base_dir: "/skills/review".into(),
+                    },
+                    content: "Review the target carefully.".into(),
+                }],
+                ..SkillSnapshot::default()
+            });
+            builder
+        }
+
+        let without_resource_read = selected_skill_builder(&[]).build_document().unwrap();
+        let selected = without_resource_read
+            .sections()
+            .iter()
+            .find(|section| section.id == "selected-skills")
+            .unwrap();
+        assert!(selected.content.contains("Review the target carefully."));
+        assert!(selected.content.contains("Base directory: /skills/review"));
+        assert!(!selected.content.contains("skill://review/"));
+
+        let with_resource_read = selected_skill_builder(&["Read"]).build_document().unwrap();
+        let selected = with_resource_read
+            .sections()
+            .iter()
+            .find(|section| section.id == "selected-skills")
+            .unwrap();
+        assert!(selected.content.contains("Review the target carefully."));
+        assert!(selected.content.contains("Resource base: skill://review/"));
+    }
+
+    #[test]
     fn mutation_routing_is_loaded_only_for_shell_and_specialized_mutation_tools() {
         let bash_write = builder_for(&["Bash", "Write"]).build_document().unwrap();
         let section = bash_write

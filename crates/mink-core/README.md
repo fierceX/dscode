@@ -38,7 +38,7 @@ Fork 子代理会在 runtime 初始化前克隆父 session 的完整状态。Art
 
 ```toml
 [dependencies]
-mink = { package = "mink-core", version = "0.1.13", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.1.15", default-features = false, features = ["runtime"] }
 ```
 
 ```rust

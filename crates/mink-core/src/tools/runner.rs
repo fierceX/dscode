@@ -123,6 +123,7 @@ enum PreparedCall {
 
 struct ToolPolicyGate<'a> {
     config: &'a ToolConfig,
+    surface: &'a crate::tools::surface::ModelToolSurface,
     storm: &'a Mutex<StormBreaker>,
 }
 
@@ -236,6 +237,7 @@ impl ToolRunner {
         let tool_metadata = self.find_tool(&call.name).map(|tool| tool.metadata());
         let policy = ToolPolicyGate {
             config: &self.ctx.tool_config,
+            surface: &self.ctx.tool_surface,
             storm: &self.storm,
         };
         if let Some(blocked) = policy.evaluate(&call, tool_metadata) {
@@ -278,6 +280,23 @@ impl ToolPolicyGate<'_> {
                 call.name.clone(),
                 call.fields.clone(),
                 denied_message(metadata, reason),
+            ));
+        }
+        if !self.surface.has(&call.name) {
+            let reason = self
+                .surface
+                .hidden()
+                .get(&call.name)
+                .map(|reason| format!(" ({reason:?})"))
+                .unwrap_or_default();
+            return Some(blocked_tool_result(
+                call.id.clone(),
+                call.name.clone(),
+                call.fields.clone(),
+                format!(
+                    "Tool '{}' is unavailable in the resolved model tool surface{reason}.",
+                    call.name
+                ),
             ));
         }
         if metadata.storm_exempt {
@@ -1026,8 +1045,20 @@ mod tests {
         let mut config = approval_test_config(ToolApprovalMode::Yolo, []);
         config.enabled_tools = Some(vec!["Read".into()]);
         let storm = Mutex::new(StormBreaker::new(6, 3));
+        let resolution = crate::tools::surface::ToolResolutionContext::from_runtime(
+            crate::tools::surface::AgentRole::Primary,
+            &config,
+            false,
+        );
+        let surface = crate::tools::surface::ModelToolSurface::resolve(
+            crate::tools::catalog::ToolCatalog::builtin().unwrap(),
+            &config,
+            &resolution,
+        )
+        .unwrap();
         let gate = ToolPolicyGate {
             config: &config,
+            surface: &surface,
             storm: &storm,
         };
         let call = test_call("Bash");
@@ -1049,8 +1080,20 @@ mod tests {
         let mut config = approval_test_config(ToolApprovalMode::Yolo, []);
         config.tool_disable.disable_bash = true;
         let storm = Mutex::new(StormBreaker::new(6, 3));
+        let resolution = crate::tools::surface::ToolResolutionContext::from_runtime(
+            crate::tools::surface::AgentRole::Primary,
+            &config,
+            false,
+        );
+        let surface = crate::tools::surface::ModelToolSurface::resolve(
+            crate::tools::catalog::ToolCatalog::builtin().unwrap(),
+            &config,
+            &resolution,
+        )
+        .unwrap();
         let gate = ToolPolicyGate {
             config: &config,
+            surface: &surface,
             storm: &storm,
         };
         let call = test_call("Bash");
@@ -1065,6 +1108,60 @@ mod tests {
 
         assert_eq!(blocked.tool_name, "Bash");
         assert!(blocked.content.contains("disabled by configuration"));
+    }
+
+    #[test]
+    fn policy_gate_blocks_tools_hidden_by_role_or_backend() {
+        let config = approval_test_config(ToolApprovalMode::Yolo, []);
+        let catalog = crate::tools::catalog::ToolCatalog::builtin().unwrap();
+        let storm = Mutex::new(StormBreaker::new(6, 3));
+
+        let sub_agent_resolution = crate::tools::surface::ToolResolutionContext::from_runtime(
+            crate::tools::surface::AgentRole::SubAgent,
+            &config,
+            false,
+        );
+        let sub_agent_surface = crate::tools::surface::ModelToolSurface::resolve(
+            catalog,
+            &config,
+            &sub_agent_resolution,
+        )
+        .unwrap();
+        let sub_agent_gate = ToolPolicyGate {
+            config: &config,
+            surface: &sub_agent_surface,
+            storm: &storm,
+        };
+        let sub_agent_metadata = tool_registry()
+            .iter()
+            .find(|tool| tool.metadata().name == "SubAgent")
+            .map(|tool| tool.metadata());
+        let blocked = sub_agent_gate
+            .evaluate(&test_call("SubAgent"), sub_agent_metadata)
+            .expect("SubAgent should be blocked outside the sub-agent surface");
+        assert!(blocked.content.contains("UnavailableForRole"));
+
+        let vfs_resolution = crate::tools::surface::ToolResolutionContext::from_runtime(
+            crate::tools::surface::AgentRole::Primary,
+            &config,
+            true,
+        );
+        let vfs_surface =
+            crate::tools::surface::ModelToolSurface::resolve(catalog, &config, &vfs_resolution)
+                .unwrap();
+        let vfs_gate = ToolPolicyGate {
+            config: &config,
+            surface: &vfs_surface,
+            storm: &storm,
+        };
+        let edit_metadata = tool_registry()
+            .iter()
+            .find(|tool| tool.metadata().name == "Edit")
+            .map(|tool| tool.metadata());
+        let blocked = vfs_gate
+            .evaluate(&test_call("Edit"), edit_metadata)
+            .expect("Edit should be blocked outside the VFS surface");
+        assert!(blocked.content.contains("UnavailableForBackend"));
     }
 
     fn test_call(name: &str) -> ToolCallEvent {
