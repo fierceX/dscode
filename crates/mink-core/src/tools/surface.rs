@@ -75,10 +75,20 @@ struct ToolHardDependencySpec {
     requires: &'static [&'static str],
 }
 
-const TOOL_HARD_DEPENDENCIES: &[ToolHardDependencySpec] = &[ToolHardDependencySpec {
-    tool: "Edit",
-    requires: &["Read"],
-}];
+const TOOL_HARD_DEPENDENCIES: &[ToolHardDependencySpec] = &[
+    ToolHardDependencySpec {
+        tool: "Edit",
+        requires: &["Read"],
+    },
+    ToolHardDependencySpec {
+        tool: "TodoWrite",
+        requires: &["TodoRead"],
+    },
+    ToolHardDependencySpec {
+        tool: "TodoAdvance",
+        requires: &["TodoRead"],
+    },
+];
 
 impl ModelToolSurface {
     pub fn resolve(
@@ -309,6 +319,38 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("requires active tool")
+        );
+
+        config.enabled_tools = Some(vec!["TodoRead".into(), "TodoWrite".into()]);
+        let surface = resolve(&config, AgentRole::Primary, false).unwrap();
+        assert!(surface.has_all(&["TodoRead", "TodoWrite"]));
+        assert!(!surface.has("TodoAdvance"));
+        assert!(
+            surface.get("TodoWrite").unwrap().schema["input_schema"]["properties"]["add"]["items"]
+                ["properties"]
+                .get("status")
+                .is_none(),
+            "structure-only TodoWrite must not create an active item"
+        );
+        config.enabled_tools = Some(vec!["TodoWrite".into()]);
+        let error = resolve(&config, AgentRole::Primary, false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("TodoWrite") && error.contains("TodoRead"),
+            "{error}"
+        );
+
+        config.enabled_tools = Some(vec!["TodoRead".into(), "TodoAdvance".into()]);
+        let surface = resolve(&config, AgentRole::Primary, false).unwrap();
+        assert!(surface.has_all(&["TodoRead", "TodoAdvance"]));
+        config.enabled_tools = Some(vec!["TodoAdvance".into()]);
+        let error = resolve(&config, AgentRole::Primary, false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("TodoAdvance") && error.contains("TodoRead"),
+            "{error}"
         );
     }
 

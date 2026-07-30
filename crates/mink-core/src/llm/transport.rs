@@ -142,7 +142,11 @@ fn convert_messages_to_openai(messages: &[Value]) -> Result<Vec<Value>> {
                 continue;
             }
         }
-        result.push(msg.clone());
+        let mut message = msg.clone();
+        if let Some(object) = message.as_object_mut() {
+            object.remove("_mink");
+        }
+        result.push(message);
     }
     // Post-process: strip orphaned tool_calls (no matching tool message)
     let valid_ids = collect_tool_call_ids(&result);
@@ -361,6 +365,23 @@ mod tests {
         // Assistant should still have tool_calls (call_1 is matched)
         let assistant = converted.iter().find(|m| m["role"] == "assistant").unwrap();
         assert!(assistant.get("tool_calls").is_some());
+    }
+
+    #[test]
+    fn internal_todo_metadata_is_not_sent_to_the_provider() {
+        let messages = vec![
+            json!({"role": "user", "content": "start"}),
+            json!({
+                "role": "user",
+                "content": "<todo-sync revision=\"2\">state</todo-sync>",
+                "_mink": {"todo_revision": 2, "todo_state_kind": "sync"},
+            }),
+        ];
+        let converted = convert_messages_to_openai(&messages).unwrap();
+        assert_eq!(converted.len(), 2);
+        assert_eq!(converted[0], messages[0]);
+        assert_eq!(converted[1]["content"], messages[1]["content"]);
+        assert!(converted[1].get("_mink").is_none());
     }
 
     #[test]

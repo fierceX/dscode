@@ -161,15 +161,26 @@ mod tests {
 
     #[test]
     fn tool_and_workflow_sections_are_loaded_on_demand() {
-        let document = builder_for(&["Read", "Grep", "Edit", "Bash", "TodoWrite", "SubAgent"])
-            .build_document()
-            .unwrap();
+        let document = builder_for(&[
+            "Read",
+            "Grep",
+            "Edit",
+            "Bash",
+            "TodoRead",
+            "TodoWrite",
+            "TodoAdvance",
+            "SubAgent",
+        ])
+        .build_document()
+        .unwrap();
         let ids: Vec<_> = document
             .sections()
             .iter()
             .map(|section| section.id.as_str())
             .collect();
-        assert!(ids.contains(&"todo-guidance"));
+        assert!(ids.contains(&"todo-inspection"));
+        assert!(ids.contains(&"todo-structure"));
+        assert!(ids.contains(&"todo-progress"));
         assert!(ids.contains(&"sub-agent-guidance"));
         assert!(ids.contains(&"search-then-inspect"));
         assert!(ids.contains(&"anchored-edit"));
@@ -269,9 +280,59 @@ mod tests {
     }
 
     #[test]
+    fn todo_workflows_match_the_available_capability_combination() {
+        let read_only = builder_for(&["TodoRead"]).build_document().unwrap();
+        assert!(
+            read_only
+                .sections()
+                .iter()
+                .any(|section| section.id == "todo-inspection")
+        );
+        assert!(
+            read_only
+                .sections()
+                .iter()
+                .all(|section| section.id != "todo-structure")
+        );
+        assert!(
+            read_only
+                .sections()
+                .iter()
+                .all(|section| section.id != "todo-progress")
+        );
+
+        let paired = builder_for(&["TodoRead", "TodoWrite"])
+            .build_document()
+            .unwrap();
+        let section = paired
+            .sections()
+            .iter()
+            .find(|section| section.id == "todo-structure")
+            .unwrap();
+        assert!(section.content.contains("base_revision"));
+        assert!(section.content.contains("stable"));
+        assert!(section.content.contains("always start pending"));
+        assert!(section.referenced_tools.contains("TodoRead"));
+        assert!(section.referenced_tools.contains("TodoWrite"));
+        assert!(!section.content.contains("TodoAdvance"));
+
+        let progress = builder_for(&["TodoRead", "TodoAdvance"])
+            .build_document()
+            .unwrap();
+        let section = progress
+            .sections()
+            .iter()
+            .find(|section| section.id == "todo-progress")
+            .unwrap();
+        assert!(section.referenced_tools.contains("TodoRead"));
+        assert!(section.referenced_tools.contains("TodoAdvance"));
+        assert!(!section.content.contains("TodoWrite"));
+    }
+
+    #[test]
     fn mission_cannot_replace_runtime_owned_sections() {
-        let mut builder = builder_for(&["TodoWrite"]);
-        builder.mission_content = Some("# todo-guidance\nreplace".into());
+        let mut builder = builder_for(&["TodoRead", "TodoWrite"]);
+        builder.mission_content = Some("# todo-structure\nreplace".into());
         assert!(
             builder
                 .build_document()

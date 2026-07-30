@@ -12,6 +12,7 @@ mink 是一个 Rust 实现的轻量 AI coding agent，专为 DeepSeek/OpenAI-com
 - 上下文自适应压缩：显式阈值、响应预留、热尾部和摘要预算；可选摘要输入降噪
 - 维修流水线：Scavenge 回收、Truncation 修复、StormBreaker 重复调用抑制
 - Session 持久化：JSONL 追加写入，支持恢复和重放
+- Todo 持久化：session `todos.json` 保存权威完整快照、revision、稳定 ID 和状态；`TodoRead` 按需读取快照，`TodoWrite` 修改结构，`TodoAdvance` 转换进度
 - Artifact 持久化：超长工具输出落到 session `artifacts/`，序号可恢复且禁止覆盖已有正文，可通过 `Read artifact://<id>` 读取
 - 工具元数据与审批策略：每个工具声明 approval tier、结果类型、副作用和 discoverable 状态
 - 轻量资源读取：`Read` 支持本地文件、artifact、skill、rule 和 session introspection URL，并通过 `ResourceRouter` 分发 registered scheme
@@ -125,7 +126,8 @@ TurnExecutor (agent/turn.rs)
 └───────────────────────┘
          │
 ┌─────── 工具层 ────────┐
-│ tools/runner.rs       │ ToolRegistry + ToolMetadata + approval + StormBreaker + artifact spill
+│ tools/runner.rs       │ ToolRegistry + resolved surface gate + StormBreaker + artifact spill
+│ tools/todo.rs         │ TodoRead / TodoWrite / TodoAdvance 与追加式状态事件
 │ tools/metadata.rs     │ approval tier、结果类型、副作用等工具元数据
 │ tools/file.rs         │ Read/Write/Edit + selector/resource/anchored patch
 │ tools/snapshot.rs     │ Read snapshot 和 anchored edit hash 校验
@@ -155,9 +157,13 @@ TurnExecutor (agent/turn.rs)
 │ session/store.rs      │ append-only JSONL、活跃后缀缓存和尾部修复
 │ session/artifacts.rs  │ artifact 索引、持久序号恢复和防覆盖写入
 │ session/stats.rs      │ Token/费用统计
+│ session/usage.rs      │ LLM 请求级 Token 与费用明细
 │ session/compaction.rs │ 显式压缩策略、非破坏式历史投影和 LLM 摘要
 │ session/compaction_input.rs │ 可选摘要输入降噪
 │ session/prefix.rs     │ ImmutablePrefix 缓存
+│ session/plan.rs       │ PlanStore 与当前计划动态投影
+│ session/todo.rs       │ TodoStore、稳定 ID、原子持久化和追加式物化投影
+│ session/atomic_file.rs│ Plan/Todo 共用的同目录原子替换
 │ session/init.rs       │ Session 初始化
 └───────────────────────┘
          │
@@ -196,9 +202,8 @@ OrchActor.handle_user_input()
 │ 3. Scavenge 回收遗漏工具调用                         │
 │ 4. 持久化 assistant 消息                             │
 │ 5. ToolRunner::execute_all                           │
-│    ├── ToolMetadata approval check                    │
+│    ├── resolved ModelToolSurface gate                 │
 │    ├── StormBreaker                                  │
-│    ├── Truncation repair                             │
 │    ├── ToolExec dispatch                             │
 │    └── format_tool_result / noise filter / artifact  │
 │ 6. 持久化 tool results 到 ConversationStore           │
@@ -289,9 +294,12 @@ DecisionEngine.decide()
 |------|------|
 | `tools/metadata.rs` | ToolMetadata、ApprovalTier、ToolResultKind |
 | `tools/catalog.rs` | schema、executor registry 和 build availability 的统一目录 |
-| `tools/surface.rs` | 模型可见工具面解析 |
+| `tools/surface.rs` | 按工具选择、approval、角色、后端、feature 和硬依赖解析模型可见工具面 |
+| `tools/approval.rs` | 构建模型工具面时使用的非交互审批判定 |
 | `tools/semantic_capabilities.rs` | 语义能力 offer、provider binding 和参数级 scope classifier |
-| `tools/runner.rs` | ToolExec registry、approval、批量分发、结果格式化、artifact spill、TodoWrite/Plan/SubAgent tools |
+| `tools/runtime_guidance.rs` | 带结构化工具引用的运行时引导消息 |
+| `tools/runner.rs` | ToolExec registry、resolved surface gate、批量分发、结果格式化、artifact spill、SubAgent tool |
+| `tools/todo.rs` | `TodoRead` / `TodoWrite` / `TodoAdvance`，revision 校验、增量事件和物化投影 |
 | `tools/file.rs` | Read/Write/Edit、path selector、resource URL、anchored patch |
 | `tools/snapshot.rs` | FileSnapshotStore、hashline 轻量校验 |
 | `tools/search.rs` | Glob/Grep |
@@ -299,7 +307,6 @@ DecisionEngine.decide()
 | `tools/bash.rs` | Bash、危险命令检查、误用拦截 |
 | `tools/python.rs` | Python |
 | `tools/plan.rs` | PlanDraft / PlanConfirm / PlanClear |
-| `session/plan.rs` | PlanStore 与原子计划状态转换 |
 
 ### Read / Edit 协议
 
@@ -355,10 +362,15 @@ Anchored patch 只修改 snapshot 覆盖且未漂移的行。tag 缺失、行 ha
 |------|------|
 | `session/store.rs` | ConversationStore append-only JSONL、活跃后缀缓存、流式后缀读取和尾部修复 |
 | `session/artifacts.rs` | ArtifactManager、artifact index、持久序号恢复和完整工具输出防覆盖落盘 |
+| `session/metadata.rs` | session identity、alias、title 和时间戳元数据 |
 | `session/stats.rs` | token 和费用统计 |
+| `session/usage.rs` | LLM 请求级 Token 与费用明细 journal |
 | `session/compaction.rs` | 显式压缩策略、非破坏式历史投影和 LLM 摘要 |
 | `session/compaction_input.rs` | 可选摘要输入降噪：删除 thinking、压缩工具参数和结果 |
 | `session/prefix.rs` | ImmutablePrefix |
+| `session/plan.rs` | PlanStore、原子计划状态转换和当前计划动态投影 |
+| `session/todo.rs` | session `todos.json` 的原子存储、revision 对账和追加式物化投影 |
+| `session/atomic_file.rs` | Plan/Todo 状态文件共用的同目录临时文件和原子替换 |
 | `session/paths.rs` | session 路径 |
 | `session/init.rs` | session 初始化 |
 | `protocol.rs` | LLM stream Event 类型 |
@@ -380,6 +392,12 @@ Anchored patch 只修改 snapshot 覆盖且未漂移的行。tag 缺失、行 ha
 - 压缩状态提交成功后必须按新的 `active_start` 裁剪 ConversationStore 缓存；模型请求只能通过 `active_messages()` 读取活跃投影
 - 投影边界必须位于完整历史内，且不能拆开 tool call/result 协议
 - 所有压缩统一调用 LLM 摘要；摘要始终作为动态消息，不修改 immutable system/tools prefix
+- todo 权威完整快照保存在 session `todos.json`；TodoWrite / TodoAdvance 成功后在 conversation 尾部追加增量事件和 `<current-todos>` 物化投影，不做逐请求前置投影
+- `TodoWrite` 和 `TodoAdvance` 各自依赖 `TodoRead`；调用使用最高可见 revision 和稳定 ID，stale revision 必须失败后重读
+- `TodoWrite` 只新增 pending 条目、删除条目或替换正文，`TodoAdvance` 只执行 pending / in_progress / completed 合法转换；两者都必须原子提交
+- session 恢复或压缩后若 `todos.json` revision 领先活跃历史，只追加一次 TodoSync；历史 revision 领先文件时 fail closed
+- 同一 active batch 可有多个 `in_progress` 项；结束前提醒最多注入一次，不强制逐项串行执行
+- 一个 session 的 `TodoStore` 由单个 runtime 持有；不支持跨进程并发写或外部热编辑 `todos.json`
 - 压缩请求使用当前 turn/编排器传入的活动真实模型名和别名，并复用 runtime 的共享 `LlmBackend`
 - `TurnExecutor` 启动子代理时传入包含当前活动模型的 child config，子代理复用父 runtime 的 `LlmBackend`
 - `context_compact_input_reduction=true` 时只精简摘要请求，不能改写完整历史或热尾部
@@ -395,11 +413,11 @@ Anchored patch 只修改 snapshot 覆盖且未漂移的行。tag 缺失、行 ha
 - `BeliefTracker` 每个新用户输入 reset，初始信念为 0.75
 - `DecisionEngine` 每个新用户输入 reset cooldown
 - Recovery 首步资格来自 resolved semantic capabilities；Bash 的 `FocusedVerificationExec` classifier 与普通 Bash 安全/误用策略相互独立
-- `ToolRunner::execute_all()` 在 StormBreaker 前执行 approval 检查
+- approval 在构建 `ModelToolSurface` 时解析；`ToolRunner::execute_all()` 在 StormBreaker 前校验调用属于同一个 resolved surface
 - `ToolRunner::execute_all()` 只并发连续只读工具；写入、执行、控制和 SubAgent 工具必须按调用顺序串行执行
 - `enabled_tools` 是唯一工具启用输入；`None` 使用 catalog 默认集合，空列表禁用全部，显式列表精确选择
 - `PythonSandbox` 是 catalog explicit-only 工具，只有 `enabled_tools` 显式列出时进入 surface
-- 工具真实执行只接受 `ModelToolSurface` 中的工具，不再重复解释 disable flag 或 sandbox 工具策略
+- 工具真实执行只接受 `ModelToolSurface` 中的工具；disable flag 和 sandbox 工具策略不属于运行时合同
 - PlanDraft/PlanConfirm/PlanClear 必须通过类型化 `PlanCommand` 和 `PlanStore` 完成；文件错误必须返回模型，禁止空成功
 - 已确认计划存在时禁止创建新草稿；PlanClear 必须同时清理可能遗留的陈旧草稿
 - 已确认计划必须在每次 LLM 请求时作为唯一的动态 `<current-plan>` system message 投影；不得写入 conversation、压缩摘要或 immutable prefix
@@ -424,9 +442,9 @@ Anchored patch 只修改 snapshot 覆盖且未漂移的行。tag 缺失、行 ha
 
 ## 新增工具步骤
 
-1. 在 `tools/*.rs` 中实现 `ToolExec` 或辅助函数。
-2. 在 `tools/runner.rs` 的 `TOOL_REGISTRY` 中注册工具。
-3. 在 `src/assets/tools.json` 中添加 schema。
+1. 在 `crates/mink-core/src/tools/*.rs` 中实现 `ToolExec` 或辅助函数。
+2. 在 `crates/mink-core/src/tools/runner.rs` 的 `TOOL_REGISTRY` 中注册工具。
+3. 在 `crates/mink-core/src/assets/tools.json` 中添加 schema。
 4. 在 `metadata()` 中声明 `ApprovalTier`、`ToolResultKind`、副作用、discoverable/internal/storm_exempt 等属性。
 5. 如果工具需要压缩给 LLM 的内容，设置 `ToolOutcome.conversation_content`。
 6. 添加单元测试，包括 schema/registry 一致性、approval、错误路径、截断、artifact、信号和安全边界。

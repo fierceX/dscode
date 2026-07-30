@@ -51,6 +51,9 @@ pub struct TurnExecutor {
     recovery_policy: crate::agent::recovery_policy::RecoveryPolicy,
     /// Set after a signal injection. The next tool batch must observe before mutating.
     signal_recovery_guard: bool,
+    todo_final_reminder_sent: bool,
+    todo_progress_reminder_sent: bool,
+    successful_work_calls_since_todo_advance: u32,
 }
 
 /// Represents the outcome of a turn that needs to be actioned.
@@ -104,6 +107,9 @@ impl TurnExecutor {
                     .expect("built-in tool catalog was validated during context construction"),
             ),
             signal_recovery_guard: false,
+            todo_final_reminder_sent: false,
+            todo_progress_reminder_sent: false,
+            successful_work_calls_since_todo_advance: 0,
         }
     }
 
@@ -133,6 +139,30 @@ impl TurnExecutor {
         crate::session::plan::project_current_plan(&self.ctx.plan_path, messages)
     }
 
+    async fn reconcile_todo_state(&self, messages: &mut Vec<serde_json::Value>) -> Result<bool> {
+        let Some(read_provider) = self.ctx.todo_read_provider() else {
+            return Ok(false);
+        };
+        let visible = crate::session::todo::visible_revision(messages)?;
+        let snapshot = self.ctx.todo_store.snapshot();
+        if visible > snapshot.revision {
+            anyhow::bail!(
+                "todo conversation revision {visible} is newer than persisted revision {}; refusing to continue",
+                snapshot.revision
+            );
+        }
+        if visible == snapshot.revision {
+            return Ok(false);
+        }
+        let message = crate::session::todo::sync_message(&snapshot, read_provider);
+        self.ctx
+            .store
+            .append_runtime_message(message.clone())
+            .await?;
+        messages.push(message);
+        Ok(true)
+    }
+
     /// 通过 turn 级统一守卫尝试上下文压缩。成功时更新 messages/system_prompt/tools_json。
     /// 返回 true 表示进行了压缩。
     async fn try_compact(
@@ -142,7 +172,8 @@ impl TurnExecutor {
         system_prompt: &mut String,
         tools_json: &mut Vec<serde_json::Value>,
     ) -> Result<bool> {
-        self.compactor
+        let compacted = self
+            .compactor
             .maybe_compact(
                 trigger,
                 messages,
@@ -151,7 +182,11 @@ impl TurnExecutor {
                 &self.prefix,
                 self.llm.model_target(),
             )
-            .await
+            .await?;
+        if compacted {
+            self.reconcile_todo_state(messages).await?;
+        }
+        Ok(compacted)
     }
 
     /// Phase 1: 发送 LLM 请求并流式读取响应，返回 `StreamOutput`。
@@ -491,10 +526,13 @@ impl TurnExecutor {
                 tool_args: r.tool_args.clone(),
                 content: r.content.clone(),
                 conv_content: r.conv_content.clone(),
+                state_metadata: r.state_metadata.clone(),
             })
             .collect();
 
         self.ctx.store.add_tool_results(&tool_results).await?;
+        self.observe_todo_progress(&processed_results);
+        self.maybe_append_todo_progress_reminder().await?;
 
         for r in &processed_results {
             let preview = if r.tool_name == "Edit" {
@@ -521,6 +559,52 @@ impl TurnExecutor {
                 });
         }
         Ok(plan_compaction_trigger)
+    }
+
+    fn observe_todo_progress(&mut self, results: &[crate::tools::runner::ToolRunResult]) {
+        for result in results {
+            if result.content.starts_with("Error:") {
+                continue;
+            }
+            if result.tool_name == "TodoAdvance" {
+                self.successful_work_calls_since_todo_advance = 0;
+                continue;
+            }
+            if matches!(
+                result.tool_name.as_str(),
+                "Bash" | "Python" | "PythonSandbox" | "Write" | "Edit" | "TodoWrite" | "SubAgent"
+            ) {
+                self.successful_work_calls_since_todo_advance = self
+                    .successful_work_calls_since_todo_advance
+                    .saturating_add(1);
+            }
+        }
+    }
+
+    async fn maybe_append_todo_progress_reminder(&mut self) -> Result<()> {
+        if self.todo_progress_reminder_sent
+            || self.successful_work_calls_since_todo_advance < 8
+            || !self
+                .ctx
+                .todo_store
+                .snapshot()
+                .items
+                .iter()
+                .any(|item| item.status == crate::session::todo::TodoStatus::InProgress)
+        {
+            return Ok(());
+        }
+        let Some(provider) = self.ctx.todo_advance_provider() else {
+            return Ok(());
+        };
+        self.ctx
+            .store
+            .add_user(&format!(
+                "<todo-progress-reminder>Active todo work has continued across several successful operations without a progress transition. Reassess the active batch and call {provider} if any item should be completed, paused, or otherwise advanced.</todo-progress-reminder>"
+            ))
+            .await?;
+        self.todo_progress_reminder_sent = true;
+        Ok(())
     }
 
     fn apply_signal_recovery_guard(
@@ -596,7 +680,26 @@ impl TurnExecutor {
                 }
                 Ok(None) // 继续循环
             }
-            "end_turn" | "stop" => {
+            "end_turn" | "stop" | "done" => {
+                if !self.todo_final_reminder_sent
+                    && self
+                        .ctx
+                        .todo_store
+                        .snapshot()
+                        .items
+                        .iter()
+                        .any(|item| item.status == crate::session::todo::TodoStatus::InProgress)
+                    && let Some(provider) = self.ctx.todo_advance_provider()
+                {
+                    self.ctx
+                        .store
+                        .add_user(&format!(
+                            "<todo-final-reminder>Todo items remain in_progress. Before finishing, call {provider} to complete verified work or pause work that is no longer active. If the work is blocked and should remain active, state that explicitly.</todo-final-reminder>"
+                        ))
+                        .await?;
+                    self.todo_final_reminder_sent = true;
+                    return Ok(None);
+                }
                 self.ctx.display.render_stop();
                 Ok(Some(TurnDecision::Stop))
             }
@@ -672,7 +775,12 @@ impl TurnExecutor {
         self.signal_processor.reset();
         self.decision_engine.reset();
         self.signal_recovery_guard = false;
+        self.todo_final_reminder_sent = false;
+        self.todo_progress_reminder_sent = false;
+        self.successful_work_calls_since_todo_advance = 0;
 
+        let mut messages = self.ctx.compaction.active_messages().await?;
+        self.reconcile_todo_state(&mut messages).await?;
         self.ctx.store.add_user(user_input).await?;
         self.ctx.stats.record_turn().await;
         self.ctx
@@ -684,7 +792,7 @@ impl TurnExecutor {
         let max_turns = self.ctx.max_turns() as usize;
 
         let (mut system_prompt, mut tools_json) = self.ensure_prefix()?;
-        let mut messages = self.ctx.compaction.active_messages().await?;
+        messages = self.ctx.compaction.active_messages().await?;
 
         while turn < max_turns {
             turn += 1;
@@ -850,6 +958,7 @@ fn blocked_by_signal_recovery(
         signals: Vec::new(),
         plan_command: None,
         needs_finalization: false,
+        state_metadata: None,
     }
 }
 
@@ -920,6 +1029,137 @@ mod tests {
             .await
             .unwrap();
         assert!(decision.is_none());
+    }
+
+    #[tokio::test]
+    async fn todo_sync_is_appended_once_when_file_revision_is_ahead() -> anyhow::Result<()> {
+        let ctx = crate::regression::test_context_for_agent("turn-todo-sync").await?;
+        ctx.store.add_user("existing stable history").await?;
+        let stable_prefix = ctx.compaction.active_messages().await?;
+        ctx.todo_store.apply_structure(
+            0,
+            crate::session::todo::TodoChanges {
+                add: vec![crate::session::todo::TodoAdd {
+                    content: "active".into(),
+                }],
+                ..Default::default()
+            },
+        )?;
+        ctx.todo_store.advance(
+            1,
+            crate::session::todo::TodoTransitions {
+                activate: vec!["T0001".into()],
+                ..Default::default()
+            },
+        )?;
+        let llm = Arc::new(BackendLlmClient::new(
+            Arc::new(MockLlmClient::new("flash", vec![])),
+            "flash",
+            Some("flash".into()),
+        ));
+        let executor = TurnExecutor::new(ctx.clone(), llm);
+        let mut messages = ctx.compaction.active_messages().await?;
+
+        assert!(executor.reconcile_todo_state(&mut messages).await?);
+        assert!(!executor.reconcile_todo_state(&mut messages).await?);
+        assert!(messages.starts_with(&stable_prefix));
+        assert_eq!(crate::session::todo::visible_revision(&messages)?, 2);
+        assert_eq!(
+            ctx.store
+                .lines()
+                .await?
+                .iter()
+                .filter(|message| { message["_mink"]["todo_state_kind"].as_str() == Some("sync") })
+                .count(),
+            1
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn todo_final_guard_reminds_once_but_does_not_force_a_loop() -> anyhow::Result<()> {
+        let ctx = crate::regression::test_context_for_agent("turn-todo-final-guard").await?;
+        ctx.todo_store.apply_structure(
+            0,
+            crate::session::todo::TodoChanges {
+                add: vec![crate::session::todo::TodoAdd {
+                    content: "active".into(),
+                }],
+                ..Default::default()
+            },
+        )?;
+        ctx.todo_store.advance(
+            1,
+            crate::session::todo::TodoTransitions {
+                activate: vec!["T0001".into()],
+                ..Default::default()
+            },
+        )?;
+        let llm = Arc::new(BackendLlmClient::new(
+            Arc::new(MockLlmClient::new("flash", vec![])),
+            "flash",
+            Some("flash".into()),
+        ));
+        let mut executor = TurnExecutor::new(ctx.clone(), llm);
+
+        assert!(executor.decide_next("stop", None).await?.is_none());
+        assert_eq!(
+            executor.decide_next("stop", None).await?,
+            Some(TurnDecision::Stop)
+        );
+        let messages = ctx.store.lines().await?;
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| {
+                    message["content"]
+                        .as_str()
+                        .is_some_and(|content| content.contains("<todo-final-reminder>"))
+                })
+                .count(),
+            1
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn todo_progress_guard_appends_at_most_one_reminder_per_turn() -> anyhow::Result<()> {
+        let ctx = crate::regression::test_context_for_agent("turn-todo-progress-guard").await?;
+        ctx.todo_store.apply_structure(
+            0,
+            crate::session::todo::TodoChanges {
+                add: vec![crate::session::todo::TodoAdd {
+                    content: "active".into(),
+                }],
+                ..Default::default()
+            },
+        )?;
+        ctx.todo_store.advance(
+            1,
+            crate::session::todo::TodoTransitions {
+                activate: vec!["T0001".into()],
+                ..Default::default()
+            },
+        )?;
+        let llm = Arc::new(BackendLlmClient::new(
+            Arc::new(MockLlmClient::new("flash", vec![])),
+            "flash",
+            Some("flash".into()),
+        ));
+        let mut executor = TurnExecutor::new(ctx.clone(), llm);
+        executor.successful_work_calls_since_todo_advance = 8;
+
+        executor.maybe_append_todo_progress_reminder().await?;
+        executor.maybe_append_todo_progress_reminder().await?;
+        let messages = ctx.store.lines().await?;
+        assert_eq!(messages.len(), 1);
+        assert!(
+            messages[0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("<todo-progress-reminder>")
+        );
+        Ok(())
     }
 
     #[tokio::test]

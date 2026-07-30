@@ -1,5 +1,5 @@
 use crate::protocol::ToolCallEvent;
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, anyhow};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
@@ -17,13 +17,6 @@ pub fn build_tool_call_event(name: &str, id: &str, input: &str) -> Result<ToolCa
         fields: BTreeMap::new(),
         order: Vec::new(),
     };
-    if name == "TodoWrite" {
-        let (checklist, summary) = todo_fields(&obj)?;
-        event.order = vec!["checklist".to_string(), "summary".to_string()];
-        event.fields.insert("checklist".to_string(), checklist);
-        event.fields.insert("summary".to_string(), summary);
-        return Ok(event);
-    }
     let map = obj
         .as_object()
         .ok_or_else(|| anyhow!("tool input must be object"))?;
@@ -41,40 +34,6 @@ fn json_scalar_string(v: &Value) -> String {
         Value::Bool(b) => b.to_string(),
         _ => v.to_string(),
     }
-}
-
-fn todo_fields(obj: &Value) -> Result<(String, String)> {
-    let todos = obj
-        .get("todos")
-        .and_then(Value::as_array)
-        .ok_or_else(|| anyhow!("invalid TodoWrite input: missing todos"))?;
-    let mut lines = Vec::new();
-    let mut completed = 0;
-    let mut in_progress = 0;
-    let total = todos.len();
-    for t in todos {
-        let content = t.get("content").and_then(Value::as_str).unwrap_or("");
-        let status = t.get("status").and_then(Value::as_str).unwrap_or("");
-        if content.is_empty() {
-            bail!("Error: todo item content is required");
-        }
-        match status {
-            "pending" => lines.push(format!("- [ ] {content}")),
-            "in_progress" => {
-                in_progress += 1;
-                lines.push(format!("- [ ] {content}"));
-            }
-            "completed" => {
-                completed += 1;
-                lines.push(format!("- [x] {content}"));
-            }
-            _ => bail!("Error: invalid todo status: {status}"),
-        }
-    }
-    if in_progress > 1 {
-        bail!("Error: todo_write allows at most one in_progress item");
-    }
-    Ok((lines.join("\n"), format!("{completed}/{total}")))
 }
 
 #[cfg(test)]
@@ -115,48 +74,18 @@ mod tests {
     }
 
     #[test]
-    fn todowrite_builds_checklist_summary() {
+    fn nested_tool_fields_are_preserved_as_json() {
         let event = build_tool_call_event(
             "TodoWrite",
             "call_todo",
-            r#"{"todos":[{"content":"done","status":"completed"},{"content":"doing","status":"in_progress"},{"content":"later","status":"pending"}]}"#,
+            r#"{"base_revision":2,"update":[{"id":"T0001","content":"revised"}]}"#,
         )
         .unwrap();
-        assert_eq!(event.order, ["checklist", "summary"]);
-        assert_eq!(event.fields["summary"], "1/3");
+        assert_eq!(event.order, ["base_revision", "update"]);
+        assert_eq!(event.fields["base_revision"], "2");
         assert_eq!(
-            event.fields["checklist"],
-            "- [x] done\n- [ ] doing\n- [ ] later"
+            event.fields["update"],
+            r#"[{"content":"revised","id":"T0001"}]"#
         );
-    }
-
-    #[test]
-    fn todowrite_rejects_missing_content_invalid_status_and_multiple_active() {
-        let empty = build_tool_call_event(
-            "TodoWrite",
-            "call_empty",
-            r#"{"todos":[{"content":"","status":"pending"}]}"#,
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(empty.contains("content is required"), "{empty}");
-
-        let invalid = build_tool_call_event(
-            "TodoWrite",
-            "call_invalid",
-            r#"{"todos":[{"content":"x","status":"blocked"}]}"#,
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(invalid.contains("invalid todo status"), "{invalid}");
-
-        let multiple = build_tool_call_event(
-            "TodoWrite",
-            "call_many",
-            r#"{"todos":[{"content":"a","status":"in_progress"},{"content":"b","status":"in_progress"}]}"#,
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(multiple.contains("at most one in_progress"), "{multiple}");
     }
 }

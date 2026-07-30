@@ -89,7 +89,7 @@ TUI 相关测试覆盖输入、中断、slash command、Markdown、表格、diff
 1. 将集中在 `crates/mink-cli/src/tui/mod.rs` 的测试按职责迁移到 input、command、signal、render、markdown 模块。
 2. 为 `Display::render_tool_result_detail()` 增加回归测试，确保工具展示内容和 LLM conversation 内容边界清晰。
 3. 增加长会话本地搜索和消息类型跳转，状态只保存在 TUI 本地。
-4. 为 Bash/Python/Edit/Read/TodoWrite 提供更清晰的工具结果头部和分区展示。
+4. 为 Bash/Python/Edit/Read/TodoRead/TodoWrite/TodoAdvance 提供更清晰的工具结果头部和分区展示。
 5. 对高频 streaming 做 signal drain 和渲染节流，保持输入和中断事件优先级。
 
 不建议：

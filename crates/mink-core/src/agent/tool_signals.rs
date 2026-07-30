@@ -129,6 +129,7 @@ mod tests {
             }],
             plan_command: None,
             needs_finalization: false,
+            state_metadata: None,
         }
     }
 

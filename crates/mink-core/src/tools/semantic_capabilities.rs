@@ -23,7 +23,9 @@ pub enum ToolSemanticCapability {
     HostPythonExec,
     SandboxedPythonExec,
     DataCompute,
-    TodoState,
+    TodoInspect,
+    TodoStructureMutation,
+    TodoProgressTransition,
     PlanDraft,
     PlanConfirm,
     PlanClear,
@@ -226,8 +228,24 @@ static OFFERS: &[CapabilityOfferSpec] = &[
         Unconditional
     ),
     offer!(
+        "TodoRead",
+        TodoInspect,
+        Specialized,
+        100,
+        Always,
+        Unconditional
+    ),
+    offer!(
         "TodoWrite",
-        TodoState,
+        TodoStructureMutation,
+        Specialized,
+        100,
+        Always,
+        Unconditional
+    ),
+    offer!(
+        "TodoAdvance",
+        TodoProgressTransition,
         Specialized,
         100,
         Always,
@@ -267,8 +285,11 @@ static OFFERS: &[CapabilityOfferSpec] = &[
     ),
 ];
 
-const CAPABILITY_HARD_DEPENDENCIES: &[(ToolSemanticCapability, &[ToolSemanticCapability])] =
-    &[(AnchoredEdit, &[EditableSnapshotRead])];
+const CAPABILITY_HARD_DEPENDENCIES: &[(ToolSemanticCapability, &[ToolSemanticCapability])] = &[
+    (AnchoredEdit, &[EditableSnapshotRead]),
+    (TodoStructureMutation, &[TodoInspect]),
+    (TodoProgressTransition, &[TodoInspect]),
+];
 
 static BUILTIN: LazyLock<ToolCapabilityRegistry> =
     LazyLock::new(|| ToolCapabilityRegistry { offers: OFFERS });

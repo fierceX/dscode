@@ -34,6 +34,11 @@ assistant 文本、错误证据和 artifact 引用。Provider 在产生可见输
 Fork 子代理会在 runtime 初始化前克隆父 session 的完整状态。Artifact ID 从克隆后的索引继续
 分配，正文文件使用独占创建，从而保持继承的 `artifact://` 引用稳定。
 
+Plan 和 Todo 使用独立的 session 状态文件。确认后的计划在每次 LLM 请求时投影为动态
+`<current-plan>` system message，不进入 immutable prefix 或 conversation。Todo 的权威完整
+快照保存在 `todos.json`；成功变更以增量事件和紧凑 active 投影追加到 conversation，并使用
+revision 和稳定 ID 防止 stale write。
+
 ## 依赖方式
 
 ```toml

@@ -507,6 +507,7 @@ impl super::runner::ToolExec for EditTool {
             success: true,
             diagnostics: Vec::new(),
             plan_command: None,
+            state_metadata: None,
         })
     }
 }
@@ -1010,6 +1011,9 @@ mod tests {
                 home.join("plan.md"),
                 home.join("plan.draft"),
             )),
+            todo_store: Arc::new(
+                crate::session::todo::TodoStore::load(session.join("todos.json")).unwrap(),
+            ),
             tool_config,
             interrupt: Arc::new(AtomicBool::new(false)),
             resource_router: Arc::new(crate::resources::ResourceRouter::with_builtin_handlers()),

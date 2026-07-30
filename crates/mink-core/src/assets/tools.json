@@ -147,36 +147,110 @@
     }
   },
   {
-    "name": "TodoWrite",
-    "description": "Create and manage a structured task list for the current coding session. Use proactively for complex multi-step implementation, debugging, refactoring, review, or multi-file work. Do not use for trivial single-step or purely informational requests.",
+    "name": "TodoRead",
+    "description": "Read the persisted task list for the current session, including its revision and stable item IDs. Completed items are omitted by default.",
     "input_schema": {
       "type": "object",
       "properties": {
-        "todos": {
+        "include_completed": {
+          "type": "boolean",
+          "description": "Whether to include completed items in the result. Defaults to false."
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "TodoWrite",
+    "description": "Apply an atomic incremental update to the persisted task list for the current session. Updates use the current revision and stable item IDs to prevent stale writes.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "base_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The revision on which this update is based."
+        },
+        "add": {
           "type": "array",
-          "description": "The full updated todo list for the current session. Send the complete list each time, not a partial diff.",
+          "description": "New items to append. Every new item starts pending.",
           "items": {
             "type": "object",
             "properties": {
               "content": {
                 "type": "string",
                 "description": "A short, concrete, actionable task description."
-              },
-              "status": {
-                "type": "string",
-                "description": "Task status: pending, in_progress, or completed. Prefer exactly one in_progress item while actively working."
               }
             },
-            "required": [
-              "content",
-              "status"
-            ]
+            "required": ["content"],
+            "additionalProperties": false
+          }
+        },
+        "update": {
+          "type": "array",
+          "description": "Content replacements for existing non-completed items identified by stable ID.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Stable task ID."
+              },
+              "content": {
+                "type": "string",
+                "description": "Replacement task description."
+              }
+            },
+            "required": ["id", "content"],
+            "additionalProperties": false
+          }
+        },
+        "remove": {
+          "type": "array",
+          "description": "Stable IDs of non-active items to delete. Pause or complete active items first.",
+          "items": {
+            "type": "string"
           }
         }
       },
-      "required": [
-        "todos"
-      ]
+      "required": ["base_revision"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "TodoAdvance",
+    "description": "Atomically transition persisted todo progress. Complete or pause active items, activate pending items, or reopen completed items. Multiple related items may transition together.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "base_revision": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The revision on which these transitions are based."
+        },
+        "complete": {
+          "type": "array",
+          "description": "In-progress item IDs whose outcomes have been verified.",
+          "items": {"type": "string"}
+        },
+        "activate": {
+          "type": "array",
+          "description": "Pending item IDs to make part of the active batch.",
+          "items": {"type": "string"}
+        },
+        "pause": {
+          "type": "array",
+          "description": "In-progress item IDs to return to pending.",
+          "items": {"type": "string"}
+        },
+        "reopen": {
+          "type": "array",
+          "description": "Completed item IDs to return to pending.",
+          "items": {"type": "string"}
+        }
+      },
+      "required": ["base_revision"],
+      "additionalProperties": false
     }
   },
   {

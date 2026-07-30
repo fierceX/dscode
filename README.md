@@ -19,6 +19,7 @@
 - **可配置上下文压缩** — 显式控制阈值、响应预留、热尾部和摘要预算；可选摘要输入降噪
 - **维修流水线** — Scavenge → Truncation → Storm Breaker，三段自动修复
 - **Session 持久化** — 完整 append-only JSONL 历史、活跃后缀内存缓存、`--continue` 恢复和按需历史检索
+- **Plan 与 Todo 状态** — 确认计划按请求动态投影，Todo 使用 session 文件、稳定 ID、revision 和追加式进度事件
 - **子代理（SubAgent）** — 隔离或目录级 fork 完整 session 状态，并发执行
 - **嵌入式只读 VFS** — Rust runtime 可为 Read/Glob/Grep 注入数据库后端，并按 resource session 隔离知识库
 - **技能系统** — 按需加载 skill 文件，不污染后续 prompt

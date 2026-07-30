@@ -937,6 +937,7 @@ mod tests {
             llm_backend.clone(),
         ));
         let tool_config = ToolConfig::from_config(&cfg);
+        let todo_store = Arc::new(crate::session::todo::TodoStore::load(spaths.todos.clone())?);
         let (tool_resolution_context, tool_surface, tool_capabilities) =
             crate::context::resolve_tool_runtime(&tool_config, false, false)?;
         Ok(Arc::new(AgentSharedContext {
@@ -948,6 +949,7 @@ mod tests {
             llm_backend,
             store,
             artifacts,
+            todo_store,
             snapshots: Arc::new(Mutex::new(
                 crate::tools::snapshot::FileSnapshotStore::default(),
             )),

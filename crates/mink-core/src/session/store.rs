@@ -13,6 +13,7 @@ pub struct ToolResult {
     pub tool_args: std::collections::BTreeMap<String, String>,
     pub content: String,
     pub conv_content: String,
+    pub state_metadata: Option<Value>,
 }
 
 /// ConversationStore provides async JSONL conversation persistence.
@@ -82,11 +83,20 @@ impl ConversationStore {
                 } else {
                     &r.conv_content
                 };
-                json!({"type":"tool_result","tool_use_id":r.tool_use_id,"content":conv})
+                let mut block =
+                    json!({"type":"tool_result","tool_use_id":r.tool_use_id,"content":conv});
+                if let Some(metadata) = &r.state_metadata {
+                    block["_mink"] = metadata.clone();
+                }
+                block
             })
             .collect();
         self.append_line(&json!({"role":"user","content":content}))
             .await
+    }
+
+    pub(crate) async fn append_runtime_message(&self, message: Value) -> Result<()> {
+        self.append_line(&message).await
     }
 
     pub async fn lines(&self) -> Result<Vec<Value>> {
@@ -401,23 +411,32 @@ pub fn build_tool_call_summary(
                 label = format!("{truncated}...");
             }
         }
+        "TodoRead" => label = "state".into(),
         "TodoWrite" => {
-            if let Some(summary) = fields.get("summary").cloned()
-                && !summary.is_empty()
-            {
-                label = summary;
-            }
-            if label.is_empty()
-                && let Some(todos) = fields.get("todos")
-                && let Ok(arr) = serde_json::from_str::<Vec<Value>>(todos)
-            {
-                let total = arr.len();
-                let completed = arr
-                    .iter()
-                    .filter(|item| item.get("status").and_then(Value::as_str) == Some("completed"))
-                    .count();
-                label = format!("{completed}/{total}");
-            }
+            let changes = ["add", "update", "remove"]
+                .iter()
+                .filter_map(|field| fields.get(*field))
+                .filter_map(|value| serde_json::from_str::<Vec<Value>>(value).ok())
+                .map(|values| values.len())
+                .sum::<usize>();
+            let revision = fields
+                .get("base_revision")
+                .map(String::as_str)
+                .unwrap_or("?");
+            label = format!("{changes} changes @r{revision}");
+        }
+        "TodoAdvance" => {
+            let transitions = ["complete", "activate", "pause", "reopen"]
+                .iter()
+                .filter_map(|field| fields.get(*field))
+                .filter_map(|value| serde_json::from_str::<Vec<Value>>(value).ok())
+                .map(|values| values.len())
+                .sum::<usize>();
+            let revision = fields
+                .get("base_revision")
+                .map(String::as_str)
+                .unwrap_or("?");
+            label = format!("{transitions} transitions @r{revision}");
         }
         "Skill" => label = fields.get("name").cloned().unwrap_or_default(),
         "SubAgent" => label = fields.get("description").cloned().unwrap_or_default(),
@@ -480,15 +499,23 @@ mod tests {
         store.ensure().await.unwrap();
         let results = vec![ToolResult {
             tool_use_id: "id1".into(),
-            tool_name: "Bash".into(),
+            tool_name: "TodoAdvance".into(),
             tool_args: Default::default(),
             content: "output".into(),
             conv_content: "".into(),
+            state_metadata: Some(json!({
+                "todo_revision": 3,
+                "todo_state_kind": "progress",
+            })),
         }];
         store.add_tool_results(&results).await.unwrap();
         let lines = store.lines().await.unwrap();
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0]["role"], "user");
+        assert_eq!(
+            lines[0]["content"][0]["_mink"]["todo_revision"].as_u64(),
+            Some(3)
+        );
     }
 
     #[tokio::test]
@@ -663,6 +690,22 @@ mod tests {
         let mut f3 = std::collections::BTreeMap::new();
         f3.insert("description".into(), "child task".into());
         assert!(build_tool_call_summary("SubAgent", &f3).contains("child task"));
+
+        let mut todo = std::collections::BTreeMap::new();
+        todo.insert("base_revision".into(), "4".into());
+        todo.insert("add".into(), r#"[{"content":"one"}]"#.into());
+        todo.insert(
+            "update".into(),
+            r#"[{"id":"T0001","content":"revised"}]"#.into(),
+        );
+        assert_eq!(
+            build_tool_call_summary("TodoWrite", &todo),
+            "TodoWrite(2 changes @r4)"
+        );
+        assert_eq!(
+            build_tool_call_summary("TodoRead", &Default::default()),
+            "TodoRead(state)"
+        );
     }
 
     #[test]

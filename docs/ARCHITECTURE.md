@@ -68,7 +68,7 @@ TurnExecutor (agent/turn.rs)
 └───────────────────────┘
          │
 ┌─────── 工具层 ────────┐
-│ tools/runner.rs       │ ToolExec registry、metadata、approval、StormBreaker、结果格式化
+│ tools/runner.rs       │ ToolExec registry、resolved surface gate、StormBreaker、结果格式化
 │ tools/metadata.rs     │ ApprovalTier、ToolResultKind、ToolMetadata
 │ tools/file.rs         │ Read / Write / Edit、selector、resource、anchored patch
 │ tools/snapshot.rs     │ FileSnapshotStore、行 hash 和 snapshot tag
@@ -78,6 +78,7 @@ TurnExecutor (agent/turn.rs)
 │ tools/python.rs       │ 宿主 Python 执行
 │ tools/sandbox_python.rs│ WASI CPython 沙箱执行（python-sandbox feature）
 │ tools/plan.rs         │ PlanDraft / PlanConfirm / PlanClear 类型化命令
+│ tools/todo.rs         │ TodoRead / TodoWrite / TodoAdvance、revision 事件协议
 └───────────────────────┘
          │
 ┌─────── 资源与能力层 ───┐
@@ -105,6 +106,9 @@ TurnExecutor (agent/turn.rs)
 │ session/compaction.rs │ 显式策略、非破坏式投影、LLM 摘要和压缩状态
 │ session/compaction_input.rs │ 可选摘要输入降噪
 │ session/prefix.rs     │ ImmutablePrefix
+│ session/plan.rs       │ PlanStore 与当前计划动态投影
+│ session/todo.rs       │ TodoStore、原子持久化与追加式物化投影
+│ session/atomic_file.rs│ Plan/Todo 共用的同目录原子替换
 │ session/init.rs       │ session 目录和共享状态初始化
 └───────────────────────┘
          │
@@ -248,7 +252,7 @@ ToolRunResult
 | `tools/metadata.rs` | `ToolMetadata`、approval tier、结果类型、副作用标记 |
 | `tools/catalog.rs` | `tools.json`、executor registry 和 feature availability 的唯一目录 |
 | `tools/surface.rs` | 按 `enabled_tools`、approval、role、backend、feature 和硬依赖解析模型可见工具面 |
-| `tools/approval.rs` | surface 与 runner 共用的非交互审批判定 |
+| `tools/approval.rs` | 构建模型工具面时使用的非交互审批判定 |
 | `tools/semantic_capabilities.rs` | 工具语义能力 offer、provider binding、scope classifier 和 fingerprint |
 | `tools/runtime_guidance.rs` | 带结构化工具引用的运行时引导消息 |
 | `tools/runner.rs` | `ToolExec` trait、`TOOL_REGISTRY`、resolved surface gate、并发调度、结果截断、artifact spill 和内置控制工具 |
@@ -259,7 +263,7 @@ ToolRunResult
 | `tools/bash.rs` | `BashTool`、危险命令检查、误用拦截 |
 | `tools/python.rs` | `PythonTool` |
 | `tools/plan.rs` | `PlanDraftTool`、`PlanConfirmTool`、`PlanClearTool` |
-| `session/plan.rs` | `PlanStore` 与原子草稿/确认/清理转换 |
+| `tools/todo.rs` | `TodoReadTool`、`TodoWriteTool`、`TodoAdvanceTool` 与追加式事件格式化 |
 | `assets/tools.json` | 提供给模型的工具 schema |
 
 新增工具时需要同时实现 `ToolExec::metadata()`、注册 `TOOL_REGISTRY`、更新 `assets/tools.json`，并在 metadata 中声明 approval tier、result kind、副作用、`storm_exempt`、`internal` 或 `spawns_sub_agent`。若工具参与跨工具工作流，还必须在 `semantic_capabilities.rs` 显式声明受支持的语义能力和调用 scope；schema 只描述该工具自身合同，不得静态推荐其他工具。
@@ -273,7 +277,26 @@ ToolCatalog -> ModelToolSurface -> ResolvedToolCapabilities
 ```
 
 `AgentSharedContext` 和 `ToolContext` 共享同一个 `ToolResolutionContext`、surface 和 capability
-bindings。发给 provider 的 schemas 直接来自 surface；prefix 不再独立解析或过滤 `tools.json`。
+bindings。发给 provider 的 schemas 直接来自 surface；prefix 直接消费解析结果，不独立解析或
+过滤 `tools.json`。
+
+### Session 与持久化
+
+| 文件 | 职责 |
+|------|------|
+| `session/store.rs` | append-only conversation、活跃后缀缓存、流式读取和尾部修复 |
+| `session/metadata.rs` | session identity、alias、title 和时间戳元数据 |
+| `session/artifacts.rs` | artifact 索引、持久序号恢复和正文防覆盖写入 |
+| `session/stats.rs` | session 累计 token、费用和请求数统计 |
+| `session/usage.rs` | LLM 请求级 Token 与费用明细 journal |
+| `session/compaction.rs` | 显式压缩策略、非破坏式投影、LLM 摘要和压缩状态 |
+| `session/compaction_input.rs` | 摘要请求输入降噪 |
+| `session/prefix.rs` | ImmutablePrefix |
+| `session/plan.rs` | PlanStore、原子计划状态转换和当前计划动态投影 |
+| `session/todo.rs` | TodoStore、revision、稳定 ID、原子批量提交和 revision 对账 |
+| `session/atomic_file.rs` | Plan/Todo 状态文件共用的同目录临时文件和原子替换 |
+| `session/paths.rs` | 四种 session layout 的路径推导 |
+| `session/init.rs` | session 目录、conversation、stats 和 artifact 基础设施初始化 |
 
 ### Prompt document
 
@@ -300,6 +323,13 @@ runtime-reserved section 冲突会在启动时 fail fast，不保留旧 alias。
 conversation，也不进入压缩摘要。PlanConfirm / PlanClear 因此能在同一 turn 的下一次请求生效，
 同时保持稳定 system/tools prefix 不变。两者产生的压缩请求统一交给 `TurnCompactor`，服从同轮
 一次防护，并将压缩失败返回当前 turn。
+
+Todo 不使用逐请求前置动态状态。`TodoRead` 按需返回完整基线；TodoWrite / TodoAdvance
+成功后把增量事件和 `<current-todos>` 紧凑物化投影作为 tool result 追加到 conversation
+尾部。投影只含 revision、状态计数和当前 `in_progress` 批次；没有 active batch 但仍有
+pending 条目时提示 TodoRead。恢复、fork 或压缩使文件 revision 领先活跃历史时追加一次
+TodoSync；历史领先文件则 fail closed。该协议不修改 immutable prefix，旧请求保持为新请求
+的完整消息前缀。
 
 ### Registered Resources and Capabilities
 
@@ -407,8 +437,9 @@ pub struct ToolResultDisplay<'a> {
 
 ## Session 结构
 
-Session 文件固定包含 conversation、events、metadata、summary、plan、stats 和 artifacts；差异只在
-session 根目录如何由 `home`、`cwd`、`session_id` 推导。当前有四种 layout：
+Session 目录保存 conversation、events、metadata、summary、stats 和 artifacts，并按实际功能
+生成 compaction、plan、todo 和 usage 状态文件。session 根目录由 `home`、`cwd`、`session_id`
+和以下四种 layout 共同决定：
 
 | Layout | `home` 含义 | session 目录 |
 |--------|-------------|--------------|
@@ -432,10 +463,12 @@ session 根目录如何由 `home`、`cwd`、`session_id` 推导。当前有四�
 ├── events.jsonl
 ├── session.json
 ├── summary.txt
-├── context-state.json
-├── plan.md
-├── plan.draft
 ├── stats.json
+├── context-state.json     # 首次提交压缩状态后生成
+├── plan.md                # 确认计划存在时生成
+├── plan.draft             # 未确认草稿存在时生成
+├── todos.json             # 首次成功 Todo 变更后生成
+├── usage.jsonl            # 首次记录 LLM 请求后生成
 └── artifacts/
     ├── index.jsonl
     └── <tool>-0001.txt
@@ -459,6 +492,11 @@ session 根目录如何由 `home`、`cwd`、`session_id` 推导。当前有四�
 - 投影边界必须位于完整历史内，并且不能拆开 tool call/result 协议。
 - 所有压缩统一调用 LLM 摘要；摘要作为动态消息加入活跃投影，不改变 immutable system/tools prefix。
 - 当前计划与压缩摘要一样属于逐请求动态 system state；两者都不能进入 immutable prefix 或持久化 conversation。
+- Todo 权威完整快照保存在 `todos.json`；conversation 尾部追加增量事件和当前 active batch 的紧凑物化投影，不进入 immutable prefix。
+- `TodoWrite` 和 `TodoAdvance` 各自依赖 `TodoRead`，并使用最高可见 revision 与稳定 ID；stale revision fail closed。
+- TodoWrite 只新增 `pending` 条目、删除条目或替换正文，TodoAdvance 只转换进度；批量更新通过同目录临时文件和 rename 原子提交，持久化成功后才更新内存。
+- 文件 revision 领先活跃历史时追加一次 TodoSync，历史 revision 领先文件时 fail closed；同一 active batch 允许多个 `in_progress` 项。
+- 一个 session 的 `TodoStore` 由单个 runtime 独占写入；不支持多个 runtime 并发写同一 `todos.json`，也不观察运行期间的外部热编辑。
 - 压缩请求使用 turn/编排器传入的活动真实模型名和别名，并通过 runtime 注入的共享 `LlmBackend` 发送。
 - 子代理启动时使用从父配置克隆并写入当前活动模型的 child config，LLM backend 复用父 runtime 实例。
 - 压缩阈值、响应预留、热尾部和摘要输出预算来自显式配置，不根据上下文窗口推断策略。

@@ -150,6 +150,7 @@ pub struct SessionInfo {
     pub usage_path: PathBuf,
     pub plan_path: PathBuf,
     pub plan_draft_path: PathBuf,
+    pub todos_path: PathBuf,
 }
 
 impl SessionInfo {
@@ -174,6 +175,7 @@ impl SessionInfo {
             usage_path: paths.usage.clone(),
             plan_path: paths.plan.clone(),
             plan_draft_path: paths.plan_draft.clone(),
+            todos_path: paths.todos.clone(),
         }
     }
 }

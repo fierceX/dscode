@@ -10,20 +10,12 @@ struct ToolPromptSpec {
     content: &'static str,
 }
 
-static TOOL_PROMPTS: &[ToolPromptSpec] = &[
-    ToolPromptSpec {
-        tool: "SubAgent",
-        id: "sub-agent-guidance",
-        tag: "sub-agent-guidance",
-        content: include_str!("../assets/prompts/tools/sub_agent.md"),
-    },
-    ToolPromptSpec {
-        tool: "TodoWrite",
-        id: "todo-guidance",
-        tag: "todo-guidance",
-        content: include_str!("../assets/prompts/tools/todo_write.md"),
-    },
-];
+static TOOL_PROMPTS: &[ToolPromptSpec] = &[ToolPromptSpec {
+    tool: "SubAgent",
+    id: "sub-agent-guidance",
+    tag: "sub-agent-guidance",
+    content: include_str!("../assets/prompts/tools/sub_agent.md"),
+}];
 
 pub(super) fn append_tool_sections(
     document: &mut PromptDocument,

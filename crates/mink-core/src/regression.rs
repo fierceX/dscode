@@ -322,6 +322,7 @@ async fn harness_with_config(
         llm_backend.clone(),
     ));
     let tool_config = ToolConfig::from_config(&cfg);
+    let todo_store = Arc::new(crate::session::todo::TodoStore::load(spaths.todos.clone())?);
     let (tool_resolution_context, tool_surface, tool_capabilities) =
         crate::context::resolve_tool_runtime(&tool_config, is_sub_agent, false)?;
     let ctx = Arc::new(AgentSharedContext {
@@ -333,6 +334,7 @@ async fn harness_with_config(
         llm_backend,
         store,
         artifacts,
+        todo_store,
         snapshots: Arc::new(Mutex::new(
             crate::tools::snapshot::FileSnapshotStore::default(),
         )),
@@ -422,6 +424,7 @@ fn test_context_with_llm_backend(
         llm_backend,
         store: ctx.store.clone(),
         artifacts: ctx.artifacts.clone(),
+        todo_store: ctx.todo_store.clone(),
         snapshots: ctx.snapshots.clone(),
         stats: ctx.stats.clone(),
         usage: ctx.usage.clone(),
@@ -1878,6 +1881,81 @@ async fn plan_draft_empty_content_cancels_and_reports_cancellation() -> anyhow::
 }
 
 #[tokio::test]
+async fn todo_tools_persist_incremental_state_and_reject_stale_writes() -> anyhow::Result<()> {
+    let h = harness("todo-persistence").await?;
+    let prefix = PrefixManager::new(h.ctx.clone());
+    let stable_prefix = prefix.ensure()?;
+    assert!(!stable_prefix.0.contains("<current-todos"));
+    let tool_ctx = crate::context::ToolContext::from(h.ctx.as_ref());
+    let created = crate::tools::runner::ToolExec::execute(
+        &crate::tools::todo::TodoWriteTool,
+        &json!({
+            "base_revision": 0,
+            "add": [
+                {"content": "inspect"},
+                {"content": "implement"},
+                {"content": "verify"}
+            ]
+        }),
+        &tool_ctx,
+    )?;
+    assert!(created.content.contains("revision=\"1\""));
+    assert!(created.content.contains("T0001"));
+    assert!(created.content.contains("T0002"));
+
+    crate::tools::runner::ToolExec::execute(
+        &crate::tools::todo::TodoAdvanceTool,
+        &json!({
+            "base_revision": 1,
+            "activate": ["T0001", "T0002"]
+        }),
+        &tool_ctx,
+    )?;
+    let read = crate::tools::runner::ToolExec::execute(
+        &crate::tools::todo::TodoReadTool,
+        &json!({}),
+        &tool_ctx,
+    )?;
+    assert!(read.content.contains("in_progress=\"2\""));
+    assert!(read.content.contains("T0003: verify"));
+
+    crate::tools::runner::ToolExec::execute(
+        &crate::tools::todo::TodoWriteTool,
+        &json!({
+            "base_revision": 2,
+            "update": [
+                {"id": "T0003", "content": "run focused tests"}
+            ]
+        }),
+        &tool_ctx,
+    )?;
+    crate::tools::runner::ToolExec::execute(
+        &crate::tools::todo::TodoAdvanceTool,
+        &json!({
+            "base_revision": 3,
+            "complete": ["T0001"]
+        }),
+        &tool_ctx,
+    )?;
+    let before = h.ctx.todo_store.snapshot();
+    let error = crate::tools::runner::ToolExec::execute(
+        &crate::tools::todo::TodoWriteTool,
+        &json!({"base_revision": 3, "remove": ["T0002"]}),
+        &tool_ctx,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("stale todo revision"), "{error}");
+    assert_eq!(h.ctx.todo_store.snapshot(), before);
+    let todo_path = crate::session::paths::paths_for(&h.ctx.home, &h.ctx.cwd, "regression").todos;
+    let reloaded = crate::session::todo::TodoStore::load(todo_path)?;
+    assert_eq!(reloaded.snapshot(), before);
+    assert_eq!(reloaded.snapshot().revision, 4);
+    assert_eq!(prefix.ensure()?, stable_prefix);
+    Ok(())
+}
+
+#[tokio::test]
 async fn safety_blocked_bash_emits_typed_signal_event() -> anyhow::Result<()> {
     let h = harness("safety-signal").await?;
     let llm = Arc::new(MockLlmClient::new(
@@ -2423,6 +2501,7 @@ fn internal_result(name: &str) -> ToolRunResult {
         signals: Vec::new(),
         plan_command: None,
         needs_finalization: false,
+        state_metadata: None,
     }
 }
 

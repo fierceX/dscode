@@ -9,6 +9,7 @@ use crate::llm::client::LlmBackend;
 use crate::resources::{ResourceHandler, ResourceRouter};
 use crate::session::compaction::CompactionEngine;
 use crate::session::paths::{self, SessionLayout};
+use crate::session::todo::TodoStore;
 use crate::session::usage::UsageJournal;
 use crate::tools::snapshot::FileSnapshotStore;
 use crate::tools::vfs::{ReadOnlyFileSystem, VfsScope};
@@ -76,6 +77,7 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
     let usage = params
         .usage_journal
         .unwrap_or_else(|| UsageJournal::new(paths.usage.clone()));
+    let todo_store = Arc::new(TodoStore::load(paths.todos.clone())?);
 
     let vfs_scope = VfsScope {
         resource_session_id: params.resource_session_id,
@@ -129,6 +131,7 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
         llm_backend: params.llm_backend,
         store,
         artifacts,
+        todo_store,
         snapshots: Arc::new(Mutex::new(FileSnapshotStore::default())),
         stats,
         usage,

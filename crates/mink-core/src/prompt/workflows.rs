@@ -106,6 +106,15 @@ const PLAN_ALL: &[PromptFact] = &[
     ToolCapability(PlanConfirm),
     ToolCapability(PlanClear),
 ];
+const TODO_INSPECT: &[PromptFact] = &[ToolCapability(TodoInspect)];
+const TODO_STRUCTURE: &[PromptFact] = &[
+    ToolCapability(TodoInspect),
+    ToolCapability(TodoStructureMutation),
+];
+const TODO_PROGRESS: &[PromptFact] = &[
+    ToolCapability(TodoInspect),
+    ToolCapability(TodoProgressTransition),
+];
 
 static WORKFLOWS: &[PromptWorkflowSpec] = &[
     PromptWorkflowSpec {
@@ -150,6 +159,30 @@ static WORKFLOWS: &[PromptWorkflowSpec] = &[
         exclusive_group: None,
         priority: 100,
         render: render_python_routing,
+    },
+    PromptWorkflowSpec {
+        id: "todo-inspection",
+        tag: "todo-inspection",
+        requires: WorkflowRequirement::All(TODO_INSPECT),
+        exclusive_group: None,
+        priority: 100,
+        render: render_todo_inspection,
+    },
+    PromptWorkflowSpec {
+        id: "todo-structure",
+        tag: "todo-structure",
+        requires: WorkflowRequirement::All(TODO_STRUCTURE),
+        exclusive_group: None,
+        priority: 100,
+        render: render_todo_structure,
+    },
+    PromptWorkflowSpec {
+        id: "todo-progress",
+        tag: "todo-progress",
+        requires: WorkflowRequirement::All(TODO_PROGRESS),
+        exclusive_group: None,
+        priority: 100,
+        render: render_todo_progress,
     },
     PromptWorkflowSpec {
         id: "plan-lifecycle",
@@ -528,31 +561,72 @@ fn render_plan_lifecycle(
     let draft = tools.primary_provider(PlanDraft).unwrap();
     let confirm = tools.primary_provider(PlanConfirm).unwrap();
     let clear = tools.primary_provider(PlanClear).unwrap();
-    let mut referenced_tools: BTreeSet<_> =
+    let referenced_tools: BTreeSet<_> =
         [draft.tool, confirm.tool, clear.tool].into_iter().collect();
-    let mut consumed_facts: BTreeSet<_> = [
+    let consumed_facts: BTreeSet<_> = [
         ToolCapability(PlanDraft),
         ToolCapability(PlanConfirm),
         ToolCapability(PlanClear),
     ]
     .into_iter()
     .collect();
-    let todo = tools.primary_provider(TodoState).map(|provider| {
-        referenced_tools.insert(provider.tool);
-        consumed_facts.insert(ToolCapability(TodoState));
-        format!(
-            "\nAfter confirmation, use {} to track execution progress.",
-            provider.tool
-        )
-    });
     let content = include_str!("../assets/prompts/workflows/plan_lifecycle.md")
         .replace("{{DRAFT_PROVIDER}}", draft.tool)
         .replace("{{CONFIRM_PROVIDER}}", confirm.tool)
         .replace("{{CLEAR_PROVIDER}}", clear.tool);
     Ok(RenderedPromptPack {
-        content: format!("{}{}", content.trim(), todo.unwrap_or_default()),
+        content: content.trim().into(),
         referenced_tools,
         consumed_facts,
+    })
+}
+
+fn render_todo_inspection(
+    _: &PromptBuildContext,
+    tools: &ResolvedToolCapabilities,
+) -> Result<RenderedPromptPack> {
+    let read = tools.primary_provider(TodoInspect).unwrap();
+    Ok(RenderedPromptPack {
+        content: include_str!("../assets/prompts/workflows/todo_inspection.md")
+            .replace("{{TODO_READ_PROVIDER}}", read.tool)
+            .trim()
+            .into(),
+        referenced_tools: [read.tool].into_iter().collect(),
+        consumed_facts: TODO_INSPECT.iter().copied().collect(),
+    })
+}
+
+fn render_todo_structure(
+    _: &PromptBuildContext,
+    tools: &ResolvedToolCapabilities,
+) -> Result<RenderedPromptPack> {
+    let read = tools.primary_provider(TodoInspect).unwrap();
+    let write = tools.primary_provider(TodoStructureMutation).unwrap();
+    Ok(RenderedPromptPack {
+        content: include_str!("../assets/prompts/workflows/todo_structure.md")
+            .replace("{{TODO_READ_PROVIDER}}", read.tool)
+            .replace("{{TODO_WRITE_PROVIDER}}", write.tool)
+            .trim()
+            .into(),
+        referenced_tools: [read.tool, write.tool].into_iter().collect(),
+        consumed_facts: TODO_STRUCTURE.iter().copied().collect(),
+    })
+}
+
+fn render_todo_progress(
+    _: &PromptBuildContext,
+    tools: &ResolvedToolCapabilities,
+) -> Result<RenderedPromptPack> {
+    let read = tools.primary_provider(TodoInspect).unwrap();
+    let advance = tools.primary_provider(TodoProgressTransition).unwrap();
+    Ok(RenderedPromptPack {
+        content: include_str!("../assets/prompts/workflows/todo_progress.md")
+            .replace("{{TODO_READ_PROVIDER}}", read.tool)
+            .replace("{{TODO_ADVANCE_PROVIDER}}", advance.tool)
+            .trim()
+            .into(),
+        referenced_tools: [read.tool, advance.tool].into_iter().collect(),
+        consumed_facts: TODO_PROGRESS.iter().copied().collect(),
     })
 }
 

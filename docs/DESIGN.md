@@ -101,13 +101,13 @@ while turn < max_turns {
 
 ## 主题二：内存模型
 
-### 三层分离
+### 运行时状态分层
 
-内存模型分为四个独立的部分，各自有不同的生命周期和变更路径：
+运行时状态分为五个部分，各自有独立的生命周期和变更路径：
 
 #### 1. ImmutablePrefix（不变前缀）
 
-`src/session/prefix.rs`
+`crates/mink-core/src/session/prefix.rs`
 
 承载 system prompt 和工具定义。一旦构建，在 session 期间应保持不变。变更会触发 fingerprint 失效，导致下一次 LLM 调用丢失前缀缓存。
 
@@ -128,7 +128,7 @@ fingerprint 的联合指纹并与缓存值比对。校验失败时 `PrefixManage
 
 #### 2. ConversationStore（追加日志）
 
-`src/session/store.rs`
+`crates/mink-core/src/session/store.rs`
 
 JSONL 格式的持久化消息存储。正常运行只有追加操作：
 
@@ -159,7 +159,20 @@ Append: repair tail → single-buffer line write → flush → 更新内存缓�
 
 assistant 消息使用 content 数组承载多种内容类型（thinking/text/tool_use），而不是扁平字段。这是因为 Anthropic/DeepSeek 的 content block 格式是结构化的。
 
-#### 3. VolatileScratch（每轮清除）
+#### 3. Mutable Session State（可变会话状态）
+
+压缩投影、计划和 Todo 使用独立的 session 状态文件：
+
+- `context-state.json` 保存 `active_start` 和滚动摘要，决定 conversation 的当前活跃投影；
+- `plan.draft` 和 `plan.md` 由 `PlanStore` 管理，确认后的计划在每次请求时投影为唯一的动态
+  `<current-plan>` system message；
+- `todos.json` 保存 Todo 的权威完整快照，conversation 只追加成功变更事件、紧凑 active
+  投影和必要的 TodoSync。
+
+这些状态不进入 `ImmutablePrefix`，也不改写 `conversation.jsonl` 中的既有消息。Plan/Todo 状态文件
+通过同目录临时文件、rename 或受控 unlink 提交；持久化成功后才更新进程内状态。
+
+#### 4. VolatileScratch（每轮清除）
 
 每个新用户输入开始时重置的状态：
 - StormBreaker 窗口（`tools.reset_storm()`）
@@ -170,9 +183,9 @@ assistant 消息使用 content 数组承载多种内容类型（thinking/text/to
 
 这些 turn 级状态会跨同一用户输入的多次 tool-use 请求保持，但不会泄漏到下一个用户输入。
 
-#### 4. Session Artifacts（会话资源）
+#### 5. Session Artifacts（会话资源）
 
-`src/session/artifacts.rs`
+`crates/mink-core/src/session/artifacts.rs`
 
 超长工具输出不直接丢弃。`ToolRunner` 在统一结果格式化阶段，如果 `ToolOutcome.content` 超过 `tool_result_max_bytes`：
 
@@ -268,33 +281,32 @@ overflow，并且本轮尚未压缩，则执行一次相同的 LLM 压缩并重�
 
 ## 主题四：维修流水线
 
-三段流水线位于工具执行之前，按序处理：
+维修机制分布在流式协议归一化、turn 级回收和工具执行门禁三个边界：
 
-### 步骤 1：Scavenge（回收）
-
-`src/agent/turn.rs:228-253`
-
-LLM 流式响应结束后，从 `thinking`（reasoning_content）和 `text`（普通文本）两个渠道中回收工具调用，补充到标准 `tool_calls` 字段解析出的 calls 列表中。
-
-```rust
-// turn.rs
-let (scavenged, scavenge_notes) = scavenge_combined(
-    Some(&thinking).filter(|s| !s.is_empty()),
-    Some(&text).filter(|s| !s.is_empty()),
-    4,  // max_calls
-);
-for sc in &scavenged {
-    if !calls.iter().any(|c| c.name == sc.name) {
-        calls.push(ToolCallEvent {
-            name: sc.name,
-            id: format!("scavenged_{}", calls.len()),
-            input_json: serde_json::from_str(&sc.arguments).unwrap_or_default(),
-            fields: BTreeMap::new(),
-            order: Vec::new(),
-        });
-    }
-}
+```text
+SSE tool-call 组装与非 fallback 截断修复
+→ Turn 级 Scavenge 回收与结构化校验
+→ resolved ModelToolSurface gate
+→ StormBreaker
+→ ToolExec dispatch
 ```
+
+### 步骤 1：Tool-call 组装与 Truncation 修复
+
+`crates/mink-core/src/sse/openai.rs` 在一个流式响应内合并 tool-call name、id 和 arguments。
+准备生成 `ToolCallEvent` 时，`build_tool_call_event()` 要求 arguments 是 JSON object；首次解析失败
+后调用 `repair_truncated_json()`，只接受能够重新解析且 `fallback=false` 的修复结果。无法可靠
+修复的输入直接返回解析错误，不以空对象继续执行。
+
+修复规则依次处理尾逗号、悬挂 key、未闭合字符串和未闭合容器，并在返回前重新执行 JSON
+校验。`ToolRunner` 对已经结构化的 `input_json` 保留同样的非 fallback 输入守卫。
+
+### 步骤 2：Scavenge（回收）
+
+LLM 流式响应结束后，`crates/mink-core/src/agent/turn.rs` 从 `thinking`
+（reasoning_content）和 `text`（普通文本）两个渠道回收遗漏的工具调用，补充到标准
+tool-call 列表中。每个候选调用都通过 `build_tool_call_event()` 转为结构化事件；解析失败的
+候选会被丢弃并记录诊断。去重使用 `(tool name, input_json)`，因此同名但参数不同的调用可以保留。
 
 回收尝试顺序（`scavenge_tool_calls`）：
 
@@ -311,32 +323,15 @@ for sc in &scavenged {
 `Edit {"path":"src/lib.rs","patch":"@src/lib.rs#TAG\nreplace 40:\n+..."}`。`Read offset/limit`
 仍可由执行层接受，但不会暴露在当前工具 schema 中；`Edit old_string/new_string` 会被拒绝。
 
-### 步骤 2：Truncation（截断修复）
-
-`src/tools/runner.rs`
-
-每个工具调用执行前，检查其 `input_json` 参数是否被截断。如果 JSON 不完整，尝试修复：
-
-修复规则序列（`repair_truncated_json`）：
-
-```
-1. 快速路径：JSON.parse 成功 → 不变
-2. 删除尾逗号：,} → }
-3. 填补悬挂 key："key": → "key": null
-4. 闭合未完成的字符串：末尾 " → 补 "
-5. 逆序闭合：{ → }，[ → ]，" → "
-6. 验证：修复后 JSON.parse → 成功取修复版，失败退化为 {}
-```
-
-### 步骤 3：StormBreaker（重复抑制）
-
-`src/tools/runner.rs:53-75`
+### 步骤 3：Surface Gate 与 StormBreaker（重复抑制）
 
 `enabled_tools` 是唯一工具启用输入：`None` 使用 catalog 默认集合，空列表禁用全部，显式列表精确选择；`PythonSandbox` 是 explicit-only 工具。`ModelToolSurface` 再结合 approval、角色、文件系统后端、编译 feature 和硬依赖完成一次解析。默认 `yolo` 允许全部 tier；`write` 自动允许 Read/Write、阻止 Exec；`always-ask` 自动允许 Read、阻止 Write/Exec。单工具 `allow/deny/prompt` 可覆盖模式。当前没有交互式 prompt，`prompt` 会 fail closed。
 
-resolved `ModelToolSurface` 是唯一工具边界：`PrefixManager` 从它生成 tools schema 和能力工作流，`ToolRunner` 在真实执行前检查同一个 surface。这样即使恢复会话、模型异常输出或自定义 backend 产生未暴露的调用，也只会写入错误 tool result，不会执行；运行时不再重复解释 disable flag、sandbox `allow_*` 或 approval。
+resolved `ModelToolSurface` 是唯一工具边界：`PrefixManager` 从它生成 tools schema 和能力工作流，`ToolRunner` 在真实执行前检查同一个 surface。这样即使恢复会话、模型异常输出或自定义 backend 产生未暴露的调用，也只会写入错误 tool result，不会执行。运行时直接消费 resolved surface；disable flag、sandbox `allow_*` 和独立的 runner approval 判定不属于执行合同。
 
-随后检查重复调用。每个工具调用的 `(name, args_json)` 进入滑动窗口。检测到同一对 `(name, args)` 连续出现 ≥3 次（窗口 6），则抑制该调用，返回抑制说明：
+`ToolRunner` 先校验调用属于 resolved `ModelToolSurface`，再把每个工具调用的
+`(name, args_json)` 放入滑动窗口。检测到同一对 `(name, args)` 连续出现 ≥3 次（窗口 6），
+则抑制该调用，返回抑制说明：
 
 ```rust
 StormDecision::Suppress(reason) => {
@@ -347,9 +342,12 @@ StormDecision::Suppress(reason) => {
 }
 ```
 
-**Mutating 清空规则**：当 mutating 工具（Bash/Write/Edit）被调用时，清空窗口中的 read-only 条目。这允许 edit→re-read 模式正常执行。
+**Mutating 清空规则**：当 metadata 标记为 mutating 的工具被调用时，清空窗口中的 read-only
+条目。这允许 edit→re-read 模式正常执行。
 
-**StormExempt**：SubAgent、PlanDraft、PlanClear、PlanConfirm、TodoWrite 跳过风暴检测。
+**StormExempt**：SubAgent、PlanDraft、PlanClear、PlanConfirm、TodoWrite、TodoAdvance
+跳过风暴检测。TodoRead 是普通只读工具；TodoWrite 只负责结构更新，TodoAdvance 只负责
+进度转换，两者都是 revision 驱动的 session 状态变更并通过 `TodoStore` 原子提交。
 
 ---
 
@@ -468,7 +466,7 @@ turn。
 
 ### 错误分类
 
-`src/errors.rs`
+`crates/mink-core/src/errors.rs`
 
 ```rust
 pub enum ErrorCategory {
@@ -834,10 +832,12 @@ CLI 默认使用 `project`，Python SDK 默认使用 `home`，Rust 嵌入式 `Ag
 ├── events.jsonl          ← 事件日志（每行一个事件）
 ├── session.json          ← session 元数据：alias、title、cwd、时间戳
 ├── summary.txt           ← 压缩后的上下文快照
-├── context-state.json    ← 活跃历史边界和滚动摘要
-├── plan.md               ← 确认后的执行计划
-├── plan.draft            ← 草稿计划
 ├── stats.json            ← Token 用量统计
+├── context-state.json    ← 首次提交压缩状态后生成
+├── plan.md               ← 确认计划存在时生成
+├── plan.draft            ← 未确认草稿存在时生成
+├── todos.json            ← 首次成功 Todo 变更后生成
+├── usage.jsonl           ← 首次记录 LLM 请求后生成
 └── artifacts/            ← 超长工具输出
     ├── index.jsonl
     └── bash-0001.txt
@@ -1074,8 +1074,13 @@ Output language               ← core
 ```
 
 `Current plan` 不参与上述 immutable prompt 装配。每次 agent 请求都从 `plan.md` 生成唯一的
-`<current-plan>` 动态 system message，插入压缩摘要之后、conversation 之前；确认和清理计划
-无需使 prefix 失效，也不会把计划正文写入历史或摘要。
+`<current-plan>` 动态 system message，并插入压缩摘要之后、conversation 之前。
+
+Todo 采用追加式事件而不是逐请求前置投影。TodoWrite / TodoAdvance 成功时，tool result
+追加本次增量事件和 `<current-todos>` 物化投影；投影只包含 revision、状态计数与当前
+`in_progress` 批次，完整列表通过 TodoRead 按需读取。恢复或压缩后，若 `todos.json`
+revision 领先活跃历史，则追加一次 TodoSync；历史领先文件时 fail closed。Todo 状态变化
+因此不修改 immutable prefix，也不改写旧消息，已有请求仍是后续请求的稳定前缀。
 
 跨工具规则依赖 `ToolSemanticCapability`，不枚举工具 pair。专用 provider 按 tier、priority、
 catalog order 和名称稳定决胜；fallback 只填补未绑定能力。workflow 只使用正向事实，并在互斥
@@ -1135,6 +1140,8 @@ pub enum Event {
 | compact 后 messages 必须刷新 | `agent/turn.rs`、`agent/compactor.rs` | LLM 发送过期数据 |
 | compact 后必须重建消息投影 | `agent/compactor.rs` | LLM 发送完整冷历史或过期边界 |
 | 压缩摘要只能进入动态消息投影 | `session/compaction.rs` | prefix cache 因摘要变化失效 |
+| Todo 文件原子提交后才能更新内存 revision | `session/todo.rs` | 文件与运行时状态分叉，stale write 失效 |
+| Todo 状态只通过成功工具结果或 TodoSync 追加 | `session/todo.rs`、`tools/todo.rs`、`agent/turn.rs` | 前置投影破坏消息前缀，或文件与上下文 revision 分叉 |
 | 输入降噪只能修改摘要请求 | `session/compaction_input.rs` | 完整历史或热尾部发生信息损失 |
 | 压缩使用调用方活动模型和共享 backend | `turn.rs`、`orchestrator.rs`、`session/compaction.rs` | 模型切换后摘要发往启动模型或绕过宿主 backend |
 | 子代理启动配置继承当前活动模型 | `turn.rs`、`sub_coordinator.rs`、`sub_executor.rs` | 模型切换后 child 请求退回父启动模型 |

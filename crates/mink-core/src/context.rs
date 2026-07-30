@@ -10,6 +10,7 @@ use crate::session::plan::PlanStore;
 use crate::session::prefix::ImmutablePrefix;
 use crate::session::stats::StatsTracker;
 use crate::session::store::ConversationStore;
+use crate::session::todo::TodoStore;
 use crate::session::usage::{UsageJournal, UsageKind, UsageScope};
 use crate::tools::semantic_capabilities::ResolvedToolCapabilities;
 use crate::tools::snapshot::FileSnapshotStore;
@@ -99,6 +100,7 @@ pub struct ToolContext {
     pub artifacts: Arc<ArtifactManager>,
     pub snapshots: Arc<Mutex<FileSnapshotStore>>,
     pub plan_store: Arc<PlanStore>,
+    pub todo_store: Arc<TodoStore>,
     pub tool_config: ToolConfig,
     pub interrupt: Arc<AtomicBool>,
     pub read_only_fs: Option<Arc<dyn ReadOnlyFileSystem>>,
@@ -122,6 +124,7 @@ impl From<&AgentSharedContext> for ToolContext {
                 ctx.plan_path.clone(),
                 ctx.plan_draft_path.clone(),
             )),
+            todo_store: ctx.todo_store.clone(),
             tool_config: ctx.tool_config.clone(),
             interrupt: ctx.interrupt.clone(),
             read_only_fs: ctx.read_only_fs.clone(),
@@ -145,6 +148,7 @@ pub struct AgentSharedContext {
     pub llm_backend: Arc<dyn LlmBackend>,
     pub store: Arc<ConversationStore>,
     pub artifacts: Arc<ArtifactManager>,
+    pub todo_store: Arc<TodoStore>,
     pub snapshots: Arc<Mutex<FileSnapshotStore>>,
     pub stats: Arc<StatsTracker>,
     pub usage: Arc<UsageJournal>,
@@ -175,6 +179,20 @@ pub struct AgentSharedContext {
 }
 
 impl AgentSharedContext {
+    pub(crate) fn todo_read_provider(&self) -> Option<&'static str> {
+        use crate::tools::semantic_capabilities::ToolSemanticCapability::TodoInspect;
+        self.tool_capabilities
+            .primary_provider(TodoInspect)
+            .map(|provider| provider.tool)
+    }
+
+    pub(crate) fn todo_advance_provider(&self) -> Option<&'static str> {
+        use crate::tools::semantic_capabilities::ToolSemanticCapability::TodoProgressTransition;
+        self.tool_capabilities
+            .primary_provider(TodoProgressTransition)
+            .map(|provider| provider.tool)
+    }
+
     pub fn model(&self) -> String {
         crate::config::model_resolver(&self.config)
             .resolve(&self.config.model)

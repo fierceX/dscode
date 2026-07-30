@@ -12,6 +12,7 @@ use super::python;
 #[cfg(feature = "python-sandbox")]
 use super::sandbox_python;
 use super::search;
+use super::todo::{TodoAdvanceTool, TodoReadTool, TodoWriteTool};
 use crate::context::ToolContext;
 use crate::guard::storm::{StormBreaker, StormDecision};
 use crate::protocol::ToolCallEvent;
@@ -25,6 +26,7 @@ pub struct ToolOutcome {
     pub success: bool,
     pub diagnostics: Vec<String>,
     pub plan_command: Option<PlanCommand>,
+    pub state_metadata: Option<serde_json::Value>,
 }
 
 impl ToolOutcome {
@@ -37,6 +39,7 @@ impl ToolOutcome {
             success: true,
             diagnostics: Vec::new(),
             plan_command: None,
+            state_metadata: None,
         }
     }
 
@@ -65,7 +68,9 @@ static TOOL_REGISTRY: LazyLock<Vec<Box<dyn ToolExec>>> = LazyLock::new(|| {
         Box::new(bash::BashTool),
         Box::new(search::GlobTool),
         Box::new(search::GrepTool),
+        Box::new(TodoReadTool),
         Box::new(TodoWriteTool),
+        Box::new(TodoAdvanceTool),
         Box::new(PlanDraftTool),
         Box::new(PlanConfirmTool),
         Box::new(PlanClearTool),
@@ -105,6 +110,7 @@ pub struct ToolRunResult {
     pub signals: Vec<crate::guard::collector::Signal>,
     pub(crate) plan_command: Option<PlanCommand>,
     pub(crate) needs_finalization: bool,
+    pub(crate) state_metadata: Option<serde_json::Value>,
 }
 
 pub struct SubAgentRequest {
@@ -144,12 +150,7 @@ struct RawToolResult {
     success: bool,
     diagnostics: Vec<String>,
     plan_command: Option<PlanCommand>,
-}
-
-#[derive(serde::Deserialize)]
-struct TodoArg {
-    content: String,
-    status: String,
+    state_metadata: Option<serde_json::Value>,
 }
 
 impl ToolRunner {
@@ -354,6 +355,7 @@ fn dispatch_tool(
                 success: outcome.success,
                 diagnostics: outcome.diagnostics,
                 plan_command: outcome.plan_command,
+                state_metadata: outcome.state_metadata,
             },
             Err(e) => RawToolResult {
                 output: Err(e),
@@ -364,6 +366,7 @@ fn dispatch_tool(
                 success: false,
                 diagnostics: Vec::new(),
                 plan_command: None,
+                state_metadata: None,
             },
         }
     } else {
@@ -376,6 +379,7 @@ fn dispatch_tool(
             success: false,
             diagnostics: Vec::new(),
             plan_command: None,
+            state_metadata: None,
         }
     }
 }
@@ -394,6 +398,7 @@ fn format_dispatched_result(
         success,
         diagnostics,
         plan_command,
+        state_metadata,
     } = raw;
     let mut output = match output {
         Ok(v) => v,
@@ -477,6 +482,7 @@ fn format_dispatched_result(
         signals,
         plan_command,
         needs_finalization,
+        state_metadata,
     }
 }
 
@@ -517,6 +523,7 @@ fn blocked_tool_result(
         signals: Vec::new(),
         plan_command: None,
         needs_finalization: false,
+        state_metadata: None,
     }
 }
 
@@ -529,34 +536,7 @@ fn resolve_summary_path(cwd: &Path, raw: &str) -> PathBuf {
     }
 }
 
-pub struct TodoWriteTool;
 pub struct SubAgentTool;
-
-impl ToolExec for TodoWriteTool {
-    fn metadata(&self) -> ToolMetadata {
-        ToolMetadata::new(
-            "TodoWrite",
-            "Maintain the current session todo checklist.",
-            ApprovalTier::Write,
-            ToolResultKind::Control,
-        )
-        .mutating()
-        .storm_exempt()
-    }
-
-    fn execute(
-        &self,
-        input: &serde_json::Value,
-        _ctx: &ToolContext,
-    ) -> anyhow::Result<ToolOutcome> {
-        #[derive(serde::Deserialize)]
-        struct Args {
-            todos: Vec<TodoArg>,
-        }
-        let args: Args = serde_json::from_value(input.clone())?;
-        todo_write_tool(&args.todos).map(ToolOutcome::text)
-    }
-}
 
 impl ToolExec for SubAgentTool {
     fn metadata(&self) -> ToolMetadata {
@@ -586,29 +566,6 @@ impl ToolExec for SubAgentTool {
         }
         Ok(ToolOutcome::text(String::new()))
     }
-}
-
-fn todo_write_tool(todos: &[TodoArg]) -> Result<String> {
-    let mut lines = Vec::new();
-    let mut in_progress = 0;
-    for t in todos {
-        if t.content.is_empty() {
-            bail!("Error: todo item content is required");
-        }
-        match t.status.as_str() {
-            "pending" => lines.push(format!("- [ ] {}", t.content)),
-            "in_progress" => {
-                in_progress += 1;
-                lines.push(format!("- [ ] {}", t.content));
-            }
-            "completed" => lines.push(format!("- [x] {}", t.content)),
-            _ => bail!("Error: invalid todo status: {}", t.status),
-        }
-    }
-    if in_progress > 1 {
-        bail!("Error: todo_write allows at most one in_progress item");
-    }
-    Ok(lines.join("\n"))
 }
 
 fn file_tool_result_summary_sync(kind: &str, display_path: &str, read_path: &str) -> String {
@@ -746,43 +703,6 @@ mod tests {
     use crate::tools::approval::{ToolAuthorization, authorize_tool, denied_message};
 
     #[test]
-    fn todo_write_outputs_checklist() {
-        let todos = vec![
-            TodoArg {
-                content: "task 1".into(),
-                status: "pending".into(),
-            },
-            TodoArg {
-                content: "task 2".into(),
-                status: "in_progress".into(),
-            },
-            TodoArg {
-                content: "task 3".into(),
-                status: "completed".into(),
-            },
-        ];
-        let result = todo_write_tool(&todos).unwrap();
-        assert!(result.contains("- [ ] task 1"));
-        assert!(result.contains("- [ ] task 2"));
-        assert!(result.contains("- [x] task 3"));
-    }
-
-    #[test]
-    fn todo_write_rejects_multiple_in_progress() {
-        let todos = vec![
-            TodoArg {
-                content: "a".into(),
-                status: "in_progress".into(),
-            },
-            TodoArg {
-                content: "b".into(),
-                status: "in_progress".into(),
-            },
-        ];
-        assert!(todo_write_tool(&todos).is_err());
-    }
-
-    #[test]
     fn format_tool_result_truncates_large() {
         let s = "line0\n".repeat(500);
         let result = format_tool_result(&s, 100);
@@ -853,6 +773,8 @@ mod tests {
             "PlanConfirm",
             "PlanClear",
             "TodoWrite",
+            "TodoRead",
+            "TodoAdvance",
             "SubAgent",
         ] {
             assert!(registry_names.contains(expected));

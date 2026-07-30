@@ -39,6 +39,7 @@ pub struct Paths {
     pub metadata: PathBuf,
     pub plan: PathBuf,
     pub plan_draft: PathBuf,
+    pub todos: PathBuf,
     pub stats: PathBuf,
     pub usage: PathBuf,
     pub artifacts: PathBuf,
@@ -86,6 +87,7 @@ pub fn paths_for_layout(home: &Path, cwd: &Path, session_id: &str, layout: Sessi
         metadata: session_dir.join("session.json"),
         plan: session_dir.join("plan.md"),
         plan_draft: session_dir.join("plan.draft"),
+        todos: session_dir.join("todos.json"),
         stats: session_dir.join("stats.json"),
         usage: session_dir.join("usage.jsonl"),
         artifacts: session_dir.join("artifacts"),
@@ -270,6 +272,10 @@ mod tests {
         assert_eq!(
             paths.conversation,
             PathBuf::from("/home/mink/session-root/conversation.jsonl")
+        );
+        assert_eq!(
+            paths.todos,
+            PathBuf::from("/home/mink/session-root/todos.json")
         );
     }
 }

@@ -231,6 +231,11 @@ mod tests {
         assert_eq!(session.home, home);
         assert_eq!(session.cwd, cwd);
         assert!(session.events_path.exists());
+        assert_eq!(
+            session.todos_path.parent(),
+            session.events_path.parent(),
+            "todo state must live in the resolved session directory"
+        );
         assert!(
             std::fs::read_to_string(&session.events_path)
                 .unwrap()

@@ -522,6 +522,7 @@ mod tests {
                 tool_args: Default::default(),
                 content: "Process completed with exit code 1.".into(),
                 conv_content: "Process completed with exit code 1.".into(),
+                state_metadata: None,
             }])
             .await?;
         ctx.store.add_user("keep the API stable").await?;

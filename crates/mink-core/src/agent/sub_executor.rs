@@ -368,6 +368,18 @@ mod tests {
             .expect("test context should be uniquely owned")
             .vfs_scope
             .resource_session_id = "tenant-knowledge".into();
+        parent
+            .todo_store
+            .apply_structure(
+                0,
+                crate::session::todo::TodoChanges {
+                    add: vec![crate::session::todo::TodoAdd {
+                        content: "parent-only task".into(),
+                    }],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
 
         let parent_snapshot = parent.capability_snapshot.clone();
         let config = parent.config.clone();
@@ -394,6 +406,7 @@ mod tests {
                 .ends_with("subagents/sub-agent-session")
         );
         assert!(child.child_store.lines().await.unwrap().is_empty());
+        assert!(child.child_ctx.todo_store.snapshot().items.is_empty());
     }
 
     #[tokio::test]
@@ -508,6 +521,25 @@ mod tests {
             r#"{"total_input_tokens":999,"total_output_tokens":777}"#,
         )
         .await?;
+        parent.todo_store.apply_structure(
+            0,
+            crate::session::todo::TodoChanges {
+                add: vec![crate::session::todo::TodoAdd {
+                    content: "inherited task".into(),
+                }],
+                ..Default::default()
+            },
+        )?;
+        let parent_todos = parent
+            .todo_store
+            .advance(
+                1,
+                crate::session::todo::TodoTransitions {
+                    activate: vec!["T0001".into()],
+                    ..Default::default()
+                },
+            )?
+            .snapshot;
 
         let config = parent.config.clone();
         let child = SubAgentExecutor::new(parent, "sub-fork-state".into(), true, config).await?;
@@ -516,6 +548,7 @@ mod tests {
             child.child_ctx.compaction.active_messages().await?,
             projected
         );
+        assert_eq!(child.child_ctx.todo_store.snapshot(), parent_todos);
         assert_eq!(
             tokio::fs::read(child.child_ctx.home.join("future-state.bin")).await?,
             b"preserved"

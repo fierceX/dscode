@@ -387,7 +387,8 @@ cpython-wasi/
 
 ```toml
 enabled_tools = [
-  "Read", "Write", "Edit", "Bash", "Glob", "Grep", "TodoWrite",
+  "Read", "Write", "Edit", "Bash", "Glob", "Grep", "TodoRead", "TodoWrite",
+  "TodoAdvance",
   "PlanDraft", "PlanConfirm", "PlanClear", "Python", "SubAgent",
   "PythonSandbox",
 ]
@@ -754,11 +755,12 @@ CLI 的历史目录结构是 `project` layout：
         ├── events.jsonl       ← 事件日志
         ├── session.json       ← session 元数据：alias、title、created_at、updated_at
         ├── summary.txt        ← 压缩后的上下文快照
-        ├── context-state.json ← 当前投影边界和滚动摘要
-        ├── plan.md            ← 确认后的计划
-        ├── plan.draft         ← 草稿计划
         ├── stats.json         ← Token 用量统计
-        ├── usage.jsonl        ← LLM 请求级 Token 与费用明细
+        ├── context-state.json ← 首次提交压缩状态后生成
+        ├── plan.md            ← 确认计划存在时生成
+        ├── plan.draft         ← 未确认草稿存在时生成
+        ├── todos.json         ← 首次成功 Todo 变更后生成
+        ├── usage.jsonl        ← 首次记录 LLM 请求后生成
         └── artifacts/         ← 超长工具输出
             ├── index.jsonl
             └── <tool>-0001.txt
@@ -805,7 +807,10 @@ mink --list-sessions
 │    → 向 TurnCompactor 提交上下文压缩请求
 │    → 下一次 LLM 请求动态注入 <current-plan>
 ├─ 执行阶段
-│  → TodoWrite 可用时，LLM 创建 checklist 并随执行更新状态
+│  → TodoRead 读取权威 revision 和稳定 ID
+│  → TodoWrite 原子新增 pending 条目、删除条目或替换正文
+│  → TodoAdvance 原子转换 active batch 的进度
+│  → 成功变更在 conversation 尾部追加增量事件和当前紧凑投影
 └─ 计划完成
    → LLM 调用 PlanClear 工具
      → plan.md 删除
@@ -952,7 +957,9 @@ artifact、输出截断和每个工具的完整协议以 [工具参考](tools.md
 | `PythonSandbox` | WASI 沙箱中执行 Python（受限，需在 `enabled_tools` 显式列出） | `script` / `script_file`, `timeout` |
 | `Glob` | 文件匹配 | `pattern`, `path` |
 | `Grep` | 内容搜索 | `pattern`, `path`, `glob`, `context` |
-| `TodoWrite` | 维护 checklist | `todos[{content, status}]` |
+| `TodoRead` | 读取持久化 checklist、revision 和稳定 ID | `include_completed` |
+| `TodoWrite` | 原子修改 checklist 结构 | `base_revision`, `add`, `update`, `remove` |
+| `TodoAdvance` | 原子转换 checklist 进度 | `base_revision`, `complete`, `activate`, `pause`, `reopen` |
 | `PlanDraft` | 保存或取消计划草稿 | `content` |
 | `PlanConfirm` | 确认计划 | 无参数 |
 | `PlanClear` | 清空计划 | 无参数 |

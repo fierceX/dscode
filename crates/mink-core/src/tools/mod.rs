@@ -14,4 +14,5 @@ pub mod search;
 pub mod semantic_capabilities;
 pub mod snapshot;
 pub mod surface;
+pub mod todo;
 pub mod vfs;

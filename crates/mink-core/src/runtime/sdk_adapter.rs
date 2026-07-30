@@ -329,6 +329,7 @@ mod tests {
             usage_path: PathBuf::from("/tmp/home/sid-1/usage.jsonl"),
             plan_path: PathBuf::from("/tmp/home/sid-1/plan.md"),
             plan_draft_path: PathBuf::from("/tmp/home/sid-1/plan.draft"),
+            todos_path: PathBuf::from("/tmp/home/sid-1/todos.json"),
         };
         let outcome = TurnOutcome {
             billing_turn_id: "turn-1".into(),
@@ -392,6 +393,7 @@ mod tests {
             usage_path: "/h/sid/usage.jsonl".into(),
             plan_path: "/h/sid/plan.md".into(),
             plan_draft_path: "/h/sid/plan.draft".into(),
+            todos_path: "/h/sid/todos.json".into(),
         };
         let outcome = TurnOutcome {
             billing_turn_id: "turn-2".into(),

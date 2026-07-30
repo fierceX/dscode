@@ -1,4 +1,5 @@
 pub mod artifacts;
+mod atomic_file;
 pub mod compaction;
 pub mod compaction_input;
 pub mod init;
@@ -8,4 +9,5 @@ pub mod plan;
 pub mod prefix;
 pub mod stats;
 pub mod store;
+pub mod todo;
 pub mod usage;

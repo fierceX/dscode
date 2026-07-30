@@ -194,6 +194,7 @@ impl super::runner::ToolExec for PythonTool {
             success: exit_code.unwrap_or(0) == 0,
             diagnostics: Vec::new(),
             plan_command: None,
+            state_metadata: None,
         })
     }
 }

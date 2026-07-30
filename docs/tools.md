@@ -18,7 +18,7 @@ surface、语义能力和跨工具 workflow 的设计见
 ToolCallEvent
   -> resolved ModelToolSurface 执行门禁
   -> StormBreaker 检查
-  -> repair_truncated_json()
+  -> repair_tool_input() 非 fallback 输入守卫
   -> ToolExec::execute()
   -> format_dispatched_result() 生成 ToolRunResult
      -> 普通结果执行大小保护、Bash noise filter、Read-Write summary、Edit conv_content
@@ -27,6 +27,12 @@ ToolCallEvent
   -> finalize_deferred_results() 对延迟结果执行大小保护
   -> SignalCollector 只观察最终 ToolRunResult
 ```
+
+OpenAI SSE parser 在生成 `ToolCallEvent` 前合并碎片化 arguments，并要求输入是 JSON object。
+首次解析失败时调用 `repair_truncated_json()`；只有修复结果能够重新解析且
+`fallback=false` 才继续，无法可靠修复的输入直接返回解析错误。Scavenge 回收的候选调用也
+通过同一个 `build_tool_call_event()` 结构化校验。Runner 接收结构化 `input_json`，并保留
+同样的非 fallback 输入守卫。
 
 工具结果有两个内容通道：
 
@@ -100,8 +106,8 @@ Rust `AgentOptions` 或 SDK `options.enabled_tools` 设置。显式列表精确�
 报错。
 
 最终 surface 还会考虑 approval、主/子代理 role、filesystem backend 和硬依赖；schema、
-语义能力、workflow、运行时引导和真实执行门禁都消费同一个解析结果，不再存在 disable flag
-或 sandbox `allow_*` 工具策略。
+语义能力、workflow、运行时引导和真实执行门禁都消费同一个解析结果。工具启用合同不包含
+disable flag 或 sandbox `allow_*` 策略。
 
 ### 按需编译（PythonSandbox）
 
@@ -347,25 +353,60 @@ open("/absolute/path/to/project/output/f.txt", "w")  # 绝对路径 ✅
 - `[Full output: artifact://...]`：触发统一工具结果保护，完整输出已写入 session artifact。
 
 
-## `TodoWrite`
+## `TodoRead`
 
-维护当前会话的 checklist。
+读取当前 session 的持久化 todo 状态。结果包含 revision、状态计数、稳定 ID 和条目正文；
+默认省略已完成条目。
 
 | 参数 | 类型 | 说明 |
 |---|---|---|
-| `todos` | array | 完整 todo 列表，每项含 `content` 和 `status` |
+| `include_completed` | boolean | 是否返回已完成条目，默认 `false` |
 
-`status` 只能是：
+## `TodoWrite`
 
-- `pending`
-- `in_progress`
-- `completed`
+基于 `TodoRead` 或最新成功 todo 事件返回的 revision 和稳定 ID，原子修改列表结构。
 
-约束：
+| 参数 | 类型 | 说明 |
+|---|---|---|
+| `base_revision` | integer | 当前 todo revision，必填 |
+| `add` | array | 新增 `pending` 条目；每项只含 `content` |
+| `update` | array | 替换未完成条目正文；每项必须包含 `id` 和 `content` |
+| `remove` | string[] | 删除非 active 条目的稳定 ID |
 
-- 每次传完整列表，不传增量 diff。
-- 最多一个 `in_progress`。
-- 结果以 Markdown checklist 返回。
+新条目始终从 `pending` 开始；进入 `in_progress` 必须使用 TodoAdvance。已完成条目必须先
+reopen 才能修改正文；active 条目必须先 pause 或 complete 才能删除。TodoWrite 不修改任何
+条目的状态。至少提供一个结构变更，同一批中的所有变更要么一起提交，要么全部不生效。
+Todo 列表最多包含 256 项，单项正文最多 1024 字节，单次调用最多提交 128 个结构变更。
+
+## `TodoAdvance`
+
+基于最新 revision 原子转换一个或多个条目的进度状态。
+
+| 参数 | 类型 | 说明 |
+|---|---|---|
+| `base_revision` | integer | 当前 todo revision，必填 |
+| `complete` | string[] | `in_progress → completed` |
+| `activate` | string[] | `pending → in_progress` |
+| `pause` | string[] | `in_progress → pending` |
+| `reopen` | string[] | `completed → pending` |
+
+同一 ID 不能在一个调用中出现多次，也不能跳过合法来源状态。多个相关条目可以同时
+`in_progress`，工具不会自动选择下一项或强制逐项执行。revision 过期、ID 不存在、非法转换、
+重复 ID 或空更新都会失败，调用方需要重新 TodoRead 后重算。
+单次调用最多提交 128 个状态转换。
+
+TodoWrite / TodoAdvance 的成功结果都在 conversation 尾部追加两部分：本次增量
+`<todo-event>`，以及包含 revision、状态计数和当前 active batch 的 `<current-todos>` 紧凑
+物化投影。它们不会在每次请求前重新插入状态，因此不会因 todo 更新改写已有消息前缀。
+恢复、fork 或压缩后若文件 revision 领先活跃历史，runtime 追加一次 TodoSync；历史 revision
+领先文件时 fail closed。
+
+状态保存在 session 的 `todos.json`，包含格式版本、revision、下一个 ID 序号和条目数组。
+文件通过同目录临时文件和 rename 原子替换；缺失文件表示空列表，损坏或不支持的版本会在
+runtime 启动时 fail closed。
+
+`TodoStore` 由单个 runtime 持有并在进程内串行化更新，不提供跨进程文件锁；不要让多个 runtime
+并发写同一个 session。runtime 运行期间也不支持通过外部编辑 `todos.json` 热更新状态。
 
 ## `PlanDraft`
 
