@@ -82,8 +82,12 @@ mod tests {
             "description should match"
         );
         assert!(
-            skill.content.contains("Grep"),
-            "content should reference Grep"
+            skill.content.contains("The Checklist"),
+            "content should include the pre-code checklist"
+        );
+        assert!(
+            skill.content.contains("active content-search provider"),
+            "content should require search through an active provider"
         );
     }
 }
