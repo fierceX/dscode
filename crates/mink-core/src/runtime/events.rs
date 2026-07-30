@@ -1,5 +1,7 @@
 use crate::runtime::TurnOutcome;
-use crate::ui::{Display, StatsSnapshot, ToolResultDisplay};
+use crate::ui::{
+    Display, PresentedToolResultDisplay, StatsSnapshot, ToolCallDisplay, ToolResultDisplay,
+};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -161,6 +163,16 @@ impl Display for EventDisplay {
         }
     }
 
+    fn render_tool_call_detail(&self, call: &ToolCallDisplay<'_>) {
+        self.emit(AgentEvent::ToolCall {
+            name: call.tool_name.to_string(),
+            summary: call.summary.to_string(),
+        });
+        if let Some(delegate) = &self.delegate {
+            delegate.render_tool_call_detail(call);
+        }
+    }
+
     fn render_tool_result(&self, tool_name: &str, content_preview: &str) {
         self.emit(AgentEvent::ToolResult {
             tool_name: tool_name.to_string(),
@@ -184,6 +196,19 @@ impl Display for EventDisplay {
         });
         if let Some(delegate) = &self.delegate {
             delegate.render_tool_result_detail(result);
+        }
+    }
+
+    fn render_tool_result_presented(&self, result: &PresentedToolResultDisplay<'_>) {
+        self.emit(AgentEvent::ToolResult {
+            tool_name: result.base.tool_name.to_string(),
+            content_preview: result.base.content_preview.to_string(),
+            content: result.base.content.to_string(),
+            tool_use_id: result.base.tool_use_id.map(ToString::to_string),
+            exit_code: result.base.exit_code,
+        });
+        if let Some(delegate) = &self.delegate {
+            delegate.render_tool_result_presented(result);
         }
     }
 
@@ -288,6 +313,7 @@ impl Display for EventDisplay {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::{TodoCountsDisplay, TodoDisplay, ToolPresentation, ToolResultKind};
     use std::sync::Mutex;
 
     #[derive(Default)]
@@ -299,6 +325,44 @@ mod tests {
         fn on_event(&self, event: AgentEvent) {
             self.events.lock().unwrap().push(event);
         }
+    }
+
+    #[derive(Default)]
+    struct StructuredRecordingDisplay {
+        tool_call_id: Mutex<Option<String>>,
+        presentation: Mutex<Option<ToolPresentation>>,
+    }
+
+    impl Display for StructuredRecordingDisplay {
+        fn render_thinking(&self, _content: &str) {}
+        fn render_text(&self, _content: &str) {}
+        fn render_tool_call(&self, _name: &str, _summary: &str) {}
+
+        fn render_tool_call_detail(&self, call: &ToolCallDisplay<'_>) {
+            *self.tool_call_id.lock().unwrap() = Some(call.tool_use_id.to_string());
+        }
+
+        fn render_tool_result(&self, _tool_name: &str, _content_preview: &str) {}
+
+        fn render_tool_result_presented(&self, result: &PresentedToolResultDisplay<'_>) {
+            *self.presentation.lock().unwrap() = result.presentation.cloned();
+        }
+
+        fn render_stop(&self) {}
+        fn render_error(&self, _message: &str) {}
+        fn render_retry(&self) {}
+        fn render_info(&self, _msg: &str) {}
+        fn render_title_update(&self, _model: &str, _stats: &StatsSnapshot) {}
+        fn render_sub_agent_status(
+            &self,
+            _session_id: &str,
+            _status: &str,
+            _in_tokens: u64,
+            _out_tokens: u64,
+        ) {
+        }
+        fn render_prompt(&self) {}
+        fn render_clear_line(&self) {}
     }
 
     #[test]
@@ -334,6 +398,50 @@ mod tests {
                 && tool_use_id.as_deref() == Some("call_1")
                 && *exit_code == Some(0)
         ));
+    }
+
+    #[test]
+    fn event_display_preserves_structured_calls_for_its_delegate() {
+        let delegate = Arc::new(StructuredRecordingDisplay::default());
+        let display = EventDisplay::new(None, Some(delegate.clone()));
+        let presentation = ToolPresentation::Todo(TodoDisplay {
+            revision: 2,
+            counts: TodoCountsDisplay {
+                pending: 1,
+                in_progress: 2,
+                completed: 0,
+            },
+            items: Vec::new(),
+            changes: Vec::new(),
+        });
+
+        display.render_tool_call_detail(&ToolCallDisplay {
+            tool_use_id: "call_1",
+            tool_name: "TodoAdvance",
+            summary: "TodoAdvance(2 transitions @r1)",
+        });
+        display.render_tool_result_presented(&PresentedToolResultDisplay {
+            base: ToolResultDisplay {
+                tool_name: "TodoAdvance",
+                content_preview: "preview",
+                content: "full",
+                tool_use_id: Some("call_1"),
+                exit_code: None,
+            },
+            success: true,
+            result_kind: ToolResultKind::Control,
+            presentation: Some(&presentation),
+            artifacts: &[],
+        });
+
+        assert_eq!(
+            delegate.tool_call_id.lock().unwrap().as_deref(),
+            Some("call_1")
+        );
+        assert_eq!(
+            delegate.presentation.lock().unwrap().as_ref(),
+            Some(&presentation)
+        );
     }
 
     /// Verify every Display method maps to the correct AgentEvent variant.

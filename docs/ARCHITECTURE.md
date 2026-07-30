@@ -35,7 +35,8 @@ mink 是一个 Rust 实现的轻量 AI coding agent，默认面向 DeepSeek / Op
 - **Session 追加友好**：conversation、events、stats、summary、plan 都落在 session 目录。
 - **长输出可恢复**：工具输出超过上限时写入 artifact，conversation 只保留摘要和引用。
 - **读取入口统一**：`Read.path` 可读取文件和轻量 internal URL，并支持行 selector。
-- **工具结果双通道**：LLM conversation 使用工具结果或工具自定义 `conv_content`，UI 通过 `ToolResultDisplay` 展示。
+- **工具结果双通道**：LLM conversation 使用工具结果或工具自定义 `conv_content`，UI 通过
+  `PresentedToolResultDisplay` 展示基础内容、成功状态、结果类型和结构化 presentation。
 - **信号驱动干预**：工具失败、错误模式、编辑循环会降低 belief，并触发注入或中止。
 
 ---
@@ -113,10 +114,10 @@ TurnExecutor (agent/turn.rs)
 └───────────────────────┘
          │
 ┌─────── UI 层 ─────────┐
-│ crates/mink-core/src/ui/mod.rs │ Display trait、ToolResultDisplay、StatsSnapshot
+│ crates/mink-core/src/ui/mod.rs │ Display trait、结构化工具展示协议、StatsSnapshot
 │ crates/mink-cli/src/ui/engine.rs │ REPL / human 输出
 │ crates/mink-cli/src/ui/replay.rs │ REPL session 重放
-│ crates/mink-cli/src/tui/         │ ratatui 全屏 UI
+│ crates/mink-cli/src/tui/         │ ratatui Full / Inline 双 TUI surface
 └───────────────────────┘
 ```
 
@@ -154,7 +155,7 @@ OrchActor.handle_user_input()
            ├── ToolRunner 统一定稿并保护延迟结果大小
            ├── ToolSignalProcessor 基于最终结果更新 belief
            ├── store.add_tool_results()
-           ├── Display.render_tool_result_detail()
+           ├── Display.render_tool_result_presented()
            ├── Plan 压缩请求交给 TurnCompactor
            └── 循环结束 → OrchActor::finish_usage() 汇总 billing_turn_id → TurnOutcome
 ```
@@ -173,9 +174,11 @@ ToolExec::execute()
   -> ToolSignalProcessor 采集最终结果
   -> ConversationStore::add_tool_results()
        使用 conv_content（若非空）否则使用 content
-  -> Display::render_tool_result_detail()
+  -> Display::render_tool_result_presented()
 ```
-`content` 受 `tool_result_max_bytes` 保护；`content_preview` 用于简短终端展示。LLM conversation 由 `ConversationStore::add_tool_results()` 写入，不依赖 UI preview。
+`content` 受 `tool_result_max_bytes` 保护；`content_preview` 用于简短终端展示，presentation
+携带 Plan/Todo 结构化状态。LLM conversation 由 `ConversationStore::add_tool_results()` 写入，
+不依赖 UI preview。
 
 ### 信号系统
 
@@ -396,14 +399,14 @@ VFS 只接管普通路径。`artifact://`、`skill://`、`rule://` 和 `session:
 
 | 文件 | 职责 |
 |------|------|
-| `crates/mink-core/src/ui/mod.rs` | `Display`、`ToolResultDisplay`、`StatsSnapshot`，只保留协议层抽象 |
+| `crates/mink-core/src/ui/mod.rs` | `Display`、结构化工具 presentation、`ToolResultDisplay`、`StatsSnapshot` |
 | `crates/mink-cli/src/ui/engine.rs` | REPL 同步渲染 |
 | `crates/mink-cli/src/ui/replay.rs` | REPL replay |
 | `crates/mink-cli/src/tui/mod.rs` | TUI 入口和事件循环 |
 | `crates/mink-cli/src/tui/display.rs` | `Display` -> `TuiSignal` 适配 |
 | `crates/mink-cli/src/tui/signal.rs` | `TuiSignal` reducer |
-| `crates/mink-cli/src/tui/state.rs` | `TuiState`、消息、输入、视口、缓存、子代理状态 |
-| `crates/mink-cli/src/tui/input.rs` | 键盘、鼠标、粘贴、历史和命令输入 |
+| `crates/mink-cli/src/tui/state.rs` | 共享 transcript、Full viewport/click state、Inline committed state、Plan/Todo/Artifact 和子代理状态 |
+| `crates/mink-cli/src/tui/input.rs` | 键盘、粘贴、历史、详情页滚动和命令输入 |
 | `crates/mink-cli/src/tui/command.rs` | slash command 解析 |
 | `crates/mink-cli/src/tui/render.rs` | 渲染 facade 和布局 |
 | `crates/mink-cli/src/tui/render/*` | content/detail/input/status 子渲染器 |
@@ -416,7 +419,10 @@ VFS 只接管普通路径。`artifact://`、`skill://`、`rule://` 和 `session:
 ## Display 接口
 
 `Display` 是 runtime 与具体输出实现之间的共享抽象。`mink-core` 只定义 trait 和展示数据结构；
-REPL/TUI 的具体实现位于 `mink-cli`。工具结果通过 `ToolResultDisplay` 传递展示字段：
+REPL/TUI 的具体实现位于 `mink-cli`。基础工具结果通过 `ToolResultDisplay` 传递展示字段；
+`PresentedToolResultDisplay` 额外携带成功状态、结果类型、Plan/Todo presentation 和 artifact 元数据。
+工具调用通过 `ToolCallDisplay.tool_use_id` 与结果配对。TUI 实时路径与 replay 共用 reducer，不解析
+Todo XML 或 artifact 提示文本。
 
 ```rust
 pub struct ToolResultDisplay<'a> {
@@ -516,7 +522,17 @@ Session 目录保存 conversation、events、metadata、summary、stats 和 arti
 - 虚拟 `Read` 永远不生成可编辑 snapshot；VFS surface 隐藏 `Edit`，`Write` 仍只针对本地文件系统。
 - VFS 后端必须使用 `resource_session_id` 隔离数据；`agent_session_id` 只标识具体调用代理。
 - `Edit.patch` 必须校验 snapshot tag 和目标行 hash，stale 时 fail closed。
-- `render_tool_result_detail()` 必须保留默认实现。
+- Display 包装层必须保留详细 tool call/result 协议，不得在委托时丢失调用 ID 或 presentation。
 - TUI 输入 cursor 必须落在 UTF-8 char boundary。
-- TUI 点击目标只对应当前可见 viewport。
+- TUI 初始化从当前 session 的 Plan/Todo 状态文件建立详情基线，实时 presentation 在该基线上更新。
+- Full TUI 使用应用内完整 transcript、mouse capture、click map 和可逆折叠。
+- Inline TUI 已完成消息只写入原生 terminal scrollback 一次；只有连续 sealed 前缀可以推进 committed 边界。
+- Inline 空闲状态保留最后一个 sealed item，并使用 scrolling region 提交更早的稳定前缀；
+  新工作开始后才提交该尾部。
+- Inline 进入详情页时保存主视图 terminal，退出 alternate screen 后恢复同一对象并重绘，
+  不创建额外 inline viewport。
+- Full 与 Inline 共用结构化卡片、Markdown 和自动折叠策略；Inline 主视图不启用 mouse capture。
+- 含 Artifact 元数据的折叠卡片必须保留首个 `artifact://ID`，详情读取保持 256 KiB 上限。
+- Plan、Todo 和 Artifact 详情使用扣除水平 padding 后的内容宽度生成可视行，垂直滚动范围基于
+  折行后的行数。
 - 子代理详情使用稳定 `session_id`，不要回退到裸 `line_idx` 作为视图主键。

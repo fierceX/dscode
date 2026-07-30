@@ -63,7 +63,7 @@ SubAgent 由 `SubAgentCoordinator` 在 turn 内部启动、收集和注入结果
   ├── 延迟结果统一执行大小保护
   ├── ToolSignalProcessor 基于最终结果采集信号并更新 belief
   ├── ConversationStore::add_tool_results()
-  └── Display::render_tool_result_detail()
+  └── Display::render_tool_result_presented()
 步骤 6.1: Plan 压缩请求交给 TurnCompactor，失败则终止并返回错误
 步骤 7: DecisionEngine 决策继续、注入、中止或停止
 ```
@@ -485,7 +485,8 @@ pub enum ErrorCategory {
 
 信念度实时显示在终端界面上：
 
-- **TUI 模式**（`--tui`）：状态栏 `flash B:0.73 T:12 R:45 I:200K(50%)...`
+- **Full TUI**（`--tui` / `--tui=full`）：应用内 transcript、鼠标卡片操作和状态栏
+- **Inline TUI**（`--tui=inline`）：原生 scrollback、结构化紧凑卡片和状态栏
 - **REPL/CLI 模式**（`-i` / 单次）：ANSI 标题栏 `\x1b]0;...\x07` 相同格式
 
 两种模式共享同一套统计数据结构（`StatsSnapshot`），每轮工具执行后由 `render_title_update()` 刷新。
@@ -566,7 +567,9 @@ impl ToolExec for ReadTool {
 | `content` | UI 展示和默认 tool_result 内容，已过最大字节保护 |
 | `conv_content` | 非空时优先进入 LLM conversation，适合给模型更短的结果 |
 
-`TurnExecutor` 渲染工具结果时会构造 `ToolResultDisplay`：
+`TurnExecutor` 渲染工具结果时会构造 `PresentedToolResultDisplay`。其中基础字段仍由
+`ToolResultDisplay` 承载，结构化层补充 `success`、`result_kind`、Plan/Todo presentation
+和 artifact 元数据：
 
 ```rust
 ToolResultDisplay {
@@ -579,6 +582,15 @@ ToolResultDisplay {
 ```
 
 `content_preview` 用于简短展示，`content` 是工具层截断/过滤后的展示内容。LLM 读取的是 `ConversationStore` 写入的 tool result。
+TUI 使用 `tool_use_id` 合并调用和结果；实时事件和 events.jsonl replay 进入同一个 transcript
+reducer。Full 模式在应用内 viewport 中提供鼠标命中和可逆折叠；Inline 模式将自动折叠后的
+sealed item 与稳定 Markdown 块渐进提交到原生 scrollback。两种模式使用同一套语义卡片、
+Markdown 和 Plan/Todo/Artifact presentation。Display 包装器保持结构化调用 ID 与
+presentation，不把增强协议降级为旧的文本回调。Inline 通过 terminal scrolling region 写入
+稳定前缀，空闲时保留最后一个 item，避免完成时清空动态区并整体重排。
+TUI 初始化从当前 session 的 Plan/Todo 状态文件建立详情基线；超长工具结果折叠后仍保留首个
+`artifact://ID`，Artifact 详情最多读取 256 KiB。
+Plan、Todo 和 Artifact 详情按实际内容区宽度折行，并以折行后的可视行作为垂直滚动单位。
 
 ### 同步只读 VFS hook
 

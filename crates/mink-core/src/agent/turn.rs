@@ -288,7 +288,13 @@ impl TurnExecutor {
                     saw_visible_output = true;
                     self.ctx.log_event(serde_json::json!({"type":"tool_call","name":call.name,"id":call.id,"input":call.input_json}));
                     let summary = build_tool_call_summary(&call.name, &call.fields);
-                    self.ctx.display.render_tool_call(&call.name, &summary);
+                    self.ctx
+                        .display
+                        .render_tool_call_detail(&crate::ui::ToolCallDisplay {
+                            tool_use_id: &call.id,
+                            tool_name: &call.name,
+                            summary: &summary,
+                        });
                     calls.push(call);
                 }
                 Event::Usage(u) => {
@@ -544,18 +550,30 @@ impl TurnExecutor {
             };
             self.ctx.log_event(serde_json::json!({
                 "type":"tool_result",
+                "version": 2,
                 "tool_use_id": r.tool_use_id,
                 "name": r.tool_name,
                 "content": r.content,
+                "success": r.success,
+                "exit_code": r.exit_code,
+                "result_kind": r.result_kind,
+                "presentation": r.presentation,
+                "artifacts": r.artifacts,
             }));
             self.ctx
                 .display
-                .render_tool_result_detail(&ToolResultDisplay {
-                    tool_name: &r.tool_name,
-                    content_preview: &preview,
-                    content: &r.content,
-                    tool_use_id: Some(&r.tool_use_id),
-                    exit_code: r.exit_code,
+                .render_tool_result_presented(&crate::ui::PresentedToolResultDisplay {
+                    base: ToolResultDisplay {
+                        tool_name: &r.tool_name,
+                        content_preview: &preview,
+                        content: &r.content,
+                        tool_use_id: Some(&r.tool_use_id),
+                        exit_code: r.exit_code,
+                    },
+                    success: r.success,
+                    result_kind: r.result_kind,
+                    presentation: r.presentation.as_ref(),
+                    artifacts: &r.artifacts,
                 });
         }
         Ok(plan_compaction_trigger)
@@ -955,6 +973,10 @@ fn blocked_by_signal_recovery(
         sub_agent_description: None,
         sub_agent_fork: false,
         exit_code: None,
+        success: false,
+        result_kind: crate::tools::metadata::ToolResultKind::Control,
+        presentation: None,
+        artifacts: Vec::new(),
         signals: Vec::new(),
         plan_command: None,
         needs_finalization: false,

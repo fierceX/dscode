@@ -1,7 +1,8 @@
-use crate::tui::markdown::render_md_with_tables_with_width;
+use crate::tui::markdown::{render_md_with_tables_with_width, wrap_lines_word};
 use crate::tui::render::padded_content_area;
-use crate::tui::state::{MsgKind, TuiState};
+use crate::tui::state::{TranscriptKind, TuiState};
 use crate::tui::theme;
+use crate::ui::{PlanTransitionDisplay, TodoStatusDisplay};
 use ratatui::{
     Frame,
     layout::Rect,
@@ -53,7 +54,7 @@ pub(crate) fn detail_lines_for_session_with_width(
     let Some(line) = state
         .lines
         .get(line_idx)
-        .filter(|line| line.kind == MsgKind::SubAgent)
+        .filter(|line| line.kind == TranscriptKind::SubAgent)
     else {
         return vec![Line::from(Span::styled(
             format!("Sub-agent {session_id} has no detail line."),
@@ -97,6 +98,98 @@ pub(super) fn render_detail_bar(f: &mut Frame, area: Rect) {
     f.render_widget(Paragraph::new(Line::from(text)), area);
 }
 
+pub(super) fn render_plan_content(f: &mut Frame, area: Rect, scroll: usize, state: &TuiState) {
+    let inner_w = padded_content_area(area).width.max(1);
+    let mut lines = Vec::new();
+    if let Some(plan) = state.plan.as_ref() {
+        let status = match plan.transition {
+            PlanTransitionDisplay::DraftSaved => "Plan draft · awaiting confirmation",
+            PlanTransitionDisplay::DraftCancelled => "Plan draft cancelled",
+            PlanTransitionDisplay::Confirmed => "Plan confirmed",
+            PlanTransitionDisplay::Cleared => "No active plan",
+        };
+        lines.push(Line::from(Span::styled(status, theme::primary_bold())));
+        lines.push(Line::default());
+        if let Some(content) = plan.content.as_deref() {
+            render_md_with_tables_with_width(&mut lines, content, inner_w);
+        }
+    } else {
+        lines.push(Line::from(Span::styled(
+            "No plan state is available in this session.",
+            theme::muted(),
+        )));
+    }
+    render_detail_lines(f, area, scroll, lines);
+}
+
+pub(super) fn render_todos_content(f: &mut Frame, area: Rect, scroll: usize, state: &TuiState) {
+    let mut lines = Vec::new();
+    if let Some(todos) = state.todos.as_ref() {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "Todos r{} · {} active · {} pending · {} completed",
+                todos.revision,
+                todos.counts.in_progress,
+                todos.counts.pending,
+                todos.counts.completed
+            ),
+            theme::primary_bold(),
+        )));
+        lines.push(Line::default());
+        for item in &todos.items {
+            let marker = match item.status {
+                TodoStatusDisplay::Pending => "○",
+                TodoStatusDisplay::InProgress => "◉",
+                TodoStatusDisplay::Completed => "✓",
+            };
+            lines.push(Line::from(format!(
+                "{marker} {}  {}",
+                item.id, item.content
+            )));
+        }
+    } else {
+        lines.push(Line::from(Span::styled(
+            "No todo state is available in this session.",
+            theme::muted(),
+        )));
+    }
+    render_detail_lines(f, area, scroll, lines);
+}
+
+pub(super) fn render_artifact_content(f: &mut Frame, area: Rect, scroll: usize, state: &TuiState) {
+    let mut lines = Vec::new();
+    if let Some(artifact) = state.artifact_detail.as_ref() {
+        lines.push(Line::from(Span::styled(
+            format!("artifact://{}", artifact.id),
+            theme::primary_bold(),
+        )));
+        if artifact.truncated {
+            lines.push(Line::from(Span::styled(
+                "Showing the first 256 KiB. Use Read with a selector for later sections.",
+                theme::info(),
+            )));
+        }
+        lines.push(Line::default());
+        for raw in artifact.content.lines() {
+            lines.push(Line::from(raw.to_string()));
+        }
+    }
+    render_detail_lines(f, area, scroll, lines);
+}
+
+fn render_detail_lines(f: &mut Frame, area: Rect, scroll: usize, lines: Vec<Line<'static>>) {
+    let content_area = padded_content_area(area);
+    let lines = wrap_lines_word(&lines, content_area.width.max(1));
+    let viewport = content_area.height as usize;
+    let max_scroll = lines.len().saturating_sub(viewport);
+    let visible = lines
+        .into_iter()
+        .skip(scroll.min(max_scroll))
+        .take(viewport)
+        .collect::<Vec<_>>();
+    f.render_widget(Paragraph::new(Text::from(visible)), content_area);
+}
+
 pub(crate) fn detail_viewport_height(area_height: u16) -> usize {
     padded_content_area(Rect {
         x: 0,
@@ -105,4 +198,41 @@ pub(crate) fn detail_viewport_height(area_height: u16) -> usize {
         height: area_height,
     })
     .height as usize
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::style::{Color, Style};
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn detail_lines_wrap_before_viewport_scrolling() {
+        let style = Style::default().fg(Color::Cyan);
+        let logical = vec![
+            Line::from(Span::styled("计划内容中文测试", style)),
+            Line::from("todo-T0001-abcdefghijk"),
+            Line::from(r#"{"artifact":"abcdefghijklmnopqrstuvwxyz"}"#),
+        ];
+
+        let wrapped = wrap_lines_word(&logical, 8);
+
+        assert!(wrapped.len() > logical.len());
+        assert!(
+            wrapped.iter().all(|line| {
+                unicode_width::UnicodeWidthStr::width(line_text(line).as_str()) <= 8
+            })
+        );
+        assert_eq!(wrapped[0].spans[0].style, style);
+        assert_eq!(
+            wrapped.iter().map(line_text).collect::<String>(),
+            logical.iter().map(line_text).collect::<String>()
+        );
+    }
 }

@@ -1876,6 +1876,13 @@ async fn plan_draft_empty_content_cancels_and_reports_cancellation() -> anyhow::
     )?;
 
     assert_eq!(outcome.content, "Plan draft cancelled.");
+    assert!(matches!(
+        outcome.presentation,
+        Some(crate::ui::ToolPresentation::Plan(crate::ui::PlanDisplay {
+            transition: crate::ui::PlanTransitionDisplay::DraftCancelled,
+            content: None,
+        }))
+    ));
     assert!(!h.ctx.plan_draft_path.exists());
     Ok(())
 }
@@ -1902,6 +1909,13 @@ async fn todo_tools_persist_incremental_state_and_reject_stale_writes() -> anyho
     assert!(created.content.contains("revision=\"1\""));
     assert!(created.content.contains("T0001"));
     assert!(created.content.contains("T0002"));
+    assert!(matches!(
+        created.presentation,
+        Some(crate::ui::ToolPresentation::Todo(crate::ui::TodoDisplay {
+            revision: 1,
+            ..
+        }))
+    ));
 
     crate::tools::runner::ToolExec::execute(
         &crate::tools::todo::TodoAdvanceTool,
@@ -1918,6 +1932,13 @@ async fn todo_tools_persist_incremental_state_and_reject_stale_writes() -> anyho
     )?;
     assert!(read.content.contains("in_progress=\"2\""));
     assert!(read.content.contains("T0003: verify"));
+    assert!(matches!(
+        read.presentation,
+        Some(crate::ui::ToolPresentation::Todo(crate::ui::TodoDisplay {
+            revision: 2,
+            ..
+        }))
+    ));
 
     crate::tools::runner::ToolExec::execute(
         &crate::tools::todo::TodoWriteTool,
@@ -2195,6 +2216,7 @@ async fn sub_agent_recursion_is_rejected_without_running_child() -> anyhow::Resu
     let processed = coordinator.process_with_runner(vec![result], runner).await;
     assert_eq!(processed.len(), 1);
     assert!(processed[0].content.contains("recursion blocked"));
+    assert!(!processed[0].success);
     Ok(())
 }
 
@@ -2228,6 +2250,7 @@ async fn sub_agent_success_formats_result_and_records_usage() -> anyhow::Result<
     assert!(processed[0].content.contains("] ok (in=10, out=5)"));
     assert!(processed[0].content.contains("Thinking: child thought"));
     assert!(processed[0].content.contains("Text: child text"));
+    assert!(processed[0].success);
     let stats = h.ctx.stats.snapshot().await;
     assert_eq!(stats.sub_agent_request_count, 1);
     assert_eq!(stats.agent_request_count, 2);
@@ -2259,6 +2282,7 @@ async fn sub_agent_runner_panic_is_reported_as_failed_result() -> anyhow::Result
         "{}",
         processed[0].content
     );
+    assert!(!processed[0].success);
     assert!(
         h.display
             .info
@@ -2316,6 +2340,7 @@ async fn sub_agent_timeout_marks_incomplete() -> anyhow::Result<()> {
     });
     let processed = coordinator.process_with_runner(vec![result], runner).await;
     assert_eq!(processed[0].content, "Sub-agent timed out after 0s.");
+    assert!(!processed[0].success);
     Ok(())
 }
 
@@ -2498,6 +2523,10 @@ fn internal_result(name: &str) -> ToolRunResult {
         sub_agent_description: None,
         sub_agent_fork: false,
         exit_code: None,
+        success: true,
+        result_kind: crate::tools::metadata::ToolResultKind::Control,
+        presentation: None,
+        artifacts: Vec::new(),
         signals: Vec::new(),
         plan_command: None,
         needs_finalization: false,
@@ -2509,6 +2538,7 @@ fn plan_result(name: &str, outcome: crate::tools::runner::ToolOutcome) -> ToolRu
     let mut result = internal_result(name);
     result.content = outcome.content;
     result.plan_command = outcome.plan_command;
+    result.presentation = outcome.presentation;
     result.needs_finalization = true;
     result
 }

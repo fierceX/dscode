@@ -39,13 +39,16 @@ mink 是一个 Rust 实现的轻量 AI coding agent，专为 DeepSeek/OpenAI-com
 
 输入处理位于 `run_interactive()`，由 `rustyline::Editor` 提供历史、行编辑和 Tab 补全。
 
-### TUI 模式（`--tui`）
+### TUI 模式（`--tui` / `--tui=inline`）
 
-基于 `ratatui` 的事件驱动全屏界面。入口是 `run_tui()`（`crates/mink-cli/src/tui/mod.rs`）。
+基于 `ratatui` 的两种事件驱动界面。`--tui`（等价于 `--tui=full`）使用全屏应用内
+transcript；`--tui=inline` 使用原生 terminal scrollback。入口统一由
+`run_tui()`（`crates/mink-cli/src/tui/mod.rs`）按 `TuiMode` 分发。
 
 工作方式：编排器通过 `Display` trait 输出事件，`TuiDisplay`（`crates/mink-cli/src/tui/display.rs`）转为 `TuiSignal`，TUI 主循环消费 mpsc channel 并渲染。
 
-核心能力：状态栏、消息列表、多行输入、Ctrl+C 中断、slash command、Markdown 子集渲染、长工具结果折叠、子代理详情和鼠标点击。
+两种模式共用结构化 transcript reducer、工具卡片、Markdown、自动折叠、多行输入、状态栏、
+slash command，以及 Plan、Todo、Artifact 和子代理详情。
 
 TUI 特有操作和行为：
 
@@ -53,8 +56,18 @@ TUI 特有操作和行为：
 - Ctrl+C 在 `waiting/thinking/generating/tool/sub-agent/compacting` 等工作状态中断当前 turn；空闲状态按退出流程处理。
 - `/flash`、`/pro`、`/compact`、`/help`、`/skills`、`/exit`、`/quit`、`/q` 在本地处理。未知 `/xxx` 不发送给模型；需要发送 slash 文本时在行首加空格。
 - 工具结果可自动折叠。TUI 展示的是 `ToolResultDisplay.content`，仍受工具层 `tool_result_max_bytes` 保护。
-- 子代理消息可通过点击进入详情页，详情以 `session_id` 查找。
-- 鼠标点击只命中当前可见 viewport 中的折叠项或详情入口。
+- Full 模式使用 alternate screen 和 mouse capture，主视图支持应用内滚动、工具卡片点击和可逆折叠。
+- Inline 模式把连续 sealed transcript 和稳定 Markdown 块通过 `insert_before` 写入原生
+  scrollback；使用 terminal scrolling region 避免提交时重绘动态 viewport，并把一轮结束时的
+  最后一个 item 保留在 viewport，直到新工作开始。自动折叠后的内容不再提供展开操作，主视图
+  不启用 mouse capture。
+- 工具卡片根据 `ToolResultKind`、执行状态和 presentation 使用同一套语义着色与紧凑/展开投影。
+- TUI 初始化从当前 session 的 `plan.draft` / `plan.md` 和 `todos.json` 恢复 Plan/Todo 详情状态。
+- 超长工具结果折叠后仍显示首个 `artifact://ID`，完整内容由 Artifact 详情按需读取。
+- `/plan`、`/todos`、`/artifact ID` 和 `/sub-agent ID` 打开结构化详情。
+- Plan、Todo 和 Artifact 详情按扣除水平 padding 后的内容宽度折行，滚动边界按折行后的可视行计算。
+- Inline 详情页临时切换 alternate screen 时保存原 inline terminal；返回主视图必须恢复同一个
+  terminal 对象并清理重绘，不能创建第二个 inline viewport。
 
 ---
 
@@ -75,9 +88,15 @@ pub trait Display: Send + Sync {
     fn render_thinking(&self, content: &str);
     fn render_text(&self, content: &str);
     fn render_tool_call(&self, name: &str, summary: &str);
+    fn render_tool_call_detail(&self, call: &ToolCallDisplay<'_>) {
+        self.render_tool_call(call.tool_name, call.summary);
+    }
     fn render_tool_result(&self, tool_name: &str, content_preview: &str);
     fn render_tool_result_detail(&self, result: &ToolResultDisplay<'_>) {
         self.render_tool_result(result.tool_name, result.content_preview);
+    }
+    fn render_tool_result_presented(&self, result: &PresentedToolResultDisplay<'_>) {
+        self.render_tool_result_detail(&result.base);
     }
     fn render_stop(&self);
     fn render_error(&self, message: &str);
@@ -100,7 +119,9 @@ pub trait Display: Send + Sync {
 }
 ```
 
-工具结果显示使用 `ToolResultDisplay`。`content` 是工具层截断/过滤后的展示内容，受 `tool_result_max_bytes` 保护；`content_preview` 用于简短终端展示。
+工具结果显示使用 `PresentedToolResultDisplay` 包装 `ToolResultDisplay`。`content` 是工具层
+截断/过滤后的展示内容，受 `tool_result_max_bytes` 保护；`content_preview` 用于简短终端展示，
+presentation 携带 Plan/Todo 结构化状态。
 
 ---
 
@@ -346,12 +367,12 @@ Anchored patch 只修改 snapshot 覆盖且未漂移的行。tag 缺失、行 ha
 
 | 文件 | 职责 |
 |------|------|
-| `crates/mink-core/src/ui/mod.rs` | Display trait、ToolResultDisplay、StatsSnapshot |
+| `crates/mink-core/src/ui/mod.rs` | Display trait、结构化工具展示协议、ToolResultDisplay、StatsSnapshot |
 | `crates/mink-cli/src/ui/engine.rs` | REPL 同步渲染 |
 | `crates/mink-cli/src/ui/replay.rs` | REPL session 重放 |
 | `crates/mink-cli/src/tui/mod.rs` | TUI 入口和事件循环 |
 | `crates/mink-cli/src/tui/display.rs` | Display 到 TuiSignal 的适配 |
-| `crates/mink-cli/src/tui/state.rs` | TUI 消息、输入、视口、缓存、子代理状态 |
+| `crates/mink-cli/src/tui/state.rs` | 结构化 transcript、提交边界、输入、Plan/Todo/Artifact 和子代理状态 |
 | `crates/mink-cli/src/tui/input.rs` | TUI 输入、快捷键、鼠标、slash command |
 | `crates/mink-cli/src/tui/render/*` | TUI 内容区、详情页、输入区、状态栏渲染 |
 | `crates/mink-cli/src/tui/markdown/*` | TUI Markdown 子集渲染 |
@@ -435,8 +456,17 @@ Anchored patch 只修改 snapshot 覆盖且未漂移的行。tag 缺失、行 ha
 - 嵌入式 runtime 可为普通路径注入同步只读 VFS，仅替换 Read/Glob/Grep 后端；未注入时必须严格保持原有本地执行路径
 - VFS 调用同时携带继承的 `resource_session_id` 和当前 `agent_session_id`；虚拟 Read 不生成 snapshot，Edit/Write 始终操作本地文件
 - `Edit.patch` 的 header path 必须和 `Edit.path` 一致，snapshot stale 时拒绝编辑
-- `Display::render_tool_result_detail()` 必须保持默认实现。
+- Display 包装层必须原样转发 `render_tool_call_detail()` 和
+  `render_tool_result_presented()`；不得退化丢失 `tool_use_id`、presentation 或 artifact 元数据。
 - TUI 光标必须始终落在 UTF-8 char boundary。
+- Inline TUI 只提交连续且 sealed 的 transcript 前缀；committed 项不得再修改或重复写入原生 scrollback。
+- Inline TUI 空闲时保留最后一个 sealed item；新工作开始后才能推进该 item 的 committed 边界。
+- Inline 详情视图不得丢弃或重建主视图 terminal，否则 alternate screen 恢复内容会与新
+  viewport 叠加形成残影。
+- Full TUI 必须保留主视图鼠标命中、可逆折叠和应用内 viewport；不得受 Inline committed 边界影响。
+- TUI 实时 signal 与 replay 必须经过同一个 reducer；结构化工具状态不得从展示文本反向解析。
+- TUI Todo 增量 presentation 必须合并到当前完整状态，不能覆盖未出现在本次变化中的条目。
+- TUI Plan/Todo/Artifact 详情必须先按实际内容宽度折行，再计算垂直滚动范围。
 
 ---
 

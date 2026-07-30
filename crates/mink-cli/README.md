@@ -12,7 +12,8 @@
 
 - `src/cli.rs`：`mink` / `mink-core` 共用 CLI adapter，负责参数解析、配置合并、sandbox re-exec 和模式分发。
 - `src/ui`：REPL / 普通终端输出实现。
-- `src/tui`：ratatui 全屏 TUI、输入、渲染、通知、Markdown 子集和 session replay。
+- `src/tui`：ratatui Full / Inline 双 TUI surface，共享结构化 transcript、工具卡片、
+  Markdown、输入、详情、通知和 session replay。
 - `src/main.rs`：`mink` thin wrapper。
 - `src/bin/mink-core.rs`：SDK 精简二进制 thin wrapper。
 
@@ -39,7 +40,7 @@ cargo build -p mink-cli --release --no-default-features --features "sdk-bin pyth
 | `full-cli` | 默认 feature，等价于完整终端能力：CLI + REPL + TUI + PythonSandbox |
 | `cli` | 普通 CLI / REPL 基础能力 |
 | `repl` | rustyline 交互输入 |
-| `tui` | ratatui 全屏界面 |
+| `tui` | ratatui Full / Inline 双 TUI 界面 |
 | `sdk-bin` | 构建 `mink-core` SDK 二进制所需的最小 runtime |
 | `python-sandbox` | 透传启用 `mink-core/python-sandbox` |
 

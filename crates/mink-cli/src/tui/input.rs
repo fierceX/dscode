@@ -1,8 +1,11 @@
 use crate::agent::orchestrator::OrchCmd;
+use crate::config::TuiMode;
 use crate::tui::command::{SlashCommand, parse_slash_command};
 use crate::tui::file_picker::FilePickerState;
 use crate::tui::sanitize::normalize_tui_input;
-use crate::tui::state::{ActiveOverlay, ClickAction, MsgKind, MsgLine, TuiState, View, WorkState};
+use crate::tui::state::{
+    ActiveOverlay, ClickAction, TranscriptItem, TranscriptKind, TuiState, View, WorkState,
+};
 use crossterm::event::{Event, KeyCode, KeyModifiers, MouseEventKind};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -46,32 +49,32 @@ fn handle_key(
         return false;
     }
 
-    if matches!(state.view, View::SubAgentDetail { .. }) {
+    if !matches!(state.view, View::Main) {
         match (key.modifiers, key.code) {
             (KeyModifiers::NONE, KeyCode::Esc) => {
                 state.view = View::Main;
                 return false;
             }
             (KeyModifiers::NONE, KeyCode::PageUp) => {
-                if let View::SubAgentDetail { scroll, .. } = &mut state.view {
+                if let Some(scroll) = view_scroll_mut(&mut state.view) {
                     *scroll = scroll.saturating_sub(10);
                 }
                 return false;
             }
             (KeyModifiers::NONE, KeyCode::PageDown) => {
-                if let View::SubAgentDetail { scroll, .. } = &mut state.view {
+                if let Some(scroll) = view_scroll_mut(&mut state.view) {
                     *scroll = scroll.saturating_add(10);
                 }
                 return false;
             }
             (KeyModifiers::NONE, KeyCode::Up) => {
-                if let View::SubAgentDetail { scroll, .. } = &mut state.view {
+                if let Some(scroll) = view_scroll_mut(&mut state.view) {
                     *scroll = scroll.saturating_sub(1);
                 }
                 return false;
             }
             (KeyModifiers::NONE, KeyCode::Down) => {
-                if let View::SubAgentDetail { scroll, .. } = &mut state.view {
+                if let Some(scroll) = view_scroll_mut(&mut state.view) {
                     *scroll = scroll.saturating_add(1);
                 }
                 return false;
@@ -170,6 +173,16 @@ fn handle_key(
     }
     refresh_file_picker(state);
     false
+}
+
+fn view_scroll_mut(view: &mut View) -> Option<&mut usize> {
+    match view {
+        View::SubAgentDetail { scroll, .. }
+        | View::Plan { scroll }
+        | View::Todos { scroll }
+        | View::Artifact { scroll } => Some(scroll),
+        View::Main => None,
+    }
 }
 
 fn handle_overlay_key(key: &crossterm::event::KeyEvent, state: &mut TuiState) -> bool {
@@ -439,7 +452,10 @@ fn handle_enter(
     }
     state.input.history.push(input.clone());
     state.input.history_idx = None;
-    state.push_line(MsgLine::new(format!("> {input}"), MsgKind::Info));
+    state.push_line(TranscriptItem::new(
+        format!("> {input}"),
+        TranscriptKind::Info,
+    ));
     match parse_slash_command(&input) {
         Ok(Some(command)) => match command {
             SlashCommand::Flash => {
@@ -460,14 +476,23 @@ fn handle_enter(
                     state.arm_task_notification();
                     state.work_state = WorkState::Compacting;
                 } else {
-                    state.push_line(MsgLine::new(
+                    state.push_line(TranscriptItem::new(
                         "Failed to send compact command.".into(),
-                        MsgKind::Error,
+                        TranscriptKind::Error,
                     ));
                 }
             }
             SlashCommand::Help => state.add_help(),
             SlashCommand::Skills => state.show_skills(),
+            SlashCommand::Plan => state.view = View::Plan { scroll: 0 },
+            SlashCommand::Todos => state.view = View::Todos { scroll: 0 },
+            SlashCommand::SubAgent(session_id) => {
+                state.view = View::SubAgentDetail {
+                    session_id,
+                    scroll: 0,
+                }
+            }
+            SlashCommand::Artifact(id) => state.open_artifact(&id),
             SlashCommand::Quit => {
                 state.quit = true;
                 return true;
@@ -485,16 +510,16 @@ fn handle_enter(
                 state.arm_task_notification();
                 state.work_state = WorkState::WaitingModel;
             } else {
-                state.push_line(MsgLine::new(
+                state.push_line(TranscriptItem::new(
                     "Failed to send user input.".into(),
-                    MsgKind::Error,
+                    TranscriptKind::Error,
                 ));
             }
         }
         Err(_) => {
-            state.push_line(MsgLine::new(
+            state.push_line(TranscriptItem::new(
                 "Unknown command. Prefix with a space to send it as text.".into(),
-                MsgKind::Info,
+                TranscriptKind::Info,
             ));
         }
     }
@@ -502,60 +527,39 @@ fn handle_enter(
     false
 }
 
+#[cfg(test)]
 pub(crate) fn handle_event(
     ev: Event,
     state: &mut TuiState,
     orch_tx: &tokio::sync::mpsc::UnboundedSender<OrchCmd>,
 ) -> bool {
+    handle_event_for_mode(ev, state, orch_tx, TuiMode::Full)
+}
+
+pub(crate) fn handle_event_for_mode(
+    ev: Event,
+    state: &mut TuiState,
+    orch_tx: &tokio::sync::mpsc::UnboundedSender<OrchCmd>,
+    mode: TuiMode,
+) -> bool {
     match ev {
         Event::Key(key) => return handle_key(key, state, orch_tx),
-        Event::Mouse(mouse) => match mouse.kind {
-            MouseEventKind::ScrollUp => {
-                if let View::SubAgentDetail { scroll, .. } = &mut state.view {
-                    *scroll = scroll.saturating_sub(3);
-                } else {
-                    scroll_by(state, -(SCROLL_STEP as isize));
+        Event::Mouse(mouse) => {
+            if let Some(scroll) = view_scroll_mut(&mut state.view) {
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => *scroll = scroll.saturating_sub(3),
+                    MouseEventKind::ScrollDown => *scroll = scroll.saturating_add(3),
+                    _ => {}
+                }
+            } else if mode == TuiMode::Full {
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => scroll_by(state, -(SCROLL_STEP as isize)),
+                    MouseEventKind::ScrollDown => scroll_by(state, SCROLL_STEP as isize),
+                    MouseEventKind::Down(_) => handle_full_click(state, mouse.row),
+                    _ => {}
                 }
             }
-            MouseEventKind::ScrollDown => {
-                if let View::SubAgentDetail { scroll, .. } = &mut state.view {
-                    *scroll = scroll.saturating_add(3);
-                } else {
-                    scroll_by(state, SCROLL_STEP as isize);
-                }
-            }
-            MouseEventKind::Down(_) => {
-                if state.viewport.click_map.is_empty() {
-                    return false;
-                }
-                let Some(row) = content_row_for_mouse(state, mouse.row) else {
-                    return false;
-                };
-                let mut hit: Option<(usize, ClickAction)> = None;
-                for target in &state.viewport.click_map {
-                    if (target.start_row..=target.end_row).contains(&row) {
-                        hit = Some((target.line_idx, target.action.clone()));
-                        break;
-                    }
-                }
-                match hit {
-                    Some((idx, ClickAction::ToggleCollapse)) => {
-                        if let Some(msg) = state.lines.get_mut(idx) {
-                            msg.toggle_collapsed();
-                            state.invalidate_all_cache();
-                        }
-                    }
-                    Some((_, ClickAction::OpenSubAgentDetail { session_id })) => {
-                        state.view = View::SubAgentDetail {
-                            session_id,
-                            scroll: 0,
-                        };
-                    }
-                    None => {}
-                }
-            }
-            _ => {}
-        },
+        }
         Event::Resize(..) => {}
         Event::Paste(content) => {
             state.input.clamp_cursor();
@@ -571,7 +575,33 @@ pub(crate) fn handle_event(
     false
 }
 
-fn content_row_for_mouse(state: &TuiState, mouse_row: u16) -> Option<usize> {
-    (mouse_row >= state.viewport.content_y)
-        .then(|| usize::from(mouse_row - state.viewport.content_y))
+fn handle_full_click(state: &mut TuiState, mouse_row: u16) {
+    if mouse_row < state.viewport.content_y {
+        return;
+    }
+    let row = usize::from(mouse_row - state.viewport.content_y);
+    let action = state
+        .viewport
+        .click_map
+        .iter()
+        .find(|target| (target.start_row..=target.end_row).contains(&row))
+        .map(|target| (target.line_idx, target.action.clone()));
+    match action {
+        Some((idx, ClickAction::ToggleCollapse)) => {
+            if let Some(item) = state.lines.get_mut(idx) {
+                item.toggle_collapsed();
+                state.invalidate_all_cache();
+            }
+        }
+        Some((_, ClickAction::OpenPlan)) => state.view = View::Plan { scroll: 0 },
+        Some((_, ClickAction::OpenTodos)) => state.view = View::Todos { scroll: 0 },
+        Some((_, ClickAction::OpenArtifact { id })) => state.open_artifact(&id),
+        Some((_, ClickAction::OpenSubAgent { session_id })) => {
+            state.view = View::SubAgentDetail {
+                session_id,
+                scroll: 0,
+            };
+        }
+        None => {}
+    }
 }

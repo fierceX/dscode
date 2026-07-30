@@ -34,7 +34,7 @@ crossterm = "0.29"
 time = { version = "0.3.52", features = ["formatting", "macros"] }
 toml = "1.1"
 tokio = { version = "1", features = ["full"] }
-ratatui = "0.30"
+ratatui = { version = "0.30", features = ["scrolling-regions"] }
 unicode-width = "0.2"
 wasmtime = { version = "46", features = ["async"] }
 wasmtime-wasi = "46"

@@ -195,6 +195,7 @@ impl super::runner::ToolExec for PythonTool {
             diagnostics: Vec::new(),
             plan_command: None,
             state_metadata: None,
+            presentation: None,
         })
     }
 }

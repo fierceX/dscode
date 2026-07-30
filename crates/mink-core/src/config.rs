@@ -9,6 +9,20 @@ pub enum OutputFormat {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TuiMode {
+    #[default]
+    Off,
+    Full,
+    Inline,
+}
+
+impl TuiMode {
+    pub fn enabled(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OpenAiTokenParamConfig {
     #[default]
     MaxTokens,
@@ -311,7 +325,7 @@ pub struct Config {
     pub max_search_results: usize,
     pub output_format: OutputFormat,
     pub verbose: bool,
-    pub tui_mode: bool,
+    pub tui_mode: TuiMode,
     pub api_key: String,
     pub base_url: String,
     pub prompt: String,
@@ -390,7 +404,7 @@ impl Default for Config {
             max_search_results: 1000,
             output_format: OutputFormat::Human,
             verbose: false,
-            tui_mode: false,
+            tui_mode: TuiMode::Off,
             api_key: String::new(),
             base_url: String::new(),
             prompt: String::new(),
@@ -489,7 +503,15 @@ pub fn parse_args(args: Vec<String>) -> Result<Config> {
                 i += 1;
             }
             "--tui" => {
-                cfg.tui_mode = true;
+                cfg.tui_mode = TuiMode::Full;
+                i += 1;
+            }
+            "--tui=full" => {
+                cfg.tui_mode = TuiMode::Full;
+                i += 1;
+            }
+            "--tui=inline" => {
+                cfg.tui_mode = TuiMode::Inline;
                 i += 1;
             }
             "-i" | "--interactive" => {
@@ -1188,6 +1210,22 @@ mod tests {
         assert!(cfg.verbose);
         assert!(cfg.interactive);
         assert_eq!(cfg.output_format, OutputFormat::StreamJson);
+    }
+
+    #[test]
+    fn parse_args_selects_full_and_inline_tui_modes() {
+        assert_eq!(
+            parse_args(vec!["--tui".into()]).unwrap().tui_mode,
+            TuiMode::Full
+        );
+        assert_eq!(
+            parse_args(vec!["--tui=full".into()]).unwrap().tui_mode,
+            TuiMode::Full
+        );
+        assert_eq!(
+            parse_args(vec!["--tui=inline".into()]).unwrap().tui_mode,
+            TuiMode::Inline
+        );
     }
 
     #[test]

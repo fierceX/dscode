@@ -2,19 +2,23 @@ use crate::tui::file_picker::{FilePickerPolicy, FilePickerState};
 use crate::tui::notify::{TaskNotification, TaskNotificationKind};
 use crate::tui::sanitize::sanitize_tui_text;
 use crate::ui::StatsSnapshot;
+use crate::ui::{
+    ArtifactDisplay, PlanDisplay, TodoChangeDisplay, TodoDisplay, TodoStatusDisplay,
+    ToolPresentation, ToolResultKind,
+};
 use ratatui::text::Line;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Display as FmtDisplay, Formatter};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub(crate) enum MsgKind {
+pub(crate) enum TranscriptKind {
     #[default]
     Text,
-    ToolCall,
-    ToolResult,
+    Tool,
     Error,
     Info,
     SubAgent,
@@ -61,15 +65,31 @@ pub(crate) struct SubAgentDetail {
 }
 
 #[derive(Clone)]
-pub(crate) struct MsgLine {
+pub(crate) struct ArtifactDetail {
+    pub id: String,
+    pub content: String,
+    pub truncated: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct TranscriptItem {
     pub text: String,
-    pub kind: MsgKind,
+    pub kind: TranscriptKind,
     pub collapsed: bool,
     pub collapse_policy: CollapsePolicy,
     pub collapse_overridden: bool,
     pub tool_name: Option<String>,
+    pub tool_use_id: Option<String>,
+    pub tool_summary: Option<String>,
+    pub tool_success: Option<bool>,
+    pub tool_exit_code: Option<i32>,
+    pub tool_result_kind: Option<ToolResultKind>,
+    pub presentation: Option<ToolPresentation>,
+    pub artifacts: Vec<ArtifactDisplay>,
+    pub sealed: bool,
     pub cached_lines: Option<Vec<Line<'static>>>,
     pub cached_collapsed: bool,
+    pub cached_interactive: bool,
     pub sub_detail: Option<SubAgentDetail>,
 }
 
@@ -84,10 +104,10 @@ impl CollapsePolicy {
     const LARGE_AUTO_COLLAPSE_BYTES: usize = 4096;
     const LARGE_AUTO_COLLAPSE_LINE_WIDTH: usize = 240;
 
-    fn for_kind(kind: MsgKind) -> Self {
+    fn for_kind(kind: TranscriptKind) -> Self {
         match kind {
-            MsgKind::StreamThinking => CollapsePolicy::Always,
-            MsgKind::ToolResult => CollapsePolicy::Auto {
+            TranscriptKind::StreamThinking => CollapsePolicy::Always,
+            TranscriptKind::Tool => CollapsePolicy::Auto {
                 threshold_lines: 20,
             },
             _ => CollapsePolicy::Never,
@@ -118,32 +138,61 @@ impl CollapsePolicy {
     }
 }
 
-impl MsgLine {
-    pub(crate) fn cache_valid(&self) -> bool {
-        self.cached_lines.is_some() && self.cached_collapsed == self.collapsed
+impl TranscriptItem {
+    pub(crate) fn cache_valid(&self, interactive: bool) -> bool {
+        self.cached_lines.is_some()
+            && self.cached_collapsed == self.collapsed
+            && self.cached_interactive == interactive
     }
 
-    pub(crate) fn new(text: String, kind: MsgKind) -> Self {
+    pub(crate) fn new(text: String, kind: TranscriptKind) -> Self {
         let text = sanitize_tui_text(&text);
         let collapse_policy = CollapsePolicy::for_kind(kind);
         let collapsed = collapse_policy.initial_collapsed(&text);
-        MsgLine {
+        TranscriptItem {
             text,
             kind,
             collapsed,
             collapse_policy,
             collapse_overridden: false,
             tool_name: None,
+            tool_use_id: None,
+            tool_summary: None,
+            tool_success: None,
+            tool_exit_code: None,
+            tool_result_kind: None,
+            presentation: None,
+            artifacts: Vec::new(),
+            sealed: true,
             cached_lines: None,
             cached_collapsed: collapsed,
+            cached_interactive: false,
             sub_detail: None,
         }
     }
 
     pub(crate) fn new_tool_result(tool_name: String, text: String) -> Self {
-        let mut line = Self::new(text, MsgKind::ToolResult);
+        let mut line = Self::new(text, TranscriptKind::Tool);
         line.tool_name = Some(tool_name);
         line
+    }
+
+    pub(crate) fn new_tool_call(
+        tool_use_id: Option<String>,
+        tool_name: String,
+        summary: String,
+    ) -> Self {
+        let text = if summary.is_empty() {
+            format!("[tool] {tool_name}")
+        } else {
+            format!("[tool] {summary}")
+        };
+        let mut item = Self::new(text, TranscriptKind::Tool);
+        item.tool_use_id = tool_use_id;
+        item.tool_name = Some(tool_name);
+        item.tool_summary = Some(summary);
+        item.sealed = false;
+        item
     }
 
     pub(crate) fn is_collapsible(&self) -> bool {
@@ -155,28 +204,37 @@ impl MsgLine {
         self
     }
 
+    pub(crate) fn invalidate_cache(&mut self) {
+        self.cached_lines = None;
+    }
+
     pub(crate) fn toggle_collapsed(&mut self) {
         self.collapsed = !self.collapsed;
         self.collapse_overridden = true;
         self.invalidate_cache();
     }
-
-    pub(crate) fn invalidate_cache(&mut self) {
-        self.cached_lines = None;
-    }
 }
 
-impl Default for MsgLine {
+impl Default for TranscriptItem {
     fn default() -> Self {
-        MsgLine {
+        TranscriptItem {
             text: String::new(),
-            kind: MsgKind::Text,
+            kind: TranscriptKind::Text,
             collapsed: false,
             collapse_policy: CollapsePolicy::Never,
             collapse_overridden: false,
             tool_name: None,
+            tool_use_id: None,
+            tool_summary: None,
+            tool_success: None,
+            tool_exit_code: None,
+            tool_result_kind: None,
+            presentation: None,
+            artifacts: Vec::new(),
+            sealed: true,
             cached_lines: None,
             cached_collapsed: false,
+            cached_interactive: false,
             sub_detail: None,
         }
     }
@@ -217,7 +275,6 @@ pub(crate) struct ViewportState {
     pub max_scroll: usize,
     pub click_map: Vec<ClickTarget>,
     pub content_y: u16,
-    pub effective_scroll: usize,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -231,7 +288,10 @@ pub(crate) struct ClickTarget {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) enum ClickAction {
     ToggleCollapse,
-    OpenSubAgentDetail { session_id: String },
+    OpenPlan,
+    OpenTodos,
+    OpenArtifact { id: String },
+    OpenSubAgent { session_id: String },
 }
 
 #[derive(Clone, Default)]
@@ -239,7 +299,7 @@ pub(crate) struct RenderCache {
     pub width: u16,
     pub history_lines: Option<Vec<Line<'static>>>,
     pub stream_width: u16,
-    pub stream_kind: MsgKind,
+    pub stream_kind: TranscriptKind,
     pub stream_revision: u64,
     pub stream_lines: Option<Vec<Line<'static>>>,
 }
@@ -258,11 +318,17 @@ impl SubAgentState {
     }
 }
 
+#[derive(Clone, Default)]
+pub(crate) struct InlineSurfaceState {
+    pub committed: usize,
+}
+
 #[derive(Clone)]
 pub(crate) struct TuiState {
-    pub lines: Vec<MsgLine>,
+    pub lines: Vec<TranscriptItem>,
+    pub inline: InlineSurfaceState,
     pub stream_line: String,
-    pub stream_kind: MsgKind,
+    pub stream_kind: TranscriptKind,
     pub streaming: bool,
     pub input: InputState,
     pub model: String,
@@ -276,6 +342,10 @@ pub(crate) struct TuiState {
     pub last_interrupt: Option<Instant>,
     pub work_state: WorkState,
     pub sub_agents: SubAgentState,
+    pub plan: Option<PlanDisplay>,
+    pub todos: Option<TodoDisplay>,
+    pub artifacts_dir: PathBuf,
+    pub artifact_detail: Option<ArtifactDetail>,
     /// 中断当前任务（由 Ctrl+C 触发），None 表示无中断能力
     pub interrupt: Option<Arc<AtomicBool>>,
     pub view: View,
@@ -293,6 +363,15 @@ pub(crate) enum View {
         session_id: String,
         scroll: usize,
     },
+    Plan {
+        scroll: usize,
+    },
+    Todos {
+        scroll: usize,
+    },
+    Artifact {
+        scroll: usize,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -304,8 +383,9 @@ impl Default for TuiState {
     fn default() -> Self {
         Self {
             lines: Vec::new(),
+            inline: InlineSurfaceState::default(),
             stream_line: String::new(),
-            stream_kind: MsgKind::default(),
+            stream_kind: TranscriptKind::default(),
             streaming: false,
             input: InputState::default(),
             model: "flash".into(),
@@ -322,6 +402,10 @@ impl Default for TuiState {
             last_interrupt: None,
             work_state: WorkState::Idle,
             sub_agents: SubAgentState::default(),
+            plan: None,
+            todos: None,
+            artifacts_dir: PathBuf::new(),
+            artifact_detail: None,
             interrupt: None,
             view: View::Main,
             overlay: None,
@@ -377,7 +461,7 @@ impl TuiState {
         self.cache.stream_lines = None;
     }
 
-    pub(crate) fn push_line(&mut self, line: MsgLine) -> usize {
+    pub(crate) fn push_line(&mut self, line: TranscriptItem) -> usize {
         let idx = self.lines.len();
         self.lines.push(line);
         self.invalidate_all_cache();
@@ -387,7 +471,7 @@ impl TuiState {
     pub(crate) fn save_stream(&mut self) {
         let text = std::mem::take(&mut self.stream_line);
         if !text.is_empty() {
-            self.push_line(MsgLine::new(text, self.stream_kind));
+            self.push_line(TranscriptItem::new(text, self.stream_kind));
         }
         self.stream_revision = self.stream_revision.wrapping_add(1);
         self.invalidate_stream_cache();
@@ -397,6 +481,92 @@ impl TuiState {
     pub(crate) fn finalize_stream(&mut self) {
         self.save_stream();
         self.streaming = false;
+    }
+
+    pub(crate) fn promote_stable_stream_prefix(&mut self) {
+        if self.stream_kind != TranscriptKind::StreamText || self.stream_line.is_empty() {
+            return;
+        }
+        let end = stable_markdown_prefix_end(&self.stream_line);
+        if end == 0 {
+            return;
+        }
+        let remaining = self.stream_line.split_off(end);
+        let stable = std::mem::replace(&mut self.stream_line, remaining);
+        if !stable.is_empty() {
+            self.push_line(TranscriptItem::new(stable, TranscriptKind::StreamText));
+        }
+        self.stream_revision = self.stream_revision.wrapping_add(1);
+        self.invalidate_stream_cache();
+        self.viewport.auto_scroll = true;
+    }
+
+    pub(crate) fn seal_incomplete_transcript(&mut self, reason: &str) {
+        let mut changed = false;
+        for item in self.lines.iter_mut().skip(self.inline.committed) {
+            if item.sealed {
+                continue;
+            }
+            item.sealed = true;
+            if item.kind == TranscriptKind::Tool {
+                item.tool_success = Some(false);
+                if item.text.is_empty() || item.text.starts_with("[tool]") {
+                    item.text = reason.to_string();
+                }
+            } else if !reason.is_empty() {
+                item.text.push('\n');
+                item.text.push_str(reason);
+            }
+            item.invalidate_cache();
+            changed = true;
+        }
+        if changed {
+            self.sub_agents.active_sessions.clear();
+            self.invalidate_all_cache();
+        }
+    }
+
+    pub(crate) fn apply_todo_presentation(&mut self, update: &TodoDisplay) {
+        if update.changes.is_empty() {
+            self.todos = Some(update.clone());
+            return;
+        }
+
+        let mut current = self.todos.take().unwrap_or_else(|| TodoDisplay {
+            revision: update.revision,
+            counts: update.counts.clone(),
+            items: Vec::new(),
+            changes: Vec::new(),
+        });
+        for change in &update.changes {
+            match change {
+                TodoChangeDisplay::Added { item } => upsert_todo(&mut current.items, item.clone()),
+                TodoChangeDisplay::Updated { id, content } => {
+                    if let Some(item) = current.items.iter_mut().find(|item| item.id == *id) {
+                        item.content.clone_from(content);
+                    }
+                }
+                TodoChangeDisplay::Removed { id } => {
+                    current.items.retain(|item| item.id != *id);
+                }
+                TodoChangeDisplay::Completed { id } => {
+                    set_todo_status(&mut current.items, id, TodoStatusDisplay::Completed);
+                }
+                TodoChangeDisplay::Activated { id } => {
+                    set_todo_status(&mut current.items, id, TodoStatusDisplay::InProgress);
+                }
+                TodoChangeDisplay::Paused { id } | TodoChangeDisplay::Reopened { id } => {
+                    set_todo_status(&mut current.items, id, TodoStatusDisplay::Pending);
+                }
+            }
+        }
+        for item in &update.items {
+            upsert_todo(&mut current.items, item.clone());
+        }
+        current.revision = update.revision;
+        current.counts = update.counts.clone();
+        current.changes.clone_from(&update.changes);
+        self.todos = Some(current);
     }
 
     pub(crate) fn arm_task_notification(&mut self) {
@@ -417,47 +587,69 @@ impl TuiState {
     }
 
     pub(crate) fn add_help(&mut self) {
-        self.push_line(MsgLine::new("Commands:".into(), MsgKind::Info));
-        self.push_line(MsgLine::new(
+        self.push_line(TranscriptItem::new(
+            "Commands:".into(),
+            TranscriptKind::Info,
+        ));
+        self.push_line(TranscriptItem::new(
             "  /flash          Switch to flash alias".into(),
-            MsgKind::Text,
+            TranscriptKind::Text,
         ));
-        self.push_line(MsgLine::new(
+        self.push_line(TranscriptItem::new(
             "  /pro            Switch to pro alias".into(),
-            MsgKind::Text,
+            TranscriptKind::Text,
         ));
-        self.push_line(MsgLine::new(
+        self.push_line(TranscriptItem::new(
             "  /model NAME     Switch to a model name or alias".into(),
-            MsgKind::Text,
+            TranscriptKind::Text,
         ));
-        self.push_line(MsgLine::new(
+        self.push_line(TranscriptItem::new(
             "  /compact        Force context compaction".into(),
-            MsgKind::Text,
+            TranscriptKind::Text,
         ));
-        self.push_line(MsgLine::new(
+        self.push_line(TranscriptItem::new(
             "  /skills         List available skills".into(),
-            MsgKind::Text,
+            TranscriptKind::Text,
         ));
-        self.push_line(MsgLine::new(
+        self.push_line(TranscriptItem::new(
+            "  /plan           Open current plan detail".into(),
+            TranscriptKind::Text,
+        ));
+        self.push_line(TranscriptItem::new(
+            "  /todos          Open current todo detail".into(),
+            TranscriptKind::Text,
+        ));
+        self.push_line(TranscriptItem::new(
+            "  /sub-agent ID   Open sub-agent detail".into(),
+            TranscriptKind::Text,
+        ));
+        self.push_line(TranscriptItem::new(
+            "  /artifact ID    Open a bounded artifact preview".into(),
+            TranscriptKind::Text,
+        ));
+        self.push_line(TranscriptItem::new(
             "  Ctrl+C          Interrupt current task".into(),
-            MsgKind::Text,
+            TranscriptKind::Text,
         ));
-        self.push_line(MsgLine::new(
+        self.push_line(TranscriptItem::new(
             "  Ctrl+C again    Exit TUI".into(),
-            MsgKind::Text,
+            TranscriptKind::Text,
         ));
-        self.push_line(MsgLine::new(
+        self.push_line(TranscriptItem::new(
             "  Esc             Exit TUI".into(),
-            MsgKind::Text,
+            TranscriptKind::Text,
         ));
-        self.push_line(MsgLine::new(
+        self.push_line(TranscriptItem::new(
             "  /exit  /quit    Exit TUI".into(),
-            MsgKind::Text,
+            TranscriptKind::Text,
         ));
     }
 
     pub(crate) fn show_skills(&mut self) {
-        self.push_line(MsgLine::new("=== Skills ===".into(), MsgKind::Info));
+        self.push_line(TranscriptItem::new(
+            "=== Skills ===".into(),
+            TranscriptKind::Info,
+        ));
         let cwd = std::env::current_dir().unwrap_or_default();
         let home = std::path::PathBuf::from(
             std::env::var("MINK_HOME")
@@ -473,28 +665,84 @@ impl TuiState {
         ) {
             Ok(snapshot) => {
                 for skill in &snapshot.skills.discoverable {
-                    self.push_line(MsgLine::new(
+                    self.push_line(TranscriptItem::new(
                         format!(
                             "  {} [{}] - {}",
                             skill.skill.name,
                             tui_skill_source_label(skill),
                             skill.skill.description
                         ),
-                        MsgKind::Text,
+                        TranscriptKind::Text,
                     ));
                 }
             }
             Err(e) => {
-                self.push_line(MsgLine::new(
+                self.push_line(TranscriptItem::new(
                     format!("Error loading skills: {e}"),
-                    MsgKind::Error,
+                    TranscriptKind::Error,
                 ));
             }
         }
-        self.push_line(MsgLine::new(
+        self.push_line(TranscriptItem::new(
             "Use --skill NAME or Read skill://NAME to load.".into(),
-            MsgKind::Info,
+            TranscriptKind::Info,
         ));
+    }
+
+    pub(crate) fn open_artifact(&mut self, id: &str) {
+        const MAX_ARTIFACT_DETAIL_BYTES: usize = 256 * 1024;
+        let manager = crate::session::artifacts::ArtifactManager::new(self.artifacts_dir.clone());
+        match manager.read_text_prefix(id, MAX_ARTIFACT_DETAIL_BYTES) {
+            Ok((content, truncated)) => {
+                self.artifact_detail = Some(ArtifactDetail {
+                    id: id.to_string(),
+                    content,
+                    truncated,
+                });
+                self.view = View::Artifact { scroll: 0 };
+            }
+            Err(error) => {
+                self.push_line(TranscriptItem::new(
+                    format!("Cannot open artifact://{id}: {error}"),
+                    TranscriptKind::Error,
+                ));
+            }
+        }
+    }
+}
+
+fn stable_markdown_prefix_end(text: &str) -> usize {
+    let mut in_fence = false;
+    let mut offset = 0usize;
+    let mut stable_end = 0usize;
+    for line in text.split_inclusive('\n') {
+        offset += line.len();
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+            if !in_fence {
+                stable_end = offset;
+            }
+            continue;
+        }
+        if !in_fence && trimmed.is_empty() {
+            stable_end = offset;
+        }
+    }
+    stable_end
+}
+
+fn upsert_todo(items: &mut Vec<crate::ui::TodoItemDisplay>, update: crate::ui::TodoItemDisplay) {
+    if let Some(item) = items.iter_mut().find(|item| item.id == update.id) {
+        *item = update;
+    } else {
+        items.push(update);
+    }
+}
+
+fn set_todo_status(items: &mut [crate::ui::TodoItemDisplay], id: &str, status: TodoStatusDisplay) {
+    if let Some(item) = items.iter_mut().find(|item| item.id == id) {
+        item.status = status;
     }
 }
 

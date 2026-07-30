@@ -1,6 +1,8 @@
+use crate::config::TuiMode;
 use crate::tui::notify::TaskNotificationKind;
 use crate::tui::sanitize::sanitize_tui_text;
-use crate::tui::state::{MsgKind, MsgLine, SubAgentDetail, TuiState, WorkState};
+use crate::tui::state::{SubAgentDetail, TranscriptItem, TranscriptKind, TuiState, WorkState};
+use crate::ui::{ArtifactDisplay, ToolPresentation, ToolResultKind};
 use crate::ui::{StatsSnapshot, SubAgentStreamKind};
 use std::sync::mpsc;
 
@@ -8,10 +10,20 @@ use std::sync::mpsc;
 pub enum TuiSignal {
     Thinking(String),
     Text(String),
-    ToolCall(String, String),
+    ToolCall {
+        tool_use_id: Option<String>,
+        tool_name: String,
+        summary: String,
+    },
     ToolResult {
+        tool_use_id: Option<String>,
         tool_name: String,
         content: String,
+        success: bool,
+        exit_code: Option<i32>,
+        result_kind: ToolResultKind,
+        presentation: Option<ToolPresentation>,
+        artifacts: Vec<ArtifactDisplay>,
     },
     Error(String),
     Stop,
@@ -46,11 +58,13 @@ impl TuiState {
         match sig {
             TuiSignal::Thinking(c) => {
                 let c = sanitize_tui_text(c);
-                if !self.stream_line.is_empty() && self.stream_kind != MsgKind::StreamThinking {
+                if !self.stream_line.is_empty()
+                    && self.stream_kind != TranscriptKind::StreamThinking
+                {
                     self.stream_line.push('\n');
                     self.save_stream();
                 }
-                self.stream_kind = MsgKind::StreamThinking;
+                self.stream_kind = TranscriptKind::StreamThinking;
                 self.streaming = true;
                 self.stream_line.push_str(&c);
                 self.stream_revision = self.stream_revision.wrapping_add(1);
@@ -58,11 +72,11 @@ impl TuiState {
             }
             TuiSignal::Text(c) => {
                 let c = sanitize_tui_text(c);
-                if !self.stream_line.is_empty() && self.stream_kind != MsgKind::StreamText {
+                if !self.stream_line.is_empty() && self.stream_kind != TranscriptKind::StreamText {
                     self.stream_line.push('\n');
                     self.save_stream();
                 }
-                self.stream_kind = MsgKind::StreamText;
+                self.stream_kind = TranscriptKind::StreamText;
                 self.streaming = true;
                 self.stream_line.push_str(&c);
                 self.stream_revision = self.stream_revision.wrapping_add(1);
@@ -70,6 +84,7 @@ impl TuiState {
             }
             TuiSignal::Stop => {
                 self.finalize_stream();
+                self.seal_incomplete_transcript("Result unavailable: turn stopped.");
                 self.work_state = WorkState::Idle;
                 self.finish_task_notification(TaskNotificationKind::Completed);
             }
@@ -77,31 +92,80 @@ impl TuiState {
                 self.finalize_stream();
                 self.work_state = WorkState::WaitingModel;
             }
-            TuiSignal::ToolCall(name, summary) => {
+            TuiSignal::ToolCall {
+                tool_use_id,
+                tool_name,
+                summary,
+            } => {
                 self.finalize_stream();
                 self.work_state = WorkState::RunningTool;
-                let text = if summary.is_empty() {
-                    format!("[tool] {name}")
-                } else {
-                    format!("[tool] {summary}")
-                };
-                self.push_line(MsgLine::new(text, MsgKind::ToolCall));
+                self.push_line(TranscriptItem::new_tool_call(
+                    tool_use_id.clone(),
+                    tool_name.clone(),
+                    summary.clone(),
+                ));
             }
             TuiSignal::Info(n) => {
                 self.finalize_stream();
-                self.push_line(MsgLine::new(n.clone(), MsgKind::Info));
+                self.push_line(TranscriptItem::new(n.clone(), TranscriptKind::Info));
             }
-            TuiSignal::ToolResult { tool_name, content } => {
+            TuiSignal::ToolResult {
+                tool_use_id,
+                tool_name,
+                content,
+                success,
+                exit_code,
+                result_kind,
+                presentation,
+                artifacts,
+            } => {
                 self.finalize_stream();
                 self.work_state = WorkState::WaitingModel;
-                if !content.is_empty() {
-                    self.push_line(MsgLine::new_tool_result(tool_name.clone(), content.clone()));
+                let existing = tool_use_id.as_ref().and_then(|id| {
+                    self.lines
+                        .get(self.inline.committed..)
+                        .and_then(|items| {
+                            items.iter().rposition(|item| {
+                                !item.sealed && item.tool_use_id.as_ref() == Some(id)
+                            })
+                        })
+                        .map(|idx| self.inline.committed + idx)
+                });
+                let idx = if let Some(idx) = existing {
+                    idx
+                } else {
+                    self.push_line(TranscriptItem::new_tool_result(
+                        tool_name.clone(),
+                        String::new(),
+                    ))
+                };
+                if let Some(item) = self.lines.get_mut(idx) {
+                    item.text = content.clone();
+                    item.tool_name = Some(tool_name.clone());
+                    item.tool_use_id.clone_from(tool_use_id);
+                    item.tool_success = Some(*success);
+                    item.tool_exit_code = *exit_code;
+                    item.tool_result_kind = Some(*result_kind);
+                    item.presentation.clone_from(presentation);
+                    item.artifacts.clone_from(artifacts);
+                    item.sealed = true;
+                    item.invalidate_cache();
                 }
+                match presentation {
+                    Some(ToolPresentation::Plan(plan)) => self.plan = Some(plan.clone()),
+                    Some(ToolPresentation::Todo(todos)) => self.apply_todo_presentation(todos),
+                    None => {}
+                }
+                self.invalidate_all_cache();
             }
             TuiSignal::Error(m) => {
                 self.finalize_stream();
+                self.seal_incomplete_transcript("Result unavailable: turn failed.");
                 self.work_state = WorkState::Error;
-                self.push_line(MsgLine::new(format!("Error: {m}"), MsgKind::Error));
+                self.push_line(TranscriptItem::new(
+                    format!("Error: {m}"),
+                    TranscriptKind::Error,
+                ));
                 self.finish_task_notification(TaskNotificationKind::Failed);
             }
             TuiSignal::TitleUpdate(m, s) => {
@@ -144,15 +208,17 @@ impl TuiState {
                     && let Some(line) = self.lines.get_mut(idx)
                 {
                     line.text = title;
+                    line.sealed = !running;
                     if running && line.sub_detail.is_none() {
                         line.sub_detail = sub_detail;
                     }
                     line.invalidate_cache();
                     self.invalidate_all_cache();
                 } else {
-                    let idx = self.push_line(
-                        MsgLine::new(title, MsgKind::SubAgent).with_sub_detail(sub_detail),
-                    );
+                    let mut item = TranscriptItem::new(title, TranscriptKind::SubAgent)
+                        .with_sub_detail(sub_detail);
+                    item.sealed = !running;
+                    let idx = self.push_line(item);
                     self.sub_agents
                         .line_by_session
                         .insert(session_id.clone(), idx);
@@ -203,6 +269,7 @@ impl TuiState {
                     && let Some(line) = self.lines.get_mut(idx)
                 {
                     line.text = title.clone();
+                    line.sealed = true;
                     if let Some(ref mut detail) = line.sub_detail {
                         detail.thinking = thinking.clone();
                         detail.text = text.clone();
@@ -214,13 +281,13 @@ impl TuiState {
                     self.invalidate_all_cache();
                 }
                 if !found {
-                    let idx =
-                        self.push_line(MsgLine::new(title, MsgKind::SubAgent).with_sub_detail(
-                            Some(SubAgentDetail {
-                                thinking: thinking.clone(),
-                                text: text.clone(),
-                            }),
-                        ));
+                    let mut item = TranscriptItem::new(title, TranscriptKind::SubAgent)
+                        .with_sub_detail(Some(SubAgentDetail {
+                            thinking: thinking.clone(),
+                            text: text.clone(),
+                        }));
+                    item.sealed = true;
+                    let idx = self.push_line(item);
                     self.sub_agents
                         .line_by_session
                         .insert(session_id.clone(), idx);
@@ -231,17 +298,44 @@ impl TuiState {
     }
 }
 
-pub(crate) fn drain_signals(rx: &mut mpsc::Receiver<TuiSignal>, state: &mut TuiState) -> bool {
-    let mut drained = false;
-    loop {
-        match rx.try_recv() {
-            Ok(sig) => {
-                state.apply(&sig);
-                drained = true;
+pub(crate) fn drain_signals(
+    rx: &mut mpsc::Receiver<TuiSignal>,
+    state: &mut TuiState,
+    mode: TuiMode,
+) -> bool {
+    const MAX_SIGNALS_PER_TICK: usize = 512;
+    let mut pending = Vec::new();
+    for _ in 0..MAX_SIGNALS_PER_TICK {
+        let sig = match rx.try_recv() {
+            Ok(sig) => sig,
+            Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
+        };
+        match (pending.last_mut(), sig) {
+            (Some(TuiSignal::Thinking(existing)), TuiSignal::Thinking(next))
+            | (Some(TuiSignal::Text(existing)), TuiSignal::Text(next)) => {
+                existing.push_str(&next);
             }
-            Err(mpsc::TryRecvError::Empty) => break,
-            Err(mpsc::TryRecvError::Disconnected) => break,
+            (_, sig) => pending.push(sig),
         }
     }
-    drained
+
+    let mut visible_change = false;
+    for sig in pending {
+        let visible = match &sig {
+            TuiSignal::SubAgentStream { session_id, .. } => matches!(
+                &state.view,
+                crate::tui::state::View::SubAgentDetail {
+                    session_id: visible,
+                    ..
+                } if visible == session_id
+            ),
+            _ => true,
+        };
+        state.apply(&sig);
+        if mode == TuiMode::Inline {
+            state.promote_stable_stream_prefix();
+        }
+        visible_change |= visible;
+    }
+    visible_change
 }

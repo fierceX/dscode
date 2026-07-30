@@ -6,6 +6,10 @@ pub(crate) enum SlashCommand {
     Compact,
     Help,
     Skills,
+    Plan,
+    Todos,
+    SubAgent(String),
+    Artifact(String),
     Quit,
 }
 
@@ -25,6 +29,16 @@ pub(crate) fn parse_slash_command(input: &str) -> Result<Option<SlashCommand>, S
         "/compact" => SlashCommand::Compact,
         "/help" => SlashCommand::Help,
         "/skills" => SlashCommand::Skills,
+        "/plan" => SlashCommand::Plan,
+        "/todos" => SlashCommand::Todos,
+        _ if input.starts_with("/sub-agent ")
+            && !input["/sub-agent ".len()..].trim().is_empty() =>
+        {
+            SlashCommand::SubAgent(input["/sub-agent ".len()..].trim().to_string())
+        }
+        _ if input.starts_with("/artifact ") && !input["/artifact ".len()..].trim().is_empty() => {
+            SlashCommand::Artifact(input["/artifact ".len()..].trim().to_string())
+        }
         "/exit" | "/quit" | "/q" => SlashCommand::Quit,
         _ if input.starts_with("/model ") && !input["/model ".len()..].trim().is_empty() => {
             SlashCommand::Model(input["/model ".len()..].trim().to_string())

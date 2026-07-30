@@ -1,3 +1,84 @@
+pub use crate::tools::metadata::ToolResultKind;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactDisplay {
+    pub id: String,
+    pub tool: String,
+    pub bytes: u64,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanTransitionDisplay {
+    DraftSaved,
+    DraftCancelled,
+    Confirmed,
+    Cleared,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanDisplay {
+    pub transition: PlanTransitionDisplay,
+    pub content: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TodoStatusDisplay {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TodoItemDisplay {
+    pub id: String,
+    pub content: String,
+    pub status: TodoStatusDisplay,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TodoCountsDisplay {
+    pub pending: usize,
+    pub in_progress: usize,
+    pub completed: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "change", rename_all = "snake_case")]
+pub enum TodoChangeDisplay {
+    Added { item: TodoItemDisplay },
+    Updated { id: String, content: String },
+    Removed { id: String },
+    Completed { id: String },
+    Activated { id: String },
+    Paused { id: String },
+    Reopened { id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TodoDisplay {
+    pub revision: u64,
+    pub counts: TodoCountsDisplay,
+    pub items: Vec<TodoItemDisplay>,
+    pub changes: Vec<TodoChangeDisplay>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+pub enum ToolPresentation {
+    Plan(PlanDisplay),
+    Todo(TodoDisplay),
+}
+
+pub struct ToolCallDisplay<'a> {
+    pub tool_use_id: &'a str,
+    pub tool_name: &'a str,
+    pub summary: &'a str,
+}
+
 /// Display abstracts agent output from any concrete terminal implementation.
 ///
 /// `mink-core` owns only this protocol-level contract so embedded Rust services
@@ -16,13 +97,27 @@ pub struct ToolResultDisplay<'a> {
     pub exit_code: Option<i32>,
 }
 
+pub struct PresentedToolResultDisplay<'a> {
+    pub base: ToolResultDisplay<'a>,
+    pub success: bool,
+    pub result_kind: ToolResultKind,
+    pub presentation: Option<&'a ToolPresentation>,
+    pub artifacts: &'a [ArtifactDisplay],
+}
+
 pub trait Display: Send + Sync {
     fn render_thinking(&self, content: &str);
     fn render_text(&self, content: &str);
     fn render_tool_call(&self, name: &str, summary: &str);
+    fn render_tool_call_detail(&self, call: &ToolCallDisplay<'_>) {
+        self.render_tool_call(call.tool_name, call.summary);
+    }
     fn render_tool_result(&self, tool_name: &str, content_preview: &str);
     fn render_tool_result_detail(&self, result: &ToolResultDisplay<'_>) {
         self.render_tool_result(result.tool_name, result.content_preview);
+    }
+    fn render_tool_result_presented(&self, result: &PresentedToolResultDisplay<'_>) {
+        self.render_tool_result_detail(&result.base);
     }
     fn render_stop(&self);
     fn render_error(&self, message: &str);

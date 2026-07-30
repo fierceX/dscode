@@ -6,6 +6,10 @@ use crate::session::todo::{
     TodoTransitionResult, TodoTransitions, TodoUpdate, escape_prompt_markup, render_current_todos,
     todo_state_metadata,
 };
+use crate::ui::{
+    TodoChangeDisplay, TodoCountsDisplay, TodoDisplay, TodoItemDisplay, TodoStatusDisplay,
+    ToolPresentation,
+};
 use anyhow::Result;
 use serde::Deserialize;
 use std::fmt::Write as _;
@@ -61,6 +65,11 @@ impl ToolExec for TodoReadTool {
         let snapshot = ctx.todo_store.snapshot();
         let mut outcome = ToolOutcome::text(render_snapshot(&snapshot, args.include_completed));
         outcome.state_metadata = Some(todo_state_metadata(snapshot.revision, "snapshot"));
+        outcome.presentation = Some(ToolPresentation::Todo(todo_display(
+            &snapshot,
+            snapshot.items.iter().map(todo_item_display).collect(),
+            Vec::new(),
+        )));
         Ok(outcome)
     }
 }
@@ -88,13 +97,43 @@ impl ToolExec for TodoWriteTool {
             },
         )?;
         let read_provider = todo_read_provider(ctx);
-        Ok(state_change_outcome(
+        let changes = result
+            .changes
+            .iter()
+            .map(|change| match change {
+                TodoStructureChange::Added {
+                    id,
+                    status,
+                    content,
+                } => TodoChangeDisplay::Added {
+                    item: TodoItemDisplay {
+                        id: id.clone(),
+                        content: content.clone(),
+                        status: todo_status_display(*status),
+                    },
+                },
+                TodoStructureChange::Updated { id, content } => TodoChangeDisplay::Updated {
+                    id: id.clone(),
+                    content: content.clone(),
+                },
+                TodoStructureChange::Removed { id } => {
+                    TodoChangeDisplay::Removed { id: id.clone() }
+                }
+            })
+            .collect();
+        let mut outcome = state_change_outcome(
             render_apply_result(&result, read_provider),
             &result.snapshot,
             "structure",
             read_provider,
             ctx.tool_config.tool_result_max_bytes,
-        ))
+        );
+        outcome.presentation = Some(ToolPresentation::Todo(todo_display(
+            &result.snapshot,
+            active_items(&result.snapshot),
+            changes,
+        )));
+        Ok(outcome)
     }
 }
 
@@ -122,13 +161,48 @@ impl ToolExec for TodoAdvanceTool {
             },
         )?;
         let read_provider = todo_read_provider(ctx);
-        Ok(state_change_outcome(
+        let mut changes = Vec::new();
+        changes.extend(
+            result
+                .completed
+                .iter()
+                .cloned()
+                .map(|id| TodoChangeDisplay::Completed { id }),
+        );
+        changes.extend(
+            result
+                .activated
+                .iter()
+                .cloned()
+                .map(|id| TodoChangeDisplay::Activated { id }),
+        );
+        changes.extend(
+            result
+                .paused
+                .iter()
+                .cloned()
+                .map(|id| TodoChangeDisplay::Paused { id }),
+        );
+        changes.extend(
+            result
+                .reopened
+                .iter()
+                .cloned()
+                .map(|id| TodoChangeDisplay::Reopened { id }),
+        );
+        let mut outcome = state_change_outcome(
             render_transition_result(&result, read_provider),
             &result.snapshot,
             "progress",
             read_provider,
             ctx.tool_config.tool_result_max_bytes,
-        ))
+        );
+        outcome.presentation = Some(ToolPresentation::Todo(todo_display(
+            &result.snapshot,
+            active_items(&result.snapshot),
+            changes,
+        )));
+        Ok(outcome)
     }
 }
 
@@ -267,6 +341,49 @@ fn status_label(status: TodoStatus) -> &'static str {
         TodoStatus::Pending => "pending",
         TodoStatus::InProgress => "in_progress",
         TodoStatus::Completed => "completed",
+    }
+}
+
+fn todo_status_display(status: TodoStatus) -> TodoStatusDisplay {
+    match status {
+        TodoStatus::Pending => TodoStatusDisplay::Pending,
+        TodoStatus::InProgress => TodoStatusDisplay::InProgress,
+        TodoStatus::Completed => TodoStatusDisplay::Completed,
+    }
+}
+
+fn todo_item_display(item: &crate::session::todo::TodoItem) -> TodoItemDisplay {
+    TodoItemDisplay {
+        id: item.id.clone(),
+        content: item.content.clone(),
+        status: todo_status_display(item.status),
+    }
+}
+
+fn active_items(snapshot: &TodoSnapshot) -> Vec<TodoItemDisplay> {
+    snapshot
+        .items
+        .iter()
+        .filter(|item| item.status == TodoStatus::InProgress)
+        .map(todo_item_display)
+        .collect()
+}
+
+fn todo_display(
+    snapshot: &TodoSnapshot,
+    items: Vec<TodoItemDisplay>,
+    changes: Vec<TodoChangeDisplay>,
+) -> TodoDisplay {
+    let (pending, in_progress, completed) = status_counts(snapshot);
+    TodoDisplay {
+        revision: snapshot.revision,
+        counts: TodoCountsDisplay {
+            pending,
+            in_progress,
+            completed,
+        },
+        items,
+        changes,
     }
 }
 

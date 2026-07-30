@@ -18,7 +18,9 @@ pub(crate) fn render_markdown(
 }
 
 pub(crate) fn parse_blocks(text: &str) -> Vec<MdBlock> {
-    let raw_lines: Vec<&str> = text.split('\n').collect();
+    // `str::lines` preserves intentional blank lines but does not manufacture
+    // an extra Markdown block solely because a streamed fragment ends in `\n`.
+    let raw_lines: Vec<&str> = text.lines().collect();
     let mut blocks = Vec::new();
     let mut in_code = false;
     let mut code_lang: Option<String> = None;

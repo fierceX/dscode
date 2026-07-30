@@ -16,6 +16,7 @@ use super::todo::{TodoAdvanceTool, TodoReadTool, TodoWriteTool};
 use crate::context::ToolContext;
 use crate::guard::storm::{StormBreaker, StormDecision};
 use crate::protocol::ToolCallEvent;
+use crate::ui::{ArtifactDisplay, ToolPresentation};
 
 #[derive(Debug)]
 pub struct ToolOutcome {
@@ -27,6 +28,7 @@ pub struct ToolOutcome {
     pub diagnostics: Vec<String>,
     pub plan_command: Option<PlanCommand>,
     pub state_metadata: Option<serde_json::Value>,
+    pub presentation: Option<ToolPresentation>,
 }
 
 impl ToolOutcome {
@@ -40,6 +42,7 @@ impl ToolOutcome {
             diagnostics: Vec::new(),
             plan_command: None,
             state_metadata: None,
+            presentation: None,
         }
     }
 
@@ -107,6 +110,10 @@ pub struct ToolRunResult {
     pub sub_agent_description: Option<String>,
     pub sub_agent_fork: bool,
     pub exit_code: Option<i32>,
+    pub success: bool,
+    pub result_kind: ToolResultKind,
+    pub presentation: Option<ToolPresentation>,
+    pub artifacts: Vec<ArtifactDisplay>,
     pub signals: Vec<crate::guard::collector::Signal>,
     pub(crate) plan_command: Option<PlanCommand>,
     pub(crate) needs_finalization: bool,
@@ -133,7 +140,7 @@ impl ToolRunResult {
 
 enum PreparedCall {
     Execute(ToolCallEvent),
-    Immediate(ToolRunResult),
+    Immediate(Box<ToolRunResult>),
 }
 
 struct ToolPolicyGate<'a> {
@@ -151,6 +158,8 @@ struct RawToolResult {
     diagnostics: Vec<String>,
     plan_command: Option<PlanCommand>,
     state_metadata: Option<serde_json::Value>,
+    result_kind: ToolResultKind,
+    presentation: Option<ToolPresentation>,
 }
 
 impl ToolRunner {
@@ -201,12 +210,14 @@ impl ToolRunner {
             if !result.needs_finalization {
                 continue;
             }
-            result.content = format_tool_result_with_artifact(
+            let formatted = format_tool_result_with_artifact(
                 &result.tool_name,
                 &result.content,
                 self.ctx.tool_config.tool_result_max_bytes,
                 &self.ctx,
             );
+            result.content = formatted.content;
+            result.artifacts.extend(formatted.artifacts);
             result.needs_finalization = false;
         }
     }
@@ -219,7 +230,7 @@ impl ToolRunner {
         for call in calls {
             match self.prepare_call(call) {
                 PreparedCall::Immediate(result) => {
-                    handles.push(tokio::task::spawn_blocking(move || Ok(result)));
+                    handles.push(tokio::task::spawn_blocking(move || Ok(*result)));
                 }
                 PreparedCall::Execute(call) => {
                     let ctx = self.ctx.clone();
@@ -243,7 +254,7 @@ impl ToolRunner {
 
     async fn execute_prepared_call(&self, call: ToolCallEvent) -> Result<ToolRunResult> {
         match self.prepare_call(call) {
-            PreparedCall::Immediate(result) => Ok(result),
+            PreparedCall::Immediate(result) => Ok(*result),
             PreparedCall::Execute(call) => {
                 let ctx = self.ctx.clone();
                 let tool_name = call.name.clone();
@@ -265,7 +276,7 @@ impl ToolRunner {
             storm: &self.storm,
         };
         if let Some(blocked) = policy.evaluate(&call, tool_metadata) {
-            return PreparedCall::Immediate(blocked);
+            return PreparedCall::Immediate(Box::new(blocked));
         }
 
         repair_tool_input(&mut call);
@@ -356,6 +367,8 @@ fn dispatch_tool(
                 diagnostics: outcome.diagnostics,
                 plan_command: outcome.plan_command,
                 state_metadata: outcome.state_metadata,
+                result_kind: metadata.result_kind,
+                presentation: outcome.presentation,
             },
             Err(e) => RawToolResult {
                 output: Err(e),
@@ -367,6 +380,8 @@ fn dispatch_tool(
                 diagnostics: Vec::new(),
                 plan_command: None,
                 state_metadata: None,
+                result_kind: metadata.result_kind,
+                presentation: None,
             },
         }
     } else {
@@ -380,6 +395,8 @@ fn dispatch_tool(
             diagnostics: Vec::new(),
             plan_command: None,
             state_metadata: None,
+            result_kind: ToolResultKind::Text,
+            presentation: None,
         }
     }
 }
@@ -399,6 +416,8 @@ fn format_dispatched_result(
         diagnostics,
         plan_command,
         state_metadata,
+        result_kind,
+        presentation,
     } = raw;
     let mut output = match output {
         Ok(v) => v,
@@ -416,8 +435,11 @@ fn format_dispatched_result(
     }
 
     let needs_finalization = plan_command.is_some() || spawns_sub_agent;
-    let output = if needs_finalization {
-        output
+    let formatted = if needs_finalization {
+        FormattedToolOutput {
+            content: output,
+            artifacts: Vec::new(),
+        }
     } else {
         format_tool_result_with_artifact(
             &call.name,
@@ -428,9 +450,9 @@ fn format_dispatched_result(
     };
 
     let output = if is_bash {
-        filter_bash_noise(&output)
+        filter_bash_noise(&formatted.content)
     } else {
-        output
+        formatted.content
     };
 
     if call.name == "Edit" && conv_content.is_empty() {
@@ -479,6 +501,10 @@ fn format_dispatched_result(
         sub_agent_description,
         sub_agent_fork,
         exit_code,
+        success,
+        result_kind,
+        presentation,
+        artifacts: formatted.artifacts,
         signals,
         plan_command,
         needs_finalization,
@@ -520,6 +546,10 @@ fn blocked_tool_result(
         sub_agent_description: None,
         sub_agent_fork: false,
         exit_code: None,
+        success: false,
+        result_kind: ToolResultKind::Text,
+        presentation: None,
+        artifacts: Vec::new(),
         signals: Vec::new(),
         plan_command: None,
         needs_finalization: false,
@@ -622,22 +652,41 @@ pub fn format_tool_result(s: &str, max: usize) -> String {
     format!("{head_text}{marker}{tail_text}")
 }
 
+struct FormattedToolOutput {
+    content: String,
+    artifacts: Vec<ArtifactDisplay>,
+}
+
 fn format_tool_result_with_artifact(
     tool_name: &str,
     output: &str,
     max: usize,
     ctx: &ToolContext,
-) -> String {
+) -> FormattedToolOutput {
     if output.len() <= max {
-        return output.to_string();
+        return FormattedToolOutput {
+            content: output.to_string(),
+            artifacts: Vec::new(),
+        };
     }
     let truncated = format_tool_result(output, max);
     match ctx
         .artifacts
         .write_text(tool_name, "full tool output", output)
     {
-        Ok(record) => format!("{truncated}\n\n[Full output: artifact://{}]", record.id),
-        Err(_) => truncated,
+        Ok(record) => FormattedToolOutput {
+            content: format!("{truncated}\n\n[Full output: artifact://{}]", record.id),
+            artifacts: vec![ArtifactDisplay {
+                id: record.id,
+                tool: record.tool,
+                bytes: record.bytes,
+                description: record.description,
+            }],
+        },
+        Err(_) => FormattedToolOutput {
+            content: truncated,
+            artifacts: Vec::new(),
+        },
     }
 }
 

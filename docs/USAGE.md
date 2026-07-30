@@ -28,6 +28,9 @@ export DEEPSEEK_API_KEY="sk-xxx"
 # TUI 全屏模式
 ./target/release/mink -m flash --tui
 
+# TUI 原生 scrollback 模式
+./target/release/mink -m flash --tui=inline
+
 # 继续上次会话
 ./target/release/mink -m flash --continue -i
 
@@ -37,9 +40,9 @@ echo "list the files" | ./target/release/mink -m flash
 
 ---
 
-## 两种终端模式
+## 终端模式
 
-项目提供两种交互式终端模式，一种非交互 CLI 模式。
+项目提供 REPL、Full TUI、Inline TUI 和非交互 CLI 模式。
 
 ### REPL 模式（`-i`）
 
@@ -57,14 +60,22 @@ mink interactive mode (type 'exit' or Ctrl+D to quit)
 - 标题栏：ANSI escape 更新终端窗口标题
 - 历史记录：持久化到 `~/.mink/history`
 
-### TUI 模式（`--tui`）
+### Full TUI（`--tui` / `--tui=full`）
 
-基于 ratatui 的全屏终端界面。适合长时间编码会话：
+Full TUI 使用 alternate screen 和应用内 transcript。主视图支持鼠标滚动、工具卡片点击、
+自动折叠和再次展开，适合需要完整结构化操作的编码会话。
+
+### Inline TUI（`--tui=inline`）
+
+Inline TUI 将完成的结构化内容和稳定 Markdown 块渐进写入终端原生 scrollback，底部只保留
+尚未提交的流式尾部、状态栏和输入区；一轮结束时的最后一个 item 会保留到新工作开始。
+稳定内容通过 terminal scrolling region 写入，避免宽字符占位空格和提交时的 viewport
+整体重绘，适合 SSH 和长日志会话：
 
 ```
 flash B:0.73 T:12 R:45 I:200K(50%) O:20K C:400K(40%) ¥0.12 [idle]
 ────────────────────────────────────────────────────────────────
- 消息列表（历史对话、工具调用、工具结果）
+ 原生 terminal scrollback（已完成对话和结构化工具卡片）
 ────────────────────────────────────────────────────────────────
  > 输入区域（多行输入）
 ```
@@ -93,15 +104,26 @@ flash B:0.73 T:12 R:45 I:200K(50%) O:20K C:400K(40%) ¥0.12 [idle]
 | 0.3~0.5 | 频繁出错 |
 | < 0.3 | 严重 |
 
-TUI 支持：
+两种 TUI 共用：
 
 - 多行输入和 UTF-8 安全编辑。
 - Ctrl+C 在任务运行时中断当前 turn。
-- 长工具结果自动折叠。
-- 子代理消息可点击进入详情页，查看 thinking/text。
+- 工具调用与结果按 ID 合并，显示退出状态、Plan/Todo 状态和 Artifact 元数据。
+- 语义工具着色、自动折叠和同一套 Markdown renderer。
 - Markdown 由内置 renderer 渲染，支持标题、列表、引用、代码块、表格和 diff。
+- 启动或恢复 session 时，Plan/Todo 详情从当前状态文件加载；后续工具 presentation 继续更新该状态。
+- 超长工具结果折叠后仍显示首个 `artifact://ID`；Full 模式可点击卡片，两种模式均可使用
+  `/artifact ID` 查看有界预览。
+- Plan、Todo 和 Artifact 详情按终端可用内容宽度折行，上下滚动以折行后的可视行为单位。
 
-**TUI 特有操作**：
+模式差异：
+
+- Full 主视图捕获鼠标，滚轮操作应用内 transcript；点击卡片可以展开、折叠或打开结构化详情。
+- Inline 主视图不捕获鼠标，滚轮由本地终端处理；自动折叠后的原生输出不可再次展开。
+- Inline 的 Plan/Todo/Artifact/SubAgent 详情临时使用 alternate screen，返回后恢复原主视图
+  viewport，不会重复打印详情命令或最后一条回复。
+
+**TUI 操作**：
 
 | 操作 | 行为 |
 |------|------|
@@ -109,11 +131,16 @@ TUI 支持：
 | `/flash` / `/pro` | 切换模型，不发送给 LLM |
 | `/compact` | 手动触发上下文压缩 |
 | `/help` / `/skills` | 本地显示帮助或 skill 列表 |
+| `/plan` / `/todos` | 打开当前 Plan 或 Todo 详情 |
+| `/artifact ID` | 打开最多 256 KiB 的 Artifact 预览 |
+| `/sub-agent ID` | 打开指定子代理的 thinking/text 详情 |
 | `/exit` / `/quit` / `/q` | 退出 TUI |
 | 未知 `/xxx` | 本地提示，不发送给 LLM |
 | 行首空格 + `/xxx` | 作为普通文本发送给 LLM |
-| 鼠标点击折叠项 | 展开或收起长内容 |
-| 鼠标点击子代理消息 | 打开子代理详情页 |
+| Full 主视图鼠标滚轮 | 滚动应用内 transcript |
+| Full 主视图点击卡片 | 展开、折叠或打开 Plan/Todo/Artifact/SubAgent 详情 |
+| Inline 主视图鼠标滚轮 | 使用本地 terminal scrollback |
+| 详情页鼠标滚轮 | 滚动结构化详情 |
 
 ### 标题栏（REPL/CLI 模式）
 
@@ -171,7 +198,8 @@ prompt 为空且 stdin 是终端时自动进入交互模式。非终端 stdin �
 | `--list-sessions` | — | 列出所有 session |
 | `--list-skills` | — | 列出可用 skill |
 | `-i` / `--interactive` | auto | REPL 交互模式 |
-| `--tui` | — | TUI 全屏模式 |
+| `--tui` / `--tui=full` | — | Full TUI：应用内 transcript 和主视图卡片交互 |
+| `--tui=inline` | — | Inline TUI：原生 scrollback 和不可逆自动折叠 |
 | `--print` | — | ndjson 结构化输出，最后输出 `type=final` |
 | `--agent-jsonl` | — | Agent JSONL 协议（stdin 读 versioned request，stdout 输出事件流和最终 `final`；request 可用 `options.stream_events=false` 关闭过程事件，仅保留 `final`） |
 | `--api-key KEY` | env | 覆盖 API Key |

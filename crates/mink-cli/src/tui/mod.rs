@@ -17,24 +17,41 @@ pub use display::{TuiDisplay, TuiSubAgentStreamSink};
 pub use signal::TuiSignal;
 
 use crate::agent::orchestrator::OrchCmd;
-use crate::config::SandboxConfig;
+use crate::config::{SandboxConfig, TuiMode};
 use file_picker::FilePickerPolicy;
-use input::handle_event;
+use input::handle_event_for_mode;
 use notify::send_task_notification;
 use render::render;
 use replay::load_session;
 use signal::drain_signals;
 use state::{TuiState, short_cwd_label};
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 use std::time::Duration;
 
 pub fn run_tui(
+    mode: TuiMode,
     sig_rx: mpsc::Receiver<TuiSignal>,
     orch_tx: tokio::sync::mpsc::UnboundedSender<OrchCmd>,
-    events_path: &Path,
+    session: &crate::runtime::SessionInfo,
+    interrupt: Option<Arc<AtomicBool>>,
+    initial_model: &str,
+    sandbox: &SandboxConfig,
+) -> anyhow::Result<()> {
+    match mode {
+        TuiMode::Full => run_full_tui(sig_rx, orch_tx, session, interrupt, initial_model, sandbox),
+        TuiMode::Inline => {
+            run_inline_tui(sig_rx, orch_tx, session, interrupt, initial_model, sandbox)
+        }
+        TuiMode::Off => anyhow::bail!("TUI mode is disabled"),
+    }
+}
+
+fn run_full_tui(
+    sig_rx: mpsc::Receiver<TuiSignal>,
+    orch_tx: tokio::sync::mpsc::UnboundedSender<OrchCmd>,
+    session: &crate::runtime::SessionInfo,
     interrupt: Option<Arc<AtomicBool>>,
     initial_model: &str,
     sandbox: &SandboxConfig,
@@ -45,8 +62,8 @@ pub fn run_tui(
         crossterm::event::EnableMouseCapture,
         crossterm::event::EnableBracketedPaste,
     )?;
-    struct RestoreGuard;
-    impl Drop for RestoreGuard {
+    struct FullRestoreGuard;
+    impl Drop for FullRestoreGuard {
         fn drop(&mut self) {
             let _ = crossterm::execute!(
                 std::io::stdout(),
@@ -56,41 +73,105 @@ pub fn run_tui(
             ratatui::restore();
         }
     }
+    let _guard = FullRestoreGuard;
+    tui_main_loop(
+        &mut terminal,
+        sig_rx,
+        orch_tx,
+        TuiLoopConfig {
+            mode: TuiMode::Full,
+            session,
+            interrupt,
+            initial_model,
+            sandbox,
+        },
+    )
+}
+
+fn run_inline_tui(
+    sig_rx: mpsc::Receiver<TuiSignal>,
+    orch_tx: tokio::sync::mpsc::UnboundedSender<OrchCmd>,
+    session: &crate::runtime::SessionInfo,
+    interrupt: Option<Arc<AtomicBool>>,
+    initial_model: &str,
+    sandbox: &SandboxConfig,
+) -> anyhow::Result<()> {
+    let inline_height = preferred_inline_height();
+    let mut terminal = ratatui::init_with_options(ratatui::TerminalOptions {
+        viewport: ratatui::Viewport::Inline(inline_height),
+    });
+    crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste,)?;
+    struct RestoreGuard;
+    impl Drop for RestoreGuard {
+        fn drop(&mut self) {
+            let _ = crossterm::execute!(
+                std::io::stdout(),
+                crossterm::event::DisableBracketedPaste,
+                crossterm::event::DisableMouseCapture,
+                crossterm::terminal::LeaveAlternateScreen,
+            );
+            ratatui::restore();
+        }
+    }
     let _guard = RestoreGuard;
     tui_main_loop(
         &mut terminal,
         sig_rx,
         orch_tx,
-        events_path,
-        interrupt,
-        initial_model,
-        sandbox,
+        TuiLoopConfig {
+            mode: TuiMode::Inline,
+            session,
+            interrupt,
+            initial_model,
+            sandbox,
+        },
     )
+}
+
+struct TuiLoopConfig<'a> {
+    mode: TuiMode,
+    session: &'a crate::runtime::SessionInfo,
+    interrupt: Option<Arc<AtomicBool>>,
+    initial_model: &'a str,
+    sandbox: &'a SandboxConfig,
 }
 
 fn tui_main_loop(
     terminal: &mut ratatui::DefaultTerminal,
     sig_rx: mpsc::Receiver<TuiSignal>,
     orch_tx: tokio::sync::mpsc::UnboundedSender<OrchCmd>,
-    events_path: &Path,
-    interrupt: Option<Arc<AtomicBool>>,
-    initial_model: &str,
-    sandbox: &SandboxConfig,
+    config: TuiLoopConfig<'_>,
 ) -> anyhow::Result<()> {
+    let TuiLoopConfig {
+        mode,
+        session,
+        interrupt,
+        initial_model,
+        sandbox,
+    } = config;
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let mut state = TuiState {
-        lines: load_session(events_path),
+        lines: load_session(&session.events_path),
         cwd_label: short_cwd_label(),
+        artifacts_dir: session.artifacts_dir.clone(),
         model: initial_model.to_string(),
         interrupt,
         file_picker_policy: FilePickerPolicy::from_sandbox(cwd, sandbox),
         ..Default::default()
     };
+    load_persisted_state(session, &mut state);
     let mut sig_rx = sig_rx;
+    let mut saved_inline_terminal = None;
 
     loop {
-        if drain_signals(&mut sig_rx, &mut state) {
+        if drain_signals(&mut sig_rx, &mut state, mode) {
             state.dirty = true;
+        }
+        if mode == TuiMode::Inline {
+            sync_inline_terminal_mode(terminal, &state, &mut saved_inline_terminal)?;
+            if matches!(state.view, state::View::Main) && commit_ready(terminal, &mut state)? {
+                state.dirty = true;
+            }
         }
         if let Some(notification) = state.take_task_notification() {
             send_task_notification(&notification);
@@ -100,7 +181,7 @@ fn tui_main_loop(
         }
 
         if state.dirty {
-            terminal.draw(|f| render(f, &mut state))?;
+            terminal.draw(|f| render(f, &mut state, mode))?;
             state.dirty = false;
         }
 
@@ -112,7 +193,7 @@ fn tui_main_loop(
         if crossterm::event::poll(poll_timeout).unwrap_or(false) {
             let mut should_quit = false;
             while let Ok(ev) = crossterm::event::read() {
-                if handle_event(ev, &mut state, &orch_tx) {
+                if handle_event_for_mode(ev, &mut state, &orch_tx, mode) {
                     should_quit = true;
                     break;
                 }
@@ -129,6 +210,158 @@ fn tui_main_loop(
     Ok(())
 }
 
+fn preferred_inline_height() -> u16 {
+    crossterm::terminal::size()
+        .map(|(_, height)| height.saturating_sub(4).clamp(8, 12))
+        .unwrap_or(10)
+}
+
+fn sync_inline_terminal_mode(
+    terminal: &mut ratatui::DefaultTerminal,
+    state: &TuiState,
+    saved_inline_terminal: &mut Option<ratatui::DefaultTerminal>,
+) -> anyhow::Result<()> {
+    use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
+    use ratatui::backend::CrosstermBackend;
+
+    let wants_detail = !matches!(state.view, state::View::Main);
+    if wants_detail == saved_inline_terminal.is_some() {
+        return Ok(());
+    }
+    if wants_detail {
+        crossterm::execute!(
+            std::io::stdout(),
+            EnterAlternateScreen,
+            crossterm::event::EnableMouseCapture,
+        )?;
+        let detail_terminal = ratatui::Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
+        *saved_inline_terminal = Some(std::mem::replace(terminal, detail_terminal));
+    } else {
+        crossterm::execute!(
+            std::io::stdout(),
+            crossterm::event::DisableMouseCapture,
+            LeaveAlternateScreen,
+        )?;
+        let inline_terminal = saved_inline_terminal
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("inline terminal state is unavailable"))?;
+        *terminal = inline_terminal;
+    }
+    terminal.clear()?;
+    Ok(())
+}
+
+fn load_persisted_state(session: &crate::runtime::SessionInfo, state: &mut TuiState) {
+    use crate::session::todo::{TodoSnapshot, TodoStatus};
+    use crate::ui::{
+        PlanDisplay, PlanTransitionDisplay, TodoCountsDisplay, TodoDisplay, TodoItemDisplay,
+        TodoStatusDisplay,
+    };
+
+    let plan = std::fs::read_to_string(&session.plan_draft_path)
+        .ok()
+        .filter(|content| !content.trim().is_empty())
+        .map(|content| PlanDisplay {
+            transition: PlanTransitionDisplay::DraftSaved,
+            content: Some(content),
+        })
+        .or_else(|| {
+            std::fs::read_to_string(&session.plan_path)
+                .ok()
+                .filter(|content| !content.trim().is_empty())
+                .map(|content| PlanDisplay {
+                    transition: PlanTransitionDisplay::Confirmed,
+                    content: Some(content),
+                })
+        });
+    state.plan = plan;
+
+    let Ok(bytes) = std::fs::read(&session.todos_path) else {
+        state.todos = None;
+        return;
+    };
+    let Ok(snapshot) = serde_json::from_slice::<TodoSnapshot>(&bytes) else {
+        state.todos = None;
+        return;
+    };
+    let (pending, in_progress, completed) =
+        snapshot
+            .items
+            .iter()
+            .fold((0, 0, 0), |counts, item| match item.status {
+                TodoStatus::Pending => (counts.0 + 1, counts.1, counts.2),
+                TodoStatus::InProgress => (counts.0, counts.1 + 1, counts.2),
+                TodoStatus::Completed => (counts.0, counts.1, counts.2 + 1),
+            });
+    state.todos = Some(TodoDisplay {
+        revision: snapshot.revision,
+        counts: TodoCountsDisplay {
+            pending,
+            in_progress,
+            completed,
+        },
+        items: snapshot
+            .items
+            .into_iter()
+            .map(|item| TodoItemDisplay {
+                id: item.id,
+                content: item.content,
+                status: match item.status {
+                    TodoStatus::Pending => TodoStatusDisplay::Pending,
+                    TodoStatus::InProgress => TodoStatusDisplay::InProgress,
+                    TodoStatus::Completed => TodoStatusDisplay::Completed,
+                },
+            })
+            .collect(),
+        changes: Vec::new(),
+    });
+}
+
+fn commit_ready<B: ratatui::backend::Backend>(
+    terminal: &mut ratatui::Terminal<B>,
+    state: &mut TuiState,
+) -> Result<bool, B::Error> {
+    use ratatui::text::Text;
+    use ratatui::widgets::{Paragraph, Widget};
+
+    let start = state.inline.committed;
+    let end = committable_prefix_end(state);
+    if end == start {
+        return Ok(false);
+    }
+
+    let width = terminal.size()?.width.saturating_sub(2).max(1);
+    for item in &state.lines[start..end] {
+        let lines = render::transcript_item_lines(item, width);
+        for chunk in lines.chunks(4096) {
+            let owned = chunk.to_vec();
+            terminal.insert_before(owned.len() as u16, move |buf| {
+                Paragraph::new(Text::from(owned)).render(buf.area, buf);
+            })?;
+        }
+    }
+    state.inline.committed = end;
+    state.invalidate_all_cache();
+    Ok(true)
+}
+
+fn sealed_prefix_end(state: &TuiState) -> usize {
+    let mut end = state.inline.committed;
+    while state.lines.get(end).is_some_and(|item| item.sealed) {
+        end += 1;
+    }
+    end
+}
+
+fn committable_prefix_end(state: &TuiState) -> usize {
+    let end = sealed_prefix_end(state);
+    if !state.work_state.is_working() && end == state.lines.len() && end > state.inline.committed {
+        end - 1
+    } else {
+        end
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,15 +375,13 @@ mod tests {
     };
     use crate::tui::notify::TaskNotificationKind;
     use crate::tui::render::{
-        build_status_line, build_status_spans, build_visible_click_map, collapsed_summary,
-        content_viewport_height, detail_lines_for_session, detail_viewport_height,
-        split_at_visual_width, visible_lines,
+        build_status_line, build_status_spans, collapsed_summary, content_viewport_height,
+        detail_lines_for_session, detail_viewport_height, split_at_visual_width, visible_lines,
     };
     use crate::tui::state::{
-        ActiveOverlay, ClickAction, ClickTarget, CollapsePolicy, MsgKind, MsgLine, SubAgentDetail,
-        TuiState, View, WorkState,
+        ActiveOverlay, CollapsePolicy, TranscriptItem, TranscriptKind, TuiState, View, WorkState,
     };
-    use crate::ui::{Display, ToolResultDisplay};
+    use crate::ui::{Display, ToolResultDisplay, ToolResultKind};
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
@@ -177,7 +408,9 @@ mod tests {
         });
 
         match rx.recv().unwrap() {
-            TuiSignal::ToolResult { tool_name, content } => {
+            TuiSignal::ToolResult {
+                tool_name, content, ..
+            } => {
                 assert_eq!(tool_name, "Bash");
                 assert_eq!(content, "full output\nwith more detail");
             }
@@ -233,7 +466,15 @@ mod tests {
             serde_json::json!({"type":"user_input","content":"hello\nsecond line"}),
             serde_json::json!({"type":"thinking","content":"thinking"}),
             serde_json::json!({"type":"text","content":"answer"}),
-            serde_json::json!({"type":"tool_call","name":"Read","input":{"file_path":"src/tui/mod.rs"}}),
+            serde_json::json!({"type":"tool_call","id":"call-1","name":"Read","input":{"file_path":"src/tui/mod.rs"}}),
+            serde_json::json!({
+                "type":"tool_result",
+                "tool_use_id":"call-1",
+                "name":"Read",
+                "content":"file contents",
+                "success":true,
+                "result_kind":"text"
+            }),
         ];
         let data = events
             .iter()
@@ -249,10 +490,20 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line.kind == MsgKind::StreamThinking)
+                .any(|line| line.kind == TranscriptKind::StreamThinking)
         );
-        assert!(lines.iter().any(|line| line.kind == MsgKind::StreamText));
-        assert!(lines.iter().any(|line| line.kind == MsgKind::ToolCall));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.kind == TranscriptKind::StreamText)
+        );
+        let tool = lines
+            .iter()
+            .find(|line| line.kind == TranscriptKind::Tool)
+            .unwrap();
+        assert!(tool.sealed);
+        assert_eq!(tool.tool_success, Some(true));
+        assert!(tool.text.contains("file contents"));
     }
 
     #[test]
@@ -263,9 +514,9 @@ mod tests {
         state.apply(&TuiSignal::Text("answer".into()));
 
         assert_eq!(state.lines.len(), 1);
-        assert_eq!(state.lines[0].kind, MsgKind::StreamThinking);
+        assert_eq!(state.lines[0].kind, TranscriptKind::StreamThinking);
         assert!(state.lines[0].collapsed);
-        assert_eq!(state.stream_kind, MsgKind::StreamText);
+        assert_eq!(state.stream_kind, TranscriptKind::StreamText);
         assert_eq!(state.stream_line, "answer");
         assert!(state.streaming);
         assert_eq!(state.work_state, WorkState::StreamingText);
@@ -475,11 +726,9 @@ mod tests {
         ));
         assert!(rx.try_recv().is_err());
         assert_eq!(state.work_state, WorkState::Idle);
-        assert!(
-            state.lines.iter().any(|line| {
-                line.kind == MsgKind::Info && line.text.contains("Unknown command")
-            })
-        );
+        assert!(state.lines.iter().any(|line| {
+            line.kind == TranscriptKind::Info && line.text.contains("Unknown command")
+        }));
     }
 
     #[test]
@@ -538,7 +787,7 @@ mod tests {
     fn markdown_renderer_handles_heading_list_and_inline_code() {
         let mut lines = Vec::new();
 
-        push_msg(&mut lines, "# Title\n- item `code`", MsgKind::Text);
+        push_msg(&mut lines, "# Title\n- item `code`", TranscriptKind::Text);
 
         assert_eq!(line_text(&lines[0]), "Title");
         assert_eq!(line_text(&lines[1]), "- item code");
@@ -611,7 +860,7 @@ mod tests {
         push_msg(
             &mut lines,
             "| Name | Count | Note |\n| :--- | ---: | :---: |\n| 中 | 2 | ok |\n| long-name | 10 | yes |",
-            MsgKind::Text,
+            TranscriptKind::Text,
         );
 
         assert_eq!(line_text(&lines[0]), "Name      │ Count │ Note");
@@ -633,7 +882,7 @@ mod tests {
         push_msg(
             &mut lines,
             "| Pattern | Meaning |\n| --- | --- |\n| `a\\|b` | escaped pipe |",
-            MsgKind::Text,
+            TranscriptKind::Text,
         );
 
         assert_eq!(line_text(&lines[0]), "Pattern │ Meaning     ");
@@ -647,7 +896,7 @@ mod tests {
         push_msg_with_width(
             &mut lines,
             "| Key | Description |\n| --- | --- |\n| row | abcdefghijklmnopqrstuvwxyz0123456789 |",
-            MsgKind::Text,
+            TranscriptKind::Text,
             24,
             None,
         );
@@ -665,7 +914,7 @@ mod tests {
         push_msg_with_width(
             &mut lines,
             "| Key | Description |\n| --- | --- |\n| row | abcdefghijklmnopqrstuvwxyz0123456789 |",
-            MsgKind::Text,
+            TranscriptKind::Text,
             80,
             None,
         );
@@ -697,7 +946,7 @@ mod tests {
         push_msg(
             &mut lines,
             "Use **bold** and *em* plus [docs](https://example.com)",
-            MsgKind::Text,
+            TranscriptKind::Text,
         );
 
         assert_eq!(
@@ -733,7 +982,7 @@ mod tests {
         push_msg(
             &mut lines,
             "> quoted **bold** and [docs](https://example.com/a_(b))",
-            MsgKind::Text,
+            TranscriptKind::Text,
         );
 
         assert_eq!(
@@ -763,7 +1012,7 @@ mod tests {
         push_msg_with_tool(
             &mut lines,
             "\x1b[31m--- a/file\x1b[0m\n\x1b[32m+++ b/file\x1b[0m\n@@ -1 +1 @@\n-old\n+new",
-            MsgKind::ToolResult,
+            TranscriptKind::Tool,
             "Edit",
         );
 
@@ -782,7 +1031,7 @@ mod tests {
         push_msg(
             &mut lines,
             "| A | B |\n| nope | --- |\nplain",
-            MsgKind::Text,
+            TranscriptKind::Text,
         );
 
         assert_eq!(line_text(&lines[0]), "| A | B |");
@@ -842,105 +1091,8 @@ mod tests {
     }
 
     #[test]
-    fn mouse_click_does_not_toggle_nearest_line_when_outside_hit_range() {
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut state = TuiState::default();
-        state
-            .lines
-            .push(MsgLine::new("thinking".into(), MsgKind::StreamThinking));
-        state.lines[0].collapsed = true;
-        state.viewport.click_map = vec![ClickTarget {
-            line_idx: 0,
-            start_row: 5,
-            end_row: 5,
-            action: ClickAction::ToggleCollapse,
-        }];
-        state.viewport.content_y = 0;
-        state.viewport.effective_scroll = 0;
-
-        let ev = Event::Mouse(MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: 0,
-            row: 1,
-            modifiers: KeyModifiers::NONE,
-        });
-
-        assert!(!handle_event(ev, &mut state, &tx));
-        assert!(state.lines[0].collapsed);
-    }
-
-    #[test]
-    fn mouse_click_uses_area_top_as_content_row() {
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut state = TuiState::default();
-        state
-            .lines
-            .push(MsgLine::new("thinking".into(), MsgKind::StreamThinking));
-        state.lines[0].collapsed = true;
-        state.viewport.click_map = vec![ClickTarget {
-            line_idx: 0,
-            start_row: 0,
-            end_row: 0,
-            action: ClickAction::ToggleCollapse,
-        }];
-        state.viewport.content_y = 0;
-
-        assert!(!handle_event(
-            Event::Mouse(MouseEvent {
-                kind: MouseEventKind::Down(MouseButton::Left),
-                column: 0,
-                row: 0,
-                modifiers: KeyModifiers::NONE,
-            }),
-            &mut state,
-            &tx,
-        ));
-        assert!(!state.lines[0].collapsed);
-    }
-
-    #[test]
-    fn long_tool_result_defaults_collapsed_and_can_be_clicked_open() {
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut state = TuiState::default();
-        let text = (0..25)
-            .map(|i| format!("line {i}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        state.lines.push(MsgLine::new(text, MsgKind::ToolResult));
-        state.lines[0].cached_lines = Some(vec![Line::from("stale")]);
-        state.cache.history_lines = Some(vec![Line::from("stale")]);
-        state.viewport.click_map = vec![ClickTarget {
-            line_idx: 0,
-            start_row: 0,
-            end_row: 0,
-            action: ClickAction::ToggleCollapse,
-        }];
-
-        assert!(state.lines[0].collapsed);
-        assert_eq!(
-            state.lines[0].collapse_policy,
-            CollapsePolicy::Auto {
-                threshold_lines: 20
-            }
-        );
-        assert!(!handle_event(
-            Event::Mouse(MouseEvent {
-                kind: MouseEventKind::Down(MouseButton::Left),
-                column: 0,
-                row: 0,
-                modifiers: KeyModifiers::NONE,
-            }),
-            &mut state,
-            &tx,
-        ));
-        assert!(!state.lines[0].collapsed);
-        assert!(state.lines[0].cached_lines.is_none());
-        assert!(state.cache.history_lines.is_none());
-    }
-
-    #[test]
     fn short_tool_result_does_not_default_to_collapsed() {
-        let line = MsgLine::new("short\noutput".into(), MsgKind::ToolResult);
+        let line = TranscriptItem::new("short\noutput".into(), TranscriptKind::Tool);
 
         assert!(!line.collapsed);
         assert_eq!(
@@ -957,7 +1109,7 @@ mod tests {
             .map(|i| format!("line {i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let line = MsgLine::new_tool_result("Bash".into(), text);
+        let line = TranscriptItem::new_tool_result("Bash".into(), text);
 
         let summary = collapsed_summary(&line, 80);
 
@@ -968,7 +1120,7 @@ mod tests {
 
     #[test]
     fn collapsed_summary_marks_truncated_tool_result() {
-        let line = MsgLine::new_tool_result(
+        let line = TranscriptItem::new_tool_result(
             "Read".into(),
             "first\n\n[... truncated: showing first/last portions of 10000 bytes ...]\nlast".into(),
         );
@@ -985,73 +1137,394 @@ mod tests {
         let mut state = TuiState::default();
 
         state.apply(&TuiSignal::ToolResult {
+            tool_use_id: None,
             tool_name: "Edit".into(),
             content: "changed file".into(),
+            success: true,
+            exit_code: None,
+            result_kind: crate::ui::ToolResultKind::Edit,
+            presentation: None,
+            artifacts: Vec::new(),
         });
 
         assert_eq!(state.lines.len(), 1);
         assert_eq!(state.lines[0].tool_name.as_deref(), Some("Edit"));
-        assert_eq!(state.lines[0].kind, MsgKind::ToolResult);
+        assert_eq!(state.lines[0].kind, TranscriptKind::Tool);
     }
 
     #[test]
-    fn long_wrapped_tool_result_auto_collapses_until_user_overrides() {
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    fn structured_tool_result_updates_the_running_transcript_item() {
         let mut state = TuiState::default();
-        state
-            .lines
-            .push(MsgLine::new_tool_result("Bash".into(), "x".repeat(1000)));
-        assert!(state.lines[0].collapsed);
+        state.apply(&TuiSignal::ToolCall {
+            tool_use_id: Some("call-1".into()),
+            tool_name: "PlanDraft".into(),
+            summary: "PlanDraft".into(),
+        });
+        assert_eq!(state.lines.len(), 1);
+        assert!(!state.lines[0].sealed);
 
-        let backend = TestBackend::new(40, 30);
+        let presentation = crate::ui::ToolPresentation::Plan(crate::ui::PlanDisplay {
+            transition: crate::ui::PlanTransitionDisplay::DraftSaved,
+            content: Some("1. inspect\n2. implement".into()),
+        });
+        state.apply(&TuiSignal::ToolResult {
+            tool_use_id: Some("call-1".into()),
+            tool_name: "PlanDraft".into(),
+            content: "Plan draft saved.".into(),
+            success: true,
+            exit_code: None,
+            result_kind: crate::ui::ToolResultKind::Control,
+            presentation: Some(presentation),
+            artifacts: Vec::new(),
+        });
+
+        assert_eq!(state.lines.len(), 1);
+        assert!(state.lines[0].sealed);
+        assert_eq!(state.lines[0].tool_success, Some(true));
+        assert!(state.plan.is_some());
+    }
+
+    #[test]
+    fn tool_result_with_mismatched_id_does_not_merge_by_tool_name() {
+        use crate::ui::{TodoChangeDisplay, TodoCountsDisplay, TodoDisplay, ToolPresentation};
+
+        let mut state = TuiState::default();
+        state.apply(&TuiSignal::ToolCall {
+            tool_use_id: Some("call-1".into()),
+            tool_name: "TodoAdvance".into(),
+            summary: "TodoAdvance(2 transitions @r1)".into(),
+        });
+        let presentation = ToolPresentation::Todo(TodoDisplay {
+            revision: 2,
+            counts: TodoCountsDisplay {
+                pending: 2,
+                in_progress: 2,
+                completed: 0,
+            },
+            items: Vec::new(),
+            changes: vec![TodoChangeDisplay::Activated { id: "T0001".into() }],
+        });
+        state.apply(&TuiSignal::ToolResult {
+            tool_use_id: Some("provider-call-1".into()),
+            tool_name: "TodoAdvance".into(),
+            content: "<todo-event>raw protocol</todo-event>".into(),
+            success: true,
+            exit_code: None,
+            result_kind: ToolResultKind::Control,
+            presentation: Some(presentation),
+            artifacts: Vec::new(),
+        });
+
+        assert_eq!(state.lines.len(), 2);
+        assert!(!state.lines[0].sealed);
+        assert_eq!(state.lines[0].tool_use_id.as_deref(), Some("call-1"));
+        assert!(state.lines[1].sealed);
+        assert_eq!(
+            state.lines[1].tool_use_id.as_deref(),
+            Some("provider-call-1")
+        );
+        let rendered = render::transcript_item_lines(&state.lines[1], 80)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("Todos r2"));
+        assert!(rendered.contains("activated T0001"));
+        assert!(!rendered.contains("<todo-event>"));
+        assert_eq!(state.todos.as_ref().unwrap().revision, 2);
+    }
+
+    #[test]
+    fn reused_tool_id_updates_the_latest_unsealed_call() {
+        let mut state = TuiState::default();
+        state.apply(&TuiSignal::ToolCall {
+            tool_use_id: Some("call-1".into()),
+            tool_name: "Read".into(),
+            summary: "Read(old)".into(),
+        });
+        state.apply(&TuiSignal::ToolResult {
+            tool_use_id: Some("call-1".into()),
+            tool_name: "Read".into(),
+            content: "old result".into(),
+            success: true,
+            exit_code: None,
+            result_kind: ToolResultKind::FileRead,
+            presentation: None,
+            artifacts: Vec::new(),
+        });
+        state.inline.committed = 1;
+        state.apply(&TuiSignal::ToolCall {
+            tool_use_id: Some("call-1".into()),
+            tool_name: "Read".into(),
+            summary: "Read(new)".into(),
+        });
+        state.apply(&TuiSignal::ToolResult {
+            tool_use_id: Some("call-1".into()),
+            tool_name: "Read".into(),
+            content: "new result".into(),
+            success: true,
+            exit_code: None,
+            result_kind: ToolResultKind::FileRead,
+            presentation: None,
+            artifacts: Vec::new(),
+        });
+
+        assert_eq!(state.lines.len(), 2);
+        assert_eq!(state.lines[0].text, "old result");
+        assert_eq!(state.lines[1].text, "new result");
+        assert!(state.lines[1].sealed);
+    }
+
+    #[test]
+    fn collapsed_artifact_card_keeps_the_artifact_id_visible() {
+        let mut item = TranscriptItem::new_tool_result("Bash".into(), "large output".into());
+        item.collapsed = true;
+        item.artifacts = vec![crate::ui::ArtifactDisplay {
+            id: "bash-0001".into(),
+            tool: "Bash".into(),
+            bytes: 100_000,
+            description: "full tool output".into(),
+        }];
+
+        let rendered = render::transcript_item_lines(&item, 80)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(rendered.contains("artifact://bash-0001"));
+    }
+
+    #[test]
+    fn todo_delta_preserves_items_not_mentioned_by_the_update() {
+        use crate::ui::{
+            TodoChangeDisplay, TodoCountsDisplay, TodoDisplay, TodoItemDisplay, TodoStatusDisplay,
+        };
+
+        let mut state = TuiState {
+            todos: Some(TodoDisplay {
+                revision: 1,
+                counts: TodoCountsDisplay {
+                    pending: 2,
+                    in_progress: 0,
+                    completed: 0,
+                },
+                items: vec![
+                    TodoItemDisplay {
+                        id: "todo-1".into(),
+                        content: "first".into(),
+                        status: TodoStatusDisplay::Pending,
+                    },
+                    TodoItemDisplay {
+                        id: "todo-2".into(),
+                        content: "second".into(),
+                        status: TodoStatusDisplay::Pending,
+                    },
+                ],
+                changes: Vec::new(),
+            }),
+            ..Default::default()
+        };
+
+        state.apply_todo_presentation(&TodoDisplay {
+            revision: 2,
+            counts: TodoCountsDisplay {
+                pending: 1,
+                in_progress: 1,
+                completed: 0,
+            },
+            items: vec![TodoItemDisplay {
+                id: "todo-1".into(),
+                content: "first".into(),
+                status: TodoStatusDisplay::InProgress,
+            }],
+            changes: vec![TodoChangeDisplay::Activated {
+                id: "todo-1".into(),
+            }],
+        });
+
+        let todos = state.todos.unwrap();
+        assert_eq!(todos.items.len(), 2);
+        assert_eq!(todos.items[0].status, TodoStatusDisplay::InProgress);
+        assert_eq!(todos.items[1].content, "second");
+        assert_eq!(todos.revision, 2);
+    }
+
+    #[test]
+    fn shared_tool_card_renderer_colors_tools_by_result_kind() {
+        let mut item = TranscriptItem::new_tool_result("Edit".into(), "updated file".into());
+        item.tool_success = Some(true);
+        item.tool_result_kind = Some(ToolResultKind::Edit);
+
+        let lines = render::transcript_item_lines(&item, 80);
+
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].spans[0].style.fg, Some(Color::Green));
+        assert_eq!(lines[0].spans[1].content.as_ref(), "Edit");
+        assert_eq!(lines[0].spans[1].style.fg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn inline_tool_projection_auto_collapses_without_expand_marker() {
+        let mut item = TranscriptItem::new_tool_result(
+            "Bash".into(),
+            (0..30)
+                .map(|line| format!("output {line}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        item.tool_success = Some(true);
+        item.tool_result_kind = Some(ToolResultKind::Command);
+
+        let lines = render::transcript_item_lines(&item, 80);
+
+        assert_eq!(lines.len(), 1);
+        assert!(!line_text(&lines[0]).starts_with('▶'));
+        assert!(line_text(&lines[0]).contains("Bash"));
+    }
+
+    #[test]
+    fn full_tui_restores_mouse_toggle_for_collapsible_cards() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut item = TranscriptItem::new_tool_result(
+            "Bash".into(),
+            (0..30)
+                .map(|line| format!("output {line}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        item.tool_success = Some(true);
+        item.tool_result_kind = Some(ToolResultKind::Command);
+        let mut state = TuiState::default();
+        state.push_line(item);
+        let backend = TestBackend::new(80, 20);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| render(f, &mut state)).unwrap();
 
+        terminal
+            .draw(|frame| render(frame, &mut state, TuiMode::Full))
+            .unwrap();
         assert!(state.lines[0].collapsed);
-        assert!(!state.lines[0].collapse_overridden);
         assert!(!state.viewport.click_map.is_empty());
+        let row = state.viewport.content_y + state.viewport.click_map[0].start_row as u16;
 
-        assert!(!handle_event(
+        handle_event(
             Event::Mouse(MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
-                column: 0,
-                row: state.viewport.content_y,
+                column: 1,
+                row,
                 modifiers: KeyModifiers::NONE,
             }),
             &mut state,
             &tx,
-        ));
+        );
+
         assert!(!state.lines[0].collapsed);
         assert!(state.lines[0].collapse_overridden);
-
-        terminal.draw(|f| render(f, &mut state)).unwrap();
-
-        assert!(!state.lines[0].collapsed);
     }
 
     #[test]
-    fn visible_click_map_keeps_only_viewport_relative_targets() {
+    fn inline_stream_promotes_complete_markdown_blocks_before_stop() {
         let mut state = TuiState::default();
-        state
-            .lines
-            .push(MsgLine::new("hidden".into(), MsgKind::StreamThinking));
-        state
-            .lines
-            .push(MsgLine::new("visible".into(), MsgKind::StreamThinking));
-        state
-            .lines
-            .push(MsgLine::new("below".into(), MsgKind::StreamThinking));
-        state.lines[0].cached_lines = Some(vec![Line::from("h0"), Line::from("h1")]);
-        state.lines[1].cached_lines = Some(vec![Line::from("v0"), Line::from("v1")]);
-        state.lines[2].cached_lines = Some(vec![Line::from("b0")]);
+        state.apply(&TuiSignal::Text(
+            "first paragraph\n\nsecond paragraph".into(),
+        ));
 
-        let targets = build_visible_click_map(&state, 2, 2);
+        state.promote_stable_stream_prefix();
 
-        assert_eq!(targets.len(), 1);
-        assert_eq!(targets[0].line_idx, 1);
-        assert_eq!(targets[0].start_row, 0);
-        assert_eq!(targets[0].end_row, 1);
-        assert_eq!(targets[0].action, ClickAction::ToggleCollapse);
+        assert_eq!(state.lines.len(), 1);
+        assert_eq!(state.lines[0].text, "first paragraph\n\n");
+        assert_eq!(state.stream_line, "second paragraph");
+        assert!(state.lines[0].sealed);
+    }
+
+    #[test]
+    fn markdown_trailing_newline_does_not_create_an_extra_blank_row() {
+        let mut lines = Vec::new();
+
+        push_msg(&mut lines, "hello\n", TranscriptKind::Text);
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!(line_text(&lines[0]), "hello");
+    }
+
+    #[test]
+    fn committed_boundary_stops_at_the_first_live_item() {
+        let mut state = TuiState::default();
+        state.push_line(TranscriptItem::new("sealed".into(), TranscriptKind::Text));
+        state.push_line(TranscriptItem::new_tool_call(
+            Some("call-1".into()),
+            "Bash".into(),
+            "Bash(test)".into(),
+        ));
+        state.push_line(TranscriptItem::new("later".into(), TranscriptKind::Text));
+
+        assert_eq!(sealed_prefix_end(&state), 1);
+        state.lines[1].sealed = true;
+        assert_eq!(sealed_prefix_end(&state), 3);
+        state.inline.committed = 2;
+        assert_eq!(sealed_prefix_end(&state), 3);
+    }
+
+    #[test]
+    fn terminal_signal_seals_orphan_tool_calls() {
+        let mut state = TuiState::default();
+        state.apply(&TuiSignal::ToolCall {
+            tool_use_id: Some("call-1".into()),
+            tool_name: "Bash".into(),
+            summary: "Bash(test)".into(),
+        });
+
+        state.apply(&TuiSignal::Error("connection failed".into()));
+
+        assert!(state.lines[0].sealed);
+        assert_eq!(state.lines[0].tool_success, Some(false));
+        assert!(state.lines[0].text.contains("turn failed"));
+        assert_eq!(sealed_prefix_end(&state), state.lines.len());
+    }
+
+    #[test]
+    fn commit_ready_moves_only_the_sealed_prefix_into_native_history() {
+        let backend = TestBackend::new(60, 12);
+        let mut terminal = Terminal::with_options(
+            backend,
+            ratatui::TerminalOptions {
+                viewport: ratatui::Viewport::Inline(4),
+            },
+        )
+        .unwrap();
+        let mut state = TuiState::default();
+        state.push_line(TranscriptItem::new(
+            "completed answer".into(),
+            TranscriptKind::Text,
+        ));
+        state.push_line(TranscriptItem::new_tool_call(
+            Some("call-1".into()),
+            "Bash".into(),
+            "Bash(test)".into(),
+        ));
+
+        assert!(commit_ready(&mut terminal, &mut state).unwrap());
+        assert_eq!(state.inline.committed, 1);
+        assert!(!commit_ready(&mut terminal, &mut state).unwrap());
+
+        state.lines[1].sealed = true;
+        state.work_state = WorkState::WaitingModel;
+        assert!(commit_ready(&mut terminal, &mut state).unwrap());
+        assert_eq!(state.inline.committed, 2);
+    }
+
+    #[test]
+    fn inline_keeps_the_final_item_in_the_viewport_until_new_work_starts() {
+        let mut state = TuiState::default();
+        state.push_line(TranscriptItem::new(
+            "final answer".into(),
+            TranscriptKind::StreamText,
+        ));
+
+        assert_eq!(committable_prefix_end(&state), 0);
+
+        state.work_state = WorkState::WaitingModel;
+        assert_eq!(committable_prefix_end(&state), 1);
     }
 
     #[test]
@@ -1141,48 +1614,6 @@ mod tests {
                 .add_modifier
                 .contains(ratatui::style::Modifier::BOLD)
         );
-    }
-
-    #[test]
-    fn mouse_click_on_sub_agent_opens_detail_by_session_id() {
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut state = TuiState::default();
-        state.lines.push(
-            MsgLine::new("sub".into(), MsgKind::SubAgent).with_sub_detail(Some(SubAgentDetail {
-                thinking: String::new(),
-                text: String::new(),
-            })),
-        );
-        state.sub_agents.line_by_session.insert("sub_1".into(), 0);
-        state.viewport.click_map = vec![ClickTarget {
-            line_idx: 0,
-            start_row: 0,
-            end_row: 0,
-            action: ClickAction::OpenSubAgentDetail {
-                session_id: "sub_1".into(),
-            },
-        }];
-        state.viewport.content_y = 0;
-        state.viewport.effective_scroll = 0;
-
-        assert!(!handle_event(
-            Event::Mouse(MouseEvent {
-                kind: MouseEventKind::Down(MouseButton::Left),
-                column: 0,
-                row: 0,
-                modifiers: KeyModifiers::NONE,
-            }),
-            &mut state,
-            &tx,
-        ));
-
-        assert!(matches!(
-            state.view,
-            View::SubAgentDetail {
-                ref session_id,
-                scroll: 0
-            } if session_id == "sub_1"
-        ));
     }
 
     #[test]
@@ -1792,10 +2223,10 @@ mod tests {
         state.input.cursor = 2;
         state
             .lines
-            .push(MsgLine::new("first".into(), MsgKind::Text));
+            .push(TranscriptItem::new("first".into(), TranscriptKind::Text));
         state
             .lines
-            .push(MsgLine::new("second".into(), MsgKind::Text));
+            .push(TranscriptItem::new("second".into(), TranscriptKind::Text));
         state.cache.width = 78;
         state.cache.history_lines = Some(vec![Line::from("stale")]);
         state.lines[0].cached_lines = Some(vec![Line::from("first")]);
@@ -1803,7 +2234,9 @@ mod tests {
 
         let backend = TestBackend::new(80, 20);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| render(f, &mut state)).unwrap();
+        terminal
+            .draw(|f| render(f, &mut state, TuiMode::Full))
+            .unwrap();
 
         assert_eq!(state.input.cursor, "a".len());
         assert!(state.lines[1].cached_lines.is_some());

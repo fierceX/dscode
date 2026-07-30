@@ -117,6 +117,10 @@ mod tests {
             sub_agent_description: None,
             sub_agent_fork: false,
             exit_code: None,
+            success: false,
+            result_kind: crate::tools::metadata::ToolResultKind::Command,
+            presentation: None,
+            artifacts: Vec::new(),
             signals: vec![Signal {
                 kind: SignalKind::ToolFailed,
                 severity: 1.0,

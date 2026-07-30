@@ -14,7 +14,8 @@
 
 - **OpenAI-compatible 默认后端** — 默认适配 DeepSeek / OpenAI-compatible streaming API，支持 reasoning、usage 和工具调用
 - **可注入 LLM backend** — Rust runtime 可由宿主注入私有化模型、内网网关、厂商 SDK 或非 HTTP transport
-- **两种终端模式** — REPL（`-i`，rustyline 行编辑）和 TUI（`--tui`，ratatui 全屏界面）
+- **三种终端交互 surface** — REPL（`-i`）、Full TUI（`--tui`）和使用原生 scrollback 的
+  Inline TUI（`--tui=inline`）
 - **信号驱动的信念系统** — 自动检测工具执行错误，低信念时注入修正提示并约束恢复首步；可用 `MINK_SIGNAL_MODE=off` 关闭
 - **可配置上下文压缩** — 显式控制阈值、响应预留、热尾部和摘要预算；可选摘要输入降噪
 - **维修流水线** — Scavenge → Truncation → Storm Breaker，三段自动修复
@@ -48,6 +49,9 @@ make build
 
 # TUI 全屏模式
 ./target/release/mink -m flash --tui
+
+# TUI 原生 scrollback 模式
+./target/release/mink -m flash --tui=inline
 
 # 单次查询
 ./target/release/mink -m flash "explain this project"

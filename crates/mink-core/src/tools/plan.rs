@@ -1,6 +1,7 @@
 use crate::context::ToolContext;
 use crate::tools::metadata::{ApprovalTier, ToolMetadata, ToolResultKind};
 use crate::tools::runner::{ToolExec, ToolOutcome};
+use crate::ui::{PlanDisplay, PlanTransitionDisplay, ToolPresentation};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlanCommand {
@@ -46,14 +47,23 @@ impl ToolExec for PlanDraftTool {
         let cancelled = args.content.is_empty();
         ctx.plan_store
             .set_draft(&args.content, ctx.tool_config.file_write_max_bytes)?;
-        Ok(ToolOutcome::plan(
+        let mut outcome = ToolOutcome::plan(
             PlanCommand::SetDraft,
             if cancelled {
                 "Plan draft cancelled."
             } else {
                 "Plan draft saved."
             },
-        ))
+        );
+        outcome.presentation = Some(ToolPresentation::Plan(PlanDisplay {
+            transition: if cancelled {
+                PlanTransitionDisplay::DraftCancelled
+            } else {
+                PlanTransitionDisplay::DraftSaved
+            },
+            content: (!cancelled).then_some(args.content),
+        }));
+        Ok(outcome)
     }
 }
 
@@ -75,11 +85,13 @@ impl ToolExec for PlanConfirmTool {
         _input: &serde_json::Value,
         ctx: &ToolContext,
     ) -> anyhow::Result<ToolOutcome> {
-        ctx.plan_store.confirm()?;
-        Ok(ToolOutcome::plan(
-            PlanCommand::Confirm,
-            "Plan confirmed and locked in.",
-        ))
+        let content = ctx.plan_store.confirm()?;
+        let mut outcome = ToolOutcome::plan(PlanCommand::Confirm, "Plan confirmed and locked in.");
+        outcome.presentation = Some(ToolPresentation::Plan(PlanDisplay {
+            transition: PlanTransitionDisplay::Confirmed,
+            content: Some(content),
+        }));
+        Ok(outcome)
     }
 }
 
@@ -102,6 +114,11 @@ impl ToolExec for PlanClearTool {
         ctx: &ToolContext,
     ) -> anyhow::Result<ToolOutcome> {
         ctx.plan_store.clear()?;
-        Ok(ToolOutcome::plan(PlanCommand::Clear, "Plan cleared."))
+        let mut outcome = ToolOutcome::plan(PlanCommand::Clear, "Plan cleared.");
+        outcome.presentation = Some(ToolPresentation::Plan(PlanDisplay {
+            transition: PlanTransitionDisplay::Cleared,
+            content: None,
+        }));
+        Ok(outcome)
     }
 }

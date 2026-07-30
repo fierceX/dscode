@@ -91,7 +91,7 @@ impl PlanStore {
         atomic_replace(&self.draft_path, content.as_bytes())
     }
 
-    pub fn confirm(&self) -> Result<()> {
+    pub fn confirm(&self) -> Result<String> {
         let _guard = self
             .transition_lock
             .lock()
@@ -106,6 +106,8 @@ impl PlanStore {
         if draft.iter().all(u8::is_ascii_whitespace) {
             bail!("no plan draft found to confirm");
         }
+        let content = String::from_utf8(draft)
+            .map_err(|error| anyhow::anyhow!("plan draft is not valid UTF-8: {error}"))?;
         match self.plan_path.try_exists() {
             Ok(true) => bail!("a confirmed plan already exists"),
             Ok(false) => {}
@@ -117,7 +119,8 @@ impl PlanStore {
         }
         ensure_parent(&self.plan_path)?;
         std::fs::rename(&self.draft_path, &self.plan_path)
-            .map_err(|error| anyhow::anyhow!("cannot commit plan draft atomically: {error}"))
+            .map_err(|error| anyhow::anyhow!("cannot commit plan draft atomically: {error}"))?;
+        Ok(content)
     }
 
     pub fn clear(&self) -> Result<()> {
@@ -177,7 +180,7 @@ mod tests {
     fn draft_confirm_clear_is_a_valid_lifecycle() {
         let (root, store) = store("plan-lifecycle");
         store.set_draft("# Plan\n", 1024).unwrap();
-        store.confirm().unwrap();
+        assert_eq!(store.confirm().unwrap(), "# Plan\n");
         assert_eq!(
             std::fs::read_to_string(root.join("plan.md")).unwrap(),
             "# Plan\n"

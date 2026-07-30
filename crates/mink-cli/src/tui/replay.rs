@@ -1,5 +1,7 @@
 use crate::session::store::first_line;
-use crate::tui::state::{MsgKind, MsgLine};
+use crate::tui::signal::TuiSignal;
+use crate::tui::state::{TranscriptItem, TranscriptKind, TuiState};
+use crate::ui::{ArtifactDisplay, ToolPresentation, ToolResultKind};
 use crate::util::truncate_str;
 use std::collections::VecDeque;
 use std::io::BufRead;
@@ -7,22 +9,20 @@ use std::path::Path;
 
 const REPLAY_TURNS: usize = 10;
 
-pub(crate) fn load_session(events_path: &Path) -> Vec<MsgLine> {
-    let mut lines: Vec<MsgLine> = Vec::new();
+pub(crate) fn load_session(events_path: &Path) -> Vec<TranscriptItem> {
     if !events_path.exists() {
-        return lines;
+        return Vec::new();
     }
     let file = match std::fs::File::open(events_path) {
         Ok(file) => file,
-        Err(_) => return lines,
+        Err(_) => return Vec::new(),
     };
     let events = load_recent_turn_events(file);
     if events.is_empty() {
-        return lines;
+        return Vec::new();
     }
 
-    build_lines_from_events(&events, &mut lines);
-    lines
+    build_lines_from_events(&events)
 }
 
 fn load_recent_turn_events(file: std::fs::File) -> Vec<serde_json::Value> {
@@ -65,17 +65,8 @@ fn load_recent_turn_events(file: std::fs::File) -> Vec<serde_json::Value> {
     turns.into_iter().flatten().collect()
 }
 
-fn build_lines_from_events(events: &[serde_json::Value], lines: &mut Vec<MsgLine>) {
-    let mut buf = String::new();
-    let mut buf_kind: Option<MsgKind> = None;
-
-    let flush_buf = |lines: &mut Vec<MsgLine>, buf: &mut String, kind: &mut Option<MsgKind>| {
-        if !buf.is_empty() {
-            let k = kind.take().unwrap_or(MsgKind::Text);
-            lines.push(MsgLine::new(std::mem::take(buf), k));
-        }
-    };
-
+fn build_lines_from_events(events: &[serde_json::Value]) -> Vec<TranscriptItem> {
+    let mut state = TuiState::default();
     for evt in events {
         let t = evt
             .get("type")
@@ -87,57 +78,95 @@ fn build_lines_from_events(events: &[serde_json::Value], lines: &mut Vec<MsgLine
             .unwrap_or("");
         match t {
             "user_input" | "user_message" => {
-                flush_buf(lines, &mut buf, &mut buf_kind);
+                state.finalize_stream();
                 let preview = truncate_str(first_line(c), 77);
                 if !preview.is_empty() {
-                    lines.push(MsgLine::new(format!("> {preview}"), MsgKind::Info));
+                    state.push_line(TranscriptItem::new(
+                        format!("> {preview}"),
+                        TranscriptKind::Info,
+                    ));
                 }
             }
-            "thinking" => {
-                let target = MsgKind::StreamThinking;
-                if buf_kind != Some(target) {
-                    flush_buf(lines, &mut buf, &mut buf_kind);
-                    buf_kind = Some(target);
-                }
-                buf.push_str(c);
-            }
-            "text" => {
-                let target = MsgKind::StreamText;
-                if buf_kind != Some(target) {
-                    flush_buf(lines, &mut buf, &mut buf_kind);
-                    buf_kind = Some(target);
-                }
-                buf.push_str(c);
-            }
+            "thinking" => state.apply(&TuiSignal::Thinking(c.to_string())),
+            "text" => state.apply(&TuiSignal::Text(c.to_string())),
             "tool_call" => {
-                flush_buf(lines, &mut buf, &mut buf_kind);
                 let name = evt
                     .get("name")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("");
                 let summary = build_replay_tool_summary(name, evt);
-                let text = if summary.is_empty() {
-                    format!("[tool] {name}")
-                } else {
-                    format!("[tool] {summary}")
-                };
-                lines.push(MsgLine::new(text, MsgKind::ToolCall));
+                state.apply(&TuiSignal::ToolCall {
+                    tool_use_id: evt
+                        .get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned),
+                    tool_name: name.to_string(),
+                    summary,
+                });
             }
             "tool_result" => {
-                flush_buf(lines, &mut buf, &mut buf_kind);
+                let tool_name = evt
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                let presentation = evt
+                    .get("presentation")
+                    .cloned()
+                    .and_then(|value| serde_json::from_value::<ToolPresentation>(value).ok());
+                let artifacts = evt
+                    .get("artifacts")
+                    .cloned()
+                    .and_then(|value| serde_json::from_value::<Vec<ArtifactDisplay>>(value).ok())
+                    .unwrap_or_default();
+                let result_kind = evt
+                    .get("result_kind")
+                    .cloned()
+                    .and_then(|value| serde_json::from_value::<ToolResultKind>(value).ok())
+                    .unwrap_or(ToolResultKind::Text);
+                state.apply(&TuiSignal::ToolResult {
+                    tool_use_id: evt
+                        .get("tool_use_id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned),
+                    tool_name: tool_name.to_string(),
+                    content: c.to_string(),
+                    success: evt
+                        .get("success")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(true),
+                    exit_code: evt
+                        .get("exit_code")
+                        .and_then(serde_json::Value::as_i64)
+                        .and_then(|value| i32::try_from(value).ok()),
+                    result_kind,
+                    presentation,
+                    artifacts,
+                });
             }
             "error" => {
-                flush_buf(lines, &mut buf, &mut buf_kind);
                 let msg = evt
                     .get("message")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("");
-                lines.push(MsgLine::new(format!("Error: {msg}"), MsgKind::Error));
+                state.apply(&TuiSignal::Error(msg.to_string()));
             }
             _ => {}
         }
     }
-    flush_buf(lines, &mut buf, &mut buf_kind);
+    state.finalize_stream();
+    for item in &mut state.lines {
+        if !item.sealed {
+            item.sealed = true;
+            if item.kind == TranscriptKind::Tool {
+                item.tool_success = Some(false);
+                if item.text.starts_with("[tool]") {
+                    item.text
+                        .push_str("\nResult unavailable in the persisted event log.");
+                }
+            }
+        }
+    }
+    state.lines
 }
 
 fn build_replay_tool_summary(name: &str, evt: &serde_json::Value) -> String {

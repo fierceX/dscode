@@ -10,7 +10,8 @@
 
 - `mink::runtime` / `mink::prelude`：Rust 嵌入式入口，提供 `AgentRuntime`、`AgentOptions`、流式事件和 turn outcome。
 - `mink::config`：与 CLI 共用的完整配置结构和解析辅助函数。
-- `mink::ui`：`Display` trait、`ToolResultDisplay` 和状态快照协议。具体 REPL/TUI 渲染不在本包。
+- `mink::ui`：`Display` trait、结构化工具调用/结果 presentation 和状态快照协议。具体
+  REPL/TUI 渲染不在本包。
 - `mink::sdk_protocol`：Agent JSONL 协议类型和 SDK 适配。
 - `mink::sandbox`：进程级沙箱 re-exec 能力。
 - `src/agent`、`src/tools`、`src/session`、`src/llm`：mink 的主循环、工具、持久化和 LLM 流式客户端核心。

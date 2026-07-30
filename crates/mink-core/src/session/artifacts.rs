@@ -1,5 +1,6 @@
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
+use std::io::Read;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -82,6 +83,22 @@ impl ArtifactManager {
     pub fn read_text(&self, id: &str) -> Result<String> {
         let record = self.get(id)?;
         self.read_record_text(&record)
+    }
+
+    pub fn read_text_prefix(&self, id: &str, max_bytes: usize) -> Result<(String, bool)> {
+        let record = self.get(id)?;
+        let file = std::fs::File::open(self.root.join(&record.path))?;
+        let mut bytes = Vec::with_capacity(max_bytes.saturating_add(1));
+        file.take(max_bytes.saturating_add(1) as u64)
+            .read_to_end(&mut bytes)?;
+        let truncated = bytes.len() > max_bytes;
+        bytes.truncate(max_bytes);
+        while std::str::from_utf8(&bytes).is_err() {
+            let Some(_) = bytes.pop() else {
+                break;
+            };
+        }
+        Ok((String::from_utf8(bytes).unwrap_or_default(), truncated))
     }
 
     pub fn read_record_text(&self, record: &ArtifactRecord) -> Result<String> {
@@ -198,6 +215,18 @@ mod tests {
         let record = manager.write_text("Bash", "full output", "hello").unwrap();
         assert_eq!(record.id, "bash-0001");
         assert_eq!(manager.read_text(&record.id).unwrap(), "hello");
+        let _ = std::fs::remove_dir_all(manager.root);
+    }
+
+    #[test]
+    fn bounded_read_preserves_utf8_boundary() {
+        let manager = temp_manager("bounded-read");
+        let record = manager
+            .write_text("Bash", "unicode output", "abc中文def")
+            .unwrap();
+        let (content, truncated) = manager.read_text_prefix(&record.id, 5).unwrap();
+        assert_eq!(content, "abc");
+        assert!(truncated);
         let _ = std::fs::remove_dir_all(manager.root);
     }
 

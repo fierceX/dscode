@@ -135,7 +135,7 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
 
     // TUI channels (if tui_mode). Created before display so signal_tx is available.
     #[cfg(feature = "tui")]
-    let tui_tx = if cfg.tui_mode {
+    let tui_tx = if cfg.tui_mode.enabled() {
         let (signal_tx, signal_rx) = std::sync::mpsc::channel::<crate::tui::TuiSignal>();
         Some((signal_tx, signal_rx))
     } else {
@@ -143,7 +143,7 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
     };
     #[cfg(not(feature = "tui"))]
     {
-        if cfg.tui_mode {
+        if cfg.tui_mode.enabled() {
             anyhow::bail!("this mink binary was built without the `tui` feature");
         }
     }
@@ -194,7 +194,7 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
             .await?;
         crate::sdk_protocol::emit_json_line(&final_from_outcome(&outcome));
         process_exit_code = exit_code_from_turn(outcome.status);
-    } else if cfg.tui_mode {
+    } else if cfg.tui_mode.enabled() {
         #[cfg(feature = "tui")]
         {
             let cmd_tx = runtime.command_sender();
@@ -202,9 +202,10 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
             if let Some((_, signal_rx)) = tui_tx {
                 let model_label = crate::config::resolve_model_label(&cfg.model);
                 if let Err(e) = crate::tui::run_tui(
+                    cfg.tui_mode,
                     signal_rx,
                     cmd_tx.clone(),
-                    &session.events_path,
+                    &session,
                     Some(interrupt.clone()),
                     &model_label,
                     &cfg.sandbox,
@@ -714,7 +715,7 @@ fn print_usage() {
     println!("  -v, --verbose           Verbose mode");
     println!("  -i, --interactive       Interactive mode (REPL)");
     #[cfg(feature = "tui")]
-    println!("  --tui                   TUI mode");
+    println!("  --tui[=full|inline]     Full TUI (default) or inline TUI");
     println!("  --print                 Stream JSON events to stdout");
     println!("  --agent-jsonl           Agent JSONL protocol");
     println!("  --enabled-tools <list>  Comma-separated tools to enable, or 'none'");

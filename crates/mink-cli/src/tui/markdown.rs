@@ -1,4 +1,4 @@
-use crate::tui::state::MsgKind;
+use crate::tui::state::TranscriptKind;
 use crate::tui::theme;
 use ratatui::{
     style::Style,
@@ -33,15 +33,14 @@ enum MarkdownMode {
     Diff,
 }
 
-pub(crate) fn style_for_kind(kind: MsgKind) -> Style {
+pub(crate) fn style_for_kind(kind: TranscriptKind) -> Style {
     match kind {
-        MsgKind::StreamThinking => theme::muted(),
-        MsgKind::Text | MsgKind::StreamText => theme::text(),
-        MsgKind::ToolCall => theme::primary_bold(),
-        MsgKind::Error => theme::error(),
-        MsgKind::Info => theme::info(),
-        MsgKind::SubAgent => theme::sub_agent(),
-        MsgKind::ToolResult => theme::muted(),
+        TranscriptKind::StreamThinking => theme::muted(),
+        TranscriptKind::Text | TranscriptKind::StreamText => theme::text(),
+        TranscriptKind::Tool => theme::muted(),
+        TranscriptKind::Error => theme::error(),
+        TranscriptKind::Info => theme::info(),
+        TranscriptKind::SubAgent => theme::sub_agent(),
     }
 }
 
@@ -60,19 +59,19 @@ fn is_diff_eligible(tool_name: Option<&str>) -> bool {
     )
 }
 
-fn mode_for_kind(kind: MsgKind, text: &str, tool_name: Option<&str>) -> MarkdownMode {
+fn mode_for_kind(kind: TranscriptKind, text: &str, tool_name: Option<&str>) -> MarkdownMode {
     match kind {
-        MsgKind::Text | MsgKind::StreamText => MarkdownMode::Full,
-        MsgKind::ToolResult if is_diff_eligible(tool_name) && diff::is_diff_like(text) => {
+        TranscriptKind::Text | TranscriptKind::StreamText => MarkdownMode::Full,
+        TranscriptKind::Tool if is_diff_eligible(tool_name) && diff::is_diff_like(text) => {
             MarkdownMode::Diff
         }
-        MsgKind::ToolResult => MarkdownMode::ToolOutput,
+        TranscriptKind::Tool => MarkdownMode::ToolOutput,
         _ => MarkdownMode::Plain,
     }
 }
 
 #[cfg(test)]
-pub(crate) fn push_msg(lines: &mut Vec<Line<'static>>, text: &str, kind: MsgKind) {
+pub(crate) fn push_msg(lines: &mut Vec<Line<'static>>, text: &str, kind: TranscriptKind) {
     push_msg_with_width(lines, text, kind, 80, None);
 }
 
@@ -80,7 +79,7 @@ pub(crate) fn push_msg(lines: &mut Vec<Line<'static>>, text: &str, kind: MsgKind
 pub(crate) fn push_msg_with_tool(
     lines: &mut Vec<Line<'static>>,
     text: &str,
-    kind: MsgKind,
+    kind: TranscriptKind,
     tool_name: &str,
 ) {
     push_msg_with_width(lines, text, kind, 80, Some(tool_name));
@@ -89,7 +88,7 @@ pub(crate) fn push_msg_with_tool(
 pub(crate) fn push_msg_with_width(
     lines: &mut Vec<Line<'static>>,
     text: &str,
-    kind: MsgKind,
+    kind: TranscriptKind,
     max_width: u16,
     tool_name: Option<&str>,
 ) {

@@ -1,5 +1,9 @@
-use crate::tui::render::content::render_content;
-use crate::tui::render::detail::{render_detail_bar, render_detail_content};
+use crate::config::TuiMode;
+use crate::tui::render::content::{ContentMode, render_content};
+use crate::tui::render::detail::{
+    render_artifact_content, render_detail_bar, render_detail_content, render_plan_content,
+    render_todos_content,
+};
 use crate::tui::render::file_picker::render_file_picker;
 use crate::tui::render::input::render_input;
 use crate::tui::render::status::render_status;
@@ -15,17 +19,16 @@ mod file_picker;
 mod input;
 mod status;
 
+pub(crate) use content::transcript_item_lines;
 #[cfg(test)]
-pub(crate) use content::{
-    build_visible_click_map, collapsed_summary, content_viewport_height, visible_lines,
-};
+pub(crate) use content::{collapsed_summary, content_viewport_height, visible_lines};
 #[cfg(test)]
 pub(crate) use detail::{detail_lines_for_session, detail_viewport_height};
 pub(crate) use input::{clamp_input_scroll, split_at_visual_width};
 #[cfg(test)]
 pub(crate) use status::{build_status_line, build_status_spans};
 
-pub(crate) fn render(f: &mut Frame, state: &mut TuiState) {
+pub(crate) fn render(f: &mut Frame, state: &mut TuiState, mode: TuiMode) {
     let area = f.area();
     if area.height < 5 || area.width < 20 {
         return;
@@ -64,7 +67,16 @@ pub(crate) fn render(f: &mut Frame, state: &mut TuiState) {
                 ])
                 .split(area);
 
-            render_content(f, chunks[0], state);
+            render_content(
+                f,
+                chunks[0],
+                state,
+                if mode == TuiMode::Full {
+                    ContentMode::Full
+                } else {
+                    ContentMode::Inline
+                },
+            );
             render_input(f, chunks[1], &visible_input_lines);
             render_file_picker(f, chunks[1], state);
 
@@ -84,6 +96,30 @@ pub(crate) fn render(f: &mut Frame, state: &mut TuiState) {
                 .constraints([Constraint::Min(1), Constraint::Length(1)])
                 .split(area);
             render_detail_content(f, chunks[0], session_id, *scroll, state);
+            render_detail_bar(f, chunks[1]);
+        }
+        View::Plan { scroll } => {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(1), Constraint::Length(1)])
+                .split(area);
+            render_plan_content(f, chunks[0], *scroll, state);
+            render_detail_bar(f, chunks[1]);
+        }
+        View::Todos { scroll } => {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(1), Constraint::Length(1)])
+                .split(area);
+            render_todos_content(f, chunks[0], *scroll, state);
+            render_detail_bar(f, chunks[1]);
+        }
+        View::Artifact { scroll } => {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(1), Constraint::Length(1)])
+                .split(area);
+            render_artifact_content(f, chunks[0], *scroll, state);
             render_detail_bar(f, chunks[1]);
         }
     }

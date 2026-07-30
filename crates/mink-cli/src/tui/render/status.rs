@@ -2,6 +2,7 @@
 use crate::tui::markdown::truncate_visual;
 use crate::tui::state::TuiState;
 use crate::tui::theme;
+use crate::ui::PlanTransitionDisplay;
 use crate::ui::StatsSnapshot;
 use crate::util::fmt_k;
 use ratatui::{
@@ -82,6 +83,27 @@ fn build_status_items(state: &TuiState) -> Vec<StatusItem> {
             text: format!("B:{:.2}", s.belief),
             style: theme::muted(),
             priority: 7,
+        });
+    }
+    if let Some(plan) = state.plan.as_ref() {
+        let label = match plan.transition {
+            PlanTransitionDisplay::DraftSaved => "plan:draft",
+            PlanTransitionDisplay::Confirmed => "plan:confirmed",
+            PlanTransitionDisplay::DraftCancelled | PlanTransitionDisplay::Cleared => "plan:none",
+        };
+        items.push(StatusItem {
+            text: label.to_string(),
+            style: theme::info(),
+            priority: 6,
+        });
+    }
+    if let Some(todos) = state.todos.as_ref()
+        && todos.counts.in_progress + todos.counts.pending > 0
+    {
+        items.push(StatusItem {
+            text: format!("todo:{}/{}", todos.counts.in_progress, todos.counts.pending),
+            style: theme::info(),
+            priority: 6,
         });
     }
     items.push(StatusItem {

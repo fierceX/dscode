@@ -74,6 +74,7 @@ impl SubAgentCoordinator {
                     result.content =
                         "Error: sub-agent recursion blocked: sub-agent cannot spawn sub-agents."
                             .to_string();
+                    result.success = false;
                     result.spawns_sub_agent = false;
                     processed_results.push(result);
                     continue;
@@ -162,6 +163,7 @@ impl SubAgentCoordinator {
                     sub_completed += 1;
                     completed_indices.insert(idx);
                     if let Some(ref mut pr) = processed_results.get_mut(idx) {
+                        pr.success = sa.status == "ok";
                         pr.content = format!(
                             "[sub-agent {}] {} (in={}, out={})\nThinking: {}\nText: {}",
                             session_id,
@@ -226,14 +228,15 @@ impl SubAgentCoordinator {
                     "session_id": launch.session_id,
                     "status": reason,
                 }));
-                if let Some(pr) = processed_results.get_mut(launch.idx)
-                    && pr.content.is_empty()
-                {
-                    pr.content = match reason {
-                        "timed_out" => format!("Sub-agent timed out after {timeout}s."),
-                        "cancelled" => "Sub-agent cancelled before completion.".into(),
-                        _ => "Sub-agent did not complete.".into(),
-                    };
+                if let Some(pr) = processed_results.get_mut(launch.idx) {
+                    pr.success = false;
+                    if pr.content.is_empty() {
+                        pr.content = match reason {
+                            "timed_out" => format!("Sub-agent timed out after {timeout}s."),
+                            "cancelled" => "Sub-agent cancelled before completion.".into(),
+                            _ => "Sub-agent did not complete.".into(),
+                        };
+                    }
                 }
                 pending_handles.push(launch.handle);
             }
@@ -243,6 +246,7 @@ impl SubAgentCoordinator {
         for pr in &mut processed_results {
             if pr.spawns_sub_agent && pr.content.is_empty() {
                 pr.content = "Sub-agent did not complete.".into();
+                pr.success = false;
             }
         }
         processed_results

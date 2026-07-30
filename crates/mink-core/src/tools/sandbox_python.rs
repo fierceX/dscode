@@ -317,6 +317,7 @@ impl super::runner::ToolExec for PythonSandboxTool {
             diagnostics: Vec::new(),
             plan_command: None,
             state_metadata: None,
+            presentation: None,
         })
     }
 }
