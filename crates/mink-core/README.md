@@ -44,7 +44,7 @@ revision 和稳定 ID 防止 stale write。
 
 ```toml
 [dependencies]
-mink = { package = "mink-core", version = "0.1.15", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.2.0", default-features = false, features = ["runtime"] }
 ```
 
 ```rust

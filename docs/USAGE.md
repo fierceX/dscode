@@ -1,52 +1,40 @@
 # 使用手册
 
-本文面向 mink 使用者，覆盖 CLI、Rust 嵌入、Python SDK 相关的运行方式、配置、沙箱、
-session、技能和常见工作流。内置工具的完整参数、结果格式和边界行为见
-[工具参考](tools.md)；架构和内部模块职责见 [ARCHITECTURE.md](ARCHITECTURE.md)；工具与
-提示词解耦、自由组合和算法策略见
-[工具能力与提示词解耦设计文档](设计哲学-工具能力与提示词解耦.md)。
+> 更新日期：2026-07-30
 
-## 快速开始
-
-```bash
-# 前置：Rust 1.94+，设置 DEEPSEEK_API_KEY 或通过配置指定 OpenAI-compatible 端点
-
-# 编译
-make build
-# 或
-cargo build --release
-
-# 设置 API Key
-export DEEPSEEK_API_KEY="sk-xxx"
-
-# 单次任务
-./target/release/mink -m flash "scan this project"
-
-# REPL 交互模式
-./target/release/mink -m flash -i
-
-# TUI 全屏模式
-./target/release/mink -m flash --tui
-
-# TUI 原生 scrollback 模式
-./target/release/mink -m flash --tui=inline
-
-# 继续上次会话
-./target/release/mink -m flash --continue -i
-
-# stdin 管道输入
-echo "list the files" | ./target/release/mink -m flash
-```
+本文面向 mink 使用者，覆盖 CLI、Rust 嵌入、Python SDK 的运行方式、配置、沙箱、session、技能和常见工作流。
+内置工具的完整参数、结果格式和边界行为见 [工具参考](tools.md)；架构和内部模块职责见 [ARCHITECTURE.md](ARCHITECTURE.md)；
+工具与提示词解耦、自由组合见 [工具能力与提示词解耦设计文档](设计哲学-工具能力与提示词解耦.md)。
 
 ---
 
-## 终端模式
+## 目录
 
-项目提供 REPL、Full TUI、Inline TUI 和非交互 CLI 模式。
+- [终端模式与操作](#终端模式与操作)
+- [配置与参数](#配置与参数)
+- [沙箱与安全](#沙箱与安全)
+- [Token 用量与费用](#token-用量与费用)
+- [Rust 库嵌入](#rust-库嵌入)
+- [会话管理](#会话管理)
+- [计划系统](#计划系统)
+- [上下文压缩](#上下文压缩)
+- [维修流水线](#维修流水线)
+- [工具系统](#工具系统)
+- [Skills（技能）](#skills技能)
+- [MISSION（自定义系统提示词）](#mission自定义系统提示词)
+- [SubAgent（子代理）](#subagent子代理)
+- [Stream-JSON 输出](#stream-json-输出)
+- [故障排查](#故障排查)
+
+---
+
+## 终端模式与操作
+
+项目提供 REPL、Full TUI、Inline TUI 和非交互 CLI 四种使用模式。
 
 ### REPL 模式（`-i`）
 
-基于 rustyline 的行编辑器。适合日常编码交互：
+基于 rustyline 的行编辑器，适合日常编码交互：
 
 ```
 mink interactive mode (type 'exit' or Ctrl+D to quit)
@@ -62,15 +50,12 @@ mink interactive mode (type 'exit' or Ctrl+D to quit)
 
 ### Full TUI（`--tui` / `--tui=full`）
 
-Full TUI 使用 alternate screen 和应用内 transcript。主视图支持鼠标滚动、工具卡片点击、
-自动折叠和再次展开，适合需要完整结构化操作的编码会话。
+使用 alternate screen 和应用内 transcript，支持鼠标滚动、工具卡片点击、自动折叠和展开，适合需要完整结构化操作的编码会话。
 
 ### Inline TUI（`--tui=inline`）
 
-Inline TUI 将完成的结构化内容和稳定 Markdown 块渐进写入终端原生 scrollback，底部只保留
-尚未提交的流式尾部、状态栏和输入区；一轮结束时的最后一个 item 会保留到新工作开始。
-稳定内容通过 terminal scrolling region 写入，避免宽字符占位空格和提交时的 viewport
-整体重绘，适合 SSH 和长日志会话：
+将完成的结构化内容渐进写入终端原生 scrollback，底部保留流式尾部、状态栏和输入区。
+通过 terminal scrolling region 写入稳定内容，避免宽字符占位空格和 viewport 整体重绘，适合 SSH 和长日志：
 
 ```
 flash B:0.73 T:12 R:45 I:200K(50%) O:20K C:400K(40%) ¥0.12 [idle]
@@ -80,21 +65,21 @@ flash B:0.73 T:12 R:45 I:200K(50%) O:20K C:400K(40%) ¥0.12 [idle]
  > 输入区域（多行输入）
 ```
 
-**状态栏字段含义**：
+**状态栏字段含义：**
 
 | 字段 | 示例 | 含义 |
 |------|------|------|
 | `flash` | 模型名 | 当前模型 |
-| `B:0.73` | 信念度 | 工具执行可靠性评分（0.0~1.0，0.0 表示未追踪） |
+| `B:0.73` | 信念度 | 工具执行可靠性评分（0.0~1.0） |
 | `T:12` | 对话轮次 | 当前对话的用户输入轮数 |
 | `R:45` | API 请求 | 累计 LLM API 请求次数 |
-| `I:200K` | 输入 tokens | 总输入 tokens（含缓存读取），括号内为缓存命中率 |
+| `I:200K` | 输入 tokens | 总输入 tokens，括号内为缓存命中率 |
 | `O:20K` | 输出 tokens | 总输出 tokens |
-| `C:400K` | 上下文 | 当前对话上下文 tokens，括号内为上下文使用率 |
+| `C:400K` | 上下文 | 当前上下文 tokens，括号内为使用率 |
 | `¥0.12` | 费用 | 累计费用（按模型单价实时计算） |
 | `[idle]` | 工作状态 | idle / waiting / thinking / generating / tool / sub-agent / compacting / error |
 
-**B 值含义**：
+**B（信念度）值含义：**
 
 | B 值 | 含义 |
 |------|------|
@@ -105,52 +90,35 @@ flash B:0.73 T:12 R:45 I:200K(50%) O:20K C:400K(40%) ¥0.12 [idle]
 | < 0.3 | 严重 |
 
 两种 TUI 共用：
-
-- 多行输入和 UTF-8 安全编辑。
-- Ctrl+C 在任务运行时中断当前 turn。
-- 工具调用与结果按 ID 合并，显示退出状态、Plan/Todo 状态和 Artifact 元数据。
-- 语义工具着色、自动折叠和同一套 Markdown renderer。
-- Markdown 由内置 renderer 渲染，支持标题、列表、引用、代码块、表格和 diff。
-- 启动或恢复 session 时，Plan/Todo 详情从当前状态文件加载；后续工具 presentation 继续更新该状态。
-- 超长工具结果折叠后仍显示首个 `artifact://ID`；Full 模式可点击卡片，两种模式均可使用
-  `/artifact ID` 查看有界预览。
-- Plan、Todo 和 Artifact 详情按终端可用内容宽度折行，上下滚动以折行后的可视行为单位。
+- 多行输入和 UTF-8 安全编辑，Ctrl+C 中断当前 turn
+- 工具调用与结果按 ID 合并，显示退出状态、Plan/Todo 状态和 Artifact 元数据
+- 语义工具着色、自动折叠和同一套 Markdown renderer（标题、列表、引用、代码块、表格、diff）
+- Plan/Todo 详情从 session 状态文件加载；超长工具结果折叠后显示 `artifact://ID`
+- `/artifact ID` 查看有界预览，Plan/Todo/Artifact 详情按内容宽度折行
 
 模式差异：
+- Full：鼠标捕获，应用内滚动，卡片可展开/折叠
+- Inline：鼠标由终端处理，自动折叠后不可展开；详情临时使用 alternate screen
 
-- Full 主视图捕获鼠标，滚轮操作应用内 transcript；点击卡片可以展开、折叠或打开结构化详情。
-- Inline 主视图不捕获鼠标，滚轮由本地终端处理；自动折叠后的原生输出不可再次展开。
-- Inline 的 Plan/Todo/Artifact/SubAgent 详情临时使用 alternate screen，返回后恢复原主视图
-  viewport，不会重复打印详情命令或最后一条回复。
-
-**TUI 操作**：
+**TUI 操作：**
 
 | 操作 | 行为 |
 |------|------|
-| `Ctrl+C` | 工作中中断当前 turn；空闲时按退出流程处理 |
-| `/flash` / `/pro` | 切换模型，不发送给 LLM |
+| `Ctrl+C` | 工作中中断当前 turn；空闲时退出 |
+| `/flash` / `/pro` | 切换模型 |
 | `/compact` | 手动触发上下文压缩 |
-| `/help` / `/skills` | 本地显示帮助或 skill 列表 |
-| `/plan` / `/todos` | 打开当前 Plan 或 Todo 详情 |
+| `/help` / `/skills` | 显示帮助或 skill 列表 |
+| `/plan` / `/todos` | 打开 Plan/Todo 详情 |
 | `/artifact ID` | 打开最多 256 KiB 的 Artifact 预览 |
-| `/sub-agent ID` | 打开指定子代理的 thinking/text 详情 |
-| `/exit` / `/quit` / `/q` | 退出 TUI |
+| `/sub-agent ID` | 打开子代理详情 |
+| `/exit` / `/quit` / `/q` | 退出 |
 | 未知 `/xxx` | 本地提示，不发送给 LLM |
-| 行首空格 + `/xxx` | 作为普通文本发送给 LLM |
-| Full 主视图鼠标滚轮 | 滚动应用内 transcript |
-| Full 主视图点击卡片 | 展开、折叠或打开 Plan/Todo/Artifact/SubAgent 详情 |
-| Inline 主视图鼠标滚轮 | 使用本地 terminal scrollback |
-| 详情页鼠标滚轮 | 滚动结构化详情 |
+| 行首空格 + `/xxx` | 作为普通文本发送 |
 
 ### 标题栏（REPL/CLI 模式）
 
-REPL/CLI 模式下，终端窗口标题显示相同统计信息，通过 ANSI escape `\x1b]0;...\x07` 设置：
-
-```
-flash B:0.73 T:12 R:45 I:200K(50%) O:20K C:400K(40%) ¥0.12
-```
-
-信念度在每次工具调用后实时更新。低于阈值时，系统会在同一次任务循环内的下一轮 LLM 调用前注入提示词或中止任务。
+终端窗口标题显示相同统计：`flash B:0.73 T:12 R:45 I:200K(50%) O:20K C:400K(40%) ¥0.12`
+信念度在每次工具调用后实时更新，低于阈值时在同轮的下次 LLM 调用前注入提示或中止。
 
 ### 非交互 CLI 模式
 
@@ -167,9 +135,7 @@ cat main.rs | ./target/release/mink -m flash "review"
 
 prompt 为空且 stdin 是终端时自动进入交互模式。非终端 stdin 时读取 stdin 作为 prompt。
 
----
-
-## 交互命令（REPL / TUI）
+### 交互命令（REPL / TUI）
 
 | 命令 | 说明 |
 |------|------|
@@ -177,41 +143,42 @@ prompt 为空且 stdin 是终端时自动进入交互模式。非终端 stdin �
 | `/pro` | 切换到 pro 模型 |
 | `/compact` | 强制上下文压缩 |
 | `/skills` | 列出所有可用 skill |
-| `/help` | 显示可用的命令列表 |
+| `/help` | 显示可用命令列表 |
 | `exit` / `quit` | 退出 |
-| Ctrl+C | 取消当前正在执行的 turn |
-| Ctrl+D | 退出 |
+| `Ctrl+C` | 取消当前正在执行的 turn |
+| `Ctrl+D` | 退出 |
 
-`/flash` 和 `/pro` 命令立即生效，不会发送给 LLM。切换后下一轮 LLM 调用使用新模型。TUI 会拦截未知 `/xxx` 命令并提示；如果要把 slash 开头文本发给模型，在行首加一个空格。
+`/flash` 和 `/pro` 立即生效，不会发送给 LLM。
 
 ---
 
-## CLI 参数
+## 配置与参数
+
+### CLI 参数
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `PROMPT` | — | 用户输入（位置参数） |
-| `-m` / `--model` | `flash` | 模型名。`flash` / `pro` 是默认别名，也可以直接指定任意 OpenAI-compatible 模型名 |
-| `--mission PATH` | — | 加载 MISSION.md：覆盖允许的 core section，并追加自定义 section |
-| `--session [NAME]` | 自动生成 | 命名会话。提供名称可恢复 |
+| `-m` / `--model` | `flash` | 模型名。`flash` / `pro` 是默认别名，也可直接指定任意 OpenAI-compatible 模型名 |
+| `--mission PATH` | — | 加载 MISSION.md |
+| `--session [NAME]` | 自动生成 | 命名会话 |
 | `--continue` | — | 恢复最近的 session |
 | `--list-sessions` | — | 列出所有 session |
 | `--list-skills` | — | 列出可用 skill |
 | `-i` / `--interactive` | auto | REPL 交互模式 |
-| `--tui` / `--tui=full` | — | Full TUI：应用内 transcript 和主视图卡片交互 |
-| `--tui=inline` | — | Inline TUI：原生 scrollback 和不可逆自动折叠 |
-| `--print` | — | ndjson 结构化输出，最后输出 `type=final` |
-| `--agent-jsonl` | — | Agent JSONL 协议（stdin 读 versioned request，stdout 输出事件流和最终 `final`；request 可用 `options.stream_events=false` 关闭过程事件，仅保留 `final`） |
+| `--tui` / `--tui=full` | — | Full TUI |
+| `--tui=inline` | — | Inline TUI |
+| `--print` | — | ndjson 结构化输出 |
+| `--agent-jsonl` | — | Agent JSONL 协议（stdin request，stdout 事件流 + final） |
 | `--api-key KEY` | env | 覆盖 API Key |
 | `--base-url URL` | 默认端点 | 覆盖 API 端点 |
-| `--enabled-tools <list>` | 默认集合 | 逗号分隔的精确工具列表；传 `none` 禁用全部 |
-| `--config <toml>` | — | 通过 TOML 字符串设置配置（见下文） |
+| `--enabled-tools <list>` | 默认集合 | 逗号分隔的精确工具列表；`none` 禁用全部 |
+| `--config <toml>` | — | TOML 字符串设置配置 |
 | `-v` / `--verbose` | `false` | 详细日志 |
-| `-h` / `--help` | — | 显示帮助 |
 
 ### `--config` TOML 格式
 
-中低频参数通过 `--config` 传递，支持全部可选字段：
+中低频参数通过 `--config` 传递：
 
 ```toml
 # 标量字段
@@ -234,253 +201,78 @@ output_format = "stream-json"
 enabled_tools = ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]
 approval_mode = "write"
 skills = ["python", "debugging"]
-openai_reasoning_effort = "max"          # 设为 "off" 可不发送 reasoning_effort
-openai_include_usage = true              # stream_options.include_usage
-openai_token_param = "max_tokens"        # max_tokens / max_completion_tokens
+openai_reasoning_effort = "max"          # "off" 表示不发送
+openai_include_usage = true
+openai_token_param = "max_tokens"        # 或 max_completion_tokens
 openai_tool_choice = "auto"              # auto / none / required，或 JSON 对象
 
 [openai_extra_body]
-custom_boolean = true                    # 兼容端点扩展字段
+custom_boolean = true
 custom_budget = 8192
-temperature = 0.2
-
-# 需要嵌套扩展参数时可使用子表：
-# [openai_extra_body.custom_options]
-# enabled = true
 
 [model_aliases]
 flash = "deepseek-v4-flash"
 pro = "deepseek-v4-pro"
 local = "private-model-v1"
 
-# [sandbox_python] 段
 [sandbox_python]
 wasm_path = "/path/to/python.wasm"
 read_dirs = ["./data"]
 ```
 
-等价于旧版独立的 CLI 参数。也支持设置 `model`、`api_key`、`base_url`，但推荐使用独立参数以便 SDK 控制。显式传入的 `--config <toml>` 解析失败会直接退出；用户级/项目级 `.minkrc` 解析失败只输出 warning 并继续。
-`model_aliases` 可覆盖默认别名；没有命中别名的 `model` 会作为真实模型名原样发送。
+`model_aliases` 可覆盖默认别名；未命中别名的 `model` 作为真实模型名原样发送。
+`--agent-jsonl` 模式不会读取 `.minkrc`，但仍应用命令行 `--config`。
 
-`--agent-jsonl` 模式不会读取用户级/项目级 `.minkrc`，以避免 SDK 调用产生额外文件 I/O；但仍会应用同一命令行传入的 `--config <toml>`。Agent JSONL `options` 可直接传入
-`max_context`、`context_compact_pct`、`context_reserve_tokens`、
-`context_compact_tail_tokens`、`context_compact_max_output_tokens` 和
-`context_compact_input_reduction`，Python `SandboxConfig` 暴露同名字段，不需要额外 TOML。
----
-
-## 配置文件
+### 配置文件
 
 `~/.minkrc`（用户级）和 `<project>/.minkrc`（项目级）可选配置。
 优先级：CLI 参数 > 项目配置 > 用户配置 > 环境变量 > 默认值。
 
 ```toml
-# ~/.minkrc 示例
-api_key = "sk-xxx"                        # API 密钥
-base_url = "https://api.deepseek.com/v1"  # API 端点
-model = "flash"                           # 默认模型；可为别名或真实模型名
-max_tokens = 81920                        # 最大输出 token
-max_turns = 40                            # 最大轮次
-max_context = "1M"                        # 最大上下文（支持 K/M 后缀）
-tool_timeout = 600                        # 工具超时（秒）
-sub_agent_timeout = 120                   # 子代理超时（秒）
-llm_first_event_timeout = 60              # 等待首个模型 stream event 的秒数
-llm_idle_timeout = 90                     # 模型 stream 空闲超时（秒）
-llm_wait_heartbeat = 30                   # 等待模型响应的提示间隔（秒，0=关闭）
-context_compact_pct = 94                  # 自动压缩百分比（1-100）
-context_reserve_tokens = 64000            # 主请求响应预留及 max_tokens 上限
-context_compact_tail_tokens = 256000      # 压缩后原样保留的热尾部目标
-context_compact_max_output_tokens = 8192  # 摘要请求输出上限
-context_compact_input_reduction = false   # 摘要前是否过滤 thinking 和工具噪声
-log_events = true                         # 事件日志
-max_search_files = 5000                     # Glob/Grep 最大遍历文件数
-max_search_results = 1000                   # Grep 最大匹配结果行数
-enabled_tools = ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]  # 精确工具选择
-openai_reasoning_effort = "max"           # OpenAI-compatible reasoning_effort；"off" 表示不发送
-openai_include_usage = true               # 是否请求 stream usage
-openai_token_param = "max_tokens"         # max_tokens | max_completion_tokens
-openai_tool_choice = "auto"               # auto | none | required，或 JSON 对象
+# ~/.minkrc
+api_key = "sk-xxx"
+base_url = "https://api.deepseek.com/v1"
+model = "flash"
+max_tokens = 81920
+max_turns = 40
+max_context = "1M"
+tool_timeout = 600
+sub_agent_timeout = 120
+llm_first_event_timeout = 60
+llm_idle_timeout = 90
+llm_wait_heartbeat = 30
+context_compact_pct = 94
+context_reserve_tokens = 64000
+context_compact_tail_tokens = 256000
+context_compact_max_output_tokens = 8192
+context_compact_input_reduction = false
+log_events = true
+max_search_files = 5000
+max_search_results = 1000
+enabled_tools = ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]
+openai_reasoning_effort = "max"
+openai_include_usage = true
+openai_token_param = "max_tokens"
+openai_tool_choice = "auto"
 
 [model_aliases]
 flash = "deepseek-v4-flash"
 pro = "deepseek-v4-pro"
-# local = "private-model-v1"
 
 [tools]
-approval_mode = "yolo"                    # yolo | write | always-ask
+approval_mode = "yolo"               # yolo | write | always-ask
 
 [tools.approval]
-Bash = "prompt"                           # allow | deny | prompt
+Bash = "prompt"                      # allow | deny | prompt
 Read = "allow"
 ```
 
-`openai_extra_body` 会合并到默认 OpenAI-compatible `/chat/completions` 请求体中，用于
-兼容端点的扩展参数，例如采样参数、结构化输出参数、模型特定开关和嵌套选项等。为避免破坏
-agent 协议，`model`、`messages`、`stream`、`tools`、`tool_choice`、`max_tokens` 和
-`max_completion_tokens` 不会被 `openai_extra_body` 覆盖；工具策略请使用
-`openai_tool_choice`。
+`openai_extra_body` 会合并到 `/chat/completions` 请求体中。`model`、`messages`、`stream`、`tools`、`tool_choice`、`max_tokens`、`max_completion_tokens` 不会被 extra body 覆盖。
 
-通用示例：
+**`enabled_tools` 是模型工具 surface 的唯一输入。** 未设置时使用 catalog 默认集合；未知名称、重复名称、缺少硬依赖或 feature 未编译的工具会在创建 session 前报错。`PythonSandbox` 必须显式列出。最终 schemas、按需 tool/workflow prompt、Bash 路由、Signal Recovery 和真实执行门禁同时依据该 surface 收缩，不存在额外 disable flag 或 sandbox 工具策略。
+当前版本尚未实现交互式审批 prompt。默认 `yolo` 允许所有 approval tiers。
 
-```toml
-openai_reasoning_effort = "off"
-openai_tool_choice = "auto"
-
-[openai_extra_body]
-custom_boolean = true
-custom_budget = 8192
-min_p = 0.05
-```
-
-嵌套扩展参数示例：
-
-```toml
-openai_reasoning_effort = "off"
-openai_tool_choice = "auto"
-
-[openai_extra_body]
-custom_budget = 4096
-
-[openai_extra_body.custom_options]
-enabled = true
-```
-
-项目级 `.minkrc` 覆盖用户级，CLI 参数覆盖所有文件设置。
-所有字段可选，未设置的字段使用默认值或环境变量。
-当前版本尚未实现交互式审批 prompt；必然需要 prompt 的工具不会暴露给模型，历史调用仍会在
-执行层 fail closed。默认 `yolo` 允许所有 approval tiers。
-
-`enabled_tools` 是模型工具 surface 的输入。未知名称、重复名称、当前构建未包含的 feature 工具、
-缺少硬依赖（例如显式启用 anchored editing 却没有 snapshot reader），都会在创建 session 前
-报错。未设置时使用 catalog 默认集合；`PythonSandbox` 必须显式列出。最终 schemas、按需
-tool/workflow prompt、Bash 路由、Signal Recovery 和真实执行门禁同时依据该 surface 收缩，
-不存在额外 disable flag 或 sandbox 工具策略。
-
----
-
-## 沙箱配置
-
-沙箱通过 OS 原生工具（Linux nsjail/bubblewrap、macOS sandbox-exec）包裹 mink 进程，
-在文件系统层面强制执行访问控制。
-
-### 配置方式
-
-`.minkrc` 的 `[sandbox]` 段控制沙箱开关和规则：
-
-```toml
-[sandbox]
-enabled = true                          # 是否启用
-backend = "auto"                        # nsjail | bwrap | sandbox-exec | off (macOS 忽略)
-
-# 文件系统白名单（相对路径基于项目根目录）
-read_dirs = ["src", "tests", "docs"]    # 允许读取的目录（macOS 忽略）
-write_dirs = ["src"]                    # 允许写入的目录
-
-allow_network = true
-
-# 资源配额（仅 Linux nsjail cgroup）
-max_memory_mb = 1024
-max_pids = 64
-timeout_secs = 600
-```
-
-### PythonSandbox 沙箱配置
-
-#### python.wasm 文件
-
-`python.wasm` 是 **CPython 编译为 WASI 的二进制**，由 CPython 核心开发者 Brett Cannon 维护的 [cpython-wasi-build](https://github.com/brettcannon/cpython-wasi-build) 项目自动构建发布。
-
-- **版本**: Python 3.13.13（稳定版），3.14.5，3.15.0 beta
-- **大小**: ~29MB（python.wasm）+ ~9MB（标准库 .py 文件）
-- **运行时**: wasmtime
-- **C 扩展**: 仅包含 CPython 内置 C 模块（math/hashlib/binascii 等），不含第三方 C 扩展
-
-下载方式：
-
-```bash
-# 手动下载
-curl -sL "https://github.com/brettcannon/cpython-wasi-build/releases/download/v3.13.13/python-3.13.13-wasi_sdk-24.zip" -o python-wasi.zip
-unzip python-wasi.zip -d cpython-wasi
-```
-
-下载后，项目目录结构应为：
-
-```
-cpython-wasi/
-├── python.wasm          # CPython WASI 二进制（~29MB）
-├── lib/python3.13/      # CPython 标准库
-└── LICENSE
-```
-
-然后在 `.minkrc` 中配置路径：
-
-```toml
-enabled_tools = [
-  "Read", "Write", "Edit", "Bash", "Glob", "Grep", "TodoRead", "TodoWrite",
-  "TodoAdvance",
-  "PlanDraft", "PlanConfirm", "PlanClear", "Python", "SubAgent",
-  "PythonSandbox",
-]
-
-[sandbox_python]
-wasm_path = "cpython-wasi/python.wasm"   # python.wasm 路径
-stdlib_dir = "cpython-wasi"              # 标准库目录
-```
-
-`enabled_tools` 是精确工具列表；`PythonSandbox` 默认不进入工具 surface，必须在该列表中显式
-列出。`[sandbox_python]` 只配置运行参数，不负责启用工具。
-
-#### 路径与权限配置
-
-`[sandbox_python]` 段还支持以下配置项：
-
-```toml
-[sandbox_python]
-wasm_path = "cpython-wasi/python.wasm"
-stdlib_dir = "cpython-wasi"
-timeout = 30                             # 超时秒数
-read_dirs = ["./data"]                   # 允许读取的目录
-write_dirs = ["./output"]               # 允许写入的目录
-package_dirs = ["./packages"]            # Python 包目录（挂载到 /packages）
-```
-
-路径解析通过沙箱自动注入的 `os.chdir` 实现，三种路径写法均支持：
-- `open("./output/f.txt", "w")` — 相对路径
-- `open("output/f.txt", "w")` — 无前缀相对路径
-- `open("/absolute/path/to/output/f.txt", "w")` — 绝对路径
-
-权限规则：
-- 仅在 `read_dirs` / `write_dirs` 中声明的目录可访问
-- `write_dirs` 优先于 CWD 只读（显式声明的写入权限覆盖 CWD 默认只读）
-- 路径穿越（`../`）无法逃逸 preopen 范围
-
-### 平台差异
-
-| 功能 | Linux (nsjail/bwrap) | macOS (sandbox-exec) |
-|------|---------------------|---------------------|
-| **写入限制** `write_dirs` | ✅ 内核强制 | ✅ 内核强制 |
-| **读取限制** `read_dirs` | ✅ 内核强制 | ❌ 不生效（sandbox 无法阻断 TUI 初始化的系统路径） |
-| **网络隔离** `allow_network` | ✅ namespace | ❌ 不生效 |
-| **资源限制** `max_memory_mb` | ✅ cgroup | ❌ 不生效 |
-| **后台自动启用** | ✅ | ✅（写入限制） |
-
-### 启动机制
-
-mink 启动时检测 `[sandbox] enabled = true`，自动通过 `exec()` 将自身重新装入沙箱：
-
-```
-mink --tui
-  → 读取 .minkrc
-  → exec("nsjail --bindmount_ro src mink --tui")        // Linux
-  → exec("sandbox-exec -p '<profile>' mink --tui")        // macOS (写入限制)
-  → 设置 MINK_SANDBOXED=1 防无限递归
-  → 原进程被替换，进程完全在沙箱中运行
-```
-
-启用沙箱后，如果指定或自动选择的沙箱后端不可用，mink 会打印 fatal 错误并退出，而不是静默降级到非沙箱运行。未启用 `[sandbox] enabled = true` 时不会触发 re-exec。
-
----
-
-## 环境变量
+### 环境变量
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
@@ -490,20 +282,98 @@ mink --tui
 | `FILE_WRITE_MAX_BYTES` | `1048576` | Write/Edit 工具写入上限 |
 | `MAX_SEARCH_FILES` | `5000` | Glob/Grep 最大遍历文件数 |
 | `MAX_SEARCH_RESULTS` | `1000` | Grep 最大匹配结果行数 |
-| `LOG_EVENTS` | `true` | 设为 `0`/`false`/`no` 关闭 events.jsonl 记录 |
-| `MINK_SIGNAL_MODE` | `full` | 信号系统模式：`full` 启用信念跟踪、注入和恢复守卫；`off` 关闭信号提示词和运行时信号干预 |
+| `LOG_EVENTS` | `true` | 设为 `0`/`false` 关闭 events.jsonl |
+| `MINK_SIGNAL_MODE` | `full` | 信号模式：`full` 启用信念跟踪和注入；`off` 关闭 |
 | `MINK_HOME` | `$HOME` | session 存储目录覆盖 |
-| `MINK_LIMITS` | — | JSON 格式 sandbox 限制配置，启用时覆盖 `[sandbox]` |
+| `MINK_LIMITS` | — | JSON sandbox 限制配置 |
+
+搜索上限多层保护：`MAX_SEARCH_FILES`（文件遍历）、`MAX_SEARCH_RESULTS`（匹配行数）、
+工具自身 100KB 输出保护、`TOOL_RESULT_MAX_BYTES` 最终截断。
+`scanned first N files` = 文件数上限触发，`truncated at N results` = 匹配数上限触发，
+`output > 100000 bytes` 或 artifact 提示 = 字节数保护触发。
+
+`MINK_SIGNAL_MODE=full` 时，低 belief 注入会要求 Recovery 首步先检查状态。Recovery 首步资格是独立的参数级能力判断，不等同于普通 Bash 安全策略。
 
 ---
 
-搜索相关上限分为多层：`MAX_SEARCH_FILES` 控制 Glob/Grep 最多遍历的文件数，`MAX_SEARCH_RESULTS` 控制 Grep 最多返回的匹配行数；搜索工具自身还有 100KB 输出保护，最终工具结果还会受 `TOOL_RESULT_MAX_BYTES` 保护。看到 `scanned first N files` 表示文件遍历上限触发，看到 `truncated at N results` 表示匹配结果数上限触发，看到 `output > 100000 bytes` 或 artifact 提示则表示输出字节数保护触发。
+## 沙箱与安全
 
-### SIGNAL_RECOVERY 与 Bash
+### 进程级沙箱
 
-`MINK_SIGNAL_MODE=full` 时，低 belief 注入会要求下一次工具调用先检查当前状态。这个
-Recovery 首步资格是独立的参数级能力判断，不等同于普通 Bash 安全策略：一个命令可以在正常
-流程中合法执行，但不适合作为 Recovery 的首个检查动作。
+通过 OS 原生工具（Linux nsjail/bubblewrap、macOS sandbox-exec）包裹 mink 进程。
+
+`.minkrc` 的 `[sandbox]` 段：
+
+```toml
+[sandbox]
+enabled = true
+backend = "auto"                 # nsjail | bwrap | sandbox-exec | off
+read_dirs = ["src", "tests"]
+write_dirs = ["src"]
+allow_network = true
+
+# 仅 Linux nsjail cgroup：
+max_memory_mb = 1024
+max_pids = 64
+timeout_secs = 600
+```
+
+### 平台差异
+
+| 功能 | Linux (nsjail/bwrap) | macOS (sandbox-exec) |
+|------|---------------------|---------------------|
+| 写入限制 | ✅ 内核强制 | ✅ 内核强制 |
+| 读取限制 | ✅ 内核强制 | ❌ 不生效 |
+| 网络隔离 | ✅ namespace | ❌ 不生效 |
+| 资源限制 | ✅ cgroup | ❌ 不生效 |
+| 后台自动启用 | ✅ | ✅（写入限制） |
+
+### 启动机制
+
+mink 检测 `[sandbox] enabled = true` 后自动通过 `exec()` 装入沙箱，设置 `MINK_SANDBOXED=1` 防无限递归。
+不可用的后端会 fatal 退出，不会静默降级。
+
+### PythonSandbox（CPython WASI 沙箱）
+
+在 wasmtime + CPython WASI 中执行 Python，WASI 级进程隔离，无网络、无子进程、无 C 扩展。
+
+**准备工作：** 下载 [cpython-wasi-build](https://github.com/brettcannon/cpython-wasi-build) 发布的 Python 3.13+ WASI 包：
+
+```bash
+curl -sL "https://github.com/brettcannon/cpython-wasi-build/releases/download/v3.13.13/python-3.13.13-wasi_sdk-24.zip" -o python-wasi.zip
+unzip python-wasi.zip -d cpython-wasi
+```
+
+项目结构：
+```
+cpython-wasi/
+├── python.wasm          # ~29MB
+├── lib/python3.13/
+└── LICENSE
+```
+
+配置：
+
+```toml
+enabled_tools = ["Read", "Write", "Bash", "PythonSandbox", ...]
+
+[sandbox_python]
+wasm_path = "cpython-wasi/python.wasm"
+stdlib_dir = "cpython-wasi"
+timeout = 30
+read_dirs = ["./data"]
+write_dirs = ["./output"]
+package_dirs = ["./packages"]
+```
+
+`enabled_tools` 是精确列表；`PythonSandbox` 必须显式列出。
+
+路径权限规则：
+- 仅在 `read_dirs` / `write_dirs` 中声明的目录可访问
+- `write_dirs` 优先于 CWD 只读
+- 路径穿越（`../`）无法逃逸 preopen 范围
+
+---
 
 ## Token 用量与费用
 
@@ -511,120 +381,119 @@ Recovery 首步资格是独立的参数级能力判断，不等同于普通 Bash
 
 ### 字段说明
 
-| Rust `TurnOutcome` 字段 | Python `result` 字段 | 类型 | 说明 |
-|------------------------|---------------------|------|------|
-| `billing_turn_id` | `billing_turn_id` | `String` | 本轮稳定标识。Agent、自动压缩和子代理共用同一个 `billing_turn_id` |
-| `usage_records` | `usage_records` | `Vec<UsageRecord>` | 本轮每笔 LLM 请求的明细（最多一条记录 per 请求） |
-| `usage` | `usage` | `UsageSummary` | 纯函数汇总：请求数、attempt 数、Token 总计、纳元费用 |
-| `session.usage_path` | `usage_path` | `PathBuf` | session `usage.jsonl` 路径，可自行读取完整历史 |
+| Rust 字段 | Python 字段 | 说明 |
+|-----------|------------|------|
+| `billing_turn_id` | `billing_turn_id` | 本轮稳定标识；Agent、压缩、子代理共用 |
+| `usage_records` | `usage_records` | 每笔 LLM 请求明细 |
+| `usage` | `usage` | `UsageSummary` 汇总：请求数、attempt 数、Token、纳元费用 |
+| `session.usage_path` | `usage_path` | `usage.jsonl` 路径 |
 
-### `UsageSummary` 字段
+### UsageSummary
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `request_count` | `u64` | 本轮逻辑 LLM 请求数 |
-| `reported_request_count` | `u64` | provider 返回了 `usage` 的请求数 |
-| `unreported_request_count` | `u64` | provider 未返回 `usage` 的请求数（失败、超时等） |
-| `attempt_count` | `u64` | HTTP 重试合计次数 |
-| `tokens` | [TokenUsage](#tokenusage) | 各项 Token 总数 |
-| `cost_nano_cny` | `u64` | 预估人民币费用（纳元），`1 元 = 10⁹ 纳元` |
+| 字段 | 说明 |
+|------|------|
+| `request_count` | 本轮逻辑请求数 |
+| `reported_request_count` | 返回 usage 的请求数 |
+| `unreported_request_count` | 未返回 usage 的请求数 |
+| `attempt_count` | HTTP 重试合计 |
+| `tokens` | [TokenUsage](#tokenusage) |
+| `cost_nano_cny` | 预估费用（纳元，`1 元 = 10⁹ 纳元`） |
 
-### `TokenUsage`
+### TokenUsage
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `input_tokens` | `u64` | 输入 Token（已减去缓存命中部分） |
-| `cache_read_tokens` | `u64` | 缓存命中 Token（按折扣价计费） |
-| `cache_creation_tokens` | `u64` | 新增缓存写入 Token（按全价计费，多数 provider 不报告此值） |
-| `output_tokens` | `u64` | 输出 Token |
+| 字段 | 说明 |
+|------|------|
+| `input_tokens` | 输入 Token（已减缓存命中） |
+| `cache_read_tokens` | 缓存命中 Token（按折扣价） |
+| `cache_creation_tokens` | 新增缓存写入 Token（按全价） |
+| `output_tokens` | 输出 Token |
 
 ### 采集路径
 
 ```text
-Turn / Compaction / SubAgent 都通过同一 AsyncLlClient 入口
-→ MeteredStream 包装 SSE 流
-→ Event::Usage → UsageCapture::reported() → usage.jsonl 追加
-→ 或 stream_error / 无 usage → UsageCapture::unreported() → usage.jsonl 追加
-→ OrchActor::finish_usage() 按 billing_turn_id 收集 → TurnOutcome
+Turn / Compaction / SubAgent → MeteredStream → usage.jsonl
+→ OrchActor::finish_usage() → TurnOutcome
 ```
 
-三类请求共享 billing_turn_id：Agent 工具循环中的多次 LLM 调用、turn 内的自动压缩、子代理的 LLM 请求都汇聚到同一 `billing_turn_id` 下。手动压缩（无活跃 turn）使用独立的 `operation-*` 标识。
+Agent 工具循环、自动压缩、子代理共享同一 `billing_turn_id`。手动压缩使用 `operation-*`。
 
 ### 定价模型
 
-当前使用 DeepSeek API 官方单价（纳元整数运算，无浮点累积误差）：
+DeepSeek API 官方单价（纳元整数运算）：
 
 | 模型 | 输入（纳元/token） | 输出（纳元/token） | 缓存读取（纳元/token） |
 |------|-------------------|-------------------|----------------------|
 | Flash | 1,000 | 2,000 | 20 |
 | Pro | 3,000 | 6,000 | 25 |
 
-价格来源：`ModelTier::price_input_per_m() / price_output_per_m() / price_cache_read_per_m()`。
-费用计算公式（`price_usage()`）：
+计算公式：`input × input_nano + cache_creation × input_nano + cache_read × cache_read_nano + output × output_nano`
 
-```
-cost = input_tokens × input_nano
-     + cache_creation_tokens × input_nano
-     + cache_read_tokens × cache_read_nano
-     + output_tokens × output_nano
-```
+未报告 usage 的请求 `cost_nano_cny` 为 `None`。未知模型只记录 Token，费用按 0 统计。
 
-未报告 `usage` 的请求 `cost_nano_cny` 为 `None`，不会用零值伪装。
-未知模型或自定义模型即使命中了 `usage`，也只记录 Token，`cost_nano_cny` 按 0 统计；
-业务侧如需私有模型计价，应读取 `usage_records` 后按自己的价格表计算。
-
-### usage.jsonl 记录格式
+### usage.jsonl 格式
 
 ```json
 {"version":2,"billing_turn_id":"turn-...","request_id":"request-...",
- "kind":"agent","origin_session_id":"session-...","model":"deepseek-v4-flash",
- "attempt_count":1,"status":"reported",
- "tokens":{"input_tokens":100,"cache_read_tokens":40,"cache_creation_tokens":0,"output_tokens":20},
- "cost_nano_cny":140800,"reason":null,
- "completed_at":"2026-06-18T00:00:00Z"}
+ "kind":"agent","model":"deepseek-v4-flash","attempt_count":1,"status":"reported",
+ "tokens":{"input_tokens":100,"cache_read_tokens":40,...},
+ "cost_nano_cny":140800,"completed_at":"2026-06-18T00:00:00Z"}
 ```
-
-未报告 `usage` 的记录 `tokens` 和 `cost_nano_cny` 为 `null`，`reason` 描述原因。一个逻辑请求最多写入一条终态记录。
 
 ### Rust 库中访问
 
 ```rust
 use mink::prelude::{AgentOptions, AgentRuntime, UsageSummary};
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let rt = AgentRuntime::start_with_options(
-        AgentOptions::new("/tmp/mink-session", ".")
-            .with_api_key(std::env::var("DEEPSEEK_API_KEY")?)
-            .with_model("flash"),
-    ).await?;
+let outcome = AgentRuntime::start_with_options(
+    AgentOptions::new("/tmp/mink-session", ".")
+        .with_api_key(std::env::var("DEEPSEEK_API_KEY")?)
+        .with_model("flash"),
+).await?.run_turn("解释这段代码").await?;
 
-    let outcome = rt.run_turn("解释这段代码").await?;
-
-    println!("billing_turn_id: {}", outcome.billing_turn_id);
-    println!("input tokens: {}", outcome.usage.tokens.input_tokens);
-    println!("cache read tokens: {}", outcome.usage.tokens.cache_read_tokens);
-    println!("output tokens: {}", outcome.usage.tokens.output_tokens);
-    println!("cost: {} 纳元 ≈ {:.4} 元", outcome.usage.cost_nano_cny,
-             outcome.usage.cost_nano_cny as f64 / 1_000_000_000.0);
-    println!("usage file: {}", outcome.session.usage_path.display());
-
-    for record in &outcome.usage_records {
-        println!("  request {}: kind={:?}, status={:?}, attempts={}",
-                 record.request_id, record.kind, record.status, record.attempt_count);
-    }
-
-    // session 中全部历史记录可通过读取 usage_path 文件获取：
-    // let data = std::fs::read_to_string(&outcome.session.usage_path)?;
-
-    rt.shutdown().await?;
-    Ok(())
+println!("input: {}, cost: {} 纳元",
+    outcome.usage.tokens.input_tokens, outcome.usage.cost_nano_cny);
+for record in &outcome.usage_records {
+    println!("  {}: kind={:?}, status={:?}", record.request_id, record.kind, record.status);
 }
 ```
 
+### Python SDK 中访问
+
+```python
+from mink_agent import AgentSession, SandboxConfig
+
+session = AgentSession(SandboxConfig(api_key="sk-...", read_dirs=["."]))
+result = session.run("解释这段代码")
+print(f"cost: {result['usage']['cost_nano_cny']} nano-cny")
+for record in result['usage_records']:
+    print(f"  {record['request_id']}: kind={record['kind']}")
+session.close()
+```
+
+### CLI 中查看
+
+```bash
+mink -m flash --print "hello" | jq 'select(.type=="final") | {billing_turn_id, usage}'
+cat ~/.mink/projects/<project_key>/<session_id>/usage.jsonl | jq -c
+```
+
+---
+
+## Rust 库嵌入
+
+Rust 发布包为 `mink-core`，库 crate 名为 `mink`。发布包只包含可嵌入 runtime 和 `Display` 协议层；
+终端 REPL/TUI 和二进制入口在 `mink-cli` workspace 包。
+
+```toml
+[dependencies]
+mink = { package = "mink-core", version = "0.2.0", default-features = false, features = ["runtime"] }
+```
+
+稳定入口：`mink::prelude`、`mink::runtime`、`mink::config`、`mink::sandbox`、`mink::sdk_protocol`。
+
 ### Rust 嵌入式只读 VFS
 
-私有化服务可保持 `Read`、`Glob`、`Grep` 工具协议不变，把普通路径的读取和检索切换到数据库：
+私有化服务可替换 `Read`、`Glob`、`Grep` 的后端为数据库：
 
 ```rust
 use std::sync::Arc;
@@ -638,51 +507,32 @@ let runtime = AgentRuntime::start_with_options(
 ).await?;
 ```
 
-后端实现同步的 `mink::runtime::ReadOnlyFileSystem`。每个 `read` / `glob` / `grep`
-调用都会收到 `VfsScope`：
+实现同步的 `ReadOnlyFileSystem` trait。每个操作收到 `VfsScope`：
+- `resource_session_id`：知识库数据分区
+- `agent_session_id`：调用方 session id
 
-- `resource_session_id`：知识库数据分区；未配置时默认使用 runtime session id。
-- `agent_session_id`：实际发起调用的主代理或子代理 session id。
-
-子代理继承父代理的 `resource_session_id`，但使用自己的 `agent_session_id`。虚拟 Read 是只读的，不产生 anchored Edit snapshot；`Write` 和 `Edit` 仍只操作本地文件。`artifact://`、`skill://`、`rule://` 和 `session://` 继续走内置资源实现，不进入 VFS。
-
-完整 redb 示例见
-[`crates/mink-core/examples/redb_vfs.rs`](../crates/mink-core/examples/redb_vfs.rs)。
-redb 只是示例依赖，业务可替换为其他同步嵌入式数据库。
+子代理继承 `resource_session_id`。虚拟 Read 不产生 snapshot。`Write`/`Edit` 仍操作本地文件。
+`artifact://`、`skill://`、`rule://`、`session://` 不进入 VFS。
 
 ### Rust 嵌入式自定义 LLM backend
 
-默认 LLM backend 是 OpenAI-compatible streaming client，可通过 `openai_extra_body` 和
-`openai_tool_choice` 适配大多数 Chat Completions 兼容端点。Rust 嵌入时也可以由业务服务注入
-自己的后端，支持私有化部署、内网网关、自定义鉴权、非 HTTP transport 或模型厂商 SDK：
+默认 OpenAI-compatible backend 支持 `openai_extra_body` 和 `openai_tool_choice` 适配大多数兼容端点：
 
 ```rust
-use std::collections::BTreeMap;
-use mink::prelude::{AgentOptions, AgentRuntime, TokenParamKind};
-use serde_json::json;
-
 let runtime = AgentRuntime::start_with_options(
     AgentOptions::new("/tmp/mink-session", ".")
         .with_model("local")
         .with_openai_reasoning_effort("high")
-        .with_openai_include_usage(false)
-        .with_openai_token_param(TokenParamKind::MaxCompletionTokens)
         .with_openai_tool_choice("auto")
         .with_openai_extra_body(BTreeMap::from([
-            ("custom_boolean".to_string(), json!(true)),
             ("custom_budget".to_string(), json!(8192)),
         ])),
 ).await?;
 ```
 
-如果兼容端点不接受 `reasoning_effort`，可使用
-`without_openai_reasoning_effort()` 禁止发送该字段。非 OpenAI-compatible 协议再使用自定义
-LLM backend：
+非兼容协议可使用自定义 backend：
 
 ```rust
-use std::sync::Arc;
-use mink::prelude::{AgentOptions, AgentRuntime};
-
 let runtime = AgentRuntime::start_with_options(
     AgentOptions::new("/tmp/mink-session", ".")
         .with_model("local")
@@ -690,106 +540,50 @@ let runtime = AgentRuntime::start_with_options(
 ).await?;
 ```
 
-后端实现 `mink::runtime::LlmBackend`，从 `LlmRequest` 读取系统提示词、消息、工具 schema、
-取消 token、真实模型名和别名，然后返回 `LlmEvent` 流。`LlmRequest.model` 是解析后的真实模型名；
-`LlmRequest.model_alias` 保留用户请求的别名。失败时建议返回
-`LlmRequestFailure { attempt_count, error }.into()`，这样 usage 日志能记录失败请求的 attempt 数。
+实现 `mink::runtime::LlmBackend`，从 `LlmRequest` 读取 system prompt、messages、tools、取消 token 和模型名。
+`LlmRequest.model` 是解析后的真实模型名；`LlmRequest.model_alias` 保留用户请求的别名。
+失败时返回 `LlmRequestFailure { attempt_count, error }`。
 
-完整示例见
-[`crates/mink-core/examples/custom_llm_backend.rs`](../crates/mink-core/examples/custom_llm_backend.rs)：
-
+完整示例：
 ```bash
 cargo run -p mink-core --example custom_llm_backend
 ```
 
-### Python SDK 中访问
-
-```python
-from mink_agent import AgentSession, SandboxConfig
-
-session = AgentSession(SandboxConfig(api_key="sk-...", read_dirs=["."]))
-result = session.run("解释这段代码")
-
-print(f"billing_turn_id: {result['billing_turn_id']}")
-print(f"usage tokens: {result['usage']['tokens']}")
-print(f"cost: {result['usage']['cost_nano_cny']} nano-cny")
-
-for record in result['usage_records']:
-    print(f"  {record['request_id']}: kind={record['kind']}, status={record['status']}")
-
-session.close()
-```
-
-### CLI 中查看
-
-```bash
-# stream-json 模式的 final 事件携带用量
-mink -m flash --print "hello" | jq 'select(.type=="final") | {billing_turn_id, usage}'
-
-# 直接读取 usage.jsonl
-cat ~/.mink/projects/<project_key>/<session_id>/usage.jsonl | jq -c
-
-# 筛选特定 billing_turn_id 的记录
-cat usage.jsonl | jq 'select(.billing_turn_id == "turn-...")'
-```
-
-## Rust 库嵌入
-
-
-Rust 发布包名为 `mink-core`，库 crate 名为 `mink`。`mink-core` 发布包只包含可嵌入 runtime
-和 `Display` 协议层；终端 REPL/TUI 实现、`mink` / `mink-core` 二进制入口都在 `mink-cli`
-workspace 包中。服务端嵌入时推荐只启用 runtime：
-
-```toml
-[dependencies]
-mink = { package = "mink-core", version = "0.1.15", default-features = false, features = ["runtime"] }
-```
-
-稳定入口优先使用 `mink::prelude`、`mink::runtime`、`mink::config`、`mink::sandbox` 和
-`mink::sdk_protocol`。完整终端二进制使用 `mink-cli` 默认 feature 构建；SDK 精简二进制使用
-`cargo build -p mink-cli --no-default-features --features sdk-bin --bin mink-core` 构建。
+---
 
 ## 会话管理
 
 ### Session layout
 
-`MINK_HOME` 是 session 持久化的 home 根目录，默认是 `$HOME`。不同入口使用不同 layout 推导最终
-session 目录：
+`MINK_HOME`（默认 `$HOME`）是 session 持久化根目录。不同入口使用不同 layout：
 
-| Layout | `home` 含义 | 最终 session 目录 | 默认入口 |
-|--------|-------------|-------------------|----------|
-| `project` | 用户/服务根目录 | `home/.mink/projects/<project_key(cwd)>/<session_id>/` | CLI、裸 `mink-core --agent-jsonl` |
-| `home` | 用户/服务根目录 | `home/.mink/sessions/<session_id>/` | Python SDK |
-| `direct` | mink session 集合根目录 | `home/<session_id>/` | 显式配置 |
-| `isolated` | 当前 session 根目录 | `home/` | Rust `AgentOptions` |
+| Layout | 最终 session 目录 | 默认入口 |
+|--------|-------------------|----------|
+| `project` | `HOME/.mink/projects/<project_key>/<session_id>/` | CLI、裸 `mink-core` |
+| `home` | `HOME/.mink/sessions/<session_id>/` | Python SDK |
+| `direct` | `HOME/<session_id>/` | 显式配置 |
+| `isolated` | `HOME/` | Rust `AgentOptions` |
 
-选择建议：
-
-- 终端用户和 CLI 自动使用 `project`，同一个 `MINK_HOME` 下按项目隔离。
-- Python SDK 默认 `home`，适合一个 SDK home 管理多个独立 session。
-- Rust API 服务如果已经为每个任务创建了独立目录，例如 `default/<task_id>/.mink_home/`，用 `isolated`。
-- 如果服务有一个共享 mink 根目录，例如 `/var/lib/my-service/mink/`，并希望 mink 自己按 session 分目录，用 `direct`。
+选择建议：终端用户用 `project`（按项目隔离）；Python SDK 用 `home`；Rust API 按任务建独立目录用 `isolated`；共享 mink 根目录用 `direct`。
 
 ### 目录结构
 
-CLI 的历史目录结构是 `project` layout：
-
 ```
 ~/.mink/
-├── history                    ← 交互式 REPL 历史
+├── history
 └── projects/<project_key>/
     └── <session_id>/
-        ├── conversation.jsonl ← 对话消息（JSONL 逐行追加）
+        ├── conversation.jsonl ← 对话消息（JSONL 追加）
         ├── events.jsonl       ← 事件日志
-        ├── session.json       ← session 元数据：alias、title、created_at、updated_at
-        ├── summary.txt        ← 压缩后的上下文快照
-        ├── stats.json         ← Token 用量统计
-        ├── context-state.json ← 首次提交压缩状态后生成
-        ├── plan.md            ← 确认计划存在时生成
-        ├── plan.draft         ← 未确认草稿存在时生成
-        ├── todos.json         ← 首次成功 Todo 变更后生成
-        ├── usage.jsonl        ← 首次记录 LLM 请求后生成
-        └── artifacts/         ← 超长工具输出
+        ├── session.json       ← 元数据：alias、title、时间戳
+        ├── summary.txt        ← 压缩上下文快照
+        ├── stats.json         ← Token 统计
+        ├── context-state.json ← 首次压缩后生成
+        ├── plan.md            ← 确认计划
+        ├── plan.draft         ← 未确认草稿
+        ├── todos.json         ← 首次 Todo 变更后生成
+        ├── usage.jsonl        ← 首次 LLM 请求后生成
+        └── artifacts/
             ├── index.jsonl
             └── <tool>-0001.txt
 ```
@@ -797,80 +591,33 @@ CLI 的历史目录结构是 `project` layout：
 ### 操作
 
 ```bash
-# 命名会话
-mink -m flash --session my-fix "fix the bug"
-
-# 恢复命名会话（保持上下文）
-mink -m flash --session my-fix -i
-
-# 恢复最近会话
-mink -m flash --continue -i
-
-# 列出所有
-mink --list-sessions
+mink -m flash --session my-fix "fix the bug"   # 命名会话
+mink -m flash --session my-fix -i               # 恢复命名会话
+mink -m flash --continue -i                     # 恢复最近会话
+mink --list-sessions                            # 列出所有 session
 ```
 
-`session_id` 是稳定内部 ID，默认使用时间戳和随机后缀。除 `isolated` 外，它通常也是最终目录名；
-`isolated` 中 `home` 自身就是 session 目录，`session_id` 仍写入 `session.json` 并出现在事件/SDK final 中。
-`--session my-fix` 会先按 alias、完整 id、id 前缀和 title 匹配已有 session；匹配不到时创建新的时间戳 session，并把 `my-fix` 写入 `session.json` 的 alias。带空格或特殊字符的名称会规范化为安全 alias，例如 `feature x` 会保存并解析为 `feature-x`。如果某个 `session.json` 损坏，列表和解析会回退到目录名与 `summary.txt`，不会阻断其他 session。`--list-sessions` 优先展示 alias/title，同时保留内部 id。
-
-`--continue` 自动选择最近修改的 session。恢复时会 replay 最近 10 轮 LLM 响应事件，在交互式终端重新渲染历史对话。
+`--session my-fix` 按 alias、完整 id、id 前缀和 title 匹配已有 session；匹配不到时创建新 session 并写入 alias。
+`--continue` 选择最近修改的 session，恢复时 replay 最近 10 轮 LLM 响应。
 
 ---
 
 ## 计划系统（Plan）
 
-计划系统通过三个内置工具管理；只有三者都进入 resolved tool surface 时才加载计划工作流。
+三个内置工具管理计划生命周期；三者都进入 resolved tool surface 时才加载计划工作流。
 
 ### 生命周期
 
 ```
-┌─ LLM 提议制定计划
-│  → LLM 使用 PlanDraft 保存完整草稿
-│  → 用户反馈会先同步到草稿，再次请求确认
-│  → 用户取消时调用 PlanDraft(content="")
-├─ 用户确认计划
-│  → LLM 调用 PlanConfirm 工具
-│    → plan.draft → plan.md（锁定）
-│    → 向 TurnCompactor 提交上下文压缩请求
-│    → 下一次 LLM 请求动态注入 <current-plan>
-├─ 执行阶段
-│  → TodoRead 读取权威 revision 和稳定 ID
-│  → TodoWrite 原子新增 pending 条目、删除条目或替换正文
-│  → TodoAdvance 原子转换 active batch 的进度
-│  → 成功变更在 conversation 尾部追加增量事件和当前紧凑投影
-└─ 计划完成
-   → LLM 调用 PlanClear 工具
-     → plan.md 删除
-     → 向 TurnCompactor 提交上下文压缩请求
-     → 下一次 LLM 请求不再注入 <current-plan>
+LLM 提议 → PlanDraft(草稿) → 用户确认 → PlanConfirm → <current-plan> 动态注入
+  → TodoRead/TodoWrite/TodoAdvance 执行 → PlanClear → 移除动态计划
 ```
 
-### PlanDraft
+- `PlanDraft(content)`：保存或取消草稿（空 content = 取消）。已确认计划存在时拒绝创建。
+- `PlanConfirm()`：原子 rename `plan.draft → plan.md` + 请求压缩。下一轮 LLM 请求注入 `<current-plan>`。
+- `PlanClear()`：删除 `plan.md` + 清理残留 `plan.draft` + 请求压缩。下一轮移除动态计划。
 
-**触发条件**：创建、修订或取消尚未确认的计划。
-
-- 参数：`content`，完整 Markdown 草稿；空字符串表示取消
-- 行为：通过 `PlanStore` 同目录原子替换 `plan.draft`
-- 已确认计划存在时拒绝创建或替换草稿
-- 返回：`"Plan draft saved."`；I/O 或大小校验失败时返回明确错误
-
-### PlanConfirm
-
-**触发条件**：用户明确确认 plan 后。**非**规划阶段或用户要求修改时。
-
-- 参数：无
-- 行为：原子 rename `plan.draft → plan.md` + 请求压缩；压缩服从同轮一次守卫，失败会返回当前 turn；下一次 LLM 请求动态注入计划
-- 返回："Plan confirmed and locked in."
-- 如果 plan.draft 为空（用户未创建草稿就要求确认），返回错误信息
-
-### PlanClear
-
-**触发条件**：计划所有任务完成后。
-
-- 参数：无
-- 行为：删除 `plan.md` 并清理可能遗留的 `plan.draft`，随后请求压缩；压缩服从同轮一次守卫，失败会返回当前 turn；下一次 LLM 请求移除动态计划
-- 返回："Plan cleared."
+PlanConfirm/PlanClear 的压缩请求服从 TurnCompactor 同轮一次守卫，失败会返回当前 turn。
 
 ---
 
@@ -878,68 +625,55 @@ mink --list-sessions
 
 ### 显式策略
 
-mink 的压缩行为由显式配置直接控制，不根据窗口大小推断压缩档位。所有压缩统一使用 LLM 滚动摘要：
+所有参数显式配置，不根据窗口大小推断档位。统一使用 LLM 滚动摘要：
 
 | 参数 | 默认值 | 作用 |
 |------|-------:|------|
-| `context_compact_pct` | 94 | 自动压缩百分比，范围 1-100 |
-| `context_reserve_tokens` | 64000 | 主请求响应预留，同时限制主请求 `max_tokens` |
-| `context_compact_tail_tokens` | 256000 | 压缩后原样保留的热尾部目标 |
-| `context_compact_max_output_tokens` | 8192 | 摘要请求独立输出上限 |
-| `context_compact_input_reduction` | false | 是否精简发送给摘要模型的历史 |
+| `context_compact_pct` | 94 | 自动压缩百分比（1-100） |
+| `context_reserve_tokens` | 64000 | 主请求响应预留，同时限制 max_tokens |
+| `context_compact_tail_tokens` | 256000 | 压缩后保留的热尾部目标 |
+| `context_compact_max_output_tokens` | 8192 | 摘要输出上限 |
+| `context_compact_input_reduction` | false | 压缩 think 和工具噪声 |
 
-实际触发点取百分比阈值和 `max_context - context_reserve_tokens` 中较早者。
-`max_context_tokens=0` 禁用 auto/preflight 压缩和本地请求输入预算上限，但不禁用 `/compact`。
+触发点取百分比阈值和 `max_context - context_reserve_tokens` 中较早者。
+`max_context_tokens=0` 禁用 auto/preflight 压缩，保留 `/compact`。
 
-压缩触发后：
-1. 从当前活跃窗口选择不破坏 tool call/result 配对的边界
-2. 可选地删除 thinking，并压缩工具参数和结果，形成紧凑摘要输入
-3. 使用最小摘要 system prompt，将新历史与旧摘要交给当前 LLM 合并
-4. 通过临时文件 + rename 原子提交投影边界和摘要到 `context-state.json`
-5. 裁剪运行时消息缓存到新的活跃边界；模型只接收动态摘要和热尾部
-6. `conversation.jsonl` 保持完整且只追加，冷历史仍可恢复、重放和搜索
+### 流程
 
-`summary.txt` 是供 session 列表和人工检查使用的摘要缓存，不是上下文投影的事实源。
+1. 从活跃窗口选择不破坏 tool call/result 配对的边界
+2. 可选降噪：删除 thinking，压缩工具参数和结果
+3. 使用最小摘要 prompt，LLM 合并新旧历史
+4. 原子提交 `context-state.json`（临时文件 + rename）
+5. 裁剪运行时缓存到新活跃边界
+6. `conversation.jsonl` 保持完整且只追加
 
 ### 防护
 
-- **同轮只压缩一次**：同一用户输入内多次 LLM 调用不重复压缩
-- **最小收益检查**：节省不足 10% token 时跳过
-- **preflight 预判**：发送前按实际 OpenAI request 形态估算 messages、system prompt 和 tools；超过输入预算时先压缩，仍超预算则拒绝请求
-- **摘要预算**：摘要请求使用独立输出上限，并在发送前校验最小 system prompt、摘要输入和输出预算能否装入窗口
-- **配置组合校验**：runtime 创建 session 前校验 reserve 小于上下文窗口、摘要输出小于窗口、热尾部小于主请求输入预算；无效组合直接返回包含参数关系的错误
-- **降噪边界**：输入降噪只作用于摘要请求；用户/assistant 文本保留，thinking 删除，工具结果保留头尾和错误/artifact 证据
-- **完整历史**：压缩不删除或改写已经提交的消息，恢复和重放仍可读取全部历史
-- **有界运行时缓存**：正常 turn 只缓存 `active_start` 后的活跃消息；显式读取完整历史不会重新扩大该缓存
-- **恢复成本**：恢复超长 session 时会流式解析并校验一次 JSONL 以定位边界，但只保留和缓存活跃后缀
-- **状态校验**：投影边界超过历史长度或状态文件损坏时 fail closed
-- **overflow 恢复**：provider 在输出前明确报告 context overflow 时，本轮最多执行一次 LLM 压缩并重试一次
+- 同轮只压缩一次；最小收益检查（节省 < 10% 跳过）
+- Preflight 预判：发送前按实际形态估算，超预算先压缩
+- 摘要使用独立输出预算，发送前校验能否装入窗口
+- 配置组合校验：reserve < 窗口，摘要输出 < 窗口，热尾部 < 主请求预算
+- 降噪只作用于摘要请求，不修改完整历史
+- Provider overflow 恢复：无可见输出时最多一次压缩 + 一次重试
 
 ### 调优
 
 ```toml
-# 1M DeepSeek，尽量延后压缩
+# 1M DeepSeek
 max_context = "1M"
 context_compact_pct = 94
 context_reserve_tokens = 64000
 context_compact_tail_tokens = 256000
-context_compact_max_output_tokens = 8192
-context_compact_input_reduction = true
 
-# 64k 私有模型
+# 64k 私有模型（必须同时缩小所有预算）
 # max_context = "64K"
 # context_compact_pct = 65
 # context_reserve_tokens = 12000
 # context_compact_tail_tokens = 16000
 # context_compact_max_output_tokens = 4096
-# context_compact_input_reduction = true
 ```
 
-仅修改 `max_context` 为 64K 会与 1M 默认的 reserve/tail 冲突并在 runtime 启动时失败；小窗口必须像上例一样同时显式配置相关预算。
-
-```bash
-mink -m flash --config 'max_context="1M"' -i
-```
+仅修改 `max_context` 不调整 reserve/tail 会在启动时因参数冲突失败。
 
 ---
 
@@ -949,91 +683,76 @@ mink -m flash --config 'max_context="1M"' -i
 
 ### Scavenge — 回收
 
-从 LLM 的 `reasoning_content`（思考过程）和文本回复中回收遗漏的工具调用。支持 6 种格式：
+从 `reasoning_content` 和文本回复中回收遗漏工具调用，支持 6 种格式：
 
 | 格式 | 示例 |
 |------|------|
-| DSML invoke（DeepSeek 原生） | `<\|DSML\|invoke name="Read">...<\|DSML\|invoke>` |
-| XML 包装 | `<tool_call>{"name":"Bash","arguments":{"command":"ls"}}</tool_call>` |
-| Bracket 包装 | `[TOOL_CALL]{"name":"Read"...}[/TOOL_CALL]` |
-| 裸 JSON | `{"name":"Grep","arguments":{"pattern":"foo"}}` |
-| OpenAI style | `{"type":"function","function":{"name":"Read","arguments":"..."}}` |
-| R1 free-form | `{"tool_name":"Bash","tool_args":{"command":"ls"}}` |
+| DSML invoke | `<\|DSML\|invoke name="Read">...</\|DSML\|invoke>` |
+| XML 包装 | `<tool_call>{"name":"Bash",...}</tool_call>` |
+| Bracket | `[TOOL_CALL]{...}[/TOOL_CALL]` |
+| 裸 JSON | `{"name":"Grep",...}` |
+| OpenAI style | `{"type":"function","function":{"name":"Read",...}}` |
+| R1 free-form | `{"tool_name":"Bash","tool_args":{...}}` |
 
 ### Truncation — 截断修复
 
-修复被截断的 JSON 参数：闭合引号、补全括号、去掉尾逗号、填 null 到悬挂 key。
+修复截断 JSON：闭合引号、补全括号、去尾逗号、填 null 到悬挂 key。
 
 ### StormBreaker — 重复抑制
 
-滑动窗口（size=6）检测 `(工具名, 参数)` 重复。同一对出现 3 次时抑制该调用。mutating 工具（Bash/Write/Edit）执行时清空只读条目，允许 edit→re-read 正常模式。
+滑动窗口（size=6）检测 `(工具名, 参数)` 重复。同一对出现 3 次时抑制调用。
+mutating 工具执行时清空只读条目，允许 edit→re-read 正常模式。
 
 ---
 
-## 工具
+## 工具系统
 
-本节只列出用户需要理解的工具能力和常用参数。工具调度模型、审批策略、资源 URL、
-artifact、输出截断和每个工具的完整协议以 [工具参考](tools.md) 为准。
+### 工具列表
 
 | 工具 | 用途 | 关键参数 |
 |------|------|---------|
-| `Read` | 读文件或轻量资源，支持 selector 和 `artifact://` / `skill://` / `rule://` / `session://` | `path` |
+| `Read` | 读文件或轻量资源，支持 selector | `path` |
 | `Write` | 写文件 | `path`, `content` |
 | `Edit` | anchored patch 编辑 | `path`, `patch` |
 | `Bash` | 执行命令 | `command`, `timeout` |
-| `Python` | 运行 Python 脚本（宿主环境，完整生态） | `script` / `script_file`, `timeout` |
-| `PythonSandbox` | WASI 沙箱中执行 Python（受限，需在 `enabled_tools` 显式列出） | `script` / `script_file`, `timeout` |
+| `Python` | 运行 Python（宿主环境，完整生态） | `script` / `script_file`, `timeout` |
+| `PythonSandbox` | WASI 沙箱 Python（受限，需显式列出） | `script` / `script_file`, `timeout` |
 | `Glob` | 文件匹配 | `pattern`, `path` |
 | `Grep` | 内容搜索 | `pattern`, `path`, `glob`, `context` |
-| `TodoRead` | 读取持久化 checklist、revision 和稳定 ID | `include_completed` |
+| `TodoRead` | 读取 checklist 快照 | `include_completed` |
 | `TodoWrite` | 原子修改 checklist 结构 | `base_revision`, `add`, `update`, `remove` |
-| `TodoAdvance` | 原子转换 checklist 进度 | `base_revision`, `complete`, `activate`, `pause`, `reopen` |
+| `TodoAdvance` | 原子转换进度 | `base_revision`, `complete`, `activate`, `pause`, `reopen` |
 | `PlanDraft` | 保存或取消计划草稿 | `content` |
 | `PlanConfirm` | 确认计划 | 无参数 |
 | `PlanClear` | 清空计划 | 无参数 |
 | `SubAgent` | 启动子代理 | `prompt`, `description`, `fork` |
 
-完整工具说明见 [tools.md](tools.md)。
+### 模型工具面（ModelToolSurface）
 
-嵌入式 Rust runtime 注入只读 VFS 后，表中的 `Read`、`Glob`、`Grep` 对普通路径使用虚拟后端；未注入时本地工具行为不变。
+工具可见性由 **`enabled_tools`** 唯一决定。每个 agent runtime 将此列表与 approval、角色、文件系统后端、编译 feature 和硬依赖结合，解析出 `ModelToolSurface` —— 即当前模型真正可见的工具集合。
+
+- `PrefixManager` 从 `ModelToolSurface` 生成 tools schema 和能力工作流 prompt
+- `ToolRunner::execute_all()` 在真实执行前校验同一 surface，形成纵深防线
+- semantic capabilities 层按能力分类工具（如“搜索内容”由 Grep 或受限 Bash 提供），自动组合工作流提示
+
+嵌入 Rust runtime 注入只读 VFS 后，`Read`、`Glob`、`Grep` 对普通路径使用虚拟后端；未注入时行为不变。
 
 ### Read selector 与资源 URL
 
-`Read.path` 可追加 selector：
+`Read.path` 支持 selector：
+- `src/main.rs:40-80`、`src/main.rs:40+20`、`src/main.rs:raw`、`src/main.rs:raw:40-80`
 
-- `src/main.rs:40-80`
-- `src/main.rs:40+20`
-- `src/main.rs:raw`
-- `src/main.rs:raw:40-80`
+轻量资源 URL：
+- `artifact://<id>`：读取被截断工具输出
+- `skill://list` / `skill://<name>` / `skill://<name>/<relative-path>`：列出或读取 skill
+- `rule://list` / `rule://<name>`：列出或读取 rule
+- `session://current` / `session://current/stats` / `session://current/messages` / `session://current/history` / `session://current/artifacts`：session 内省
 
-可读取的轻量资源：
-
-- `artifact://<id>`：读取被截断工具输出；session 恢复和 fork 后新 artifact 会从已有最大序号继续，旧正文不会被覆盖
-- `skill://list` / `skill://list/all` / `skill://<name>` / `skill://<name>/<relative-path>`：通过当前内置 `Read` provider 列出、诊断或读取可用 skill；列表、正文和 filesystem-backed skill 子资源来自同一 capability snapshot。`skill://all` 是 `skill://list/all` 的兼容别名；built-in/runtime skill 只支持读取正文，不支持子资源
-- `rule://list` / `rule://<name>`：列出或读取可用 rule
-- `session://current`：当前 session 摘要
-- `session://current/stats`：stats JSON
-- `session://current/messages` / `session://current/messages/all`：conversation 摘要
-- `session://current/history`：从完整 `conversation.jsonl` 生成的有损 transcript；保留 user/assistant 文本，省略 thinking，并将工具调用与结果折叠为状态行，不包含完整工具结果正文
-- `session://current/artifacts`：artifact 列表
-
-`Grep.path` 也可直接使用 registered resource URL。历史召回建议先搜索
-`session://current/history`，再按返回的行号用 `Read` selector 读取局部；Grep 的 resource
-路径本身不接受 selector 或 glob。
-
-示例：
-
-```jsonl
-{"path":"artifact://bash-0001:1-120"}
-{"path":"skill://debugging"}
-{"path":"skill://local-guide/references/checklist.md:1-40"}
-{"path":"session://current/history:120-180"}
-{"path":"session://current/messages:1-40"}
-```
+`Grep.path` 也可使用 registered resource URL。建议先搜索 `session://current/history`，再按行号用 `Read` selector 读取局部。
 
 ### Anchored Edit
 
-本地文件非 raw `Read` 会输出 snapshot header：
+本地文件非 raw `Read` 输出带有 `@PATH#TAG` 的 snapshot header：
 
 ```text
 @src/foo.rs#0A3B
@@ -1041,96 +760,90 @@ artifact、输出截断和每个工具的完整协议以 [工具参考](tools.md
 42:    old()
 ```
 
-推荐用 `Edit.patch` 修改已有文件。`Edit` 不支持 `old_string/new_string`；新建或完整覆盖文件使用 `Write`。
+`Edit.patch` 只支持基于 snapshot header 的行操作：
 
 ```json
-{
-  "path": "src/foo.rs",
-  "patch": "@src/foo.rs#0A3B\nreplace 41..42:\n+fn target() {\n+    new()\n+}"
-}
+{"path": "src/foo.rs",
+ "patch": "@src/foo.rs#0A3B\nreplace 41..42:\n+fn target() {\n+    new()\n+"}
 ```
 
-同一文件多处修改时，优先在一次 `Edit.patch` 中合并多个 hunk。任何成功的 `Edit` 或 `Write`
-都会让该文件之前的 snapshot tag 和行号过期。成功 `Edit` 会返回新的 `@PATH#TAG` 和修改区域附近的行号；
-后续同一区域编辑可直接使用该新 header，其他区域应重新 `Read` 目标范围。patch 行号始终指向
-snapshot 中的原始行号，同一次 patch 内不会因为前面的 hunk 而位移。
+同一文件多处修改时优先合并多个 hunk。成功的 Write/Edit 会让旧 snapshot 过期。
+VFS 普通路径不输出 `@PATH#TAG`，不能作为 Edit 输入。
 
-如果 snapshot 过期、tag 未知、目标行未覆盖或 patch 无实际变化，`Edit` 会拒绝修改，并给出建议
-`Read path:N-M` 范围和当前相关行上下文。此时不要继续猜测或扩大 hunk，应先重新 `Read`，再用新 header 重试。
+### Todo 协议
 
-patch body 行只写最终内容，每行以 `+` 开头；不要写 `-old` 行、原始上下文行或 unified diff 的 `@@` header。
-不要用 `Edit` 做机械格式化、import 排序、空白清理或纯缩进调整；语义修改后运行项目 formatter。
+权威快照保存在 session `todos.json`，使用 revision + 稳定 ID 防 stale write：
+- `TodoRead`：读取完整快照、revision 和稳定 ID
+- `TodoWrite`：原子新增 pending 条目、删除条目或替换正文
+- `TodoAdvance`：原子转换 active batch 进度（activate / complete / pause / reopen）
 
-VFS 普通路径读取会输出行号和 `[read-only virtual file: ...]` 标记，但不会输出
-`@PATH#TAG`，因此不能作为 `Edit.patch` 的输入。
+成功变更后，在 conversation 尾部追加增量事件和当前 active batch 的紧凑物化投影。
+session 恢复或压缩丢失最新 revision 时追加一次 TodoSync。一个 session 的 TodoStore 由单个 runtime 持有，不支持并发写。
+
+### SubAgent 工具
+
+LLM 自动调用，支持最多 8 个并发。结果统一收集后进入信号采集。
+
+| 模式 | 上下文 | 适用 |
+|------|--------|------|
+| 独立（默认） | 全新空会话 | 调查、搜索、隔离验证 |
+| Fork（`fork=true`） | 继承完整 session 状态 | 需要上下文延续的任务 |
+
+Fork 在 runtime 初始化前克隆父 session 目录。Artifact 序号从克隆 index 继续，旧 `artifact://` 引用保持有效。
+技能和规则来自父 capability snapshot。
 
 ---
 
 ## Skills（技能）
 
-### 启用方式
+### 启用
 
 ```bash
-# CLI 加载（通过 --config）
-mink -m flash --config 'skills=["debugging"]' -i
-
-# 加载多个
+# CLI 加载
 mink -m flash --config 'skills=["debugging","tdd"]' -i
 
-# 查看可用技能
+# 查看可用
 mink --list-skills
 ```
 
 ### 内置技能（编译时嵌入）
 
-所有 `skills/<name>/SKILL.md` 文件在编译时自动嵌入到二进制中。添加新技能只需创建文件，不需要修改 Rust 代码。
+所有 `skills/<name>/SKILL.md` 在编译时嵌入二进制，零文件 I/O：
 
 | 技能名 | 描述 | 适用场景 |
 |--------|------|---------|
-| `debugging` | 四阶段系统调试：根因调查 → 模式分析 → 假设验证 → 修复实现 | 遇到 bug、测试失败、非预期行为时 |
-| `verification` | 验证门控：禁止在未运行验证的情况下声称任务完成 | 完成任务、声称修复成功、commit 前 |
-| `tdd` | 测试驱动开发：红绿重构循环 | 实现新功能或修 bug 前 |
-| `pre-code-check` | 编码前置检查：先搜索调用点、读上下文、验证假设 | 编辑文件前 |
+| `debugging` | 四阶段系统调试 | 遇到 bug、测试失败、非预期行为 |
+| `verification` | 验证门控：禁止未验证就声称完成 | 完成任务、commit 前 |
+| `tdd` | 红绿重构循环 | 新功能或修 bug |
+| `pre-code-check` | 先搜索调用点、读上下文、验证假设 | 编辑文件前 |
 
 ### 搜索路径（优先级）
 
 1. `<project>/.claude/skills/<name>/SKILL.md` — 项目级覆盖
 2. `<project>/skills/<name>/SKILL.md` — 项目开发目录
 3. `~/.claude/skills/<name>/SKILL.md` — 用户全局
-4. **内置（编译时嵌入）** — 兜底读取内存，零文件 I/O
-
-同名 skill 会被覆盖（优先级高的替代内置的）。
-
-### 加载机制
-
-- Skill 通过 `.minkrc` 的 `skills` 字段或 `--config "skills=[\"name\"]"` 加载，加载后在 system prompt 的 `<selected-skills>` 段嵌入 SKILL.md 全文
-- selected skill 正文的加载不依赖 `Read`；`Read skill://<name>` 只是当前内置的按需资源 provider，不修改后续轮次的 system prompt
-- filesystem-backed skill 当前可通过 `Read skill://<name>/<relative-path>` 读取同目录子资源
-- 内置技能即使在离线环境也可用（编译时已嵌入）
+4. **内置** — 编译时嵌入，兜底
 
 ### 能力视图
 
-每次 runtime 启动会构建一份 capability snapshot。system prompt 的 skill index、selected skills、instruction files、rules，以及 `Read skill://...` / `Read rule://...` 都读取这份视图。这样 CLI、Rust runtime、Python SDK 和子代理不会各自重新扫描一套能力来源。
-
-Rust runtime 和 Agent JSONL / Python SDK 可注入 inline skills，并可通过 discovery policy 控制是否加载默认文件系统和内置 skills。默认 CLI 行为仍保留本地 skill 覆盖内置 skill 的优先级。
+每次 runtime 启动构建 `CapabilitySnapshot`。system prompt 的 skill index、selected skills、instruction files、rules 以及 `Read skill://` / `Read rule://` 都读取这份统一视图。CLI、Rust runtime、Python SDK 和子代理不各自重新扫描。
 
 ---
 
 ## MISSION（自定义系统提示词）
 
-通过 `--mission PATH` 加载 MISSION.md。MISSION 可以覆盖少量稳定的 core section，也可以追加
-业务自定义 section；不能覆盖工具、workflow 或其他 runtime-owned 内容。
+通过 `--mission PATH` 加载。MISSION 可覆盖少量稳定的 core section，可追加自定义 section；
+**不能**覆盖工具、workflow 或 runtime-owned 内容。
 
-### 机制
+### Section 分类
 
-MISSION.md 使用必须从行首开始的一级标题（`# section-id`）分段。首个一级标题之前的文本不会
-形成 section；空正文不会形成 section。section 分为三类：
+MISSION.md 使用行首一级标题（`# section-id`）分段。section 分三类：
 
 | 类型 | section ID | 行为 |
 |------|------------|------|
-| 可覆盖 core | `agent-identity`、`environment`、`execution-codes`、`belief-awareness`、`output-language` | 替换当前 runtime 中已存在的同名 core |
+| 可覆盖 core | `agent-identity`、`environment`、`execution-codes`、`belief-awareness`、`output-language` | 替换同名 core |
 | runtime-reserved | 工具 prompt、workflow、`runtime-capabilities`、`rules`、`instruction-files`、`rule-index`、`skill-index`、`selected-skills`、`current-plan` 等 | 启动时 fail fast |
-| 普通自定义 | 不属于以上两类的唯一 ID | 作为 `mission:<section-id>` 外部 section 追加 |
+| 普通自定义 | 不属于以上两类的唯一 ID | 作为 `mission:<section-id>` 原样追加 |
 
 ```markdown
 # agent-identity
@@ -1138,7 +851,6 @@ MISSION.md 使用必须从行首开始的一级标题（`# section-id`）分段�
 
 # mission-rules
 - 严格遵循素材内容，不得额外杜撰
-- 输出格式必须符合要求
 
 # process-flow
 ## Phase 1: 素材分析
@@ -1148,73 +860,46 @@ MISSION.md 使用必须从行首开始的一级标题（`# section-id`）分段�
 ### 用法
 
 ```bash
-# 加载自定义提示词
 mink --mission ./my-task.mission.md -i
-```
-
-```bash
-# 结合技能使用（通过 --config）
 mink --mission ./my-task.mission.md --config 'skills=["debugging"]' -i
 ```
 
-### Python SDK
-
 ```python
-# 文件方式
+# Python SDK
 SandboxConfig(mission_file="./my-task.mission.md")
-
-# 内联方式（通过 SDK JSONL 直接传递，无临时文件开销）
-SandboxConfig(mission_content="# agent-identity\n...")
-
-# 关闭信号系统
+SandboxConfig(mission_content="# agent-identity\n...")  # 内联，无临时文件
 SandboxConfig(signal_mode="off")
 ```
 
-`signal_mode=None` 时继承进程环境中的 `MINK_SIGNAL_MODE`；如果环境变量也未设置，mink 默认使用 `full`。
-
 ### 迁移规则
 
-- 旧 MISSION 中的 `# rules` 改为 `# mission-rules` 或其他业务专属 ID。
-- 不再支持 `using-your-tools`、`anchored-edit-protocol`、`rationalization-table` 等旧 alias。
-- 依赖项目直接更新 MISSION 文件；核心不会添加 alias、warning-only 或双格式兼容路径。
-- section ID 必须唯一。重复 heading 或占用 runtime-reserved ID 会导致启动失败。
-
-### 注意事项
-
-- MISSION.md 只影响 prompt 文本，不改变工具 surface。工具选择使用 `enabled_tools`，授权限制使用 approval 配置。
-- 未覆盖的 core 保持默认内容；普通自定义 section 原样加入，不进行工具名清洗。
-- 当 `MINK_SIGNAL_MODE=off` 时，默认 prompt 不存在 `belief-awareness`；MISSION 也不能创建或覆盖该 core。
-- `# rules` 是 runtime-reserved，不是自定义规则的推荐名称。
-- 建议将 MISSION.md 置于项目目录下，纳入版本管理。
+- 旧 `# rules` → 改为 `# mission-rules` 或其他业务 ID
+- 不再支持 `using-your-tools`、`anchored-edit-protocol`、`rationalization-table` 等旧 alias
+- section ID 必须唯一；重复 heading 或占用 runtime-reserved ID 导致启动失败
+- MISSION 只影响 prompt 文本，不改变工具 surface（工具选择仍用 `enabled_tools`）
+- `MINK_SIGNAL_MODE=off` 时 prompt 不存在 `belief-awareness`，MISSION 也不能创建它
 
 ---
 
 ## SubAgent（子代理）
 
-### 调用方式
-
-LLM 自动调用 SubAgent 工具。支持并发执行（最多 8 个并发）。
-
 ### 参数
 
 | 参数 | 说明 |
 |------|------|
-| `prompt` | 子代理执行的任务描述（**必需**） |
+| `prompt` | 子代理任务描述（**必需**） |
 | `description` | 日志标记（可选） |
-| `fork` | `true` 继承父会话上下文（可选，默认独立） |
+| `fork` | 是否继承父会话上下文（可选，默认独立） |
 
 ### 模式
 
-| 模式 | 上下文 | 适用 |
-|------|--------|------|
-| 独立（默认） | 全新空会话 | 文件调查、搜索、隔离的假设验证 |
-| Fork（`fork=true`） | 继承完整 session 状态，包括对话、压缩边界、摘要、计划和 artifacts | 需要父上下文的延续性任务 |
+- **独立（默认）**：全新空会话，适合文件调查、搜索、隔离验证
+- **Fork（`fork=true`）**：继承完整 session 状态（对话、压缩边界、摘要、计划、artifact），适合延续性任务
 
-Fork 会在子 runtime 初始化前复制父 session 目录，并清除 child 的身份、事件、统计和 usage 文件。
-子代理从克隆的 `context-state.json` 恢复同一活跃投影；artifact 序号从克隆 index 继续，已有
-`artifact://<id>` 引用保持指向原正文。技能和规则来自父代理的 capability snapshot，不依赖目录复制。
+Fork 在子 runtime 初始化前复制父 session 目录，清除 child 的身份/事件/统计文件。
+子代理从克隆的 `context-state.json` 恢复活跃投影；artifact 序号从克隆 index 继续。
 
-### 结果格式
+### 输出
 
 ```
 [sub-agent <id>] <status> (in=<n>, out=<n>)
@@ -1222,11 +907,7 @@ Thinking: ...
 Text: ...
 ```
 
-失败时（`status=failed`）结果可能为空，不要自动重试。Token 用量计入父会话统计。
-
-### 超时
-
-子代理默认超时 300 秒（5 分钟），可通过 `--config` 或 `.minkrc` 的 `sub_agent_timeout` 字段调整。超时后子代理被标记为 `failed`，父会话继续执行。
+Token 用量计入父会话统计。默认超时 300 秒（`sub_agent_timeout` 可调）。超时后标记为 `failed`。
 
 ---
 

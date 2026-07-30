@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.2.0 (2026-07-30)
+
+### 工具选择统一与 Web 工具移除（Breaking）
+
+- **删除** `WebSearch`、`WebFetch`、`Read http(s)://`、URL artifact cache 及全部 Web 配置和提示词。Agent JSONL 协议升至 v2，旧工具策略字段作为未知字段直接拒绝，不兼容 v1。
+- **`enabled_tools` 成为唯一工具选择入口**：删除工具级 `disable_*`、sandbox `allow_bash` / `allow_python` / `allow_sub_agent`、`sandbox_python.enable` 等字段。CLI、TOML、Rust API、Agent JSONL 与 Python SDK 共用同一 `enabled_tools` 合同。`PythonSandbox` 必须在该列表中显式列出才进入 surface。
+- **Plan 类型化命令**：新增 `PlanDraft` 和独立 `PlanStore`。草稿/确认/清理由类型化命令驱动，状态转换使用同目录原子替换。已确认计划拒绝新的草稿写入。`<current-plan>` 从 immutable prefix 移入逐请求动态 system state，确认后立即生效。PlanConfirm/PlanClear 的压缩请求经过 `TurnCompactor` 同轮守卫，失败不再被静默吞掉。
+- **Todo 持久化工作流**：从上下文内 checklist 改为 `todos.json` 持久化。`TodoRead` / `TodoWrite` / `TodoAdvance` 三个独立工具各使用类型化参数和 revision + 稳定 ID 防止 stale write。新增 `atomic_file.rs` 提供同目录原子写入。成功变更后向 conversation 尾部追加增量事件和紧凑 active 投影；恢复或压缩丢失 revision 时自动同步。新增轻量进度守卫（同一 active batch 长时间无转换或模型准备结束时最多提醒一次）。新增 `reconcile_todo_state()` 在每次 LLM 请求前校验 todo revision 一致性。`ToolOutcome` / `ToolRunResult` 扩展 `plan_command`、`state_metadata`、`presentation`、`success`、`result_kind`、`needs_finalization` 等字段。Todo prompt 按 inspect / structure / progress 语义能力组合加载。
+
+### TUI — 结构化 Full / Inline 双模式
+
+- 原单 TUI projection 拆分为共享结构化 transcript reducer + 两种终端 surface：**Full 模式**（交互式全屏应用内 transcript，鼠标滚轮、可逆折叠、卡片点击）和 **Inline 模式**（渐进写入原生 scrollback，scrolling region 避免 viewport 重绘，自动折叠后不可展开）。
+- 工具调用/结果按 ID 合并，携带 `ToolResultKind`、成功状态、Plan/Todo presentation 和 artifact 元数据。
+- 新增结构化 Plan / Todo / Artifact / SubAgent 详情页，按实际内容宽度折行。新增 `/plan`、`/todos`、`/artifact ID`、`/sub-agent ID` 四个 slash 命令。
+- Inline 模式下详情页临时切换 alternate screen，返回时恢复同一个 terminal 对象。
+- `ToolResultDisplay` / `ToolCallDisplay` 扩展 `tool_use_id` 和 presentation 字段；`Display` trait 新增 `render_tool_result_presented()` / `render_tool_call_detail()`。`AgentEvent` 扩展 `billing_turn_id`、`usage`、`presentation`、`artifacts`、`plan_presentation` 字段；事件日志序列化同步更新。
+- TUI 实时 signal 与 session replay 经过同一个 reducer；Plan/Todo 详情从 `plan.draft` / `plan.md` / `todos.json` 恢复。
+- 启用 ratatui scrolling-regions feature。Inline 只提交连续且 sealed 的 transcript。
+
+### 其他变更
+
+- 内置技能 `pre-code-check` 和 `verification` 的 prompt 调整为 provider 无关描述。
+- CLI 参数解析增加泛型 TOML 列表值处理。
+- Sub-coordinator 允许 `needs_finalization` 跳过已 finalize 的结果。
+- `ArtifactManager` 的 `index` 路径改为公有方法；`PlanStore` 增加 `pending_confirm()` 查询。
+- 更新架构、使用、设计、TUI 和工具参考文档。
+
 ## v0.1.15 (2026-07-25)
 
 ### Tool capabilities

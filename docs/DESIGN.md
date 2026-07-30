@@ -1,8 +1,32 @@
 # 设计文档
 
+> 更新日期：2026-07-30
+
 本文记录 mink 的设计取舍和关键不变式，不作为用户手册或工具协议参考。用户入口、配置和
 运行方式见 [USAGE.md](USAGE.md)；工具参数与边界见 [tools.md](tools.md)；模块分层见
 [ARCHITECTURE.md](ARCHITECTURE.md)。
+
+---
+
+## 目录
+
+- [主题一：Agent 主循环](#主题一agent-主循环)
+- [主题二：内存模型](#主题二内存模型)
+- [主题三：上下文压缩](#主题三上下文压缩)
+- [主题四：维修流水线](#主题四维修流水线)
+- [主题五：信号驱动的信念系统](#主题五信号驱动的信念系统)
+- [主题六：工具执行模型](#主题六工具执行模型)
+- [主题七：SSE 流式解析](#主题七sse-流式解析)
+- [主题八：Session 与持久化](#主题八session-与持久化)
+- [主题九：SubAgent（子代理）](#主题九subagent子代理)
+- [主题十：配置系统](#主题十配置系统)
+- [主题十一：并发模型](#主题十一并发模型)
+- [主题十二：系统提示词构建](#主题十二系统提示词构建)
+- [主题十三：Protocol 事件](#主题十三protocol-事件)
+- [主题十四：不变式（Invariants）](#主题十四不变式invariants)
+- [主题十五：Rust 库 API 设计](#主题十五rust-库-api-设计)
+
+---
 
 ## 主题一：Agent 主循环
 
@@ -1184,7 +1208,7 @@ Rust 发布包名为 `mink-core`，库 crate 名为 `mink`。`mink-core` 发布�
 实现；终端二进制和 UI 实现由 workspace 中的 `mink-cli` 包持有。服务端依赖时推荐只启用嵌入式 runtime：
 
 ```toml
-mink = { package = "mink-core", version = "0.1.15", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.2.0", default-features = false, features = ["runtime"] }
 ```
 
 `mink::runtime` / `mink::prelude` 解决这些问题：**同一套 OrchActor / TurnExecutor / ToolRunner 核心，但无进程边界**。
