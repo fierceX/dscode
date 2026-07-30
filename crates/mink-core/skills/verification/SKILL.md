@@ -33,7 +33,7 @@ Skip any step = not verifying
 | Build succeeds | Build command: exit 0 |
 | Bug fixed | Test original symptom: passes |
 | Linter clean | Linter output: 0 errors |
-| Work complete | Each task in the TodoWrite verified independently |
+| Work complete | Each task in the current execution plan or checklist verified independently |
 
 ## Red Flags
 

@@ -165,19 +165,11 @@ class SandboxConfig:
         Relative paths are resolved against the current working directory.
     write_dirs:
         Directories the agent is allowed to write to.
-    allow_bash:
-        Whether the Bash tool is enabled.
-    bash_allow_commands:
-        Command-name whitelist for Bash.  Empty = use built-in deny list only.
-    allow_python:
-        Whether the host Python tool is enabled.
     allow_network:
         Whether network access is allowed (LLM API requires this).
     enabled_tools:
-        Tool whitelist: only these tools are visible to the LLM.
-        ``None`` (default) means all enabled tools are visible (subject to
-        ``allow_*`` flags).  Example: ``["Read", "Write", "Edit", "Grep",
-        "Glob", "Bash"]``.
+        Exact tool selection. ``None`` uses the default tool set; an empty list
+        disables all tools. Include ``"PythonSandbox"`` explicitly to enable it.
     skills:
         Selected skill names to inject into the system prompt. These names must
         exist in mink's normal skill discovery paths or built-in skills.
@@ -188,12 +180,6 @@ class SandboxConfig:
         ``"defaults"`` loads runtime, project/user filesystem, and built-in
         skills. ``"runtime_only"`` and ``"explicit_only"`` load only SDK/Rust
         injected runtime skills/providers.
-    allow_sub_agent:
-        Whether the SubAgent tool is enabled.
-    enable_python_sandbox:
-        Enable the CPython WASI sandboxed Python tool (PythonSandbox).
-        Default False, use --enable-python-sandbox CLI or enable=true in
-        [sandbox_python] section of .minkrc.
     max_memory_mb:
         Maximum memory for the sandboxed process (nsjail cgroup only).
     max_pids:
@@ -240,17 +226,12 @@ class SandboxConfig:
     write_dirs: list[str] = field(default_factory=list)
 
     # Tool control
-    allow_bash: bool = True
-    bash_allow_commands: list[str] = field(default_factory=list)
-    allow_python: bool = True
     allow_network: bool = True
-    enabled_tools: Optional[list[str]] = None  # 工具白名单，None=全部启用
+    enabled_tools: Optional[list[str]] = None  # 精确工具选择，None=默认工具集
     skills: list[str] = field(default_factory=list)
     inline_skills: list[InlineSkill] = field(default_factory=list)
     skill_discovery_policy: str = "defaults"
-    allow_sub_agent: bool = True
-    # PythonSandbox tool (CPython WASI sandbox, default: disabled)
-    enable_python_sandbox: bool = False
+    # PythonSandbox tool configuration; enable it through enabled_tools.
     python_sandbox_wasm_path: str = "cpython-wasi/python.wasm"
     python_sandbox_stdlib_dir: str = "cpython-wasi"
     python_sandbox_read_dirs: list[str] = field(default_factory=list)
@@ -671,7 +652,7 @@ class AgentSession:
                     error_text = f"agent exited with code {proc.returncode}"
                 final_event = {
                     "type": "final",
-                    "version": 1,
+                    "version": 2,
                     "status": "failed" if proc.returncode else "ok",
                     "error": error_text,
                 }
@@ -771,11 +752,7 @@ class AgentSession:
             "backend": cfg.sandbox_backend,
             "read_dirs": cfg.read_dirs,
             "write_dirs": cfg.write_dirs,
-            "allow_bash": cfg.allow_bash,
-            "bash_allow_commands": cfg.bash_allow_commands,
-            "allow_python": cfg.allow_python,
             "allow_network": cfg.allow_network,
-            "allow_sub_agent": cfg.allow_sub_agent,
             "max_memory_mb": cfg.max_memory_mb,
             "max_pids": cfg.max_pids,
             "timeout_secs": cfg.timeout_secs,
@@ -786,15 +763,6 @@ class AgentSession:
         """Build the Agent JSONL request string."""
         self._validate_request_config()
         options: dict[str, Any] = {}
-        if not self._config.allow_bash:
-            options["disable_bash"] = True
-        if not self._config.allow_sub_agent:
-            options["disable_sub_agent"] = True
-        if not self._config.allow_network:
-            options["disable_web"] = True
-        if not self._config.allow_python:
-            options["disable_python"] = True
-        # enable_python_sandbox passed via --enable-python-sandbox CLI arg
         if self._config.model:
             options["model"] = self._config.model
         if self._config.max_tokens != 81920:
@@ -845,7 +813,7 @@ class AgentSession:
         if extra_options:
             options.update(extra_options)
 
-        req: dict[str, Any] = {"version": 1, "prompt": prompt}
+        req: dict[str, Any] = {"version": 2, "prompt": prompt}
         if self._config.mission_content:
             req["mission"] = self._config.mission_content
         if self._config.session_id:
@@ -982,27 +950,22 @@ class AgentSession:
         toml["llm_wait_heartbeat"] = cfg.llm_wait_heartbeat
         toml["max_search_files"] = cfg.max_search_files
         toml["max_search_results"] = cfg.max_search_results
-        if cfg.verbose:
-            toml["verbose"] = True
-
-        # PythonSandbox 配置
-        if cfg.enable_python_sandbox:
-            cmd.append("--enable-python-sandbox")
-            sp = {}
-            if cfg.python_sandbox_wasm_path != "cpython-wasi/python.wasm":
-                sp["wasm_path"] = cfg.python_sandbox_wasm_path
-            if cfg.python_sandbox_stdlib_dir != "cpython-wasi":
-                sp["stdlib_dir"] = cfg.python_sandbox_stdlib_dir
-            if cfg.python_sandbox_timeout != 30:
-                sp["timeout"] = cfg.python_sandbox_timeout
-            if cfg.python_sandbox_read_dirs:
-                sp["read_dirs"] = cfg.python_sandbox_read_dirs
-            if cfg.python_sandbox_write_dirs:
-                sp["write_dirs"] = cfg.python_sandbox_write_dirs
-            if cfg.python_sandbox_package_dirs:
-                sp["package_dirs"] = cfg.python_sandbox_package_dirs
-            if sp:
-                toml["sandbox_python"] = sp
+        # PythonSandbox configuration; activation is controlled by enabled_tools.
+        sp = {}
+        if cfg.python_sandbox_wasm_path != "cpython-wasi/python.wasm":
+            sp["wasm_path"] = cfg.python_sandbox_wasm_path
+        if cfg.python_sandbox_stdlib_dir != "cpython-wasi":
+            sp["stdlib_dir"] = cfg.python_sandbox_stdlib_dir
+        if cfg.python_sandbox_timeout != 30:
+            sp["timeout"] = cfg.python_sandbox_timeout
+        if cfg.python_sandbox_read_dirs:
+            sp["read_dirs"] = cfg.python_sandbox_read_dirs
+        if cfg.python_sandbox_write_dirs:
+            sp["write_dirs"] = cfg.python_sandbox_write_dirs
+        if cfg.python_sandbox_package_dirs:
+            sp["package_dirs"] = cfg.python_sandbox_package_dirs
+        if sp:
+            toml["sandbox_python"] = sp
 
         if toml:
             import json as _json

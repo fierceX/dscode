@@ -40,13 +40,7 @@ pub async fn init_session_base_with_layout(
     ensure_dir(&paths.session_dir).await?;
     ensure_dir(&paths.artifacts).await?;
 
-    for f in [
-        &paths.conversation,
-        &paths.events,
-        &paths.summary,
-        &paths.plan,
-        &paths.plan_draft,
-    ] {
+    for f in [&paths.conversation, &paths.events, &paths.summary] {
         if !f.exists() {
             let _ = tokio::fs::File::create(f).await;
         }

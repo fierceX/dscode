@@ -176,11 +176,7 @@ prompt 为空且 stdin 是终端时自动进入交互模式。非终端 stdin �
 | `--agent-jsonl` | — | Agent JSONL 协议（stdin 读 versioned request，stdout 输出事件流和最终 `final`；request 可用 `options.stream_events=false` 关闭过程事件，仅保留 `final`） |
 | `--api-key KEY` | env | 覆盖 API Key |
 | `--base-url URL` | 默认端点 | 覆盖 API 端点 |
-| `--disable-bash` | `false` | 禁用 Bash 工具 |
-| `--disable-python` | `false` | 禁用 Python 工具（宿主） |
-| `--enable-python-sandbox` | `false` | 启用 PythonSandbox 工具（默认禁用） |
-| `--disable-sub-agent` | `false` | 禁用 SubAgent 工具 |
-| `--disable-web` | `false` | 禁用 WebSearch / WebFetch 工具 |
+| `--enabled-tools <list>` | 默认集合 | 逗号分隔的精确工具列表；传 `none` 禁用全部 |
 | `--config <toml>` | — | 通过 TOML 字符串设置配置（见下文） |
 | `-v` / `--verbose` | `false` | 详细日志 |
 | `-h` / `--help` | — | 显示帮助 |
@@ -270,7 +266,7 @@ context_compact_input_reduction = false   # 摘要前是否过滤 thinking 和�
 log_events = true                         # 事件日志
 max_search_files = 5000                     # Glob/Grep 最大遍历文件数
 max_search_results = 1000                   # Grep 最大匹配结果行数
-enabled_tools = ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]  # 工具白名单
+enabled_tools = ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]  # 精确工具选择
 openai_reasoning_effort = "max"           # OpenAI-compatible reasoning_effort；"off" 表示不发送
 openai_include_usage = true               # 是否请求 stream usage
 openai_token_param = "max_tokens"         # max_tokens | max_completion_tokens
@@ -327,8 +323,9 @@ enabled = true
 
 `enabled_tools` 是模型工具 surface 的输入。未知名称、重复名称、当前构建未包含的 feature 工具、
 缺少硬依赖（例如显式启用 anchored editing 却没有 snapshot reader），都会在创建 session 前
-报错。最终 schemas、按需 tool/workflow prompt、Bash 路由和 Signal Recovery 同时依据该
-surface 收缩；执行层继续阻止白名单外或被禁用的历史调用。
+报错。未设置时使用 catalog 默认集合；`PythonSandbox` 必须显式列出。最终 schemas、按需
+tool/workflow prompt、Bash 路由、Signal Recovery 和真实执行门禁同时依据该 surface 收缩，
+不存在额外 disable flag 或 sandbox 工具策略。
 
 ---
 
@@ -350,12 +347,7 @@ backend = "auto"                        # nsjail | bwrap | sandbox-exec | off (m
 read_dirs = ["src", "tests", "docs"]    # 允许读取的目录（macOS 忽略）
 write_dirs = ["src"]                    # 允许写入的目录
 
-# 工具限制
-allow_bash = true
-bash_allow_commands = ["ls", "cat", "cargo", "python", "rg"]
-allow_python = true
 allow_network = true
-allow_sub_agent = true
 
 # 资源配额（仅 Linux nsjail cgroup）
 max_memory_mb = 1024
@@ -394,11 +386,19 @@ cpython-wasi/
 然后在 `.minkrc` 中配置路径：
 
 ```toml
+enabled_tools = [
+  "Read", "Write", "Edit", "Bash", "Glob", "Grep", "TodoWrite",
+  "PlanDraft", "PlanConfirm", "PlanClear", "Python", "SubAgent",
+  "PythonSandbox",
+]
+
 [sandbox_python]
-enable = true                            # 启用（默认禁用）
 wasm_path = "cpython-wasi/python.wasm"   # python.wasm 路径
 stdlib_dir = "cpython-wasi"              # 标准库目录
 ```
+
+`enabled_tools` 是精确工具列表；`PythonSandbox` 默认不进入工具 surface，必须在该列表中显式
+列出。`[sandbox_python]` 只配置运行参数，不负责启用工具。
 
 #### 路径与权限配置
 
@@ -406,7 +406,6 @@ stdlib_dir = "cpython-wasi"              # 标准库目录
 
 ```toml
 [sandbox_python]
-enable = true
 wasm_path = "cpython-wasi/python.wasm"
 stdlib_dir = "cpython-wasi"
 timeout = 30                             # 超时秒数
@@ -458,7 +457,6 @@ mink --tui
 |------|--------|------|
 | `DEEPSEEK_API_KEY` | — | **必需。** API 密钥 |
 | `DEEPSEEK_BASE_URL` | `https://api.deepseek.com/v1` | 自定义 API 端点 |
-| `MINK_WEB_USER_AGENT` | Firefox-like UA | WebSearch/WebFetch 的 User-Agent 覆盖 |
 | `TOOL_RESULT_MAX_BYTES` | `100000` | 单条工具结果截断上限 |
 | `FILE_WRITE_MAX_BYTES` | `1048576` | Write/Edit 工具写入上限 |
 | `MAX_SEARCH_FILES` | `5000` | Glob/Grep 最大遍历文件数 |
@@ -549,7 +547,7 @@ cost = input_tokens × input_nano
 ### usage.jsonl 记录格式
 
 ```json
-{"version":1,"billing_turn_id":"turn-...","request_id":"request-...",
+{"version":2,"billing_turn_id":"turn-...","request_id":"request-...",
  "kind":"agent","origin_session_id":"session-...","model":"deepseek-v4-flash",
  "attempt_count":1,"status":"reported",
  "tokens":{"input_tokens":100,"cache_read_tokens":40,"cache_creation_tokens":0,"output_tokens":20},
@@ -617,7 +615,7 @@ let runtime = AgentRuntime::start_with_options(
 - `resource_session_id`：知识库数据分区；未配置时默认使用 runtime session id。
 - `agent_session_id`：实际发起调用的主代理或子代理 session id。
 
-子代理继承父代理的 `resource_session_id`，但使用自己的 `agent_session_id`。虚拟 Read 是只读的，不产生 anchored Edit snapshot；`Write` 和 `Edit` 仍只操作本地文件。`artifact://`、`skill://`、`rule://`、`session://` 和 `http(s)://` 也继续走内置资源实现，不进入 VFS。
+子代理继承父代理的 `resource_session_id`，但使用自己的 `agent_session_id`。虚拟 Read 是只读的，不产生 anchored Edit snapshot；`Write` 和 `Edit` 仍只操作本地文件。`artifact://`、`skill://`、`rule://` 和 `session://` 继续走内置资源实现，不进入 VFS。
 
 完整 redb 示例见
 [`crates/mink-core/examples/redb_vfs.rs`](../crates/mink-core/examples/redb_vfs.rs)。
@@ -715,7 +713,7 @@ workspace 包中。服务端嵌入时推荐只启用 runtime：
 
 ```toml
 [dependencies]
-mink = { package = "mink-core", version = "0.1.12", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.1.15", default-features = false, features = ["runtime"] }
 ```
 
 稳定入口优先使用 `mink::prelude`、`mink::runtime`、`mink::config`、`mink::sandbox` 和
@@ -761,7 +759,7 @@ CLI 的历史目录结构是 `project` layout：
         ├── plan.draft         ← 草稿计划
         ├── stats.json         ← Token 用量统计
         ├── usage.jsonl        ← LLM 请求级 Token 与费用明细
-        └── artifacts/         ← 超长工具输出和 URL cache
+        └── artifacts/         ← 超长工具输出
             ├── index.jsonl
             └── <tool>-0001.txt
 ```
@@ -792,35 +790,44 @@ mink --list-sessions
 
 ## 计划系统（Plan）
 
-计划系统通过两个内置工具管理，不需要 CLI 参数启用——LLM 在需要时会自动使用。
+计划系统通过三个内置工具管理；只有三者都进入 resolved tool surface 时才加载计划工作流。
 
 ### 生命周期
 
 ```
 ┌─ LLM 提议制定计划
-│  → LLM 使用当前可用的 Edit 或 Write 更新 plan.draft
+│  → LLM 使用 PlanDraft 保存完整草稿
 │  → 用户反馈会先同步到草稿，再次请求确认
-│  → 用户取消时清空 plan.draft，不调用 PlanClear
+│  → 用户取消时调用 PlanDraft(content="")
 ├─ 用户确认计划
 │  → LLM 调用 PlanConfirm 工具
 │    → plan.draft → plan.md（锁定）
-│    → 触发上下文压缩
-│    → system prompt 中出现 <current-plan> 段
+│    → 向 TurnCompactor 提交上下文压缩请求
+│    → 下一次 LLM 请求动态注入 <current-plan>
 ├─ 执行阶段
-│  → LLM 创建 TodoWrite checklist，逐步完成并更新状态
+│  → TodoWrite 可用时，LLM 创建 checklist 并随执行更新状态
 └─ 计划完成
    → LLM 调用 PlanClear 工具
-     → plan.md 清空
-     → 触发上下文压缩
-     → system prompt 中不再包含 <current-plan> 段
+     → plan.md 删除
+     → 向 TurnCompactor 提交上下文压缩请求
+     → 下一次 LLM 请求不再注入 <current-plan>
 ```
+
+### PlanDraft
+
+**触发条件**：创建、修订或取消尚未确认的计划。
+
+- 参数：`content`，完整 Markdown 草稿；空字符串表示取消
+- 行为：通过 `PlanStore` 同目录原子替换 `plan.draft`
+- 已确认计划存在时拒绝创建或替换草稿
+- 返回：`"Plan draft saved."`；I/O 或大小校验失败时返回明确错误
 
 ### PlanConfirm
 
 **触发条件**：用户明确确认 plan 后。**非**规划阶段或用户要求修改时。
 
 - 参数：无
-- 行为：plan.draft → plan.md + 触发压缩 + 重建 system prompt
+- 行为：原子 rename `plan.draft → plan.md` + 请求压缩；压缩服从同轮一次守卫，失败会返回当前 turn；下一次 LLM 请求动态注入计划
 - 返回："Plan confirmed and locked in."
 - 如果 plan.draft 为空（用户未创建草稿就要求确认），返回错误信息
 
@@ -829,7 +836,7 @@ mink --list-sessions
 **触发条件**：计划所有任务完成后。
 
 - 参数：无
-- 行为：清空 plan.md + 触发压缩 + 重建 system prompt
+- 行为：删除 `plan.md` 并清理可能遗留的 `plan.draft`，随后请求压缩；压缩服从同轮一次守卫，失败会返回当前 turn；下一次 LLM 请求移除动态计划
 - 返回："Plan cleared."
 
 ---
@@ -942,15 +949,14 @@ artifact、输出截断和每个工具的完整协议以 [工具参考](tools.md
 | `Edit` | anchored patch 编辑 | `path`, `patch` |
 | `Bash` | 执行命令 | `command`, `timeout` |
 | `Python` | 运行 Python 脚本（宿主环境，完整生态） | `script` / `script_file`, `timeout` |
-| `PythonSandbox` | WASI 沙箱中执行 Python（受限，默认禁用） | `script` / `script_file`, `timeout` |
+| `PythonSandbox` | WASI 沙箱中执行 Python（受限，需在 `enabled_tools` 显式列出） | `script` / `script_file`, `timeout` |
 | `Glob` | 文件匹配 | `pattern`, `path` |
 | `Grep` | 内容搜索 | `pattern`, `path`, `glob`, `context` |
 | `TodoWrite` | 维护 checklist | `todos[{content, status}]` |
+| `PlanDraft` | 保存或取消计划草稿 | `content` |
 | `PlanConfirm` | 确认计划 | 无参数 |
 | `PlanClear` | 清空计划 | 无参数 |
 | `SubAgent` | 启动子代理 | `prompt`, `description`, `fork` |
-| `WebSearch` | 网络搜索 | `query` |
-| `WebFetch` | 网页获取 | `url` |
 
 完整工具说明见 [tools.md](tools.md)。
 
@@ -967,7 +973,6 @@ artifact、输出截断和每个工具的完整协议以 [工具参考](tools.md
 
 可读取的轻量资源：
 
-- `http(s)://...`：读取公开 URL，首次 fetch 后缓存到当前 session artifact，后续 selector 从缓存分页；cache 正文缺失时会重新 fetch
 - `artifact://<id>`：读取被截断工具输出；session 恢复和 fork 后新 artifact 会从已有最大序号继续，旧正文不会被覆盖
 - `skill://list` / `skill://list/all` / `skill://<name>` / `skill://<name>/<relative-path>`：通过当前内置 `Read` provider 列出、诊断或读取可用 skill；列表、正文和 filesystem-backed skill 子资源来自同一 capability snapshot。`skill://all` 是 `skill://list/all` 的兼容别名；built-in/runtime skill 只支持读取正文，不支持子资源
 - `rule://list` / `rule://<name>`：列出或读取可用 rule
@@ -984,7 +989,6 @@ artifact、输出截断和每个工具的完整协议以 [工具参考](tools.md
 示例：
 
 ```jsonl
-{"path":"https://example.com:20-60"}
 {"path":"artifact://bash-0001:1-120"}
 {"path":"skill://debugging"}
 {"path":"skill://local-guide/references/checklist.md:1-40"}
@@ -1142,7 +1146,7 @@ SandboxConfig(signal_mode="off")
 
 ### 注意事项
 
-- MISSION.md 只影响 prompt 文本，不改变工具 surface。禁用工具仍需 `--disable-bash`、白名单或 approval 配置。
+- MISSION.md 只影响 prompt 文本，不改变工具 surface。工具选择使用 `enabled_tools`，授权限制使用 approval 配置。
 - 未覆盖的 core 保持默认内容；普通自定义 section 原样加入，不进行工具名清洗。
 - 当 `MINK_SIGNAL_MODE=off` 时，默认 prompt 不存在 `belief-awareness`；MISSION 也不能创建或覆盖该 core。
 - `# rules` 是 runtime-reserved，不是自定义规则的推荐名称。

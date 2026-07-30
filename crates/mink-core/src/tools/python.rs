@@ -6,7 +6,6 @@ use std::time::{Duration, Instant};
 
 /// Patterns that are blocked in Python scripts for safety.
 /// 已废弃：安全策略交给 OS 进程沙箱处理，不再在工具层做静态字符串过滤。
-
 /// Execute a Python script and return (stdout, stderr, exit_code).
 pub fn execute_script(
     script: &str,
@@ -137,12 +136,6 @@ impl super::runner::ToolExec for PythonTool {
         input: &serde_json::Value,
         ctx: &crate::context::ToolContext,
     ) -> anyhow::Result<super::runner::ToolOutcome> {
-        if ctx.tool_config.tool_disable.disable_python {
-            return Ok(super::runner::ToolOutcome::text(
-                "Error: Python tool is disabled by configuration.".into(),
-            ));
-        }
-
         #[derive(serde::Deserialize)]
         struct Args {
             script: Option<String>,
@@ -200,6 +193,7 @@ impl super::runner::ToolExec for PythonTool {
             exit_code,
             success: exit_code.unwrap_or(0) == 0,
             diagnostics: Vec::new(),
+            plan_command: None,
         })
     }
 }

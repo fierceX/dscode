@@ -1,6 +1,6 @@
 # 架构说明
 
-更新日期：2026-07-25
+更新日期：2026-07-30
 
 本文描述 mink 当前代码结构、模块职责和运行时数据流。面向用户的命令、配置和工作流见
 [USAGE.md](USAGE.md)；完整工具协议见 [tools.md](tools.md)；设计取舍和不变式见
@@ -18,7 +18,7 @@ mink 是一个 Rust 实现的轻量 AI coding agent，默认面向 DeepSeek / Op
 - LLM backend 可注入：默认 OpenAI-compatible streaming backend 支持兼容端点扩展请求字段，宿主也可替换为私有模型、内网网关或厂商 SDK
 - Session 是一等公民，使用 JSONL 追加持久化，支持恢复、重放和压缩
 - LLM 流式输出、工具执行、信号检测、决策恢复构成闭环
-- 工具边界明确：超时、输出大小、写入大小、副作用和禁用开关都可控
+- 工具边界明确：超时、输出大小、写入大小、副作用和模型工具 surface 都可控
 - 工具有统一 metadata 和 approval tier，支持基础审批策略
 - 超长工具输出落 session artifact，可通过 `Read artifact://<id>` 恢复
 - `Read` 当前是内置轻量资源 provider，支持本地文件、artifact、skill、rule 和 session introspection；资源协议所有权属于 `ResourceRouter`
@@ -77,7 +77,7 @@ TurnExecutor (agent/turn.rs)
 │ tools/bash.rs         │ Bash 执行、超时、ANSI 过滤、安全检查、误用拦截
 │ tools/python.rs       │ 宿主 Python 执行
 │ tools/sandbox_python.rs│ WASI CPython 沙箱执行（python-sandbox feature）
-│ tools/web.rs          │ WebSearch / WebFetch
+│ tools/plan.rs         │ PlanDraft / PlanConfirm / PlanClear 类型化命令
 └───────────────────────┘
          │
 ┌─────── 资源与能力层 ───┐
@@ -145,12 +145,13 @@ OrchActor.handle_user_input()
            ├── scavenge thinking/text 中遗漏的工具调用
            ├── store.add_assistant()
            ├── ToolRunner::execute_all()
-           ├── ToolSignalProcessor 更新 belief
-           ├── PlanActionHandler 处理 PlanConfirm / PlanClear
+           ├── PlanActionHandler 将已完成的 PlanCommand 转换为 effect / 压缩请求
            ├── SubAgentCoordinator 启动/收集子代理
+           ├── ToolRunner 统一定稿并保护延迟结果大小
+           ├── ToolSignalProcessor 基于最终结果更新 belief
            ├── store.add_tool_results()
            ├── Display.render_tool_result_detail()
-           ├── SignalCollector → BeliefTracker → DecisionEngine
+           ├── Plan 压缩请求交给 TurnCompactor
            └── 循环结束 → OrchActor::finish_usage() 汇总 billing_turn_id → TurnOutcome
 ```
 
@@ -159,10 +160,13 @@ OrchActor.handle_user_input()
 ```text
 ToolExec::execute()
   -> ToolOutcome { content, conversation_content, exit_code, ... }
-  -> format_tool_result(tool_result_max_bytes)
-       超限时写 artifacts/<id>.txt 并追加 artifact://<id>
-  -> bash noise filter / Read/Write summary / Edit first-line conv content
-  -> ToolRunResult
+  -> format_dispatched_result() -> ToolRunResult
+       普通结果立即执行大小保护、bash noise filter、Read/Write summary 和 Edit conv content
+       Plan/SubAgent 结果保留待定稿标记
+  -> PlanActionHandler / SubAgentCoordinator 完成延迟工作
+  -> finalize_deferred_results()
+       对最终延迟结果执行大小保护，超限时写 artifact 并追加 artifact://<id>
+  -> ToolSignalProcessor 采集最终结果
   -> ConversationStore::add_tool_results()
        使用 conv_content（若非空）否则使用 content
   -> Display::render_tool_result_detail()
@@ -181,7 +185,8 @@ ToolRunResult
   -> None / Inject / Abort
 ```
 
-每个用户输入开始时会重置 belief、decision cooldown 和 StormBreaker 窗口。`MINK_SIGNAL_MODE=off` 时，信号采集、belief 更新、注入和中止逻辑都关闭。
+每个用户输入开始时会重置 belief、ToolSignalProcessor、decision cooldown 和 StormBreaker
+窗口。`MINK_SIGNAL_MODE=off` 时，信号采集、belief 更新、注入和中止逻辑都关闭。
 
 ---
 
@@ -228,7 +233,7 @@ ToolRunResult
 | `agent/prefix.rs` | `PrefixManager`，构建/复用 immutable prefix |
 | `agent/compactor.rs` | `TurnCompactor`，封装同轮压缩防护 |
 | `agent/tool_signals.rs` | 工具信号采集和 belief 更新 |
-| `agent/plan_actions.rs` | PlanConfirm / PlanClear 副作用 |
+| `agent/plan_actions.rs` | 将已完成的 PlanCommand 转换为 turn effect 和压缩请求 |
 | `agent/sub_coordinator.rs` | SubAgent 工具调用的启动与结果注入 |
 | `agent/sub_executor.rs` | 子代理独立 session / fork session 执行 |
 | `agent/belief.rs` | `BeliefTracker` |
@@ -242,18 +247,19 @@ ToolRunResult
 |------|------|
 | `tools/metadata.rs` | `ToolMetadata`、approval tier、结果类型、副作用标记 |
 | `tools/catalog.rs` | `tools.json`、executor registry 和 feature availability 的唯一目录 |
-| `tools/surface.rs` | 按 whitelist、disable、approval、role、backend 和硬依赖解析模型可见工具面 |
+| `tools/surface.rs` | 按 `enabled_tools`、approval、role、backend、feature 和硬依赖解析模型可见工具面 |
 | `tools/approval.rs` | surface 与 runner 共用的非交互审批判定 |
 | `tools/semantic_capabilities.rs` | 工具语义能力 offer、provider binding、scope classifier 和 fingerprint |
 | `tools/runtime_guidance.rs` | 带结构化工具引用的运行时引导消息 |
-| `tools/runner.rs` | `ToolExec` trait、`TOOL_REGISTRY`、enabled/disabled gate、approval、并发调度、结果截断、artifact spill 和内置控制工具 |
+| `tools/runner.rs` | `ToolExec` trait、`TOOL_REGISTRY`、resolved surface gate、并发调度、结果截断、artifact spill 和内置控制工具 |
 | `tools/file.rs` | `ReadTool`、`WriteTool`、`EditTool`、selector、resource URL、anchored patch |
 | `tools/snapshot.rs` | 文件 snapshot、tag、行 hash 校验 |
 | `tools/search.rs` | `GlobTool`、`GrepTool` |
 | `tools/vfs.rs` | `ReadOnlyFileSystem`、`VfsScope`、结构化请求/结果、虚拟路径规范化、请求校验和结果格式化 |
 | `tools/bash.rs` | `BashTool`、危险命令检查、误用拦截 |
 | `tools/python.rs` | `PythonTool` |
-| `tools/web.rs` | `WebSearchTool`、`WebFetchTool` |
+| `tools/plan.rs` | `PlanDraftTool`、`PlanConfirmTool`、`PlanClearTool` |
+| `session/plan.rs` | `PlanStore` 与原子草稿/确认/清理转换 |
 | `assets/tools.json` | 提供给模型的工具 schema |
 
 新增工具时需要同时实现 `ToolExec::metadata()`、注册 `TOOL_REGISTRY`、更新 `assets/tools.json`，并在 metadata 中声明 approval tier、result kind、副作用、`storm_exempt`、`internal` 或 `spawns_sub_agent`。若工具参与跨工具工作流，还必须在 `semantic_capabilities.rs` 显式声明受支持的语义能力和调用 scope；schema 只描述该工具自身合同，不得静态推荐其他工具。
@@ -278,7 +284,7 @@ Core sections
   -> allowlisted MISSION core overrides
   -> active tool fragments
   -> resolved capability workflows
-  -> runtime/external/session sections
+  -> runtime/external sections
   -> validate generated tool references
   -> render
 ```
@@ -286,8 +292,14 @@ Core sections
 MISSION 只能覆盖 `agent-identity`、`environment`、`execution-codes`、
 `belief-awareness` 和 `output-language` 中当前实际存在的 core section。工具 prompt、
 workflow、`runtime-capabilities`、`rules`、instruction files、索引、selected skills 和
-current plan 属于 runtime-reserved section；普通自定义一级标题作为外部 section 追加。
+`current-plan` 属于 runtime-reserved section；普通自定义一级标题作为外部 section 追加。
 runtime-reserved section 冲突会在启动时 fail fast，不保留旧 alias。
+
+`<current-plan>` 不属于 `PromptDocument` 或 `ImmutablePrefix`。`TurnExecutor` 在每次 LLM
+请求前读取当前 `plan.md`，将其作为唯一的动态 system message 插入活跃消息投影；该消息不写入
+conversation，也不进入压缩摘要。PlanConfirm / PlanClear 因此能在同一 turn 的下一次请求生效，
+同时保持稳定 system/tools prefix 不变。两者产生的压缩请求统一交给 `TurnCompactor`，服从同轮
+一次防护，并将压缩失败返回当前 turn。
 
 ### Registered Resources and Capabilities
 
@@ -298,7 +310,6 @@ runtime-reserved section 冲突会在启动时 fail fast，不保留旧 alias。
 ```text
 Read.path
   ├── registered scheme://... -> ResourceRouter -> ResourceHandler
-  ├── http(s)://...           -> URL artifact cache
   ├── ordinary path + VFS     -> ReadOnlyFileSystem
   └── ordinary path           -> local filesystem + editable snapshot
 ```
@@ -307,7 +318,7 @@ Read.path
 
 | Scheme | 来源 | 说明 |
 |--------|------|------|
-| `artifact://` | session artifacts | 读取被截断工具输出或 URL cache 正文 |
+| `artifact://` | session artifacts | 读取被截断工具输出 |
 | `skill://` | `CapabilitySnapshot.skills` | 列出/读取当前 capability snapshot 中的 skill |
 | `rule://` | `CapabilitySnapshot.rules` | 列出/读取当前 capability snapshot 中的 rule |
 | `session://` | current session files | 读取当前 session 摘要、stats、messages、从 conversation JSONL 生成的有损历史 transcript 和 artifacts |
@@ -344,10 +355,10 @@ Read / Glob / Grep
 
 注入链路为 `AgentOptions` / `AgentRuntimeConfig` → runtime builder → `AgentSharedContext` → `ToolContext`。未显式设置 `resource_session_id` 时使用当前 runtime session id。子代理复用同一个 `Arc<dyn ReadOnlyFileSystem>`，继承父代理的 `resource_session_id`，但使用自己的 `agent_session_id`，从而共享同一知识库作用域并保留调用方身份。
 
-VFS 只接管普通路径。`artifact://`、`skill://`、`rule://`、`session://` 和 `http(s)://` 仍先走资源读取路径。Grep 对 registered resource 直接搜索 handler 返回的文本，不要求暴露底层物理路径。虚拟路径使用 POSIX 分隔符和词法规范化，拒绝越过虚拟根目录。Glob/regex 请求由工具层先校验，后端返回结构化路径或匹配行，`mink-core` 统一输出格式和 100KB 搜索输出保护。请求中的 `max_files` / `max_results` 是后端契约，后端必须自行遵守；核心不提供第二套 VFS 搜索实现。
+VFS 只接管普通路径。`artifact://`、`skill://`、`rule://` 和 `session://` 仍先走资源读取路径。Grep 对 registered resource 直接搜索 handler 返回的文本，不要求暴露底层物理路径。虚拟路径使用 POSIX 分隔符和词法规范化，拒绝越过虚拟根目录。Glob/regex 请求由工具层先校验，后端返回结构化路径或匹配行，`mink-core` 统一输出格式和 100KB 搜索输出保护。请求中的 `max_files` / `max_results` 是后端契约，后端必须自行遵守；核心不提供第二套 VFS 搜索实现。
 
 虚拟文件是只读资源，不创建 anchored Edit snapshot。因此 VFS runtime 不向模型暴露 `Edit`；
-若白名单显式包含 `Edit`，启动会因缺少本地 editable snapshot provider 而失败。`Write` 仍是
+若 `enabled_tools` 显式包含 `Edit`，启动会因缺少本地 editable snapshot provider 而失败。`Write` 仍是
 本地文件操作，不会修改 VFS 内容。具体数据库适配不进入核心依赖；`crates/mink-core/examples/redb_vfs.rs`
 展示了按 `resource_session_id` 分区、惰性范围扫描的 redb 后端。
 
@@ -439,7 +450,7 @@ session 根目录如何由 `home`、`cwd`、`session_id` 推导。当前有四�
 ## 关键不变式
 
 - 每个用户输入开始时重置 StormBreaker、belief、decision cooldown 和 interrupt。
-- 同一用户输入的 tool_use 内循环最多压缩一次。
+- 同一用户输入的 tool_use 内循环最多压缩一次，包括 PlanConfirm / PlanClear 请求的强制压缩。
 - `conversation.jsonl` 是完整的 append-only 消息历史；压缩只推进 `context-state.json` 中的投影边界。
 - JSONL 续写先处理未换行尾部：完整 JSON 补换行，半截 JSON 截断后再以单缓冲区追加新记录。
 - `context-state.json` 通过同目录临时文件和 rename 原子替换，内存状态只在替换成功后更新。
@@ -447,6 +458,7 @@ session 根目录如何由 `home`、`cwd`、`session_id` 推导。当前有四�
 - 正常 turn、压缩和最终回复提取不加载完整历史；恢复时流式解析并校验 JSONL，但只保留并缓存活跃后缀。
 - 投影边界必须位于完整历史内，并且不能拆开 tool call/result 协议。
 - 所有压缩统一调用 LLM 摘要；摘要作为动态消息加入活跃投影，不改变 immutable system/tools prefix。
+- 当前计划与压缩摘要一样属于逐请求动态 system state；两者都不能进入 immutable prefix 或持久化 conversation。
 - 压缩请求使用 turn/编排器传入的活动真实模型名和别名，并通过 runtime 注入的共享 `LlmBackend` 发送。
 - 子代理启动时使用从父配置克隆并写入当前活动模型的 child config，LLM backend 复用父 runtime 实例。
 - 压缩阈值、响应预留、热尾部和摘要输出预算来自显式配置，不根据上下文窗口推断策略。
@@ -457,10 +469,10 @@ session 根目录如何由 `home`、`cwd`、`session_id` 推导。当前有四�
 - `ImmutablePrefix` 变更必须通过 prefix manager / invalidate 路径。
 - `ConversationStore` append 时保持活跃后缀缓存一致；显式完整历史读取是一次性读盘操作，缓存继续保持为活跃后缀。
 - `ToolRunner::format_tool_result()` 是工具输出进入 LLM/UI 前的最大字节保护。
-- `ModelToolSurface` 在 session/prefix 构造前统一决定 schema 可见性；`ToolRunner::execute_all()` 仍在 StormBreaker 前保留 enabled/disabled 和同源 approval 纵深防线。
+- `ModelToolSurface` 在 session/prefix 构造前统一决定 schema 可见性；`ToolRunner::execute_all()` 在 StormBreaker 前再次校验同一 resolved surface，形成执行层纵深防线。
 - 超长工具输出必须保存为当前 session artifact；初始化从索引最大序号继续，正文使用独占创建，恢复和 fork 后不得覆盖旧 artifact。
 - `Read` 本地非 raw 输出记录 snapshot；raw 和 immutable resource 不生成可编辑 snapshot。
-- registered resource 必须先于 VFS 处理；未知非 web scheme fail closed，不落入普通路径或 VFS。
+- registered resource 必须先于 VFS 处理；未知 URL-like scheme fail closed，不落入普通路径或 VFS。
 - 未注入 VFS 时，`Read` / `Glob` / `Grep` 必须继续执行原有本地实现；VFS 分支不得改变本地路径语义或测试。
 - prompt skill index、selected skills、`skill://` 和 `rule://` 必须来自同一 `CapabilitySnapshot`；`ImmutablePrefix` 的依赖 fingerprint 同时包含 capability snapshot、tool surface、provider bindings 和 active prompt workflows。
 - 虚拟 `Read` 永远不生成可编辑 snapshot；VFS surface 隐藏 `Edit`，`Write` 仍只针对本地文件系统。

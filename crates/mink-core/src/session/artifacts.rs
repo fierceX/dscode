@@ -12,7 +12,6 @@ pub struct ArtifactRecord {
     pub bytes: u64,
     pub created_at: String,
     pub description: String,
-    pub source: Option<String>,
 }
 
 #[derive(Debug)]
@@ -49,7 +48,6 @@ impl ArtifactManager {
         &self,
         tool: &str,
         description: &str,
-        source: Option<&str>,
         content: &str,
     ) -> Result<ArtifactRecord> {
         self.ensure()?;
@@ -76,7 +74,6 @@ impl ArtifactManager {
             bytes: content.len() as u64,
             created_at: crate::session::stats::chrono_now_rfc3339(),
             description: description.to_string(),
-            source: source.map(ToString::to_string),
         };
         self.append_index(&record)?;
         Ok(record)
@@ -108,30 +105,6 @@ impl ArtifactManager {
             }
         }
         bail!("Error: artifact not found: {id}");
-    }
-
-    pub fn find_latest_by_source(
-        &self,
-        tool: &str,
-        source: &str,
-    ) -> Result<Option<ArtifactRecord>> {
-        let index = match std::fs::read_to_string(&self.index_path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e.into()),
-        };
-        for line in index.lines().rev() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            let Ok(record) = serde_json::from_str::<ArtifactRecord>(line) else {
-                continue;
-            };
-            if record.tool == tool && record.source.as_deref() == Some(source) {
-                return Ok(Some(record));
-            }
-        }
-        Ok(None)
     }
 
     fn next_id(&self, tool: &str) -> String {
@@ -222,9 +195,7 @@ mod tests {
     #[test]
     fn write_and_read_artifact() {
         let manager = temp_manager("write-read");
-        let record = manager
-            .write_text("Bash", "full output", Some("echo"), "hello")
-            .unwrap();
+        let record = manager.write_text("Bash", "full output", "hello").unwrap();
         assert_eq!(record.id, "bash-0001");
         assert_eq!(manager.read_text(&record.id).unwrap(), "hello");
         let _ = std::fs::remove_dir_all(manager.root);
@@ -235,14 +206,14 @@ mod tests {
         let manager = temp_manager("resume-counter");
         let root = manager.root.clone();
         let old = manager
-            .write_text("Bash", "old output", None, "inherited")
+            .write_text("Bash", "old output", "inherited")
             .unwrap();
         drop(manager);
 
         let resumed = ArtifactManager::new(root.clone());
         resumed.ensure().unwrap();
         let new = resumed
-            .write_text("Bash", "new output", None, "continued")
+            .write_text("Bash", "new output", "continued")
             .unwrap();
 
         assert_eq!(old.id, "bash-0001");
@@ -259,7 +230,7 @@ mod tests {
         std::fs::write(manager.root.join("bash-0001.txt"), "orphaned content").unwrap();
 
         let record = manager
-            .write_text("Bash", "new output", None, "new content")
+            .write_text("Bash", "new output", "new content")
             .unwrap();
 
         assert_eq!(record.id, "bash-0002");
@@ -267,50 +238,6 @@ mod tests {
             std::fs::read_to_string(manager.root.join("bash-0001.txt")).unwrap(),
             "orphaned content"
         );
-        let _ = std::fs::remove_dir_all(manager.root);
-    }
-
-    #[test]
-    fn finds_latest_artifact_by_tool_and_source() {
-        let manager = temp_manager("find-source");
-        manager
-            .write_text("ReadUrl", "old", Some("https://example.com"), "old")
-            .unwrap();
-        let latest = manager
-            .write_text("ReadUrl", "new", Some("https://example.com"), "new")
-            .unwrap();
-        manager
-            .write_text("ReadUrl", "other", Some("https://other.example"), "other")
-            .unwrap();
-
-        let found = manager
-            .find_latest_by_source("ReadUrl", "https://example.com")
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(found.id, latest.id);
-        assert_eq!(manager.read_text(&found.id).unwrap(), "new");
-        let _ = std::fs::remove_dir_all(manager.root);
-    }
-
-    #[test]
-    fn source_lookup_skips_corrupt_index_lines() {
-        let manager = temp_manager("find-source-corrupt");
-        let latest = manager
-            .write_text("ReadUrl", "new", Some("https://example.com"), "new")
-            .unwrap();
-        let mut index = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&manager.index_path)
-            .unwrap();
-        writeln!(index, "{{not-json").unwrap();
-
-        let found = manager
-            .find_latest_by_source("ReadUrl", "https://example.com")
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(found.id, latest.id);
         let _ = std::fs::remove_dir_all(manager.root);
     }
 
@@ -337,10 +264,8 @@ mod tests {
     #[test]
     fn sanitizes_tool_name_for_id() {
         let manager = temp_manager("sanitize");
-        let record = manager
-            .write_text("Web Fetch", "full output", None, "x")
-            .unwrap();
-        assert_eq!(record.id, "webfetch-0001");
+        let record = manager.write_text("Tool Name", "full output", "x").unwrap();
+        assert_eq!(record.id, "toolname-0001");
         let _ = std::fs::remove_dir_all(manager.root);
     }
 }

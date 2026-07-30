@@ -35,8 +35,6 @@ impl RecoveryPolicy {
             ResourceRead,
             ResourceSearch,
             FocusedVerificationExec,
-            WebSearch,
-            HttpFetch,
         ] {
             let Some(provider) = resolved.primary_provider(capability).copied() else {
                 continue;

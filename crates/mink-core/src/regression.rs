@@ -100,6 +100,20 @@ impl LlmBackend for RecordingCompactionBackend {
     }
 }
 
+struct FailingCompactionBackend;
+
+#[async_trait::async_trait]
+impl LlmBackend for FailingCompactionBackend {
+    fn name(&self) -> &str {
+        "failing-compaction"
+    }
+
+    async fn stream(&self, request: LlmRequest) -> anyhow::Result<LlmResponseStream> {
+        assert!(matches!(request.purpose, LlmPurpose::Compaction));
+        anyhow::bail!("planned compaction failure")
+    }
+}
+
 #[derive(Debug, PartialEq)]
 struct CapturedRoutedRequest {
     purpose: &'static str,
@@ -812,7 +826,7 @@ async fn disabled_tool_call_persists_error_result_instead_of_being_dropped() -> 
         false,
         300,
         |cfg| {
-            cfg.tool_disable.disable_bash = true;
+            cfg.enabled_tools = Some(vec!["Read".into()]);
         },
         None,
     )
@@ -857,7 +871,7 @@ async fn disabled_tool_call_persists_error_result_instead_of_being_dropped() -> 
         lines[2]["content"][0]["content"]
             .as_str()
             .unwrap()
-            .contains("Tool 'Bash' is disabled by configuration"),
+            .contains("Tool 'Bash' is unavailable"),
         "{}",
         lines[2]
     );
@@ -1638,73 +1652,228 @@ async fn orchestrator_manual_compact_uses_active_model_and_shared_backend() -> a
 }
 
 #[tokio::test]
-async fn plan_confirm_and_clear_apply_file_side_effects_and_invalidate_prefix() -> anyhow::Result<()>
-{
+async fn plan_confirm_and_clear_preserve_immutable_prefix() -> anyhow::Result<()> {
     let h = harness("plan-actions").await?;
-    tokio::fs::write(&h.ctx.plan_draft_path, "1. ship it\n").await?;
     let prefix = PrefixManager::new(h.ctx.clone());
-    let _ = prefix.ensure()?;
+    let (stable_prompt, stable_tools) = prefix.ensure()?;
+    let stable_fingerprint = h
+        .ctx
+        .immutable_prefix
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .fingerprint()
+        .to_string();
+    assert!(!stable_prompt.contains("<current-plan>"));
+
+    let handler = PlanActionHandler;
+    let tool_ctx = crate::context::ToolContext::from(h.ctx.as_ref());
+    let mut effects = Vec::new();
+    let draft_outcome = crate::tools::runner::ToolExec::execute(
+        &crate::tools::plan::PlanDraftTool,
+        &serde_json::json!({"content": "1. ship it\n"}),
+        &tool_ctx,
+    )?;
+    let mut draft = plan_result("PlanDraft", draft_outcome);
+    assert_eq!(handler.handle(&mut draft, &mut effects), None);
+    assert_eq!(draft.content, "Plan draft saved.");
+    assert_eq!(
+        tokio::fs::read_to_string(&h.ctx.plan_draft_path).await?,
+        "1. ship it\n"
+    );
+    assert!(effects.is_empty());
     assert!(h.ctx.immutable_prefix.lock().unwrap().is_some());
 
-    let handler = PlanActionHandler::new(h.ctx.clone());
-    let mut effects = Vec::new();
-    let mut confirm = internal_result("PlanConfirm");
-    handler
-        .handle(
-            &mut confirm,
-            &mut effects,
-            &prefix,
-            crate::llm::client::LlmModelTarget::new("test-model", None),
-        )
-        .await;
+    let confirm_outcome = crate::tools::runner::ToolExec::execute(
+        &crate::tools::plan::PlanConfirmTool,
+        &serde_json::json!({}),
+        &tool_ctx,
+    )?;
+    let mut confirm = plan_result("PlanConfirm", confirm_outcome);
+    assert_eq!(
+        handler.handle(&mut confirm, &mut effects),
+        Some("plan_confirm")
+    );
     assert_eq!(confirm.content, "Plan confirmed and locked in.");
     assert_eq!(
         tokio::fs::read_to_string(&h.ctx.plan_path).await?,
         "1. ship it\n"
     );
-    assert_eq!(tokio::fs::read_to_string(&h.ctx.plan_draft_path).await?, "");
+    assert!(!h.ctx.plan_draft_path.exists());
     assert!(matches!(effects.as_slice(), [TurnEffect::PlanConfirmed]));
-    assert!(h.ctx.immutable_prefix.lock().unwrap().is_none());
+    let (after_confirm_prompt, after_confirm_tools) = prefix.ensure()?;
+    assert_eq!(after_confirm_prompt, stable_prompt);
+    assert_eq!(after_confirm_tools, stable_tools);
+    assert_eq!(
+        h.ctx
+            .immutable_prefix
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .fingerprint(),
+        stable_fingerprint
+    );
 
-    let _ = prefix.ensure()?;
-    let mut clear = internal_result("PlanClear");
-    handler
-        .handle(
-            &mut clear,
-            &mut effects,
-            &prefix,
-            crate::llm::client::LlmModelTarget::new("test-model", None),
-        )
-        .await;
+    let clear_outcome = crate::tools::runner::ToolExec::execute(
+        &crate::tools::plan::PlanClearTool,
+        &serde_json::json!({}),
+        &tool_ctx,
+    )?;
+    let mut clear = plan_result("PlanClear", clear_outcome);
+    assert_eq!(handler.handle(&mut clear, &mut effects), Some("plan_clear"));
     assert_eq!(clear.content, "Plan cleared.");
-    assert_eq!(tokio::fs::read_to_string(&h.ctx.plan_path).await?, "");
+    assert!(!h.ctx.plan_path.exists());
     assert!(matches!(
         effects.as_slice(),
         [TurnEffect::PlanConfirmed, TurnEffect::PlanCleared]
     ));
-    assert!(h.ctx.immutable_prefix.lock().unwrap().is_none());
+    let (after_clear_prompt, after_clear_tools) = prefix.ensure()?;
+    assert_eq!(after_clear_prompt, stable_prompt);
+    assert_eq!(after_clear_tools, stable_tools);
+    Ok(())
+}
+
+#[tokio::test]
+async fn plan_compaction_obeys_the_existing_single_turn_guard() -> anyhow::Result<()> {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let backend = Arc::new(RecordingCompactionBackend {
+        requests: requests.clone(),
+    });
+    let h = harness_with_config(
+        "plan-single-compaction",
+        false,
+        300,
+        |config| {
+            config.context_compact_pct = 1;
+            config.context_compact_tail_tokens = 1;
+        },
+        Some(backend),
+    )
+    .await?;
+    for index in 0..4 {
+        h.ctx
+            .store
+            .add_user(&format!("history {index}: {}", "x".repeat(12_000)))
+            .await?;
+        h.ctx
+            .store
+            .add_assistant(&format!("history response {index}"), "", &[])
+            .await?;
+    }
+    tokio::fs::write(&h.ctx.plan_draft_path, "1. execute\n").await?;
+
+    let llm = Arc::new(MockLlmClient::new(
+        "flash",
+        vec![
+            vec![
+                Ok(Event::ToolCall(tool_call(
+                    "PlanConfirm",
+                    "call_plan_confirm",
+                    json!({}),
+                ))),
+                Ok(Event::Stop(StopEvent {
+                    reason: "tool_use".into(),
+                })),
+            ],
+            vec![Ok(Event::Stop(StopEvent {
+                reason: "end_turn".into(),
+            }))],
+        ],
+    ));
+    let mut executor = TurnExecutor::new(h.ctx.clone(), llm_client_from_mock(llm));
+    let (decision, effects) = executor.execute("confirm the plan", None).await?;
+
+    assert_eq!(decision, TurnDecision::Stop);
+    assert!(matches!(effects.as_slice(), [TurnEffect::PlanConfirmed]));
+    assert_eq!(requests.lock().unwrap().len(), 1);
+    assert!(h.ctx.plan_path.exists());
+    assert!(!h.ctx.plan_draft_path.exists());
+    Ok(())
+}
+
+#[tokio::test]
+async fn plan_compaction_failure_is_propagated_from_the_turn() -> anyhow::Result<()> {
+    let h = harness_with_config(
+        "plan-compaction-error",
+        false,
+        300,
+        |config| {
+            config.context_compact_pct = 100;
+            config.context_compact_tail_tokens = 1;
+        },
+        Some(Arc::new(FailingCompactionBackend)),
+    )
+    .await?;
+    for index in 0..3 {
+        h.ctx.store.add_user(&format!("history {index}")).await?;
+        h.ctx
+            .store
+            .add_assistant(&format!("history response {index}"), "", &[])
+            .await?;
+    }
+    tokio::fs::write(&h.ctx.plan_draft_path, "1. execute\n").await?;
+
+    let llm = Arc::new(MockLlmClient::new(
+        "flash",
+        vec![vec![
+            Ok(Event::ToolCall(tool_call(
+                "PlanConfirm",
+                "call_plan_confirm",
+                json!({}),
+            ))),
+            Ok(Event::Stop(StopEvent {
+                reason: "tool_use".into(),
+            })),
+        ]],
+    ));
+    let mut executor = TurnExecutor::new(h.ctx.clone(), llm_client_from_mock(llm));
+    let error = executor
+        .execute("confirm the plan", None)
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("planned compaction failure"), "{error}");
+    assert!(h.ctx.plan_path.exists());
+    assert!(!h.ctx.plan_draft_path.exists());
     Ok(())
 }
 
 #[tokio::test]
 async fn plan_confirm_without_draft_returns_error_result() -> anyhow::Result<()> {
     let h = harness("plan-empty").await?;
-    let prefix = PrefixManager::new(h.ctx.clone());
-    let _ = prefix.ensure()?;
-    let handler = PlanActionHandler::new(h.ctx.clone());
-    let mut effects = Vec::new();
-    let mut confirm = internal_result("PlanConfirm");
-    handler
-        .handle(
-            &mut confirm,
-            &mut effects,
-            &prefix,
-            crate::llm::client::LlmModelTarget::new("test-model", None),
-        )
-        .await;
-    assert_eq!(confirm.content, "Error: no plan draft found to confirm.");
-    assert!(effects.is_empty());
-    assert!(h.ctx.immutable_prefix.lock().unwrap().is_some());
+    let tool_ctx = crate::context::ToolContext::from(h.ctx.as_ref());
+    let error = crate::tools::runner::ToolExec::execute(
+        &crate::tools::plan::PlanConfirmTool,
+        &serde_json::json!({}),
+        &tool_ctx,
+    )
+    .unwrap_err();
+    assert_eq!(error.to_string(), "no plan draft found to confirm");
+    Ok(())
+}
+
+#[tokio::test]
+async fn plan_draft_empty_content_cancels_and_reports_cancellation() -> anyhow::Result<()> {
+    let h = harness("plan-draft-cancel").await?;
+    let tool_ctx = crate::context::ToolContext::from(h.ctx.as_ref());
+    crate::tools::runner::ToolExec::execute(
+        &crate::tools::plan::PlanDraftTool,
+        &serde_json::json!({"content": "1. inspect\n"}),
+        &tool_ctx,
+    )?;
+    assert!(h.ctx.plan_draft_path.exists());
+
+    let outcome = crate::tools::runner::ToolExec::execute(
+        &crate::tools::plan::PlanDraftTool,
+        &serde_json::json!({"content": ""}),
+        &tool_ctx,
+    )?;
+
+    assert_eq!(outcome.content, "Plan draft cancelled.");
+    assert!(!h.ctx.plan_draft_path.exists());
     Ok(())
 }
 
@@ -2252,5 +2421,15 @@ fn internal_result(name: &str) -> ToolRunResult {
         sub_agent_fork: false,
         exit_code: None,
         signals: Vec::new(),
+        plan_command: None,
+        needs_finalization: false,
     }
+}
+
+fn plan_result(name: &str, outcome: crate::tools::runner::ToolOutcome) -> ToolRunResult {
+    let mut result = internal_result(name);
+    result.content = outcome.content;
+    result.plan_command = outcome.plan_command;
+    result.needs_finalization = true;
+    result
 }

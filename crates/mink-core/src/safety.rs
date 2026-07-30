@@ -15,7 +15,6 @@ pub enum SafetyDecision {
     Block(&'static str),
 }
 
-
 pub fn deny_bash_command_reason(command: &str) -> Option<&'static str> {
     let trimmed = command.trim();
     if trimmed.is_empty() {

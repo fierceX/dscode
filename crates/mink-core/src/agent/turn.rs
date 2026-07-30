@@ -91,7 +91,7 @@ impl TurnExecutor {
             prefix,
             compactor: crate::agent::compactor::TurnCompactor::new(ctx.clone()),
             signal_processor: crate::agent::tool_signals::ToolSignalProcessor::new(),
-            plan_actions: crate::agent::plan_actions::PlanActionHandler::new(ctx.clone()),
+            plan_actions: crate::agent::plan_actions::PlanActionHandler,
             sub_agents: crate::agent::sub_coordinator::SubAgentCoordinator::new(
                 ctx.clone(),
                 sub_agent_config,
@@ -126,7 +126,14 @@ impl TurnExecutor {
         self.prefix.ensure()
     }
 
-    /// 尝试上下文压缩（auto 或 preflight）。成功时更新 messages/system_prompt/tools_json。
+    fn project_request_messages(
+        &self,
+        messages: &[serde_json::Value],
+    ) -> Result<Vec<serde_json::Value>> {
+        crate::session::plan::project_current_plan(&self.ctx.plan_path, messages)
+    }
+
+    /// 通过 turn 级统一守卫尝试上下文压缩。成功时更新 messages/system_prompt/tools_json。
     /// 返回 true 表示进行了压缩。
     async fn try_compact(
         &mut self,
@@ -440,14 +447,14 @@ impl TurnExecutor {
     }
 
     /// 执行一轮中的所有工具调用（Phase 3）。
-    /// 处理信号采集、信念追踪、PlanClear/PlanConfirm、子代理生成与收集、持久化。
+    /// 处理 Plan 状态转换、子代理生成与收集、结果定稿、信号采集和持久化。
     #[allow(clippy::too_many_arguments)]
     async fn execute_tools_inner(
         &mut self,
         calls: Vec<ToolCallEvent>,
         mut belief: Option<&mut crate::agent::belief::BeliefTracker>,
         effects: &mut Vec<TurnEffect>,
-    ) -> Result<()> {
+    ) -> Result<Option<&'static str>> {
         self.tool_call_count += calls.len() as u32;
         let (calls_to_execute, mut guarded_results) = self.apply_signal_recovery_guard(calls);
         let mut results = if calls_to_execute.is_empty() {
@@ -459,18 +466,22 @@ impl TurnExecutor {
         let results = guarded_results;
 
         let mut prepared_results = Vec::new();
+        let mut plan_compaction_trigger = None;
         for mut result in results {
-            let model_label = self.llm.model_label();
-            self.signal_processor
-                .process(&mut result, belief.as_deref_mut(), &self.ctx, model_label)
-                .await;
-            self.plan_actions
-                .handle(&mut result, effects, &self.prefix, self.llm.model_target())
-                .await;
+            if let Some(trigger) = self.plan_actions.handle(&mut result, effects) {
+                plan_compaction_trigger = Some(trigger);
+            }
             prepared_results.push(result);
         }
 
-        let processed_results = self.sub_agents.process(prepared_results).await;
+        let mut processed_results = self.sub_agents.process(prepared_results).await;
+        self.tools.finalize_deferred_results(&mut processed_results);
+        for result in &mut processed_results {
+            let model_label = self.llm.model_label();
+            self.signal_processor
+                .process(result, belief.as_deref_mut(), &self.ctx, model_label)
+                .await;
+        }
 
         let tool_results: Vec<ToolResult> = processed_results
             .iter()
@@ -509,7 +520,7 @@ impl TurnExecutor {
                     exit_code: r.exit_code,
                 });
         }
-        Ok(())
+        Ok(plan_compaction_trigger)
     }
 
     fn apply_signal_recovery_guard(
@@ -681,9 +692,10 @@ impl TurnExecutor {
             // Phase 0: 上下文压缩
             self.try_compact("auto", &mut messages, &mut system_prompt, &mut tools_json)
                 .await?;
+            let mut request_messages = self.project_request_messages(&messages)?;
             if !self.compactor.compacted_this_turn() {
                 let estimated_tokens = crate::llm::transport::estimate_openai_context_tokens(
-                    &messages,
+                    &request_messages,
                     &tools_json,
                     &system_prompt,
                 )?;
@@ -697,10 +709,11 @@ impl TurnExecutor {
                         &mut tools_json,
                     )
                     .await?;
+                    request_messages = self.project_request_messages(&messages)?;
                 }
             }
             let estimated_tokens = crate::llm::transport::estimate_openai_context_tokens(
-                &messages,
+                &request_messages,
                 &tools_json,
                 &system_prompt,
             )?;
@@ -715,7 +728,7 @@ impl TurnExecutor {
             // Phase 1: LLM 流式响应
             let stream_output = loop {
                 match self
-                    .stream_llm_response(&messages, &system_prompt, &tools_json)
+                    .stream_llm_response(&request_messages, &system_prompt, &tools_json)
                     .await
                 {
                     Ok(output) => break output,
@@ -736,6 +749,7 @@ impl TurnExecutor {
                         {
                             return Err(error);
                         }
+                        request_messages = self.project_request_messages(&messages)?;
                         self.ctx
                             .display
                             .render_info("Context overflow detected; compacted and retrying once.");
@@ -771,8 +785,16 @@ impl TurnExecutor {
                 .await?;
 
             // Phase 3: 工具执行
-            if !calls.is_empty() {
+            let plan_compaction_trigger = if calls.is_empty() {
+                None
+            } else {
                 self.execute_tools_inner(calls, belief.as_deref_mut(), &mut effects)
+                    .await?
+            };
+
+            if let Some(trigger) = plan_compaction_trigger {
+                messages = self.ctx.compaction.active_messages().await?;
+                self.try_compact(trigger, &mut messages, &mut system_prompt, &mut tools_json)
                     .await?;
             }
 
@@ -826,6 +848,8 @@ fn blocked_by_signal_recovery(
         sub_agent_fork: false,
         exit_code: None,
         signals: Vec::new(),
+        plan_command: None,
+        needs_finalization: false,
     }
 }
 

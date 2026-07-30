@@ -131,11 +131,8 @@ Rust core 会在 `conversation.jsonl` 中完整保留历史，并通过 `context
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `allow_bash` | `True` | 是否启用 Bash 工具 |
-| `allow_python` | `True` | 是否启用 Python 工具 |
-| `allow_network` | `True` | 是否启用 WebSearch/WebFetch 工具 |
-| `allow_sub_agent` | `True` | 是否启用 SubAgent 工具 |
-| `bash_allow_commands` | `[]` | 命令白名单（空 = 使用内置黑名单） |
+| `enabled_tools` | `None` | 精确工具选择；`None` 使用默认集合，`[]` 禁用全部，显式列出 `PythonSandbox` 才启用它 |
+| `allow_network` | `True` | 是否允许沙箱进程访问网络（LLM API 需要） |
 
 ### 资源限制
 
@@ -222,7 +219,10 @@ MINK_SDK_FEATURES="sdk-bin python-sandbox" python scripts/build_wheel.py
         },
         {
             "name": "Edit",
-            "input": {"path": "src/handler.rs", "old_string": "...", "new_string": "..."},
+            "input": {
+                "path": "src/handler.rs",
+                "patch": "@src/handler.rs#A1B2\nreplace 42:\n+    Ok(value)"
+            },
             "type": "tool_call"
         }
     ],

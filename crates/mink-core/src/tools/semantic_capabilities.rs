@@ -23,9 +23,8 @@ pub enum ToolSemanticCapability {
     HostPythonExec,
     SandboxedPythonExec,
     DataCompute,
-    WebSearch,
-    HttpFetch,
     TodoState,
+    PlanDraft,
     PlanConfirm,
     PlanClear,
     Delegation,
@@ -44,14 +43,12 @@ pub enum CapabilityUseScope {
     LocalPath,
     LocalNonRawPath,
     RegisteredResource,
-    HttpUrl,
     FocusedVerificationCommand,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapabilityAvailability {
     Always,
-    WebEnabled,
     LocalFilesystemBackend,
 }
 
@@ -90,10 +87,10 @@ pub struct ToolCapabilityRegistry {
     offers: &'static [CapabilityOfferSpec],
 }
 
-use CapabilityAvailability::{Always, LocalFilesystemBackend, WebEnabled};
+use CapabilityAvailability::{Always, LocalFilesystemBackend};
 use CapabilityUseScope::{
-    FilesystemPath, FocusedVerificationCommand, HttpUrl, LocalNonRawPath, LocalPath,
-    RegisteredResource, Unconditional,
+    FilesystemPath, FocusedVerificationCommand, LocalNonRawPath, LocalPath, RegisteredResource,
+    Unconditional,
 };
 use ProviderTier::{Fallback, Specialized};
 use ToolSemanticCapability::*;
@@ -129,7 +126,6 @@ static OFFERS: &[CapabilityOfferSpec] = &[
         LocalFilesystemBackend,
         LocalNonRawPath
     ),
-    offer!("Read", HttpFetch, Specialized, 80, WebEnabled, HttpUrl),
     offer!(
         "Glob",
         PathDiscovery,
@@ -230,17 +226,16 @@ static OFFERS: &[CapabilityOfferSpec] = &[
         Unconditional
     ),
     offer!(
-        "WebSearch",
-        WebSearch,
-        Specialized,
-        100,
-        WebEnabled,
-        Unconditional
-    ),
-    offer!("WebFetch", HttpFetch, Specialized, 100, WebEnabled, HttpUrl),
-    offer!(
         "TodoWrite",
         TodoState,
+        Specialized,
+        100,
+        Always,
+        Unconditional
+    ),
+    offer!(
+        "PlanDraft",
+        PlanDraft,
         Specialized,
         100,
         Always,
@@ -427,7 +422,6 @@ fn availability_matches(
 ) -> bool {
     match availability {
         CapabilityAvailability::Always => true,
-        CapabilityAvailability::WebEnabled => context.web_enabled(),
         CapabilityAvailability::LocalFilesystemBackend => {
             context.filesystem_backend() == FilesystemBackend::Local
         }
@@ -539,17 +533,6 @@ pub fn call_satisfies_capability(
                 return false;
             };
             call.resource_router.can_handle(&selection.path)
-        }
-        CapabilityUseScope::HttpUrl => {
-            let key = if provider.tool == "WebFetch" {
-                "url"
-            } else {
-                "path"
-            };
-            call.input
-                .get(key)
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|url| url.starts_with("http://") || url.starts_with("https://"))
         }
         CapabilityUseScope::FocusedVerificationCommand => {
             capability == FocusedVerificationExec

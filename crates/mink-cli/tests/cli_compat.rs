@@ -49,7 +49,7 @@ fn mink_core_agent_jsonl_parse_failure_keeps_final_schema() {
             .stdin
             .as_mut()
             .expect("stdin")
-            .write_all(br#"{"version":1}"#)
+            .write_all(br#"{"version":2}"#)
             .expect("write sdk request");
     }
 
@@ -60,7 +60,7 @@ fn mink_core_agent_jsonl_parse_failure_keeps_final_schema() {
         serde_json::from_str(stdout.trim()).expect("parse final json");
 
     assert_eq!(final_line["type"], "final");
-    assert_eq!(final_line["version"], 1);
+    assert_eq!(final_line["version"], 2);
     assert_eq!(final_line["status"], "failed");
     assert_eq!(final_line["session_id"], "");
     assert_eq!(final_line["session_ref"], "");
@@ -99,7 +99,7 @@ fn mink_core_agent_jsonl_valid_request_without_api_key_fails_before_runtime() {
             .stdin
             .as_mut()
             .expect("stdin")
-            .write_all(br#"{"version":1,"prompt":"hello"}"#)
+            .write_all(br#"{"version":2,"prompt":"hello"}"#)
             .expect("write sdk request");
     }
 

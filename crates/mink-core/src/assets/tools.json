@@ -1,13 +1,13 @@
 [
   {
     "name": "Read",
-    "description": "Read one local or configured virtual-filesystem path, public web URL, or registered lightweight resource. Use multiple calls for multiple targets. Local non-raw reads include numbered lines and an @PATH#TAG editable snapshot header; raw, virtual-filesystem, web, and registered-resource reads never create an editable snapshot. Path selectors select line ranges. Web content is fetched once into the session artifact cache and later selectors page over that cached text.\n\nSupported targets include local paths, http(s) URLs, artifact://<id>, skill:// resources, rule:// resources, and session://current resources. A full result may be truncated; request a narrower selector when exact lines are known.",
+    "description": "Read one local or configured virtual-filesystem path or registered lightweight resource. Use multiple calls for multiple targets. Local non-raw reads include numbered lines and an @PATH#TAG editable snapshot header; raw, virtual-filesystem, and registered-resource reads never create an editable snapshot. Path selectors select line ranges.\n\nSupported targets include local paths, artifact://<id>, skill:// resources, rule:// resources, and session://current resources. A full result may be truncated; request a narrower selector when exact lines are known.",
     "input_schema": {
       "type": "object",
       "properties": {
         "path": {
           "type": "string",
-          "description": "File path, http(s) URL, or resource URL to read. Supports local paths, web URLs, artifact://<id>, skill://list, skill://list/all, skill://<name>, skill://<name>/<relative-path>, rule://<name>, and session://current resources including session://current/history. Append path selectors such as :10-20, :10+5, or :raw for ranges/raw output."
+          "description": "File path or registered resource URL to read. Supports local paths, artifact://<id>, skill://list, skill://list/all, skill://<name>, skill://<name>/<relative-path>, rule://<name>, and session://current resources including session://current/history. Append path selectors such as :10-20, :10+5, or :raw for ranges/raw output."
         }
       },
       "required": [
@@ -180,6 +180,22 @@
     }
   },
   {
+    "name": "PlanDraft",
+    "description": "Create, replace, or cancel the current plan draft. Use this for the complete proposed plan and for every revision before explicit user confirmation. Pass an empty content string when the user explicitly cancels or abandons planning. This tool does not confirm the plan.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "content": {
+          "type": "string",
+          "description": "The complete plan draft in Markdown. Pass an empty string to cancel the unconfirmed draft."
+        }
+      },
+      "required": [
+        "content"
+      ]
+    }
+  },
+  {
     "name": "PlanConfirm",
     "description": "Confirm and lock in the current plan draft. Call this ONLY when the user explicitly confirms the plan. Do NOT call this during drafting or when the user requests changes \u2014 only on explicit confirmation.",
     "input_schema": {
@@ -193,38 +209,6 @@
     "input_schema": {
       "type": "object",
       "properties": {}
-    }
-  },
-  {
-    "name": "WebSearch",
-    "description": "Search the web using DuckDuckGo Lite with DuckDuckGo HTML fallback and return search results with titles, URLs, and snippets. If DuckDuckGo returns an anti-bot challenge, the tool reports that explicitly instead of returning empty results. Use this tool for accessing current information beyond your knowledge cutoff, such as recent events, latest documentation, or current data.\n\nCRITICAL REQUIREMENT - You MUST follow this:\n  - After answering the user's question, you MUST include a \"Sources:\" section at the end of your response\n  - In the Sources section, list all relevant URLs from the search results as markdown hyperlinks: [Title](URL)\n  - This is MANDATORY - never skip including sources in your response",
-    "input_schema": {
-      "type": "object",
-      "properties": {
-        "query": {
-          "type": "string",
-          "description": "The search query to use"
-        }
-      },
-      "required": [
-        "query"
-      ]
-    }
-  },
-  {
-    "name": "WebFetch",
-    "description": "Fetches public content from a specified URL and returns readable text. Use this tool when you need to retrieve and analyze web content.\n\nUsage notes:\n  - IMPORTANT: WebFetch WILL FAIL for authenticated or private URLs. Check if the URL points to an authenticated service (e.g. Google Docs, Confluence, Jira) before using.\n  - The URL must be a fully-formed valid URL\n  - HTTP URLs will be automatically upgraded to HTTPS\n  - This tool is read-only and does not modify any files\n  - HTML is lightly extracted to text; non-HTML content is returned directly\n  - Results may be truncated if the content is very large",
-    "input_schema": {
-      "type": "object",
-      "properties": {
-        "url": {
-          "type": "string",
-          "description": "The URL to fetch content from"
-        }
-      },
-      "required": [
-        "url"
-      ]
     }
   },
   {

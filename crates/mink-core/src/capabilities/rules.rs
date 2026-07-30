@@ -1,7 +1,7 @@
 use crate::capabilities::source::{CapabilityExposure, SourceLevel, SourceMeta};
- use anyhow::Result;
+use anyhow::Result;
 use std::collections::BTreeMap;
- use std::path::Path;
+use std::path::Path;
 
 pub struct LoadContext<'a> {
     pub cwd: &'a Path,
@@ -26,7 +26,6 @@ pub struct LoadedRule {
     pub revision: String,
 }
 
-
 #[derive(Debug, Clone, Default)]
 pub struct RuleSnapshot {
     pub all: Vec<LoadedRule>,
@@ -37,44 +36,44 @@ pub struct RuleSnapshot {
     pub dependency_fingerprint: String,
 }
 
- pub fn build_default_rule_snapshot(
-     _cwd: &Path,
-     _home: &Path,
-     _session_id: &str,
-     _resource_session_id: &str,
- ) -> Result<RuleSnapshot> {
-     let content = "- Be concise and concrete. No pleasantries, no explanations unless asked. Raw results only.\n- Prefer safe, exact edits.\n- Report failures clearly.";
-     let rule = LoadedRule {
-         revision: crate::util::sha256_hex(content),
-         rule: RuleCapability {
-             name: "default-agent-rules".to_string(),
-             description: "Default response and edit discipline".to_string(),
-             content: content.to_string(),
-             always_apply: true,
-         },
-         source: SourceMeta {
-             provider_id: "built-in-rules".to_string(),
-             provider_name: "built-in rules".to_string(),
-             level: SourceLevel::BuiltIn,
-             source_path: None,
-             display_label: Some("built-in".to_string()),
-         },
-         exposure: CapabilityExposure::ModelDiscoverable,
-     };
-     let discoverable = vec![rule.clone()];
-     let always_apply = vec![rule.clone()];
-     let dependency_fingerprint = compute_dependency_fingerprint(&discoverable, &always_apply);
-     let mut by_name = BTreeMap::new();
-     by_name.insert(rule.rule.name.clone(), rule);
-     Ok(RuleSnapshot {
-         all: discoverable.clone(),
-         discoverable,
-         always_apply,
-         by_name,
-         warnings: Vec::new(),
-         dependency_fingerprint,
-     })
- }
+pub fn build_default_rule_snapshot(
+    _cwd: &Path,
+    _home: &Path,
+    _session_id: &str,
+    _resource_session_id: &str,
+) -> Result<RuleSnapshot> {
+    let content = "- Be concise and concrete. No pleasantries, no explanations unless asked. Raw results only.\n- Prefer safe, exact edits.\n- Report failures clearly.";
+    let rule = LoadedRule {
+        revision: crate::util::sha256_hex(content),
+        rule: RuleCapability {
+            name: "default-agent-rules".to_string(),
+            description: "Default response and edit discipline".to_string(),
+            content: content.to_string(),
+            always_apply: true,
+        },
+        source: SourceMeta {
+            provider_id: "built-in-rules".to_string(),
+            provider_name: "built-in rules".to_string(),
+            level: SourceLevel::BuiltIn,
+            source_path: None,
+            display_label: Some("built-in".to_string()),
+        },
+        exposure: CapabilityExposure::ModelDiscoverable,
+    };
+    let discoverable = vec![rule.clone()];
+    let always_apply = vec![rule.clone()];
+    let dependency_fingerprint = compute_dependency_fingerprint(&discoverable, &always_apply);
+    let mut by_name = BTreeMap::new();
+    by_name.insert(rule.rule.name.clone(), rule);
+    Ok(RuleSnapshot {
+        all: discoverable.clone(),
+        discoverable,
+        always_apply,
+        by_name,
+        warnings: Vec::new(),
+        dependency_fingerprint,
+    })
+}
 
 fn compute_dependency_fingerprint(
     discoverable: &[LoadedRule],
@@ -100,7 +99,7 @@ fn compute_dependency_fingerprint(
         input.push('\0');
     }
     crate::util::sha256_hex(&input)
- }
+}
 
 #[cfg(test)]
 mod tests {

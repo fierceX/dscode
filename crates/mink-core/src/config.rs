@@ -24,30 +24,30 @@ impl OpenAiTokenParamConfig {
         }
     }
 }
- 
- #[derive(Debug, Clone, Copy, PartialEq, Eq)]
- pub enum SignalMode {
-     Off,
-     Full,
- }
- 
- impl SignalMode {
-     pub fn from_env() -> Self {
-         match std::env::var("MINK_SIGNAL_MODE")
-             .unwrap_or_else(|_| "full".to_string())
-             .trim()
-             .to_ascii_lowercase()
-             .as_str()
-         {
-             "off" | "false" | "0" | "none" | "disabled" => Self::Off,
-             _ => Self::Full,
-         }
-     }
- 
-     pub fn enabled(self) -> bool {
-         matches!(self, Self::Full)
-     }
- }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignalMode {
+    Off,
+    Full,
+}
+
+impl SignalMode {
+    pub fn from_env() -> Self {
+        match std::env::var("MINK_SIGNAL_MODE")
+            .unwrap_or_else(|_| "full".to_string())
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "off" | "false" | "0" | "none" | "disabled" => Self::Off,
+            _ => Self::Full,
+        }
+    }
+
+    pub fn enabled(self) -> bool {
+        matches!(self, Self::Full)
+    }
+}
 
 /// Built-in model aliases used for DeepSeek defaults and legacy price tracking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -163,6 +163,7 @@ impl ModelResolver {
 
 /// TOML config file structure (optional, loaded from ~/.minkrc or <project>/.minkrc).
 #[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MinkConfigFile {
     pub api_key: Option<String>,
     pub base_url: Option<String>,
@@ -205,6 +206,7 @@ pub struct MinkConfigFile {
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolsConfigFile {
     pub approval_mode: Option<ToolApprovalMode>,
     pub approval: Option<BTreeMap<String, ToolApprovalPolicy>>,
@@ -218,11 +220,7 @@ pub struct SandboxConfigFile {
     pub backend: Option<String>,
     pub read_dirs: Option<Vec<String>>,
     pub write_dirs: Option<Vec<String>>,
-    pub allow_bash: Option<bool>,
-    pub bash_allow_commands: Option<Vec<String>>,
-    pub allow_python: Option<bool>,
     pub allow_network: Option<bool>,
-    pub allow_sub_agent: Option<bool>,
     pub max_memory_mb: Option<u64>,
     pub max_pids: Option<u32>,
     pub timeout_secs: Option<u64>,
@@ -244,8 +242,6 @@ pub struct SandboxPythonConfigFile {
     pub write_dirs: Option<Vec<String>>,
     /// Python 包目录（挂载到 /packages）
     pub package_dirs: Option<Vec<String>>,
-    /// 是否启用 PythonSandbox 工具（默认禁用，需显式开启）
-    pub enable: Option<bool>,
 }
 
 /// CPython WASI 沙箱工具的运行时配置（从 .minkrc 的 `[sandbox_python]` 加载）。
@@ -344,11 +340,9 @@ pub struct Config {
     pub mission_file: Option<PathBuf>,
     /// 内联 mission 内容（通过 SDK 协议传入，不写临时文件）
     pub mission_content: Option<String>,
-    /// 工具禁用开关（从 CLI 或 Agent JSONL 加载）
     /// 从 --config CLI 参数解析的 TOML 配置（最高优先级，在 apply_config_sources 中应用）
     pub cli_config: Option<MinkConfigFile>,
-    pub tool_disable: ToolDisableFlags,
-    /// 工具白名单：`None` 表示全部启用；`Some(vec![])` 表示不启用任何工具。
+    /// 工具选择：`None` 使用默认工具集；`Some(vec![])` 不启用任何工具。
     pub enabled_tools: Option<Vec<String>>,
     /// Tool approval mode.
     pub tool_approval_mode: ToolApprovalMode,
@@ -371,6 +365,7 @@ pub struct CliOverrides {
     pub max_context_tokens: bool,
     pub tool_approval_mode: bool,
     pub output_format: bool,
+    pub enabled_tools: bool,
 }
 
 impl Default for Config {
@@ -419,7 +414,6 @@ impl Default for Config {
             sandbox_python: SandboxPythonConfig::default(),
             mission_file: None,
             mission_content: None,
-            tool_disable: ToolDisableFlags::default(),
             enabled_tools: None,
             cli_config: None,
             tool_approval_mode: ToolApprovalMode::Yolo,
@@ -510,25 +504,11 @@ pub fn parse_args(args: Vec<String>) -> Result<Config> {
                 cfg.output_format = OutputFormat::StreamJson;
                 i += 1;
             }
-            "--disable-bash" => {
-                cfg.tool_disable.disable_bash = true;
-                i += 1;
-            }
-            "--disable-sub-agent" => {
-                cfg.tool_disable.disable_sub_agent = true;
-                i += 1;
-            }
-            "--disable-web" => {
-                cfg.tool_disable.disable_web = true;
-                i += 1;
-            }
-            "--disable-python" => {
-                cfg.tool_disable.disable_python = true;
-                i += 1;
-            }
-            "--enable-python-sandbox" => {
-                cfg.tool_disable.disable_python_sandbox = false;
-                i += 1;
+            "--enabled-tools" => {
+                let value = require_value(&args, i)?;
+                cfg.enabled_tools = Some(parse_enabled_tools(value)?);
+                cfg.cli_overrides.enabled_tools = true;
+                i += 2;
             }
             "--config" => {
                 let toml_str = require_value(&args, i)?;
@@ -553,6 +533,21 @@ fn require_value(args: &[String], i: usize) -> Result<String> {
         bail!("missing value for {}", args[i]);
     }
     Ok(args[i + 1].clone())
+}
+
+fn parse_enabled_tools(value: String) -> Result<Vec<String>> {
+    if value.trim().eq_ignore_ascii_case("none") {
+        return Ok(Vec::new());
+    }
+    let tools = value
+        .split(',')
+        .map(str::trim)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if tools.is_empty() || tools.iter().any(String::is_empty) {
+        bail!("--enabled-tools requires comma-separated tool names or 'none'");
+    }
+    Ok(tools)
 }
 
 pub fn apply_config_file(cfg: &mut Config) {
@@ -661,6 +656,7 @@ fn apply_config_sources(
         || cfg.tool_approval_mode != defaults.tool_approval_mode;
     let cli_output_format =
         cfg.cli_overrides.output_format || cfg.output_format != defaults.output_format;
+    let cli_enabled_tools = cfg.cli_overrides.enabled_tools;
 
     for toml_cfg in [user_cfg, project_cfg, cli_cfg].into_iter().flatten() {
         if !cli_model && let Some(model) = &toml_cfg.model {
@@ -797,7 +793,7 @@ fn apply_config_sources(
         if let Some(ref v) = toml_cfg.skills {
             cfg.skills = v.clone();
         }
-        if let Some(ref v) = toml_cfg.enabled_tools {
+        if !cli_enabled_tools && let Some(ref v) = toml_cfg.enabled_tools {
             cfg.enabled_tools = Some(v.clone());
         }
         if !cli_tool_approval_mode && let Some(ref v) = toml_cfg.approval_mode {
@@ -861,20 +857,8 @@ fn apply_sandbox_config(
             if let Some(ref v) = sb.write_dirs {
                 cfg.sandbox.write_dirs = v.clone();
             }
-            if let Some(v) = sb.allow_bash {
-                cfg.sandbox.allow_bash = v;
-            }
-            if let Some(ref v) = sb.bash_allow_commands {
-                cfg.sandbox.bash_allow_commands = v.clone();
-            }
-            if let Some(v) = sb.allow_python {
-                cfg.sandbox.allow_python = v;
-            }
             if let Some(v) = sb.allow_network {
                 cfg.sandbox.allow_network = v;
-            }
-            if let Some(v) = sb.allow_sub_agent {
-                cfg.sandbox.allow_sub_agent = v;
             }
             if let Some(v) = sb.max_memory_mb {
                 cfg.sandbox.max_memory_mb = v;
@@ -906,9 +890,6 @@ fn apply_sandbox_config(
             }
             if let Some(ref v) = sp.package_dirs {
                 cfg.sandbox_python.package_dirs = v.clone();
-            }
-            if let Some(v) = sp.enable {
-                cfg.tool_disable.disable_python_sandbox = !v;
             }
         }
     }
@@ -1064,16 +1045,8 @@ pub struct SandboxConfig {
     pub read_dirs: Vec<String>,
     /// 允许写入的目录白名单
     pub write_dirs: Vec<String>,
-    /// 允许 Bash 工具
-    pub allow_bash: bool,
-    /// 允许的 Bash 命令白名单（空 = 只用危险命令黑名单）
-    pub bash_allow_commands: Vec<String>,
-    /// 允许 Python 脚本执行
-    pub allow_python: bool,
     /// 允许网络访问（含 LLM API 调用）
     pub allow_network: bool,
-    /// 允许 SubAgent
-    pub allow_sub_agent: bool,
     /// 最大内存（MB）
     pub max_memory_mb: u64,
     /// 最大进程数
@@ -1089,11 +1062,7 @@ impl Default for SandboxConfig {
             backend: "auto".into(),
             read_dirs: Vec::new(),
             write_dirs: Vec::new(),
-            allow_bash: true,
-            bash_allow_commands: Vec::new(),
-            allow_python: true,
             allow_network: true,
-            allow_sub_agent: true,
             max_memory_mb: 1024,
             max_pids: 64,
             timeout_secs: 600,
@@ -1107,46 +1076,6 @@ impl SandboxConfig {
         self.enabled && self.backend != "off"
     }
 }
-
-// ── Tool disable flags (from CLI / Agent JSONL) ─────────────────
-
-/// 工具级别的运行时禁用开关。
-/// 来源：CLI `--disable-bash` 等，或 Agent JSONL `options.disable_*`。
-/// 注意：与 SandboxConfig 中的 allow_* 是独立的层次 —
-/// SandboxConfig 决定沙箱策略，ToolDisableFlags 是运行时覆盖。
-#[derive(Debug, Clone)]
-pub struct ToolDisableFlags {
-    pub disable_bash: bool,
-    pub disable_sub_agent: bool,
-    pub disable_web: bool,
-    pub disable_python: bool,
-    /// 默认禁用 PythonSandbox，避免与宿主 Python 混用
-    /// 通过 --enable-python-sandbox 或 .minkrc 中的设置启用
-    pub disable_python_sandbox: bool,
-}
-
-impl Default for ToolDisableFlags {
-    fn default() -> Self {
-        Self {
-            disable_bash: false,
-            disable_sub_agent: false,
-            disable_web: false,
-            disable_python: false,
-            disable_python_sandbox: true, // 默认禁用
-        }
-    }
-}
-
-/// Tool name → disable flag check mapping. Shared by Config and ToolConfig for tool filtering.
-pub(crate) type ToolDisableCheck = fn(&ToolDisableFlags) -> bool;
-pub(crate) const TOOL_DISABLE_MAP: &[(&str, ToolDisableCheck)] = &[
-    ("Bash", |f| f.disable_bash),
-    ("Python", |f| f.disable_python),
-    ("WebSearch", |f| f.disable_web),
-    ("WebFetch", |f| f.disable_web),
-    ("SubAgent", |f| f.disable_sub_agent),
-    ("PythonSandbox", |f| f.disable_python_sandbox),
-];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -1259,6 +1188,23 @@ mod tests {
         assert!(cfg.verbose);
         assert!(cfg.interactive);
         assert_eq!(cfg.output_format, OutputFormat::StreamJson);
+    }
+
+    #[test]
+    fn parse_args_enabled_tools_is_the_only_tool_selection_cli() {
+        let selected = parse_args(vec![
+            "--enabled-tools".into(),
+            "Read, Bash,PythonSandbox".into(),
+        ])
+        .unwrap();
+        assert_eq!(
+            selected.enabled_tools,
+            Some(vec!["Read".into(), "Bash".into(), "PythonSandbox".into()])
+        );
+
+        let none = parse_args(vec!["--enabled-tools".into(), "none".into()]).unwrap();
+        assert_eq!(none.enabled_tools, Some(Vec::new()));
+        assert!(parse_args(vec!["--disable-bash".into()]).is_err());
     }
 
     #[test]

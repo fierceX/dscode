@@ -7,16 +7,16 @@ use std::sync::{Arc, Mutex};
 use super::bash;
 use super::file;
 use super::metadata::{ApprovalTier, ToolMetadata, ToolResultKind};
+use super::plan::{PlanClearTool, PlanCommand, PlanConfirmTool, PlanDraftTool};
 use super::python;
 #[cfg(feature = "python-sandbox")]
 use super::sandbox_python;
 use super::search;
-use super::web;
-use crate::context::{ToolConfig, ToolContext};
+use crate::context::ToolContext;
 use crate::guard::storm::{StormBreaker, StormDecision};
 use crate::protocol::ToolCallEvent;
-use crate::tools::approval::{ToolAuthorization, authorize_tool, denied_message};
 
+#[derive(Debug)]
 pub struct ToolOutcome {
     pub content: String,
     pub conversation_content: String,
@@ -24,6 +24,7 @@ pub struct ToolOutcome {
     pub exit_code: Option<i32>,
     pub success: bool,
     pub diagnostics: Vec<String>,
+    pub plan_command: Option<PlanCommand>,
 }
 
 impl ToolOutcome {
@@ -35,7 +36,14 @@ impl ToolOutcome {
             exit_code: None,
             success: true,
             diagnostics: Vec::new(),
+            plan_command: None,
         }
+    }
+
+    pub fn plan(command: PlanCommand, content: &str) -> Self {
+        let mut outcome = Self::text(content.to_string());
+        outcome.plan_command = Some(command);
+        outcome
     }
 }
 
@@ -58,10 +66,9 @@ static TOOL_REGISTRY: LazyLock<Vec<Box<dyn ToolExec>>> = LazyLock::new(|| {
         Box::new(search::GlobTool),
         Box::new(search::GrepTool),
         Box::new(TodoWriteTool),
+        Box::new(PlanDraftTool),
         Box::new(PlanConfirmTool),
         Box::new(PlanClearTool),
-        Box::new(web::WebSearchTool),
-        Box::new(web::WebFetchTool),
         Box::new(python::PythonTool),
         #[cfg(feature = "python-sandbox")]
         Box::new(sandbox_python::PythonSandboxTool),
@@ -96,6 +103,8 @@ pub struct ToolRunResult {
     pub sub_agent_fork: bool,
     pub exit_code: Option<i32>,
     pub signals: Vec<crate::guard::collector::Signal>,
+    pub(crate) plan_command: Option<PlanCommand>,
+    pub(crate) needs_finalization: bool,
 }
 
 pub struct SubAgentRequest {
@@ -122,7 +131,6 @@ enum PreparedCall {
 }
 
 struct ToolPolicyGate<'a> {
-    config: &'a ToolConfig,
     surface: &'a crate::tools::surface::ModelToolSurface,
     storm: &'a Mutex<StormBreaker>,
 }
@@ -135,6 +143,7 @@ struct RawToolResult {
     spawns_sub_agent: bool,
     success: bool,
     diagnostics: Vec<String>,
+    plan_command: Option<PlanCommand>,
 }
 
 #[derive(serde::Deserialize)]
@@ -184,6 +193,21 @@ impl ToolRunner {
 
         results.extend(self.execute_read_batch(read_batch).await?);
         Ok(results)
+    }
+
+    pub fn finalize_deferred_results(&self, results: &mut [ToolRunResult]) {
+        for result in results {
+            if !result.needs_finalization {
+                continue;
+            }
+            result.content = format_tool_result_with_artifact(
+                &result.tool_name,
+                &result.content,
+                self.ctx.tool_config.tool_result_max_bytes,
+                &self.ctx,
+            );
+            result.needs_finalization = false;
+        }
     }
 
     async fn execute_read_batch(&self, calls: Vec<ToolCallEvent>) -> Result<Vec<ToolRunResult>> {
@@ -236,7 +260,6 @@ impl ToolRunner {
     fn prepare_call(&self, mut call: ToolCallEvent) -> PreparedCall {
         let tool_metadata = self.find_tool(&call.name).map(|tool| tool.metadata());
         let policy = ToolPolicyGate {
-            config: &self.ctx.tool_config,
             surface: &self.ctx.tool_surface,
             storm: &self.storm,
         };
@@ -265,23 +288,7 @@ impl ToolPolicyGate<'_> {
         call: &ToolCallEvent,
         metadata: Option<ToolMetadata>,
     ) -> Option<ToolRunResult> {
-        if !self.config.is_tool_enabled(&call.name) {
-            return Some(blocked_tool_result(
-                call.id.clone(),
-                call.name.clone(),
-                call.fields.clone(),
-                format!("Tool '{}' is disabled by configuration.", call.name),
-            ));
-        }
         let metadata = metadata?;
-        if let ToolAuthorization::Denied { reason } = authorize_tool(metadata, self.config) {
-            return Some(blocked_tool_result(
-                call.id.clone(),
-                call.name.clone(),
-                call.fields.clone(),
-                denied_message(metadata, reason),
-            ));
-        }
         if !self.surface.has(&call.name) {
             let reason = self
                 .surface
@@ -346,6 +353,7 @@ fn dispatch_tool(
                 spawns_sub_agent: metadata.spawns_sub_agent,
                 success: outcome.success,
                 diagnostics: outcome.diagnostics,
+                plan_command: outcome.plan_command,
             },
             Err(e) => RawToolResult {
                 output: Err(e),
@@ -355,6 +363,7 @@ fn dispatch_tool(
                 spawns_sub_agent: metadata.spawns_sub_agent,
                 success: false,
                 diagnostics: Vec::new(),
+                plan_command: None,
             },
         }
     } else {
@@ -366,6 +375,7 @@ fn dispatch_tool(
             spawns_sub_agent: false,
             success: false,
             diagnostics: Vec::new(),
+            plan_command: None,
         }
     }
 }
@@ -383,6 +393,7 @@ fn format_dispatched_result(
         spawns_sub_agent,
         success,
         diagnostics,
+        plan_command,
     } = raw;
     let mut output = match output {
         Ok(v) => v,
@@ -399,12 +410,17 @@ fn format_dispatched_result(
         }
     }
 
-    let output = format_tool_result_with_artifact(
-        &call.name,
-        &output,
-        ctx.tool_config.tool_result_max_bytes,
-        ctx,
-    );
+    let needs_finalization = plan_command.is_some() || spawns_sub_agent;
+    let output = if needs_finalization {
+        output
+    } else {
+        format_tool_result_with_artifact(
+            &call.name,
+            &output,
+            ctx.tool_config.tool_result_max_bytes,
+            ctx,
+        )
+    };
 
     let output = if is_bash {
         filter_bash_noise(&output)
@@ -459,6 +475,8 @@ fn format_dispatched_result(
         sub_agent_fork,
         exit_code,
         signals,
+        plan_command,
+        needs_finalization,
     }
 }
 
@@ -497,6 +515,8 @@ fn blocked_tool_result(
         sub_agent_fork: false,
         exit_code: None,
         signals: Vec::new(),
+        plan_command: None,
+        needs_finalization: false,
     }
 }
 
@@ -511,8 +531,6 @@ fn resolve_summary_path(cwd: &Path, raw: &str) -> PathBuf {
 
 pub struct TodoWriteTool;
 pub struct SubAgentTool;
-pub struct PlanConfirmTool;
-pub struct PlanClearTool;
 
 impl ToolExec for TodoWriteTool {
     fn metadata(&self) -> ToolMetadata {
@@ -553,12 +571,11 @@ impl ToolExec for SubAgentTool {
         .spawns_sub_agent()
     }
 
-    fn execute(&self, input: &serde_json::Value, ctx: &ToolContext) -> anyhow::Result<ToolOutcome> {
-        if ctx.tool_config.tool_disable.disable_sub_agent {
-            return Ok(ToolOutcome::text(
-                "Error: SubAgent is disabled by configuration.".into(),
-            ));
-        }
+    fn execute(
+        &self,
+        input: &serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> anyhow::Result<ToolOutcome> {
         #[derive(serde::Deserialize)]
         struct Args {
             prompt: String,
@@ -567,50 +584,6 @@ impl ToolExec for SubAgentTool {
         if args.prompt.trim().is_empty() {
             bail!("Error: sub-agent prompt is required");
         }
-        Ok(ToolOutcome::text(String::new()))
-    }
-}
-
-impl ToolExec for PlanConfirmTool {
-    fn metadata(&self) -> ToolMetadata {
-        ToolMetadata::new(
-            "PlanConfirm",
-            "Confirm and lock the current plan draft.",
-            ApprovalTier::Write,
-            ToolResultKind::Control,
-        )
-        .mutating()
-        .storm_exempt()
-        .internal()
-    }
-
-    fn execute(
-        &self,
-        _input: &serde_json::Value,
-        _ctx: &ToolContext,
-    ) -> anyhow::Result<ToolOutcome> {
-        Ok(ToolOutcome::text(String::new()))
-    }
-}
-
-impl ToolExec for PlanClearTool {
-    fn metadata(&self) -> ToolMetadata {
-        ToolMetadata::new(
-            "PlanClear",
-            "Clear the current locked plan.",
-            ApprovalTier::Write,
-            ToolResultKind::Control,
-        )
-        .mutating()
-        .storm_exempt()
-        .internal()
-    }
-
-    fn execute(
-        &self,
-        _input: &serde_json::Value,
-        _ctx: &ToolContext,
-    ) -> anyhow::Result<ToolOutcome> {
         Ok(ToolOutcome::text(String::new()))
     }
 }
@@ -704,7 +677,7 @@ fn format_tool_result_with_artifact(
     let truncated = format_tool_result(output, max);
     match ctx
         .artifacts
-        .write_text(tool_name, "full tool output", None, output)
+        .write_text(tool_name, "full tool output", output)
     {
         Ok(record) => format!("{truncated}\n\n[Full output: artifact://{}]", record.id),
         Err(_) => truncated,
@@ -769,6 +742,8 @@ fn filter_bash_noise(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::config::{ToolApprovalMode, ToolApprovalPolicy};
+    use crate::context::ToolConfig;
+    use crate::tools::approval::{ToolAuthorization, authorize_tool, denied_message};
 
     #[test]
     fn todo_write_outputs_checklist() {
@@ -873,7 +848,13 @@ mod tests {
                 tool.metadata().name
             );
         }
-        for expected in ["PlanConfirm", "PlanClear", "TodoWrite", "SubAgent"] {
+        for expected in [
+            "PlanDraft",
+            "PlanConfirm",
+            "PlanClear",
+            "TodoWrite",
+            "SubAgent",
+        ] {
             assert!(registry_names.contains(expected));
         }
     }
@@ -916,6 +897,21 @@ mod tests {
                 );
             }
         }
+
+        let plan_draft = schema
+            .iter()
+            .find(|tool| tool["name"] == "PlanDraft")
+            .expect("PlanDraft schema");
+        assert!(
+            plan_draft["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("empty content string"))
+        );
+        assert!(
+            plan_draft["input_schema"]["properties"]["content"]["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("empty string"))
+        );
     }
 
     #[test]
@@ -966,11 +962,10 @@ mod tests {
         assert_eq!(meta("Glob").result_kind, ToolResultKind::Search);
         assert_eq!(meta("Grep").approval, ApprovalTier::Read);
         assert_eq!(meta("Grep").result_kind, ToolResultKind::Search);
-        assert_eq!(meta("WebSearch").result_kind, ToolResultKind::Web);
-        assert_eq!(meta("WebFetch").result_kind, ToolResultKind::Web);
         assert_eq!(meta("SubAgent").approval, ApprovalTier::Exec);
         assert_eq!(meta("SubAgent").result_kind, ToolResultKind::SubAgent);
         assert!(meta("SubAgent").spawns_sub_agent);
+        assert!(meta("PlanDraft").internal);
         assert!(meta("PlanConfirm").internal);
         assert!(meta("PlanClear").internal);
         assert!(meta("Python").discoverable);
@@ -1057,7 +1052,6 @@ mod tests {
         )
         .unwrap();
         let gate = ToolPolicyGate {
-            config: &config,
             surface: &surface,
             storm: &storm,
         };
@@ -1072,42 +1066,7 @@ mod tests {
             .expect("Bash should be blocked by enabled_tools");
 
         assert_eq!(blocked.tool_name, "Bash");
-        assert!(blocked.content.contains("disabled by configuration"));
-    }
-
-    #[test]
-    fn policy_gate_blocks_tools_disabled_by_flag_before_execution() {
-        let mut config = approval_test_config(ToolApprovalMode::Yolo, []);
-        config.tool_disable.disable_bash = true;
-        let storm = Mutex::new(StormBreaker::new(6, 3));
-        let resolution = crate::tools::surface::ToolResolutionContext::from_runtime(
-            crate::tools::surface::AgentRole::Primary,
-            &config,
-            false,
-        );
-        let surface = crate::tools::surface::ModelToolSurface::resolve(
-            crate::tools::catalog::ToolCatalog::builtin().unwrap(),
-            &config,
-            &resolution,
-        )
-        .unwrap();
-        let gate = ToolPolicyGate {
-            config: &config,
-            surface: &surface,
-            storm: &storm,
-        };
-        let call = test_call("Bash");
-        let metadata = tool_registry()
-            .iter()
-            .find(|tool| tool.metadata().name == "Bash")
-            .map(|tool| tool.metadata());
-
-        let blocked = gate
-            .evaluate(&call, metadata)
-            .expect("Bash should be blocked by disable flag");
-
-        assert_eq!(blocked.tool_name, "Bash");
-        assert!(blocked.content.contains("disabled by configuration"));
+        assert!(blocked.content.contains("unavailable"));
     }
 
     #[test]
@@ -1128,7 +1087,6 @@ mod tests {
         )
         .unwrap();
         let sub_agent_gate = ToolPolicyGate {
-            config: &config,
             surface: &sub_agent_surface,
             storm: &storm,
         };
@@ -1150,7 +1108,6 @@ mod tests {
             crate::tools::surface::ModelToolSurface::resolve(catalog, &config, &vfs_resolution)
                 .unwrap();
         let vfs_gate = ToolPolicyGate {
-            config: &config,
             surface: &vfs_surface,
             storm: &storm,
         };
@@ -1185,7 +1142,6 @@ mod tests {
             file_write_max_bytes: 1_048_576,
             max_search_files: 5000,
             max_search_results: 1000,
-            tool_disable: crate::config::ToolDisableFlags::default(),
             enabled_tools: None,
             tool_approval_mode: mode,
             tool_approval: overrides.into_iter().collect(),
@@ -1204,7 +1160,6 @@ mod tests {
                 ToolResultKind::Edit => "Edit",
                 ToolResultKind::Command => "Command",
                 ToolResultKind::Search => "Search",
-                ToolResultKind::Web => "Web",
                 ToolResultKind::Control => "Control",
                 ToolResultKind::SubAgent => "SubAgent",
             })
@@ -1216,7 +1171,6 @@ mod tests {
             "Edit",
             "Command",
             "Search",
-            "Web",
             "Control",
             "SubAgent",
         ] {

@@ -27,7 +27,7 @@
 - **Python SDK** — `mink-agent` pip 包，内置无 TUI 的 `mink-core` 二进制，支持沙箱控制和全参数配置
 - **沙箱防护** — Linux nsjail/bubblewrap（完整文件系统隔离）、macOS sandbox-exec（写入隔离）
 - **CPython WASI 沙箱** — `PythonSandbox` 工具，在 wasmtime + CPython WASI 中执行 Python 代码，WASI 级进程隔离
-- **运行时约束** — `--disable-bash` / `--disable-sub-agent` / `--disable-web` / `--disable-python` 按场景禁用工具；`enabled_tools` 同时限制模型可见工具和真实执行边界
+- **统一工具选择** — `enabled_tools` 是唯一工具启用入口，同时决定模型可见 schema、能力工作流和真实执行边界；`PythonSandbox` 仅在显式列出时启用
 - **机器协议** — `--print` 输出 ndjson 事件流并以 `final` 结束；`--agent-jsonl` 提供 single-shot Agent JSONL 协议
 
 ---

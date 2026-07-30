@@ -92,7 +92,7 @@ receives a `VfsScope` containing both the inherited knowledge-base
 `resource_session_id` and the concrete `agent_session_id`. Child agents inherit
 the former. Without an injected backend, all three tools continue through their
 original local implementations. Resource URLs such as `artifact://`,
-`skill://`, `session://`, and HTTP(S) bypass the VFS.
+`skill://`, `rule://`, and `session://` bypass the VFS.
 
 Virtual reads are read-only and therefore do not produce anchored Edit
 snapshots. Glob and Grep requests are validated by `mink-core`, while backends

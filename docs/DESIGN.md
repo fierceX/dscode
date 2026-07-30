@@ -12,17 +12,22 @@
 
 ```rust
 // crates/mink-core/src/agent/turn.rs
-pub async fn execute(&mut self, user_input: &str)
+pub async fn execute(
+    &mut self,
+    user_input: &str,
+    belief: Option<&mut BeliefTracker>,
+)
     -> Result<(TurnDecision, Vec<TurnEffect>)>
 ```
 
-**TurnDecision** 有四类：
+**TurnDecision** 有五类：
 
 | 变体 | 含义 | 后续 |
 |------|------|------|
 | `Stop` | 正常结束（end_turn/stop） | 等待下个用户输入 |
 | `Continue` | 有更多 LLM 调用 | 循环继续 |
 | `Interrupted` | 被取消令牌中断 | 退出 |
+| `MaxTurnsExceeded` | 当前输入超过最大内部循环次数 | 报告限制并结束 |
 | `Failed(String)` | 不可恢复的错误 | 报告错误 |
 
 **TurnEffect** 是 turn 内部工具副作用的完成标记，供调用者（OrchActor）补充 UI 提示：
@@ -51,19 +56,20 @@ SubAgent 由 `SubAgentCoordinator` 在 turn 内部启动、收集和注入结果
 步骤 4: Scavenge 回收（从 thinking/text 复原工具调用）
 步骤 5: 持久化 assistant 消息和 usage
 步骤 6: 工具执行（ToolRunner::execute_all）
-  ├── ToolConfig enabled/disabled 检查
-  ├── ToolMetadata approval 检查
+  ├── resolved ModelToolSurface 执行门禁
   ├── StormBreaker 重复抑制
-  ├── ToolSignalProcessor 采集信号并更新 belief
-  ├── PlanActionHandler 处理 PlanConfirm / PlanClear
+  ├── PlanActionHandler 将已完成 PlanCommand 转换为 effect / 压缩请求
   ├── SubAgentCoordinator 启动并收集子代理
+  ├── 延迟结果统一执行大小保护
+  ├── ToolSignalProcessor 基于最终结果采集信号并更新 belief
   ├── ConversationStore::add_tool_results()
   └── Display::render_tool_result_detail()
+步骤 6.1: Plan 压缩请求交给 TurnCompactor，失败则终止并返回错误
 步骤 7: DecisionEngine 决策继续、注入、中止或停止
 ```
 
 各个阶段之间有严格的依赖关系：
-- 步骤 2 使用 `TurnCompactor` 内部标记互锁，同一用户输入最多压缩一次
+- 步骤 2 和步骤 6.1 共用 `TurnCompactor` 内部标记互锁，同一用户输入最多压缩一次
 - 步骤 4 依赖步骤 3 收集的 thinking + text 内容
 - 步骤 6 依赖步骤 4 补充后的 calls 列表
 - 步骤 7 根据 stop_reason 决定是否循环
@@ -109,17 +115,16 @@ while turn < max_turns {
 pub struct ImmutablePrefix {
     system_prompt: String,
     tools_json: Vec<Value>,
+    dependency_fingerprint: String,
     fingerprint: String,
 }
 ```
 
-**变更路径**：
-- PlanClear/PlanConfirm 后（计划内容变更）
-- SubAgent fork 模式继承
-
 压缩摘要始终作为活跃消息投影中的动态 system message，不修改 immutable system/tools prefix。
 
-**fingerprint 校验**（`verify_fingerprint()`）：重新计算指纹并与缓存值比对。如果 verbose 模式下发现不一致，直接 panic，防止缓存偏移 bug 潜入生产。
+**fingerprint 校验**（`verify_fingerprint()`）：重新计算 system prompt、tools schema 和依赖
+fingerprint 的联合指纹并与缓存值比对。校验失败时 `PrefixManager` 丢弃旧前缀并重新构建，不使用
+已经漂移的缓存内容。
 
 #### 2. ConversationStore（追加日志）
 
@@ -156,12 +161,14 @@ assistant 消息使用 content 数组承载多种内容类型（thinking/text/to
 
 #### 3. VolatileScratch（每轮清除）
 
-每轮 LLM 调用开始时重置的状态：
+每个新用户输入开始时重置的状态：
 - StormBreaker 窗口（`tools.reset_storm()`）
-- `compacted_this_turn` 标记
-- `thinking` 和 `text` 缓冲区（在每轮流式响应中累积）
+- `TurnCompactor` 的同轮压缩标记
+- `ToolSignalProcessor`、`DecisionEngine` 和恢复首步守卫
 
-这些状态不在 LLM 调用之间传递，保证每轮的独立性。
+`thinking` 和 `text` 缓冲区则在每次 LLM 流式请求中重新创建，不跨请求复用。
+
+这些 turn 级状态会跨同一用户输入的多次 tool-use 请求保持，但不会泄漏到下一个用户输入。
 
 #### 4. Session Artifacts（会话资源）
 
@@ -179,8 +186,6 @@ artifact 跟随 session 生命周期，不跨 session 共享。
 `ArtifactManager` 初始化时扫描有效 index 记录的数字后缀，从最大序号加一继续分配。
 正文文件使用 `create_new` 独占创建；即使存在未写入 index 的孤立文件也只会继续取下一个 ID，
 不会覆盖恢复或 fork 继承的历史 artifact。
-
-`Read` URL cache 复用同一 artifact 索引能力。缓存查找按 `tool + source` 反向扫描，跳过损坏的 index 行；如果记录存在但正文 artifact 已丢失，调用方会忽略该命中并重新 fetch。
 
 ---
 
@@ -244,7 +249,8 @@ transcript：用户和 assistant text 保留，thinking 删除，工具参数限
 
 ### 防护措施
 
-**同轮防护**（`TurnCompactor::compacted_this_turn`）：同一用户输入中的多次 LLM 调用（tool_use 循环）只压缩一次。
+**同轮防护**（`TurnCompactor::compacted_this_turn`）：同一用户输入中的自动、Preflight、
+overflow 和 PlanConfirm / PlanClear 强制压缩共用一个守卫，整个 tool_use 循环只压缩一次。
 
 **最小收益检查**（`CompactionEngine::evaluate_and_compact`）：如果压缩节省的 token 不足当前总量的 10%，跳过压缩。防止小上下文场景下的无意义压缩。
 
@@ -299,7 +305,11 @@ for sc in &scavenged {
 5. **OpenAI style** — `{"type":"function","function":{"name","arguments"}}`
 6. **R1 variant** — `{"tool_name":"Bash","tool_args":{...}}`
 
-这些格式是“容器协议”兼容层，不代表工具本身继续支持旧参数。回收层只把内容规整成 `{name, arguments}`，之后仍由当前 `tools.json` schema、`ToolExec` 参数反序列化和工具实现校验。例如 XML/Bracket/R1 中可以恢复 `Read {"path":"src/lib.rs:40-80"}` 或 `Edit {"path":"src/lib.rs","patch":"@src/lib.rs#TAG\nreplace 40:\n+..."}`，但不会重新启用 `Read offset/limit` 或 `Edit old_string/new_string`。
+这些格式是“容器协议”兼容层，不代表旧参数重新成为模型协议。回收层只把内容规整成
+`{name, arguments}`，之后仍由当前 `tools.json` schema、`ToolExec` 参数反序列化和工具实现校验。
+例如 XML/Bracket/R1 中可以恢复 `Read {"path":"src/lib.rs:40-80"}` 或
+`Edit {"path":"src/lib.rs","patch":"@src/lib.rs#TAG\nreplace 40:\n+..."}`。`Read offset/limit`
+仍可由执行层接受，但不会暴露在当前工具 schema 中；`Edit old_string/new_string` 会被拒绝。
 
 ### 步骤 2：Truncation（截断修复）
 
@@ -322,9 +332,9 @@ for sc in &scavenged {
 
 `src/tools/runner.rs:53-75`
 
-在工具执行前，先按 `ToolConfig::is_tool_enabled()` 检查禁用开关和 `enabled_tools` 白名单，再按 `ToolMetadata.approval` 执行 approval 检查。默认 `yolo` 保持旧行为；`write` 自动允许 Read/Write、阻止 Exec；`always-ask` 自动允许 Read、阻止 Write/Exec。单工具 `allow/deny/prompt` 可覆盖模式。当前没有交互式 prompt，`prompt` 会 fail closed。
+`enabled_tools` 是唯一工具启用输入：`None` 使用 catalog 默认集合，空列表禁用全部，显式列表精确选择；`PythonSandbox` 是 explicit-only 工具。`ModelToolSurface` 再结合 approval、角色、文件系统后端、编译 feature 和硬依赖完成一次解析。默认 `yolo` 允许全部 tier；`write` 自动允许 Read/Write、阻止 Exec；`always-ask` 自动允许 Read、阻止 Write/Exec。单工具 `allow/deny/prompt` 可覆盖模式。当前没有交互式 prompt，`prompt` 会 fail closed。
 
-`enabled_tools` 是双层边界：`PrefixManager` 用它过滤发给模型的 tools schema，`ToolRunner` 用同一个 `ToolConfig::is_tool_enabled()` 在真实执行前拦截未启用工具。这样即使恢复会话、模型异常输出或自定义 backend 产生了未暴露的工具调用，也只会写入错误 tool result，不会执行。
+resolved `ModelToolSurface` 是唯一工具边界：`PrefixManager` 从它生成 tools schema 和能力工作流，`ToolRunner` 在真实执行前检查同一个 surface。这样即使恢复会话、模型异常输出或自定义 backend 产生未暴露的调用，也只会写入错误 tool result，不会执行；运行时不再重复解释 disable flag、sandbox `allow_*` 或 approval。
 
 随后检查重复调用。每个工具调用的 `(name, args_json)` 进入滑动窗口。检测到同一对 `(name, args)` 连续出现 ≥3 次（窗口 6），则抑制该调用，返回抑制说明：
 
@@ -339,7 +349,7 @@ StormDecision::Suppress(reason) => {
 
 **Mutating 清空规则**：当 mutating 工具（Bash/Write/Edit）被调用时，清空窗口中的 read-only 条目。这允许 edit→re-read 模式正常执行。
 
-**StormExempt**：WebSearch/WebFetch/SubAgent/PlanClear/PlanConfirm/TodoWrite 跳过风暴检测。
+**StormExempt**：SubAgent、PlanDraft、PlanClear、PlanConfirm、TodoWrite 跳过风暴检测。
 
 ---
 
@@ -451,7 +461,7 @@ Recent reliability signals:
 **信念度感知**：默认情况下系统提示词包含 `<belief-awareness>` 区块，提前告知模型存在信念度机制、注入触发条件和 `SIGNAL_RECOVERY` 协议。模型在被注入时能理解上下文，按指引先读后写，而不是继续盲目操作。区块位于 `<execution-codes>` 之后，纯英文。设置 `MINK_SIGNAL_MODE=off` 时，该区块不会出现在系统提示词中，信号采集、注入、Abort 和恢复守卫也不会运行。
 
 **恢复首步守卫**：注入后，下一轮首个工具调用必须通过同一 capability policy 的参数级
-scope classifier。只有已登记的读取、搜索、发现、资源/Web 检查或聚焦 verification 命令可通过。
+scope classifier。只有已登记的读取、搜索、发现、资源检查或聚焦 verification 命令可通过。
 这套资格判定只决定能否解除 Recovery 首步守卫，不替代普通 Bash 的危险命令检查和误用拦截。
 若 surface 没有检查能力，守卫保持 pending 并阻止所有工具调用，模型只能报告限制并结束当前
 turn。
@@ -592,7 +602,7 @@ pub trait ReadOnlyFileSystem: Send + Sync {
 核心设计边界：
 
 - **本地正确性优先**：未注入 `read_only_fs` 时，工具继续进入原有本地实现；VFS 是前置可选分支，不以抽象统一为由重写本地路径。
-- **只接管普通路径**：`artifact://`、`skill://`、`rule://`、`session://`、`http(s)://` 先按资源路由处理，不进入 VFS。
+- **只接管普通路径**：`artifact://`、`skill://`、`rule://`、`session://` 先按资源路由处理，不进入 VFS。
 - **只读且不可编辑**：虚拟 `Read` 输出行号和只读标记，但不记录 snapshot。`Edit` / `Write` 不委托给 VFS。
 - **结构化搜索结果**：后端返回路径、匹配行、扫描数和截断状态，由 `mink-core` 统一生成 Glob/Grep 文本，避免后端复制用户可见协议。
 - **核心保留防线**：glob 和 regex 在调用后端前校验；完整 Read 有工具层兜底字节检查；搜索文本由核心统一格式化并保留 100KB 输出保护。
@@ -628,7 +638,7 @@ CapabilitySnapshot
   解决 prompt、skill/rule index、selected skills 和 prefix fingerprint 看到什么
 ```
 
-这个拆分避免了两个常见问题。第一，`Read` 不需要知道每类资源如何发现能力，只负责在普通路径、web URL、registered resource 和 VFS 之间选择后端。第二，prompt 构建不会直接扫描文件系统或调用 resource handler，而是消费 runtime 构建好的 snapshot。
+这个拆分避免了两个常见问题。第一，`Read` 不需要知道每类资源如何发现能力，只负责在普通路径、registered resource 和 VFS 之间选择后端。第二，prompt 构建不会直接扫描文件系统或调用 resource handler，而是消费 runtime 构建好的 snapshot。
 
 资源与能力系统由五个协作面组成：
 
@@ -647,7 +657,7 @@ provider 是 `Read`，但 Skill scheme 的协议和内容解析属于 `ResourceR
 
 设计不变式：
 
-- registered resource 先于 VFS；未知非 web scheme fail closed。
+- registered resource 先于 VFS；未知 URL-like scheme fail closed。
 - `skill://list` 和 `<skill-index>` 来自同一 `SkillSnapshot.discoverable`。
 - selected skills 和 `skill://<name>` 读取同一 `SkillSnapshot.by_name`，但 exposure 决定是否可发现/可读取/仅 host 使用。
 - rules 和 context files 的 dependency fingerprint 必须进入 `CapabilitySnapshot`，再进入 `ImmutablePrefix`。
@@ -667,7 +677,6 @@ provider 是 `Read`，但 Skill scheme 的协议和内容解析属于 `ResourceR
 
 `Read.path` 也支持轻量 internal URL：
 
-- `http(s)://...`：公开 URL 读取，首次 fetch 后写入 session artifact cache，后续 selector 读取缓存文本。
 - `artifact://<id>`
 - `skill://list`
 - `skill://<name>`
@@ -744,11 +753,13 @@ pub struct OpenAIParser {
     input_tokens: i64,
     output_tokens: i64,
     cache_read_input_tokens: i64,
+    cache_creation_input_tokens: i64,
     saw_text: bool,
     pending_calls: BTreeMap<i64, PendingCall>,
     pending_usage: Option<UsageEvent>,
-    marker_buf: String,
-    pub needs_pro_detected: bool,
+    pending_stop: Option<String>,
+    saw_done: bool,
+    saw_usage: bool,
 }
 ```
 
@@ -770,7 +781,8 @@ usage.get("cached_tokens")
 
 ### usage 事件延迟发出
 
-OpenAI API 只在最后一个 chunk（标记为 `[DONE]`）中提供完整的 usage 信息。Parser 在收到 `[DONE]` 时设置 `pending_usage`，然后在 `flush()` 中发出。
+OpenAI-compatible provider 可能在 finish chunk、独立 usage chunk 或 `[DONE]` 前后给出终态信息。
+Parser 暂存 usage 和 stop reason，并通过 `saw_done` / `saw_usage` 保证终态事件按协议只发出一次。
 
 ### LLM backend 注入
 
@@ -974,7 +986,6 @@ custom_budget = 8192
 |------|------|------|
 | API | `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL` | 认证和端点 |
 | 大小 | `TOOL_RESULT_MAX_BYTES`, `FILE_WRITE_MAX_BYTES` | 输出限制 |
-| Web | `MINK_WEB_USER_AGENT` | WebSearch / WebFetch User-Agent |
 | 信号 | `MINK_SIGNAL_MODE` | `full` 启用信号系统，`off` 关闭信号提示词和运行时干预 |
 | 沙箱 | `MINK_LIMITS` | JSON 格式 sandbox 限制配置 |
 | 调试 | `LOG_EVENTS`, `MINK_HOME` | 日志和 session 路径 |
@@ -1003,7 +1014,9 @@ Bash = "prompt"        # allow | deny | prompt
 Read = "allow"
 ```
 
-enabled/disabled 和 approval 检查发生在 `ToolRunner::execute_all()` 中，早于 StormBreaker 和实际工具执行。当前 `prompt` 没有交互 UI，会作为工具错误 fail closed。
+approval 在构建 `ModelToolSurface` 时解析；`ToolRunner::execute_all()` 在 StormBreaker 和实际
+执行前再次校验同一 resolved surface。当前 `prompt` 没有交互 UI，因此 prompt policy 会在
+surface 解析阶段 fail closed。
 
 ---
 
@@ -1057,9 +1070,12 @@ MISSION core overrides        ← 仅允许覆盖 allowlist core，标记 Extern
 Tool prompt fragments         ← 仅随对应 active tool 加载
 Capability workflow packs     ← 由正向事实求值并从 provider bindings 渲染
 Rules/instruction/skills      ← 外部内容，不纳入生成内容工具引用保证
-Current plan                  ← session state
 Output language               ← core
 ```
+
+`Current plan` 不参与上述 immutable prompt 装配。每次 agent 请求都从 `plan.md` 生成唯一的
+`<current-plan>` 动态 system message，插入压缩摘要之后、conversation 之前；确认和清理计划
+无需使 prefix 失效，也不会把计划正文写入历史或摘要。
 
 跨工具规则依赖 `ToolSemanticCapability`，不枚举工具 pair。专用 provider 按 tier、priority、
 catalog order 和名称稳定决胜；fallback 只填补未绑定能力。workflow 只使用正向事实，并在互斥
@@ -1116,7 +1132,7 @@ pub enum Event {
 
 | 不变式 | 位置 | 违反后果 |
 |--------|------|---------|
-| compact 后 messages 必须刷新 | `turn.rs:96` | LLM 发送过期数据 |
+| compact 后 messages 必须刷新 | `agent/turn.rs`、`agent/compactor.rs` | LLM 发送过期数据 |
 | compact 后必须重建消息投影 | `agent/compactor.rs` | LLM 发送完整冷历史或过期边界 |
 | 压缩摘要只能进入动态消息投影 | `session/compaction.rs` | prefix cache 因摘要变化失效 |
 | 输入降噪只能修改摘要请求 | `session/compaction_input.rs` | 完整历史或热尾部发生信息损失 |
@@ -1124,10 +1140,11 @@ pub enum Event {
 | 子代理启动配置继承当前活动模型 | `turn.rs`、`sub_coordinator.rs`、`sub_executor.rs` | 模型切换后 child 请求退回父启动模型 |
 | 所有嵌入入口映射完整压缩参数 | `sdk_protocol.rs`、`sdk_adapter.rs`、`mink_agent/__init__.py` | 私有小窗口模型只能依赖外部 TOML |
 | runtime 在 session 创建前校验上下文预算组合 | `config.rs`、`runtime/builder.rs` | 首次请求才因零输入预算或不可压缩热尾部失败 |
-| StormBreaker 窗口每用户输入重置 | `turn.rs:87` | 跨意图抑制误判 |
-| TurnFailureTracker 每轮重置 | `orchestrator.rs:90` | 跨轮信号累积误升级 |
-| 同轮最多压缩一次 | `turn.rs:106,128` | 多次无用压缩 |
-| ImmutablePrefix 只能通过 `invalidate_prefix` 变更 | `turn.rs:68-69` | 缓存偏移不可检测 |
+| StormBreaker 窗口每用户输入重置 | `agent/turn.rs` | 跨意图抑制误判 |
+| BeliefTracker、ToolSignalProcessor 和 DecisionEngine 每用户输入重置 | `agent/orchestrator.rs`、`agent/turn.rs` | 跨意图信号累积误升级 |
+| 同一用户输入最多压缩一次 | `agent/turn.rs`、`agent/compactor.rs` | 多次无用压缩 |
+| PrefixManager 校验完整依赖 fingerprint，漂移时重建 ImmutablePrefix | `agent/prefix.rs`、`session/prefix.rs` | 缓存偏移不可检测 |
+| Plan/SubAgent 延迟结果完成并执行大小保护后才能采集信号 | `agent/turn.rs`、`tools/runner.rs` | 信号观察占位结果或未保护正文 |
 | store 只缓存活跃后缀，append 增量更新 | `store.rs` | 长 session 内存持续增长或读盘性能下降 |
 | compact 提交后按 active_start 裁剪 store 缓存 | `compaction.rs` | 冷历史继续常驻内存 |
 | 压缩不删除 conversation 历史 | `compaction.rs` | session 无法完整恢复或重放 |
@@ -1148,7 +1165,7 @@ Rust 发布包名为 `mink-core`，库 crate 名为 `mink`。`mink-core` 发布�
 实现；终端二进制和 UI 实现由 workspace 中的 `mink-cli` 包持有。服务端依赖时推荐只启用嵌入式 runtime：
 
 ```toml
-mink = { package = "mink-core", version = "0.1.11", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.1.15", default-features = false, features = ["runtime"] }
 ```
 
 `mink::runtime` / `mink::prelude` 解决这些问题：**同一套 OrchActor / TurnExecutor / ToolRunner 核心，但无进程边界**。

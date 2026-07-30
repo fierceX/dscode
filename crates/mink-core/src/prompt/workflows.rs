@@ -58,8 +58,7 @@ pub struct PromptWorkflowSpec {
     pub requires: WorkflowRequirement,
     pub exclusive_group: Option<&'static str>,
     pub priority: u16,
-    pub render:
-        fn(&PromptBuildContext<'_>, &ResolvedToolCapabilities) -> Result<RenderedPromptPack>,
+    pub render: fn(&PromptBuildContext, &ResolvedToolCapabilities) -> Result<RenderedPromptPack>,
 }
 
 pub struct RenderedPromptPack {
@@ -102,8 +101,11 @@ const PYTHON_FACTS: &[PromptFact] = &[
     ToolCapability(HostPythonExec),
     ToolCapability(SandboxedPythonExec),
 ];
-const PLAN_ALL: &[PromptFact] = &[ToolCapability(PlanConfirm), ToolCapability(PlanClear)];
-const PLAN_ANY: &[PromptFact] = &[ToolCapability(AnchoredEdit), ToolCapability(FileOverwrite)];
+const PLAN_ALL: &[PromptFact] = &[
+    ToolCapability(PlanDraft),
+    ToolCapability(PlanConfirm),
+    ToolCapability(PlanClear),
+];
 
 static WORKFLOWS: &[PromptWorkflowSpec] = &[
     PromptWorkflowSpec {
@@ -152,10 +154,7 @@ static WORKFLOWS: &[PromptWorkflowSpec] = &[
     PromptWorkflowSpec {
         id: "plan-lifecycle",
         tag: "plan-lifecycle",
-        requires: WorkflowRequirement::AllWithAny {
-            all: PLAN_ALL,
-            any: PLAN_ANY,
-        },
+        requires: WorkflowRequirement::All(PLAN_ALL),
         exclusive_group: None,
         priority: 100,
         render: render_plan_lifecycle,
@@ -345,7 +344,7 @@ fn facts_from_capabilities(tools: &ResolvedToolCapabilities) -> BTreeSet<PromptF
 }
 
 fn render_search_then_inspect(
-    _: &PromptBuildContext<'_>,
+    _: &PromptBuildContext,
     tools: &ResolvedToolCapabilities,
 ) -> Result<RenderedPromptPack> {
     let search = tools.primary_provider(ContentSearch).unwrap();
@@ -362,7 +361,7 @@ fn render_search_then_inspect(
 }
 
 fn render_anchored_edit(
-    _: &PromptBuildContext<'_>,
+    _: &PromptBuildContext,
     tools: &ResolvedToolCapabilities,
 ) -> Result<RenderedPromptPack> {
     let read = tools.primary_provider(EditableSnapshotRead).unwrap();
@@ -388,7 +387,7 @@ fn render_anchored_edit(
 }
 
 fn render_specialized_routing(
-    _: &PromptBuildContext<'_>,
+    _: &PromptBuildContext,
     tools: &ResolvedToolCapabilities,
 ) -> Result<RenderedPromptPack> {
     let mut lines = Vec::new();
@@ -441,7 +440,7 @@ fn render_specialized_routing(
 }
 
 fn render_specialized_mutation_routing(
-    _: &PromptBuildContext<'_>,
+    _: &PromptBuildContext,
     tools: &ResolvedToolCapabilities,
 ) -> Result<RenderedPromptPack> {
     let shell = tools.primary_provider(ShellExec).unwrap();
@@ -495,7 +494,7 @@ fn render_specialized_mutation_routing(
 }
 
 fn render_python_routing(
-    _: &PromptBuildContext<'_>,
+    _: &PromptBuildContext,
     tools: &ResolvedToolCapabilities,
 ) -> Result<RenderedPromptPack> {
     let mut providers = Vec::new();
@@ -523,24 +522,18 @@ fn render_python_routing(
 }
 
 fn render_plan_lifecycle(
-    context: &PromptBuildContext<'_>,
+    _context: &PromptBuildContext,
     tools: &ResolvedToolCapabilities,
 ) -> Result<RenderedPromptPack> {
+    let draft = tools.primary_provider(PlanDraft).unwrap();
     let confirm = tools.primary_provider(PlanConfirm).unwrap();
     let clear = tools.primary_provider(PlanClear).unwrap();
-    let writer_capability = if tools.has(AnchoredEdit) {
-        AnchoredEdit
-    } else {
-        FileOverwrite
-    };
-    let writer = tools.primary_provider(writer_capability).unwrap();
-    let mut referenced_tools: BTreeSet<_> = [confirm.tool, clear.tool, writer.tool]
-        .into_iter()
-        .collect();
+    let mut referenced_tools: BTreeSet<_> =
+        [draft.tool, confirm.tool, clear.tool].into_iter().collect();
     let mut consumed_facts: BTreeSet<_> = [
+        ToolCapability(PlanDraft),
         ToolCapability(PlanConfirm),
         ToolCapability(PlanClear),
-        ToolCapability(writer_capability),
     ]
     .into_iter()
     .collect();
@@ -552,37 +545,10 @@ fn render_plan_lifecycle(
             provider.tool
         )
     });
-    let draft_cancel_instruction = if let Some(overwrite) = tools.primary_provider(FileOverwrite) {
-        referenced_tools.insert(overwrite.tool);
-        consumed_facts.insert(ToolCapability(FileOverwrite));
-        format!(
-            "If the user explicitly cancels or abandons planning, clear {} by using {} to overwrite it with empty content. Do not use {} for an unconfirmed draft; it only clears the locked plan.",
-            context.plan_draft_file.display(),
-            overwrite.tool,
-            clear.tool
-        )
-    } else {
-        let snapshot = tools.primary_provider(EditableSnapshotRead).unwrap();
-        referenced_tools.insert(snapshot.tool);
-        consumed_facts.insert(ToolCapability(EditableSnapshotRead));
-        format!(
-            "If the user explicitly cancels or abandons planning, obtain a fresh snapshot of {} with {} and use {} to delete all draft lines. Do not use {} for an unconfirmed draft; it only clears the locked plan.",
-            context.plan_draft_file.display(),
-            snapshot.tool,
-            writer.tool,
-            clear.tool
-        )
-    };
     let content = include_str!("../assets/prompts/workflows/plan_lifecycle.md")
-        .replace("{{WRITER_PROVIDER}}", writer.tool)
-        .replace("{{DRAFT_CANCEL_INSTRUCTION}}", &draft_cancel_instruction)
+        .replace("{{DRAFT_PROVIDER}}", draft.tool)
         .replace("{{CONFIRM_PROVIDER}}", confirm.tool)
-        .replace("{{CLEAR_PROVIDER}}", clear.tool)
-        .replace(
-            "{{PLAN_DRAFT_FILE}}",
-            &context.plan_draft_file.display().to_string(),
-        )
-        .replace("{{PLAN_FILE}}", &context.plan_file.display().to_string());
+        .replace("{{CLEAR_PROVIDER}}", clear.tool);
     Ok(RenderedPromptPack {
         content: format!("{}{}", content.trim(), todo.unwrap_or_default()),
         referenced_tools,

@@ -1,7 +1,6 @@
 use super::{Builder, PromptDocument, PromptSection, PromptSectionOrigin};
 use anyhow::Result;
 use std::collections::BTreeSet;
-use std::fs;
 
 pub(super) fn append_core_sections(builder: &Builder, document: &mut PromptDocument) -> Result<()> {
     let locale_raw = ["LC_ALL", "LC_MESSAGES", "LANG"]
@@ -67,7 +66,7 @@ pub(super) fn append_core_sections(builder: &Builder, document: &mut PromptDocum
     Ok(())
 }
 
-pub(super) fn append_external_and_session_sections(
+pub(super) fn append_external_sections(
     builder: &Builder,
     document: &mut PromptDocument,
 ) -> Result<()> {
@@ -166,20 +165,6 @@ pub(super) fn append_external_and_session_sections(
             content,
             None,
         )?;
-    }
-    if builder.plan_file.exists() {
-        let content = fs::read_to_string(&builder.plan_file)?;
-        if !content.trim().is_empty() {
-            document.push(PromptSection {
-                id: "current-plan".into(),
-                tag: "current-plan".into(),
-                origin: PromptSectionOrigin::SessionState,
-                content,
-                name: Some(builder.plan_file.display().to_string()),
-                referenced_tools: BTreeSet::new(),
-                consumed_facts: BTreeSet::new(),
-            })?;
-        }
     }
     Ok(())
 }

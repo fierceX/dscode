@@ -1,11 +1,12 @@
 use crate::cancel::CancellationToken;
 use crate::capabilities::CapabilitySnapshot;
-use crate::config::{Config, OutputFormat, ToolApprovalMode, ToolApprovalPolicy, ToolDisableFlags};
+use crate::config::{Config, OutputFormat, ToolApprovalMode, ToolApprovalPolicy};
 use crate::llm::client::LlmBackend;
 use crate::resources::ResourceRouter;
 use crate::session::artifacts::ArtifactManager;
 use crate::session::compaction::CompactionEngine;
 use crate::session::paths::SessionLayout;
+use crate::session::plan::PlanStore;
 use crate::session::prefix::ImmutablePrefix;
 use crate::session::stats::StatsTracker;
 use crate::session::store::ConversationStore;
@@ -23,7 +24,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use crate::config::{SandboxPythonConfig, TOOL_DISABLE_MAP};
+use crate::config::SandboxPythonConfig;
 
 #[derive(Clone)]
 pub struct ToolConfig {
@@ -33,9 +34,7 @@ pub struct ToolConfig {
     pub file_write_max_bytes: usize,
     pub max_search_files: usize,
     pub max_search_results: usize,
-    /// 工具禁用开关（运行时覆盖）
-    pub tool_disable: ToolDisableFlags,
-    /// 工具白名单：`None` 表示全部启用；`Some(vec![])` 表示不启用任何工具。
+    /// 工具选择：`None` 使用默认工具集；`Some(vec![])` 不启用任何工具。
     pub enabled_tools: Option<Vec<String>>,
     pub tool_approval_mode: ToolApprovalMode,
     pub tool_approval: BTreeMap<String, ToolApprovalPolicy>,
@@ -52,27 +51,11 @@ impl ToolConfig {
             file_write_max_bytes: cfg.file_write_max_bytes,
             max_search_files: cfg.max_search_files,
             max_search_results: cfg.max_search_results,
-            tool_disable: cfg.tool_disable.clone(),
             enabled_tools: cfg.enabled_tools.clone(),
             tool_approval_mode: cfg.tool_approval_mode,
             tool_approval: cfg.tool_approval.clone(),
             sandbox_python: cfg.sandbox_python.clone(),
         }
-    }
-
-    pub fn is_tool_enabled(&self, name: &str) -> bool {
-        if TOOL_DISABLE_MAP
-            .iter()
-            .any(|(tool_name, check)| *tool_name == name && check(&self.tool_disable))
-        {
-            return false;
-        }
-        if let Some(whitelist) = self.enabled_tools.as_deref()
-            && !whitelist.iter().any(|tool_name| tool_name == name)
-        {
-            return false;
-        }
-        true
     }
 }
 
@@ -115,6 +98,7 @@ pub struct ToolContext {
     pub store: Arc<ConversationStore>,
     pub artifacts: Arc<ArtifactManager>,
     pub snapshots: Arc<Mutex<FileSnapshotStore>>,
+    pub plan_store: Arc<PlanStore>,
     pub tool_config: ToolConfig,
     pub interrupt: Arc<AtomicBool>,
     pub read_only_fs: Option<Arc<dyn ReadOnlyFileSystem>>,
@@ -134,6 +118,10 @@ impl From<&AgentSharedContext> for ToolContext {
             store: ctx.store.clone(),
             artifacts: ctx.artifacts.clone(),
             snapshots: ctx.snapshots.clone(),
+            plan_store: Arc::new(PlanStore::new(
+                ctx.plan_path.clone(),
+                ctx.plan_draft_path.clone(),
+            )),
             tool_config: ctx.tool_config.clone(),
             interrupt: ctx.interrupt.clone(),
             read_only_fs: ctx.read_only_fs.clone(),

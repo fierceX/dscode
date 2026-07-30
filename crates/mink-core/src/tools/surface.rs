@@ -1,6 +1,6 @@
 use crate::context::ToolConfig;
 use crate::tools::approval::{ToolAuthorization, ToolAuthorizationDeniedReason, authorize_tool};
-use crate::tools::catalog::{ToolBuildAvailability, ToolCatalog};
+use crate::tools::catalog::{ToolBuildAvailability, ToolCatalog, ToolDefaultActivation};
 use crate::tools::metadata::ToolMetadata;
 use anyhow::{Result, bail, ensure};
 use sha2::{Digest, Sha256};
@@ -22,11 +22,10 @@ pub enum FilesystemBackend {
 pub struct ToolResolutionContext {
     role: AgentRole,
     filesystem_backend: FilesystemBackend,
-    web_enabled: bool,
 }
 
 impl ToolResolutionContext {
-    pub fn from_runtime(role: AgentRole, config: &ToolConfig, read_only_fs_present: bool) -> Self {
+    pub fn from_runtime(role: AgentRole, _config: &ToolConfig, read_only_fs_present: bool) -> Self {
         Self {
             role,
             filesystem_backend: if read_only_fs_present {
@@ -34,7 +33,6 @@ impl ToolResolutionContext {
             } else {
                 FilesystemBackend::Local
             },
-            web_enabled: !config.tool_disable.disable_web,
         }
     }
 
@@ -45,16 +43,12 @@ impl ToolResolutionContext {
     pub fn filesystem_backend(&self) -> FilesystemBackend {
         self.filesystem_backend
     }
-
-    pub fn web_enabled(&self) -> bool {
-        self.web_enabled
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolHiddenReason {
-    DisabledByFlag,
     NotWhitelisted,
+    ExplicitOptInRequired,
     DeniedByApproval,
     ApprovalPromptUnavailable,
     UnavailableForRole,
@@ -111,18 +105,16 @@ impl ModelToolSurface {
                     continue;
                 }
             };
-            if crate::config::TOOL_DISABLE_MAP
-                .iter()
-                .any(|(name, check)| *name == tool.name && check(&config.tool_disable))
-            {
-                hidden.insert(tool.name.clone(), ToolHiddenReason::DisabledByFlag);
-                continue;
-            }
             if whitelist
                 .as_ref()
                 .is_some_and(|names| !names.contains(tool.name.as_str()))
             {
                 hidden.insert(tool.name.clone(), ToolHiddenReason::NotWhitelisted);
+                continue;
+            }
+            if whitelist.is_none() && tool.default_activation == ToolDefaultActivation::ExplicitOnly
+            {
+                hidden.insert(tool.name.clone(), ToolHiddenReason::ExplicitOptInRequired);
                 continue;
             }
             match authorize_tool(metadata, config) {
@@ -369,7 +361,6 @@ mod tests {
     #[test]
     fn compiled_python_sandbox_requires_runtime_enablement() {
         let mut config = ToolConfig::from_config(&Config::default());
-        config.tool_disable.disable_python_sandbox = false;
         config.enabled_tools = Some(vec!["PythonSandbox".into()]);
         assert!(
             resolve(&config, AgentRole::Primary, false)

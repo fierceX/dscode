@@ -37,8 +37,10 @@ impl TurnCompactor {
         if self.compacted_this_turn {
             return Ok(false);
         }
+        let request_messages =
+            crate::session::plan::project_current_plan(&self.ctx.plan_path, messages)?;
         let local_tokens = crate::llm::transport::estimate_openai_context_tokens(
-            messages,
+            &request_messages,
             tools_json,
             system_prompt,
         )?;

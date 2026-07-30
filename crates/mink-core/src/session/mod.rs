@@ -4,6 +4,7 @@ pub mod compaction_input;
 pub mod init;
 pub mod metadata;
 pub mod paths;
+pub mod plan;
 pub mod prefix;
 pub mod stats;
 pub mod store;

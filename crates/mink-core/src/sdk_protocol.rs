@@ -5,7 +5,7 @@ use std::path::Path;
 
 use crate::session::paths::SessionLayout;
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -30,12 +30,8 @@ impl Default for SdkRequest {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct SdkOptions {
-    pub disable_bash: bool,
-    pub disable_sub_agent: bool,
-    pub disable_web: bool,
-    pub disable_python: bool,
     pub model: Option<String>,
     pub max_tokens: Option<i32>,
     pub max_turns: Option<i32>,
@@ -290,7 +286,6 @@ mod tests {
         let req: SdkRequest = serde_json::from_str(r#"{"prompt":"hi"}"#).unwrap();
         assert_eq!(req.version, Some(PROTOCOL_VERSION));
         assert_eq!(req.prompt, "hi");
-        assert!(!req.options.disable_bash);
         assert_eq!(req.options.session_layout, None);
         assert_eq!(req.options.skills, None);
         assert_eq!(req.options.inline_skills, None);
@@ -388,13 +383,13 @@ mod tests {
 
     #[test]
     fn parse_agent_jsonl_request_rejects_missing_prompt() {
-        let err = parse_agent_jsonl_request(r#"{"version":1}"#).unwrap_err();
+        let err = parse_agent_jsonl_request(r#"{"version":2}"#).unwrap_err();
         assert!(err.contains("missing required field prompt"));
     }
 
     #[test]
     fn parse_agent_jsonl_request_rejects_non_string_prompt() {
-        let err = parse_agent_jsonl_request(r#"{"version":1,"prompt":123}"#).unwrap_err();
+        let err = parse_agent_jsonl_request(r#"{"version":2,"prompt":123}"#).unwrap_err();
         assert!(err.contains("prompt must be a string"));
     }
 

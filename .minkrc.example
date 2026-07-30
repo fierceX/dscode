@@ -72,7 +72,7 @@ max_search_results = 1000                   # Grep 最大匹配结果行数
 
 # ── 工具审批 ─────────────────────────────────────────────────
 
-# ── 工具白名单（同时限制模型可见工具和真实执行）─────────────
+# ── 工具选择（同时限制模型可见工具和真实执行）───────────────
 # enabled_tools = ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]
 #[tools]
 #approval_mode = "yolo"                    # yolo / write / always-ask
@@ -89,17 +89,14 @@ max_search_results = 1000                   # Grep 最大匹配结果行数
 #backend = "auto"                         # nsjail / bwrap / sandbox-exec / off
 #read_dirs = ["src"]
 #write_dirs = ["src"]
-#allow_bash = true
-#allow_python = true
 #allow_network = true
-#allow_sub_agent = true
 #max_memory_mb = 1024
 #max_pids = 64
 #timeout_secs = 600
 
 # ── PythonSandbox ───────────────────────────────────────────
+# 运行参数在此配置；工具是否启用只由顶层 enabled_tools 决定。
 #[sandbox_python]
-#enable = false
 #wasm_path = "cpython-wasi/python.wasm"
 #stdlib_dir = "cpython-wasi"
 #timeout = 30

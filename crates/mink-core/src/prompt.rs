@@ -21,18 +21,13 @@ pub struct Builder {
     pub skill_snapshot: Arc<SkillSnapshot>,
     pub context_file_snapshot: Arc<ContextFileSnapshot>,
     pub rule_snapshot: Arc<RuleSnapshot>,
-    pub plan_file: PathBuf,
-    pub plan_draft_file: PathBuf,
     pub mission_file: Option<PathBuf>,
     pub mission_content: Option<String>,
     pub tool_surface: Arc<ModelToolSurface>,
     pub tool_capabilities: Arc<ResolvedToolCapabilities>,
 }
 
-pub struct PromptBuildContext<'a> {
-    pub plan_file: &'a std::path::Path,
-    pub plan_draft_file: &'a std::path::Path,
-}
+pub struct PromptBuildContext;
 
 impl Builder {
     pub fn build_system_prompt(&self) -> Result<String> {
@@ -50,10 +45,7 @@ impl Builder {
         modules::append_tool_sections(&mut document, &self.tool_surface)?;
         let workflows =
             workflows::PromptWorkflowResolver::builtin().resolve(&self.tool_capabilities)?;
-        let build_context = PromptBuildContext {
-            plan_file: &self.plan_file,
-            plan_draft_file: &self.plan_draft_file,
-        };
+        let build_context = PromptBuildContext;
         for spec in workflows.ordered() {
             let rendered = (spec.render)(&build_context, &self.tool_capabilities)?;
             validate_pack(spec, &rendered, &workflows, &self.tool_surface)?;
@@ -68,7 +60,7 @@ impl Builder {
             })?;
         }
 
-        core::append_external_and_session_sections(self, &mut document)?;
+        core::append_external_sections(self, &mut document)?;
         document.move_to_end("output-language")?;
         document.validate_generated_references(&self.tool_surface, &workflows)?;
         Ok(document)
@@ -145,8 +137,6 @@ mod tests {
             skill_snapshot: Arc::new(SkillSnapshot::default()),
             context_file_snapshot: Arc::new(ContextFileSnapshot::default()),
             rule_snapshot: Arc::new(RuleSnapshot::default()),
-            plan_file: PathBuf::from("/tmp/plan.md"),
-            plan_draft_file: PathBuf::from("/tmp/plan.draft"),
             mission_file: None,
             mission_content: None,
             tool_surface: surface,
@@ -263,48 +253,19 @@ mod tests {
 
     #[test]
     fn plan_lifecycle_restores_revision_and_cancellation_constraints() {
-        let edit_plan = builder_for(&["Read", "Edit", "PlanConfirm", "PlanClear"])
+        let document = builder_for(&["PlanDraft", "PlanConfirm", "PlanClear"])
             .build_document()
             .unwrap();
-        let section = edit_plan
+        let section = document
             .sections()
             .iter()
             .find(|section| section.id == "plan-lifecycle")
             .unwrap();
-        assert!(section.content.contains("every user reply about the plan"));
-        assert!(
-            section
-                .content
-                .contains("update the draft before responding")
-        );
-        assert!(section.content.contains("fresh snapshot"));
-        assert!(section.content.contains("delete all draft lines"));
-        assert!(section.content.contains("Do not use PlanClear"));
-
-        let write_plan = builder_for(&["Write", "PlanConfirm", "PlanClear"])
-            .build_document()
-            .unwrap();
-        let section = write_plan
-            .sections()
-            .iter()
-            .find(|section| section.id == "plan-lifecycle")
-            .unwrap();
-        assert!(section.content.contains("Write"));
-        assert!(section.content.contains("overwrite it with empty content"));
-        assert!(!section.content.contains("fresh snapshot"));
-
-        let edit_and_write_plan =
-            builder_for(&["Read", "Edit", "Write", "PlanConfirm", "PlanClear"])
-                .build_document()
-                .unwrap();
-        let section = edit_and_write_plan
-            .sections()
-            .iter()
-            .find(|section| section.id == "plan-lifecycle")
-            .unwrap();
-        assert!(section.content.contains("draft the plan"));
-        assert!(section.content.contains("using Edit"));
-        assert!(section.content.contains("using Write to overwrite"));
+        assert!(section.content.contains("every reply about the plan"));
+        assert!(section.content.contains("revised draft before responding"));
+        assert!(section.content.contains("PlanDraft"));
+        assert!(section.content.contains("empty content"));
+        assert!(section.content.contains("Only explicit confirmation"));
     }
 
     #[test]
@@ -376,7 +337,6 @@ mod tests {
             for vfs in [false, true] {
                 for mask in 0usize..(1usize << names.len()) {
                     let mut config = ToolConfig::from_config(&Config::default());
-                    config.tool_disable.disable_python_sandbox = false;
                     config.enabled_tools = Some(
                         names
                             .iter()

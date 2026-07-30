@@ -1,6 +1,6 @@
 # TUI 实现说明与维护建议
 
-更新日期：2026-06-14
+更新日期：2026-07-30
 
 ## 定位
 
@@ -68,7 +68,7 @@ TUI 是 mink 的全屏终端交互模式，基于 `ratatui`。它不是 agent �
 
 ```text
 cargo test -p mink-cli --all-features tui
-76 passed
+83 passed
 
 cargo test
 workspace quick tests

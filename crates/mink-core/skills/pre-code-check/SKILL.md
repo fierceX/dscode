@@ -7,24 +7,21 @@ description: Use BEFORE touching any code — read context, search call sites, v
 
 ## The Iron Law
 
-NO CODE CHANGES WITHOUT PRIOR SEARCH AND READ. If you haven't read the file and searched for all call sites, you cannot use Edit.
+NO CODE CHANGES WITHOUT PRIOR INSPECTION AND SEARCH. Do not mutate a target until you have inspected it and searched for all call sites with the active providers.
 
 ## The Checklist
 
-Before using Write, Edit, or any tool that modifies files, complete these steps:
+Before using any capability that modifies files, complete these steps:
 
-1. **Read the target file** — understand the current structure, not just where you're changing
-2. **Grep for call sites** — search all files that reference the function, class, or symbol you're changing:
-   ```bash
-   grep -rn "function_name" --include="*.rs" --include="*.py" --include="*.js" .
-   ```
-3. **Read the callers** — at least one caller to verify your understanding
-4. **Check for existing tests** — `grep -rn "test_my_change" tests/`
-5. **Verify assumptions** — does the function behavior match what you think? Read it.
+1. **Inspect the target file** — understand the current structure, not just where you're changing
+2. **Search for call sites** — use an active content-search provider to find every reference to the function, class, or symbol
+3. **Inspect the callers** — examine at least one caller to verify your understanding
+4. **Check for existing tests** — search the relevant test locations before adding or changing coverage
+5. **Verify assumptions** — confirm that the implementation behaves as expected before changing it
 
 ## Red Flags
 
-- Editing a file you haven't read first
-- Changing a function without Grep-ing its callers
+- Editing a file you haven't inspected first
+- Changing a function without searching for its callers
 - Assuming "this is only used here" without searching
-- Refactoring without reading the test file first
+- Refactoring without inspecting the relevant tests first

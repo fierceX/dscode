@@ -10,7 +10,6 @@ pub enum PromptSectionOrigin {
     Workflow,
     External,
     ExternalOverride,
-    SessionState,
 }
 
 #[derive(Debug, Clone)]

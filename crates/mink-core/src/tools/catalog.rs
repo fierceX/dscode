@@ -1,4 +1,3 @@
-use crate::config::TOOL_DISABLE_MAP;
 use crate::context::ToolConfig;
 use crate::tools::metadata::ToolMetadata;
 use anyhow::{Result, bail, ensure};
@@ -12,6 +11,13 @@ pub struct CatalogTool {
     pub name: String,
     pub schema: serde_json::Value,
     pub availability: ToolBuildAvailability,
+    pub default_activation: ToolDefaultActivation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolDefaultActivation {
+    Enabled,
+    ExplicitOnly,
 }
 
 #[derive(Clone)]
@@ -68,10 +74,16 @@ impl ToolCatalog {
                 bail!("schema for '{name}' has no compiled executor or feature declaration");
             };
             by_name.insert(name.clone(), ordered.len());
+            let default_activation = if name == "PythonSandbox" {
+                ToolDefaultActivation::ExplicitOnly
+            } else {
+                ToolDefaultActivation::Enabled
+            };
             ordered.push(CatalogTool {
                 name,
                 schema,
                 availability,
+                default_activation,
             });
         }
 
@@ -86,13 +98,6 @@ impl ToolCatalog {
                 "feature declaration references unknown tool '{name}'"
             );
         }
-        for (name, _) in TOOL_DISABLE_MAP {
-            ensure!(
-                by_name.contains_key(*name),
-                "disable flag references unknown tool '{name}'"
-            );
-        }
-
         Ok(Self { ordered, by_name })
     }
 

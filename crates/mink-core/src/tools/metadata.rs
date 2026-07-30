@@ -13,7 +13,6 @@ pub enum ToolResultKind {
     Edit,
     Command,
     Search,
-    Web,
     Control,
     SubAgent,
 }

@@ -1,11 +1,11 @@
 use crate::capabilities::{CapabilityExposure, RuntimeSkill, SkillDiscoveryPolicy, SkillProvider};
 use crate::config::{
     Config, OpenAiTokenParamConfig, OutputFormat, SandboxConfig, SandboxPythonConfig,
-    ToolApprovalMode, ToolApprovalPolicy, ToolDisableFlags,
+    ToolApprovalMode, ToolApprovalPolicy,
 };
+use crate::llm::client::{LlmBackend, TokenParamKind};
 use crate::resources::ResourceHandler;
 use crate::runtime::config::{first_prompt_from_config, session_policy_from_config};
- use crate::llm::client::{LlmBackend, TokenParamKind};
 use crate::runtime::{AgentRuntimeConfig, EventSink, SessionPolicy};
 use crate::session::paths::SessionLayout;
 use crate::tools::vfs::ReadOnlyFileSystem;
@@ -414,46 +414,16 @@ impl AgentOptions {
         self
     }
 
-    pub fn with_tool_disable(mut self, tool_disable: ToolDisableFlags) -> Self {
-        self.config.tool_disable = tool_disable;
-        self
-    }
-
-    pub fn disable_bash(mut self, disabled: bool) -> Self {
-        self.config.tool_disable.disable_bash = disabled;
-        self
-    }
-
-    pub fn disable_python(mut self, disabled: bool) -> Self {
-        self.config.tool_disable.disable_python = disabled;
-        self
-    }
-
-    pub fn disable_sub_agent(mut self, disabled: bool) -> Self {
-        self.config.tool_disable.disable_sub_agent = disabled;
-        self
-    }
-
-    pub fn disable_web(mut self, disabled: bool) -> Self {
-        self.config.tool_disable.disable_web = disabled;
-        self
-    }
-
-    pub fn enable_python_sandbox(mut self, enabled: bool) -> Self {
-        self.config.tool_disable.disable_python_sandbox = !enabled;
-        self
-    }
-
     /// Restrict execution to exactly the provided tools.
     ///
-    /// Passing an empty list disables all tools. Use
-    /// [`AgentOptions::with_all_tools_enabled`] to clear the whitelist.
+    /// Passing an empty list disables all tools. `None` uses the catalog's
+    /// default tool set; explicitly listing `PythonSandbox` opts into it.
     pub fn with_enabled_tools(mut self, tools: impl Into<Vec<String>>) -> Self {
         self.config.enabled_tools = Some(tools.into());
         self
     }
 
-    pub fn with_all_tools_enabled(mut self) -> Self {
+    pub fn with_default_tools(mut self) -> Self {
         self.config.enabled_tools = None;
         self
     }
@@ -553,11 +523,6 @@ mod tests {
             .with_skill_discovery_policy(SkillDiscoveryPolicy::RuntimeOnly)
             .with_selected_skills(["runtime-rust"])
             .with_mission_content("mission")
-            .disable_bash(true)
-            .disable_python(true)
-            .disable_sub_agent(true)
-            .disable_web(true)
-            .enable_python_sandbox(true)
             .with_enabled_tools(vec!["Read".to_string(), "Bash".to_string()])
             .with_tool_approval_mode(ToolApprovalMode::Write)
             .with_tool_approval_policy("Bash", ToolApprovalPolicy::Prompt)
@@ -616,11 +581,6 @@ mod tests {
         );
         assert_eq!(cfg.skills, vec!["runtime-rust"]);
         assert_eq!(cfg.mission_content.as_deref(), Some("mission"));
-        assert!(cfg.tool_disable.disable_bash);
-        assert!(cfg.tool_disable.disable_python);
-        assert!(cfg.tool_disable.disable_sub_agent);
-        assert!(cfg.tool_disable.disable_web);
-        assert!(!cfg.tool_disable.disable_python_sandbox);
         assert_eq!(
             cfg.enabled_tools,
             Some(vec!["Read".to_string(), "Bash".to_string()])

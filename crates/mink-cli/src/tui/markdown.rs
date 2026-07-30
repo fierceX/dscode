@@ -49,7 +49,7 @@ pub(crate) fn style_for_kind(kind: MsgKind) -> Style {
 /// benefit from syntax-highlighted diff rendering.
 ///
 /// Only these tools are eligible for `MarkdownMode::Diff`. Other tools
-/// (Read, Write, Glob, WebSearch, SubAgent, ...) are excluded because
+/// (Read, Write, Glob, SubAgent, ...) are excluded because
 /// their output is either structured text or raw file content that should
 /// not be reinterpreted as a diff — even if the text coincidentally
 /// contains diff-like lines (e.g. Read of a YAML front-matter file).

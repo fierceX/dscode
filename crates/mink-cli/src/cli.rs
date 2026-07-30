@@ -717,11 +717,7 @@ fn print_usage() {
     println!("  --tui                   TUI mode");
     println!("  --print                 Stream JSON events to stdout");
     println!("  --agent-jsonl           Agent JSONL protocol");
-    println!("  --disable-bash          Disable Bash tool");
-    println!("  --disable-python        Disable Python tool");
-    println!("  --disable-sub-agent     Disable SubAgent tool");
-    println!("  --disable-web           Disable WebSearch/WebFetch tools");
-    println!("  --enable-python-sandbox Enable PythonSandbox tool (default: disabled)");
+    println!("  --enabled-tools <list>  Comma-separated tools to enable, or 'none'");
     println!("  --config <toml>         Set config via TOML string");
     println!("                          Example: --config \"max_tokens=4096\\ntool_timeout=300\"");
     println!("                          Supports: model, max_tokens, max_turns, max_context,");

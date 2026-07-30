@@ -1,6 +1,6 @@
 # 内置工具
 
-更新日期：2026-07-25
+更新日期：2026-07-30
 
 本文是 mink 内置工具的协议参考，面向需要理解工具参数、执行模型、结果通道、资源 URL、
 审批和构建裁剪的使用者与开发者。CLI 参数、session、沙箱、技能和常见工作流见
@@ -16,14 +16,16 @@ surface、语义能力和跨工具 workflow 的设计见
 
 ```text
 ToolCallEvent
-  -> ToolConfig enabled/disabled 检查
-  -> Approval 检查
+  -> resolved ModelToolSurface 执行门禁
   -> StormBreaker 检查
   -> repair_truncated_json()
   -> ToolExec::execute()
-  -> format_tool_result(tool_result_max_bytes)
-  -> Bash noise filter / Read-Write summary / Edit conv_content
-  -> ToolRunResult
+  -> format_dispatched_result() 生成 ToolRunResult
+     -> 普通结果执行大小保护、Bash noise filter、Read-Write summary、Edit conv_content
+     -> Plan/SubAgent 结果标记为待定稿
+  -> PlanActionHandler 生成 Plan effect / 压缩请求；SubAgentCoordinator 完成延迟工作
+  -> finalize_deferred_results() 对延迟结果执行大小保护
+  -> SignalCollector 只观察最终 ToolRunResult
 ```
 
 工具结果有两个内容通道：
@@ -38,7 +40,6 @@ ToolCallEvent
 `Read` 当前是轻量资源的内置调用 provider。具体协议由 `ResourceRouter` 和各 scheme
 handler 拥有，不能把 `skill://`、`rule://` 等协议视为 `Read` 工具自身合同：
 
-- `http(s)://...`：读取公开 URL，首次 fetch 后写入当前 session artifact cache，后续同 URL 的 selector 从缓存分页；如果 cache index 命中但正文 artifact 丢失，会重新 fetch 并写入新缓存。
 - `artifact://<id>`：读取被截断工具输出。
 - `skill://list` / `skill://list/all` / `skill://<name>` / `skill://<name>/<relative-path>`：通过当前 `Read` provider 列出、诊断或读取可用 skill；列表、正文和子资源读取来自同一 capability snapshot。`skill://all` 是 `skill://list/all` 的兼容别名；只有 filesystem-backed skill 支持 `<relative-path>` 子资源。
 - `rule://list` / `rule://<name>`：列出或读取可用 rule。
@@ -49,7 +50,7 @@ handler 拥有，不能把 `skill://`、`rule://` 等协议视为 `Read` 工具�
 - `session://current/history`：读取从完整 `conversation.jsonl` 生成的有损 transcript；省略 thinking 和完整工具结果正文。
 - `session://current/artifacts`：列出当前 session artifacts。
 
-这些资源都支持同样的行 selector，例如 `session://current/messages:1-20` 或 `https://example.com:20-60`。
+这些资源都支持同样的行 selector，例如 `session://current/messages:1-20`。
 
 ### 嵌入式只读 VFS
 
@@ -57,11 +58,11 @@ handler 拥有，不能把 `skill://`、`rule://` 等协议视为 `Read` 工具�
 `ReadOnlyFileSystem`，替换普通路径上的 `Read`、`Glob`、`Grep` 后端。该机制不注册新工具，也不修改三个工具的 schema。
 
 - 未注入时严格执行原有本地文件代码路径，包括本地路径解析、`ignore` 遍历和 Read snapshot。
-- `artifact://`、`skill://`、`rule://`、`session://`、`http(s)://` 不进入 VFS，继续使用已有资源实现。
+- `artifact://`、`skill://`、`rule://`、`session://` 不进入 VFS，继续使用已有资源实现。
 - 每次调用收到 `VfsScope { resource_session_id, agent_session_id }`。前者用于数据库分区，后者标识当前主代理或子代理。
 - 未指定 `resource_session_id` 时默认使用 runtime session id；子代理继承父代理的 resource scope，但拥有自己的 agent session id。
 - 虚拟路径按 POSIX 规则规范化，拒绝 `..` 越过虚拟根目录和 NUL 字节。
-- 虚拟 Read 不生成 editable snapshot，因此 VFS runtime 不向模型暴露 `Edit`；白名单显式包含
+- 虚拟 Read 不生成 editable snapshot，因此 VFS runtime 不向模型暴露 `Edit`；`enabled_tools` 显式包含
   `Edit` 时启动失败。`Write` 仍操作本地文件，不修改 VFS。
 - Glob/Grep 后端返回结构化结果。glob/regex 校验、文本格式和 100KB 搜索输出保护由 `mink-core` 保持。
 - 后端必须自行实现 `glob` / `grep` 并遵守请求中的 `max_files` / `max_results`；`mink-core` 不提供第二套 VFS 搜索实现。
@@ -90,16 +91,17 @@ handler 拥有，不能把 `skill://`、`rule://` 等协议视为 `Read` 工具�
 异常调用仍会在 runner 中 fail closed。可用 `[tools.approval]` 为单个工具设置 `allow`、
 `deny` 或 `prompt`。
 
-### 工具白名单
+### 工具选择
 
-工具列表可通过两种方式过滤，减少 LLM 可见的工具数量以节省 token 并提升遵循率，同时作为执行层边界：
+`enabled_tools` 是唯一工具启用入口，可由 CLI `--enabled-tools`、`.minkrc`、`--config`、
+Rust `AgentOptions` 或 SDK `options.enabled_tools` 设置。显式列表精确选择工具，空列表禁用
+全部工具，未设置时使用 catalog 默认集合。`PythonSandbox` 属于 explicit-only 工具，不在
+默认集合中，必须显式列出。未知、重复或当前构建 feature 不可用的名称会在创建 session 前
+报错。
 
-1. **禁用开关**（CLI `--disable-bash` 等，或 SDK `options.disable_*`）：按类别禁用，如 Bash、Python、SubAgent、Web 工具。
-2. **白名单 `enabled_tools`**（`.minkrc` 或 `--config` 或 SDK `options.enabled_tools`）：精确指定允许的工具名称列表。未知、重复或本构建 feature 不可用的名称会在创建 session 前报错。未在列表中的工具对 LLM 不可见，且即使模型或历史上下文产生了该工具调用，也会在 `ToolRunner` 执行前返回错误结果。`None` 或未设置表示全部启用（受禁用开关约束）。
-
-两种方式可同时使用。最终 surface 还会同时考虑 approval、主/子代理 role、filesystem backend
-和硬依赖；schema、语义能力、workflow 和运行时引导都从同一个解析结果收缩。执行层保留
-`ToolConfig::is_tool_enabled()` 和同源 approval gate 作为纵深防御。
+最终 surface 还会考虑 approval、主/子代理 role、filesystem backend 和硬依赖；schema、
+语义能力、workflow、运行时引导和真实执行门禁都消费同一个解析结果，不再存在 disable flag
+或 sandbox `allow_*` 工具策略。
 
 ### 按需编译（PythonSandbox）
 
@@ -144,7 +146,6 @@ cargo build --release
 
 - `:raw` 禁用 snapshot header 和行号。
 - 注入 VFS 后，普通路径读取虚拟文件并显示只读标记，不生成 snapshot；selector 和 `:raw` 语义保持一致。
-- `http(s)://...` 可读取公开 URL。URL 输出不生成 editable snapshot；首次读取会保存为 `ReadUrl` artifact cache，后续同 URL selector 从缓存分页，不重复 fetch。损坏的 URL cache index 行会被跳过；cache 正文缺失时会重新 fetch。
 - `artifact://<id>` 可读取被截断工具输出，支持同样的行 selector；恢复和 fork 后引用保持稳定。
 - `skill://list` / `skill://list/all` / `skill://<name>` / `skill://<name>/<relative-path>` 可通过当前 `Read` provider 读取可用 skills，列表、诊断视图、正文和 filesystem-backed skill 子资源来自同一 capability snapshot。`skill://all` 是 `skill://list/all` 的兼容别名；built-in/runtime skill 只支持读取正文，不支持子资源。selected skill 正文直接进入 prompt，不依赖此 provider。
 - `rule://list` / `rule://<name>` 可读取可用 rules。
@@ -249,7 +250,7 @@ replace 2..5:
 在 CPython WASI 沙箱中执行 Python 代码。基于 wasmtime + CPython WASI（Brett Cannon 的 cpython-wasi-build），提供 WASI 级进程隔离。
 
 仅配置的目录有读写权限，无子进程、无网络、无 C 扩展，完整 CPython 标准库可用。
-默认禁用，需通过 `--enable-python-sandbox` 或 `.minkrc` 中 `[sandbox_python] enable = true` 启用。
+默认不进入工具 surface；在 `enabled_tools` 中显式列出 `PythonSandbox` 后启用。
 
 ### python.wasm 说明
 
@@ -366,6 +367,19 @@ open("/absolute/path/to/project/output/f.txt", "w")  # 绝对路径 ✅
 - 最多一个 `in_progress`。
 - 结果以 Markdown checklist 返回。
 
+## `PlanDraft`
+
+创建、替换或取消当前计划草稿。
+
+| 参数 | 类型 | 说明 |
+|---|---|---|
+| `content` | string | 完整 Markdown 草稿；空字符串表示取消未确认草稿 |
+
+- 草稿写入由 `PlanStore` 在同目录原子替换。
+- 已确认计划存在时拒绝创建或替换草稿。
+- 每次修改都传完整草稿，不使用 `Write` / `Edit` 操作内部计划文件。
+- 写入失败会返回错误结果，不会产生空成功。
+
 ## `PlanConfirm`
 
 确认并锁定当前 `plan.draft`。
@@ -373,9 +387,10 @@ open("/absolute/path/to/project/output/f.txt", "w")  # 绝对路径 ✅
 无参数。
 
 - 仅在用户明确确认计划后调用。
-- 触发 `plan.draft -> plan.md`。
-- 触发上下文压缩和 immutable prefix 失效。
-- 工具本身是 internal tool，具体副作用由 `PlanActionHandler` 处理。
+- 通过原子 rename 触发 `plan.draft -> plan.md`，草稿文件随之消失。
+- 请求上下文压缩；请求统一经过 `TurnCompactor` 的同轮一次守卫，失败会返回当前 turn。
+- 下一次 LLM 请求将计划作为动态 `<current-plan>` system message 注入，不改变 immutable prefix。
+- 状态转换由类型化 `PlanCommand` 和 `PlanStore` 处理，失败会原样进入工具结果。
 
 ## `PlanClear`
 
@@ -384,9 +399,10 @@ open("/absolute/path/to/project/output/f.txt", "w")  # 绝对路径 ✅
 无参数。
 
 - 在计划完成后调用。
-- 清空 `plan.md`。
-- 触发上下文压缩和 immutable prefix 失效。
-- 工具本身是 internal tool，具体副作用由 `PlanActionHandler` 处理。
+- 删除 `plan.md` 并清理可能遗留的 `plan.draft`；确认计划不存在或为空时 fail closed。
+- 请求上下文压缩；请求统一经过 `TurnCompactor` 的同轮一次守卫，失败会返回当前 turn。
+- 下一次 LLM 请求不再注入动态计划，immutable prefix 保持不变。
+- 状态转换由类型化 `PlanCommand` 和 `PlanStore` 处理，失败会原样进入工具结果。
 
 ## `SubAgent`
 
@@ -414,32 +430,3 @@ open("/absolute/path/to/project/output/f.txt", "w")  # 绝对路径 ✅
 - 子代理完成时会通过 parent display 发送完整 thinking/text。
 - tool result 会注入父会话，格式为 `[sub-agent <id>] <status> (in=<n>, out=<n>) ...`。
 - 超时后未完成项返回 `Sub-agent timed out after <n>s.`，并取消对应子代理。
-
-## `WebSearch`
-
-网络搜索。
-
-| 参数 | 类型 | 说明 |
-|---|---|---|
-| `query` | string | 搜索关键词 |
-
-- 基于 DuckDuckGo Lite GET，失败或空结果时回退到 DuckDuckGo HTML POST，不需要 API key。
-- 会识别 DuckDuckGo `anomaly.js` / challenge 页面，并明确返回反爬挑战错误，而不是伪装成空结果。
-- 默认使用 Firefox-like User-Agent 和基础浏览器导航请求头，可用 `MINK_WEB_USER_AGENT` 覆盖 UA。
-- 默认 HTTP 超时 15 秒。
-- 回答中应带来源链接。
-
-## `WebFetch`
-
-获取网页内容。
-
-| 参数 | 类型 | 说明 |
-|---|---|---|
-| `url` | string | 完整 URL |
-
-- 直接通过 HTTP GET 获取公开网页，不需要 API key。
-- HTML 会做轻量文本抽取，非 HTML 内容直接返回正文。
-- 默认使用 Firefox-like User-Agent 和基础浏览器导航请求头，可用 `MINK_WEB_USER_AGENT` 覆盖 UA。
-- 默认 HTTP 超时 60 秒。
-- HTTP URL 会升级为 HTTPS。
-- 不适合需要认证的私有 URL。

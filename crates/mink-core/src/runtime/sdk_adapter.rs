@@ -15,18 +15,6 @@ use crate::sdk_protocol::{
 /// config type.
 pub fn apply_sdk_request_options(cfg: &mut Config, req: &SdkRequest) {
     let opts = &req.options;
-    if opts.disable_bash {
-        cfg.tool_disable.disable_bash = true;
-    }
-    if opts.disable_sub_agent {
-        cfg.tool_disable.disable_sub_agent = true;
-    }
-    if opts.disable_web {
-        cfg.tool_disable.disable_web = true;
-    }
-    if opts.disable_python {
-        cfg.tool_disable.disable_python = true;
-    }
     if let Some(model) = &opts.model {
         cfg.model = model.clone();
         cfg.cli_overrides.model = true;
@@ -203,10 +191,6 @@ mod tests {
                 "session_id": "outer",
                 "mission": "mission",
                 "options": {
-                    "disable_bash": true,
-                    "disable_sub_agent": true,
-                    "disable_web": true,
-                    "disable_python": true,
                     "model": "pro",
                     "max_tokens": 123,
                     "max_turns": 4,
@@ -243,10 +227,6 @@ mod tests {
 
         apply_sdk_request_options(&mut cfg, &req);
 
-        assert!(cfg.tool_disable.disable_bash);
-        assert!(cfg.tool_disable.disable_sub_agent);
-        assert!(cfg.tool_disable.disable_web);
-        assert!(cfg.tool_disable.disable_python);
         assert_eq!(cfg.model, "pro");
         assert_eq!(cfg.max_tokens, 123);
         assert_eq!(cfg.max_turns, 4);

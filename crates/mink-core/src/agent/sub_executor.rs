@@ -498,12 +498,10 @@ mod tests {
         );
         let projected = parent.compaction.active_messages().await?;
         let parent_dir = parent.store.path().parent().unwrap().to_path_buf();
-        let inherited_artifact = parent.artifacts.write_text(
-            "Bash",
-            "parent output",
-            Some("parent-command"),
-            "parent artifact content",
-        )?;
+        let inherited_artifact =
+            parent
+                .artifacts
+                .write_text("Bash", "parent output", "parent artifact content")?;
         tokio::fs::write(parent_dir.join("future-state.bin"), b"preserved").await?;
         tokio::fs::write(
             parent_dir.join("stats.json"),
@@ -535,7 +533,6 @@ mod tests {
         let child_artifact = child.child_ctx.artifacts.write_text(
             "Bash",
             "child output",
-            Some("child-command"),
             "child artifact content",
         )?;
         assert_ne!(child_artifact.id, inherited_artifact.id);

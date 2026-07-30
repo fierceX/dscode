@@ -10,6 +10,12 @@ pub use crate::capabilities::{
     CapabilityExposure, LoadedSkill, RuntimeSkill, SkillCapability, SkillDiscoveryPolicy,
     SkillLoadContext, SkillProvider, SourceLevel, SourceMeta,
 };
+pub use crate::llm::client::{
+    BackendLlmClient, LlmBackend, LlmCancelToken, LlmErrorEvent, LlmEvent, LlmEventStream,
+    LlmPurpose, LlmRequest, LlmRequestFailure, LlmResponseStream, LlmRetryEvent, LlmStopEvent,
+    LlmTextEvent, LlmThinkingEvent, LlmToolCallEvent, LlmUsageEvent, OpenAiCompatibleBackend,
+    OpenAiCompatibleOptions, TokenParamKind,
+};
 pub use crate::resources::ResourceHandler;
 pub use crate::session::paths::SessionLayout;
 pub use crate::tools::vfs::{
@@ -29,12 +35,6 @@ pub use builder::build_runtime;
 pub use config::{AgentRuntimeConfig, SessionInfo, SessionPolicy};
 pub use events::{AgentEvent, EventSink};
 pub use handle::{AgentEventStream, AgentRuntime, TurnOutcome};
- pub use crate::llm::client::{
-     BackendLlmClient, LlmBackend, LlmCancelToken, LlmErrorEvent, LlmEvent, LlmEventStream,
-     LlmPurpose, LlmRequest, LlmRequestFailure, LlmResponseStream, LlmRetryEvent, LlmStopEvent,
-     LlmTextEvent, LlmThinkingEvent, LlmToolCallEvent, LlmUsageEvent, OpenAiCompatibleBackend,
-     OpenAiCompatibleOptions, TokenParamKind,
- };
 pub use options::AgentOptions;
 pub use sdk_adapter::{
     apply_sdk_request_options, exit_code_from_turn, final_from_outcome,

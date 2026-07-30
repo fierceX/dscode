@@ -239,7 +239,6 @@ pub(crate) enum ReadTargetClass {
         raw: bool,
     },
     RegisteredResource,
-    WebUrl,
 }
 
 pub(crate) fn classify_read_target(
@@ -255,15 +254,12 @@ pub(crate) fn classify_read_target(
     if router.can_handle(&selection.path) {
         return Ok(ReadTargetClass::RegisteredResource);
     }
-    if router.is_url_like(&selection.path) && !is_web_url(&selection.path) {
+    if router.is_url_like(&selection.path) {
         let scheme = selection
             .path
             .split_once("://")
             .map_or("", |(scheme, _)| scheme);
         anyhow::bail!("unknown resource scheme: {scheme}");
-    }
-    if is_web_url(&selection.path) {
-        return Ok(ReadTargetClass::WebUrl);
     }
     Ok(ReadTargetClass::Filesystem {
         backend: filesystem_backend,
@@ -340,11 +336,6 @@ impl super::runner::ToolExec for ReadTool {
             let resource = ctx.resource_router.resolve(&selection, ctx)?;
             let text = select_text_lines(&resource.content, selection.offset, selection.limit);
             return Ok(super::runner::ToolOutcome::text(text));
-        }
-        if target_class == ReadTargetClass::WebUrl {
-            return read_url_resource(&selection.path, ctx)
-                .map(|text| select_text_lines(&text, selection.offset, selection.limit))
-                .map(super::runner::ToolOutcome::text);
         }
         if let Some(vfs) = &ctx.read_only_fs {
             let result = vfs.read(
@@ -428,28 +419,6 @@ fn snapshot_source_for_read(
         Some(text) => (text, 1),
         None => (displayed_content.to_string(), displayed_start_line),
     }
-}
-
-fn is_web_url(path: &str) -> bool {
-    path.starts_with("http://") || path.starts_with("https://")
-}
-
-fn read_url_resource(url: &str, ctx: &crate::context::ToolContext) -> Result<String> {
-    if ctx.tool_config.tool_disable.disable_web {
-        bail!("Error: Web tools are disabled by configuration.");
-    }
-    let normalized = crate::tools::web::normalize_fetch_url(url)?;
-    if let Some(record) = ctx
-        .artifacts
-        .find_latest_by_source("ReadUrl", &normalized)?
-        && let Ok(text) = ctx.artifacts.read_record_text(&record)
-    {
-        return Ok(text);
-    }
-    let text = crate::tools::web::web_fetch(&normalized)?;
-    ctx.artifacts
-        .write_text("ReadUrl", "cached URL read", Some(&normalized), &text)?;
-    Ok(text)
 }
 
 impl super::runner::ToolExec for WriteTool {
@@ -537,6 +506,7 @@ impl super::runner::ToolExec for EditTool {
             exit_code: None,
             success: true,
             diagnostics: Vec::new(),
+            plan_command: None,
         })
     }
 }
@@ -1030,11 +1000,15 @@ mod tests {
             },
             read_only_fs: None,
             cwd,
-            home,
+            home: home.clone(),
             store: Arc::new(ConversationStore::new(session.join("conversation.jsonl"))),
             artifacts,
             snapshots: Arc::new(Mutex::new(
                 crate::tools::snapshot::FileSnapshotStore::default(),
+            )),
+            plan_store: Arc::new(crate::session::plan::PlanStore::new(
+                home.join("plan.md"),
+                home.join("plan.draft"),
             )),
             tool_config,
             interrupt: Arc::new(AtomicBool::new(false)),
@@ -1162,7 +1136,7 @@ mod tests {
         let ctx = temp_tool_context("router-selector-once");
         let record = ctx
             .artifacts
-            .write_text("Bash", "full output", None, "one\ntwo\nthree\n")
+            .write_text("Bash", "full output", "one\ntwo\nthree\n")
             .unwrap();
 
         let outcome = ReadTool
@@ -1294,22 +1268,6 @@ mod tests {
     }
 
     #[test]
-    fn split_read_path_selection_keeps_url_host_port() {
-        let selection = split_read_path_selection("https://example.com:8443").unwrap();
-        assert_eq!(selection.path, "https://example.com:8443");
-        assert_eq!(selection.offset, None);
-        assert_eq!(selection.limit, None);
-    }
-
-    #[test]
-    fn split_read_path_selection_url_range_after_path() {
-        let selection = split_read_path_selection("https://example.com/docs:10-14").unwrap();
-        assert_eq!(selection.path, "https://example.com/docs");
-        assert_eq!(selection.offset, Some(10));
-        assert_eq!(selection.limit, Some(5));
-    }
-
-    #[test]
     fn split_read_path_selection_rejects_zero_line() {
         assert!(split_read_path_selection("src/main.rs:0").is_err());
     }
@@ -1420,27 +1378,6 @@ mod tests {
     fn select_text_lines_applies_range() {
         let result = select_text_lines("a\nb\nc\nd\n", Some(2), Some(2));
         assert_eq!(result, "b\nc");
-    }
-
-    #[test]
-    fn read_url_resource_uses_cached_artifact_with_selector() {
-        let ctx = temp_tool_context("read-url-cache");
-        ctx.artifacts
-            .write_text(
-                "ReadUrl",
-                "cached URL read",
-                Some("https://example.com/a"),
-                "Source: https://example.com/a\n\na\nb\nc\nd",
-            )
-            .unwrap();
-
-        let result = ReadTool
-            .execute(&json!({"path":"https://example.com/a:4-5"}), &ctx)
-            .unwrap()
-            .content;
-
-        assert_eq!(result, "b\nc");
-        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
     }
 
     #[test]

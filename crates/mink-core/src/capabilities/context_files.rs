@@ -1,6 +1,6 @@
- use crate::capabilities::source::{CapabilityExposure, SourceLevel, SourceMeta};
- use anyhow::Result;
- use std::path::{Path, PathBuf};
+use crate::capabilities::source::{CapabilityExposure, SourceLevel, SourceMeta};
+use anyhow::Result;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct ContextFileCapability {
@@ -16,7 +16,6 @@ pub struct LoadedContextFile {
     pub revision: String,
 }
 
-
 #[derive(Debug, Clone, Default)]
 pub struct ContextFileSnapshot {
     pub all: Vec<LoadedContextFile>,
@@ -25,50 +24,65 @@ pub struct ContextFileSnapshot {
     pub dependency_fingerprint: String,
 }
 
- pub fn build_default_context_file_snapshot(
-     cwd: &Path,
-     home: &Path,
-     _session_id: &str,
-     _resource_session_id: &str,
- ) -> Result<ContextFileSnapshot> {
-     let mut all = Vec::new();
-     for (base, name, provider_id, provider_name, level) in [
-         (home.join(".mink"), "global", "user-instructions", "user instructions", SourceLevel::User),
-         (cwd.to_path_buf(), "project", "project-instructions", "project instructions", SourceLevel::Project),
-     ] {
-         let Some(path) = find_instruction_file_in_dir(&base) else {
-             continue;
-         };
-         let content = std::fs::read_to_string(&path)?;
-         if content.trim().is_empty() {
-             continue;
-         }
-         all.push(LoadedContextFile {
-             revision: crate::util::sha256_hex(&content),
-             context_file: ContextFileCapability { name: name.to_string(), content },
-             source: SourceMeta {
-                 provider_id: provider_id.to_string(),
-                 provider_name: provider_name.to_string(),
-                 level,
-                 source_path: Some(path),
-                 display_label: Some(display_label(&base, cwd, home)),
-             },
-             exposure: CapabilityExposure::ModelDiscoverable,
-         });
-     }
-     let always_apply = all
-         .iter()
-         .filter(|file| !matches!(file.exposure, CapabilityExposure::HostOnly))
-         .cloned()
-         .collect::<Vec<_>>();
-     let dependency_fingerprint = compute_dependency_fingerprint(&always_apply);
-     Ok(ContextFileSnapshot {
-         all,
-         always_apply,
-         warnings: Vec::new(),
-         dependency_fingerprint,
-     })
- }
+pub fn build_default_context_file_snapshot(
+    cwd: &Path,
+    home: &Path,
+    _session_id: &str,
+    _resource_session_id: &str,
+) -> Result<ContextFileSnapshot> {
+    let mut all = Vec::new();
+    for (base, name, provider_id, provider_name, level) in [
+        (
+            home.join(".mink"),
+            "global",
+            "user-instructions",
+            "user instructions",
+            SourceLevel::User,
+        ),
+        (
+            cwd.to_path_buf(),
+            "project",
+            "project-instructions",
+            "project instructions",
+            SourceLevel::Project,
+        ),
+    ] {
+        let Some(path) = find_instruction_file_in_dir(&base) else {
+            continue;
+        };
+        let content = std::fs::read_to_string(&path)?;
+        if content.trim().is_empty() {
+            continue;
+        }
+        all.push(LoadedContextFile {
+            revision: crate::util::sha256_hex(&content),
+            context_file: ContextFileCapability {
+                name: name.to_string(),
+                content,
+            },
+            source: SourceMeta {
+                provider_id: provider_id.to_string(),
+                provider_name: provider_name.to_string(),
+                level,
+                source_path: Some(path),
+                display_label: Some(display_label(&base, cwd, home)),
+            },
+            exposure: CapabilityExposure::ModelDiscoverable,
+        });
+    }
+    let always_apply = all
+        .iter()
+        .filter(|file| !matches!(file.exposure, CapabilityExposure::HostOnly))
+        .cloned()
+        .collect::<Vec<_>>();
+    let dependency_fingerprint = compute_dependency_fingerprint(&always_apply);
+    Ok(ContextFileSnapshot {
+        all,
+        always_apply,
+        warnings: Vec::new(),
+        dependency_fingerprint,
+    })
+}
 
 fn find_instruction_file_in_dir(dir: &Path) -> Option<PathBuf> {
     let candidates = [

@@ -239,12 +239,6 @@ impl super::runner::ToolExec for PythonSandboxTool {
         input: &serde_json::Value,
         ctx: &crate::context::ToolContext,
     ) -> Result<super::runner::ToolOutcome> {
-        if ctx.tool_config.tool_disable.disable_python_sandbox {
-            return Ok(super::runner::ToolOutcome::text(
-                "PythonSandbox tool is disabled by default. Enable it via --enable-python-sandbox CLI flag or set `disable_python_sandbox = false` in .minkrc [sandbox_python] section.".into(),
-            ));
-        }
-
         #[derive(serde::Deserialize)]
         struct Args {
             script: Option<String>,
@@ -321,6 +315,7 @@ impl super::runner::ToolExec for PythonSandboxTool {
             exit_code,
             success: exit_code.unwrap_or(0) == 0,
             diagnostics: Vec::new(),
+            plan_command: None,
         })
     }
 }

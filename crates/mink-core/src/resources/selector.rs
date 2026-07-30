@@ -32,7 +32,6 @@ pub fn split_read_path_selection(input: &str) -> Result<ReadPathSelection> {
     let mut path = rest;
 
     if let Some((base, suffix)) = rest.rsplit_once(':')
-        && !looks_like_url_host_port(rest)
         && let Some((start, parsed_limit)) = parse_line_selector(suffix)?
     {
         path = base;
@@ -64,20 +63,6 @@ pub fn select_text_lines(text: &str, offset: Option<usize>, limit: Option<usize>
     let start = offset.unwrap_or(1).saturating_sub(1).min(total);
     let end = limit.map_or(total, |count| (start + count).min(total));
     lines[start..end].join("\n")
-}
-
-fn looks_like_url_host_port(input: &str) -> bool {
-    if !is_web_url(input) {
-        return false;
-    }
-    let Ok(url) = reqwest::Url::parse(input) else {
-        return false;
-    };
-    url.port().is_some() && url.path() == "/" && url.query().is_none() && url.fragment().is_none()
-}
-
-fn is_web_url(path: &str) -> bool {
-    path.starts_with("http://") || path.starts_with("https://")
 }
 
 fn parse_line_selector(suffix: &str) -> Result<Option<(usize, Option<usize>)>> {

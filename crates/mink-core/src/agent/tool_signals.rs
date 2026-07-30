@@ -127,6 +127,8 @@ mod tests {
                 matched_pattern: None,
                 message: "old".into(),
             }],
+            plan_command: None,
+            needs_finalization: false,
         }
     }
 

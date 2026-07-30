@@ -423,7 +423,6 @@ async fn run_hidden_worker() -> Result<(), String> {
         backend: "auto".into(),
         read_dirs: wa.read_dirs.clone(),
         write_dirs: wa.write_dirs.clone(),
-        allow_bash: true,
         allow_network: true,
         ..Default::default()
     };

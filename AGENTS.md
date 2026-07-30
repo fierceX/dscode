@@ -133,7 +133,7 @@ TurnExecutor (agent/turn.rs)
 │ tools/vfs.rs          │ Read/Glob/Grep 同步只读 VFS hook、请求/结果协议和数据库 helper
 │ tools/bash.rs         │ Bash 执行 + 误用拦截
 │ tools/python.rs       │ Python 执行
-│ tools/web.rs          │ WebSearch/WebFetch
+│ tools/plan.rs         │ PlanDraft/PlanConfirm/PlanClear 类型化命令
 └───────────────────────┘
          │
 ┌─────── 资源与能力层 ───┐
@@ -273,7 +273,7 @@ DecisionEngine.decide()
 | `agent/orchestrator.rs` | 命令循环、模型切换、手动 compact、turn 后处理 |
 | `agent/turn.rs` | 单轮执行器、工具循环、Display 输出 |
 | `agent/compactor.rs` | turn 内压缩封装和同轮压缩防护 |
-| `agent/plan_actions.rs` | PlanConfirm / PlanClear 副作用处理 |
+| `agent/plan_actions.rs` | 将已完成的 Plan 类型化命令转换为 turn effect 和压缩请求 |
 | `agent/belief.rs` | 信念度追踪 |
 | `agent/decision.rs` | 结构化注入/中止决策 |
 | `agent/recovery_policy.rs` | 从 resolved semantic capabilities 渲染恢复提示并校验恢复首个调用 |
@@ -298,7 +298,8 @@ DecisionEngine.decide()
 | `tools/vfs.rs` | `ReadOnlyFileSystem`、session scope、结构化 VFS 请求/结果和虚拟路径 helper |
 | `tools/bash.rs` | Bash、危险命令检查、误用拦截 |
 | `tools/python.rs` | Python |
-| `tools/web.rs` | WebSearch/WebFetch |
+| `tools/plan.rs` | PlanDraft / PlanConfirm / PlanClear |
+| `session/plan.rs` | PlanStore 与原子计划状态转换 |
 
 ### Read / Edit 协议
 
@@ -370,7 +371,7 @@ Anchored patch 只修改 snapshot 覆盖且未漂移的行。tag 缺失、行 ha
 
 ## 关键不变式
 
-- `TurnCompactor`：同一用户输入的内循环最多压缩一次上下文
+- `TurnCompactor`：同一用户输入的内循环最多压缩一次上下文；PlanConfirm/PlanClear 的强制压缩也必须经过该守卫并传播失败
 - `ImmutablePrefix`：system prompt/tools 变更必须 invalidate prefix
 - `ConversationStore` 内存缓存只保留当前活跃后缀；append 增量更新该缓存，完整历史读取作为一次性读盘操作
 - `conversation.jsonl` 完整保留且只追加；压缩只推进 `context-state.json` 中的活跃投影边界
@@ -396,12 +397,19 @@ Anchored patch 只修改 snapshot 覆盖且未漂移的行。tag 缺失、行 ha
 - Recovery 首步资格来自 resolved semantic capabilities；Bash 的 `FocusedVerificationExec` classifier 与普通 Bash 安全/误用策略相互独立
 - `ToolRunner::execute_all()` 在 StormBreaker 前执行 approval 检查
 - `ToolRunner::execute_all()` 只并发连续只读工具；写入、执行、控制和 SubAgent 工具必须按调用顺序串行执行
+- `enabled_tools` 是唯一工具启用输入；`None` 使用 catalog 默认集合，空列表禁用全部，显式列表精确选择
+- `PythonSandbox` 是 catalog explicit-only 工具，只有 `enabled_tools` 显式列出时进入 surface
+- 工具真实执行只接受 `ModelToolSurface` 中的工具，不再重复解释 disable flag 或 sandbox 工具策略
+- PlanDraft/PlanConfirm/PlanClear 必须通过类型化 `PlanCommand` 和 `PlanStore` 完成；文件错误必须返回模型，禁止空成功
+- 已确认计划存在时禁止创建新草稿；PlanClear 必须同时清理可能遗留的陈旧草稿
+- 已确认计划必须在每次 LLM 请求时作为唯一的动态 `<current-plan>` system message 投影；不得写入 conversation、压缩摘要或 immutable prefix
+- Plan 与 SubAgent 结果必须在延迟工作完成并经过统一大小保护后再进入信号采集
 - 默认 approval mode 是 `yolo`；`prompt` 目前没有交互式 UI，会 fail closed
 - `ToolRunner::format_tool_result()` 是工具输出进入 LLM/UI 前的统一最大字节保护，超长输出写入 `artifact://<id>`
 - `Bash` / `Python` 必须在 `ToolContext.cwd` 下执行；Bash 未显式设置 `timeout` 时使用稳定的全局 tool timeout
 - `TurnExecutor` 写入 LLM conversation 使用 `conv_content`，为空时使用 `content`
 - `Read` 本地非 raw 输出会记录 snapshot；raw 或 immutable resource 不生成可编辑 snapshot
-- registered resource URL 先于 VFS 处理；未知非 web scheme 必须 fail closed
+- registered resource URL 先于 VFS 处理；未知 URL-like scheme 必须 fail closed
 - Grep 可搜索 registered resource 文本；resource path 不接受 selector/glob，返回行号用于后续 Read selector
 - prompt skill index、selected skills、`skill://` 和 `rule://` 必须来自同一 `CapabilitySnapshot`
 - selected skill 正文不依赖资源读取 provider；skill index 和子资源访问由已解析的 `ResourceRead` provider 与 `ResourceRouter` handler 共同提供
