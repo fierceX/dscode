@@ -29,6 +29,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Prepare published docs files
+        run: cp CHANGELOG.md docs/CHANGELOG.md
+
       - name: Validate homepage assets
         run: |
           test -f docs/index.html
@@ -261,6 +264,9 @@ jobs:
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
+
+      - name: Prepare published docs files
+        run: cp CHANGELOG.md docs/CHANGELOG.md
 
       - name: Upload docs site artifact
         uses: actions/upload-pages-artifact@v3
