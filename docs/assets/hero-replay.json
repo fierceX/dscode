@@ -1,0 +1,291 @@
+{
+  "meta": {
+    "sessionLabel": "flash @agent-task",
+    "maxVisibleRows": 20
+  },
+  "steps": [
+    {
+      "statusLeft": "flash @agent-task",
+      "statusCenter": "B:0.88 T:12 R:90 I:13.31M(98%) O:58.7K",
+      "statusRight": "C:231.1K(23%) ¥0.601 [idle]",
+      "input": "",
+      "mode": "instant",
+      "line": "<span class=\"prompt\">&gt;</span> 定位并修复 mock 日志预览里的 UTF-8 中文截断 panic"
+    },
+    {
+      "statusLeft": "flash @agent-task",
+      "statusCenter": "B:0.89 T:12 R:90 I:13.31M(98%) O:58.8K",
+      "statusRight": "C:231.1K(23%) ¥0.602 [thinking]",
+      "input": "",
+      "mode": "typed",
+      "prefixHtml": "<span class=\"warn\">▶ thinking</span> | ",
+      "text": "先前一轮刚给 mock 命中和 callback 加了日志预览，现在用户贴出了新的 panic，需要沿着这段新增逻辑往回看。"
+    },
+    {
+      "statusLeft": "flash @agent-task",
+      "statusCenter": "B:0.89 T:12 R:90 I:13.31M(98%) O:58.9K",
+      "statusRight": "C:231.1K(23%) ¥0.604 [tool]",
+      "input": "",
+      "mode": "instant",
+      "line": "<span class=\"ok\">▼ ✓ Edit.patch</span> Edit.patch(restore missing .status(200))"
+    },
+    {
+      "statusLeft": "flash @agent-task",
+      "statusCenter": "B:0.89 T:12 R:90 I:13.31M(98%) O:59.0K",
+      "statusRight": "C:231.1K(23%) ¥0.604 [tool]",
+      "input": "",
+      "mode": "instant",
+      "line": "Edit(master/src/main.rs) [+1 -0 lines] @master/src/main.rs#A339"
+    },
+    {
+      "statusLeft": "flash @agent-task",
+      "statusCenter": "B:0.90 T:12 R:90 I:13.31M(98%) O:59.1K",
+      "statusRight": "C:231.1K(23%) ¥0.605 [thinking]",
+      "input": "",
+      "mode": "typed",
+      "prefixHtml": "<span class=\"warn\">▶ thinking</span> | ",
+      "text": "先把之前加日志时顺手丢掉的 `.status(200)` 补回去，再继续把 callback 的 body 打印逻辑补全。"
+    },
+    {
+      "statusLeft": "flash @agent-task",
+      "statusCenter": "B:0.90 T:12 R:90 I:13.31M(98%) O:59.2K",
+      "statusRight": "C:231.1K(23%) ¥0.606 [tool]",
+      "input": "",
+      "mode": "instant",
+      "line": "<span class=\"ok\">▼ ✓ Read</span> Read(master/src/main.rs:268-280)"
+    },
+    {
+      "statusLeft": "flash @agent-task",
+      "statusCenter": "B:0.90 T:12 R:90 I:13.31M(98%) O:59.3K",
+      "statusRight": "C:231.1K(23%) ¥0.606 [tool]",
+      "input": "",
+      "mode": "instant",
+      "line": "Read(master/src/main.rs:268-280) [13 lines, 544 bytes]"
+    },
+    {
+      "statusLeft": "flash @agent-task",
+      "statusCenter": "B:0.91 T:12 R:90 I:13.31M(98%) O:59.4K",
+      "statusRight": "C:231.1K(23%) ¥0.607 [thinking]",
+      "input": "",
+      "mode": "typed",
+      "prefixHtml": "<span class=\"warn\">▶ thinking</span> | ",
+      "text": "callback 侧的日志点已经定位到了，先把 body 预览加在 delay 之前，这样一旦有问题就能直接从 master 日志里看到请求体。"
+    },
+    {
+      "statusLeft": "flash @agent-task",
+      "statusCenter": "B:0.91 T:12 R:90 I:13.31M(98%) O:59.5K",
+      "statusRight": "C:231.1K(23%) ¥0.609 [tool]",
+      "input": "",
+      "mode": "instant",
+      "line": "<span class=\"ok\">▼ ✓ Edit.patch</span> Edit.patch(add callback body preview)"
+    },
+    {
+      "statusLeft": "flash @agent-task",
+      "statusCenter": "B:0.91 T:12 R:90 I:13.31M(98%) O:59.6K",
+      "statusRight": "C:231.1K(23%) ¥0.609 [tool]",
+      "input": "",
+      "mode": "instant",
+      "line": "Edit(master/src/main.rs) [+6 -1 lines] @master/src/main.rs#9257"
+    },
+    {
+      "statusLeft": "flash @agent-task",
+      "statusCenter": "B:0.91 T:12 R:90 I:13.31M(98%) O:59.7K",
+      "statusRight": "C:231.1K(23%) ¥0.612 [tool]",
+      "input": "",
+      "mode": "instant",
+      "line": "<span class=\"ok\">▼ ✓ Bash</span> Bash(cargo check)"
+    },
+    {
+      "statusLeft": "flash @agent-task",
+      "statusCenter": "B:0.91 T:12 R:90 I:13.31M(98%) O:59.8K",
+      "statusRight": "C:231.1K(23%) ¥0.612 [tool]",
+      "input": "",
+      "mode": "instant",
+      "line": "<span class=\"ok\">OK:</span> cargo check passed with no errors"
+    },
+    {
+      "statusLeft": "flash @agent-task",
+      "statusCenter": "B:0.91 T:12 R:90 I:13.31M(98%) O:59.9K",
+      "statusRight": "C:231.1K(23%) ¥0.615 [tool]",
+      "input": "",
+      "mode": "instant",
+      "line": "<span class=\"ok\">▼ ✓ Bash</span> Bash(git commit -m \"feat: mock 打印请求和回调内容\")"
+    },
+    {
+      "statusLeft": "flash @agent-task",
+      "statusCenter": "B:0.91 T:12 R:90 I:13.31M(98%) O:60.0K",
+      "statusRight": "C:231.1K(23%) ¥0.615 [tool]",
+      "input": "",
+      "mode": "instant",
+      "line": "commit: feat: mock 打印请求和回调内容"
+    },
+    {
+      "statusLeft": "flash @agent-task",
+      "statusCenter": "B:0.92 T:12 R:90 I:13.31M(98%) O:60.1K",
+      "statusRight": "C:231.1K(23%) ¥0.616 [writing]",
+      "input": "",
+      "mode": "typed",
+      "prefixHtml": "<span class=\"prompt\">&gt;</span> ",
+      "text": "启用 MOCK_FILE 后，现在 master 会打印 mock 命中时的 request / response，以及 callback 发送时的 body 预览。"
+    },
+    {
+      "statusLeft": "flash @agent-task",
+      "statusCenter": "B:0.92 T:12 R:90 I:13.31M(98%) O:60.2K",
+      "statusRight": "C:231.1K(23%) ¥0.616 [idle]",
+      "input": "",
+      "mode": "instant",
+      "line": "<span class=\"prompt\">&gt;</span> 分析 mock callback 日志中的 UTF-8 截断 panic，并直接修复"
+    },
+    {
+      "statusLeft": "flash @agent-task",
+      "statusCenter": "B:0.94 T:12 R:90 I:13.31M(98%) O:60.3K",
+      "statusRight": "C:231.1K(23%) ¥0.617 [thinking]",
+      "input": "",
+      "mode": "typed",
+      "prefixHtml": "<span class=\"warn\">▶ thinking</span> | ",
+      "text": "panic 很明确：`cb_body[..500]` 是按字节截断，日志里出现中文后，500 这个下标正好切进了一个 UTF-8 多字节字符中间。"
+    },
+    {
+      "statusLeft": "flash @agent-task",
+      "statusCenter": "B:0.94 T:12 R:90 I:13.31M(98%) O:60.4K",
+      "statusRight": "C:231.1K(23%) ¥0.618 [writing]",
+      "input": "",
+      "mode": "typed",
+      "prefixHtml": "<span class=\"prompt\">&gt;</span> ",
+      "text": "问题定位到了：按字节截断 JSON 预览时切进了中文字符中间。callback 和 request 两个入口都要改。"
+    },
+    {
+      "statusLeft": "flash @agent-task",
+      "statusCenter": "B:0.94 T:12 R:90 I:13.31M(98%) O:60.5K",
+      "statusRight": "C:231.1K(23%) ¥0.620 [tool]",
+      "input": "",
+      "mode": "instant",
+      "line": "<span class=\"ok\">▼ ✓ Edit.patch</span> Edit.patch(fix callback log truncation)"
+    },
+    {
+      "statusLeft": "flash @agent-task",
+      "statusCenter": "B:0.94 T:12 R:90 I:13.31M(98%) O:60.6K",
+      "statusRight": "C:231.1K(23%) ¥0.620 [tool]",
+      "input": "",
+      "mode": "instant",
+      "line": "Edit(master/src/main.rs) [+5 -3 lines] @master/src/main.rs#E765"
+    },
+    {
+      "statusLeft": "flash @agent-task",
+      "statusCenter": "B:0.95 T:12 R:90 I:13.31M(98%) O:60.7K",
+      "statusRight": "C:231.1K(23%) ¥0.621 [thinking]",
+      "input": "",
+      "mode": "typed",
+      "prefixHtml": "<span class=\"warn\">▶ thinking</span> | ",
+      "text": "callback 修完还不够，请求侧 `check_mock` 里的 body preview 也是同样的切法。如果只修一处，下一次还是会在另一处炸。"
+    },
+    {
+      "statusLeft": "flash @agent-task",
+      "statusCenter": "B:0.95 T:12 R:90 I:13.31M(98%) O:60.8K",
+      "statusRight": "C:231.1K(23%) ¥0.622 [tool]",
+      "input": "",
+      "mode": "instant",
+      "line": "<span class=\"ok\">▼ ✓ Read</span> Read(master/src/main.rs:174-178)"
+    },
+    {
+      "statusLeft": "flash @agent-task",
+      "statusCenter": "B:0.95 T:12 R:90 I:13.31M(98%) O:60.9K",
+      "statusRight": "C:231.1K(23%) ¥0.622 [tool]",
+      "input": "",
+      "mode": "instant",
+      "line": "Read(master/src/main.rs:174-178) [5 lines, 233 bytes]"
+    },
+    {
+      "statusLeft": "flash @agent-task",
+      "statusCenter": "B:0.95 T:12 R:90 I:13.31M(98%) O:61.0K",
+      "statusRight": "C:231.1K(23%) ¥0.622 [tool]",
+      "input": "",
+      "mode": "instant",
+      "line": "174: let body_preview = if body_bytes.len() > 500 { ... }"
+    },
+    {
+      "statusLeft": "flash @agent-task",
+      "statusCenter": "B:0.96 T:12 R:90 I:13.31M(98%) O:61.1K",
+      "statusRight": "C:231.1K(23%) ¥0.623 [thinking]",
+      "input": "",
+      "mode": "typed",
+      "prefixHtml": "<span class=\"warn\">▶ thinking</span> | ",
+      "text": "这里也是直接按 500 字节切片。修法一致：先找最后一个完整字符边界，再做截断，保证日志预览永远落在合法 UTF-8 上。"
+    },
+    {
+      "statusLeft": "flash @agent-task",
+      "statusCenter": "B:0.96 T:12 R:90 I:13.31M(98%) O:61.2K",
+      "statusRight": "C:231.1K(23%) ¥0.625 [tool]",
+      "input": "",
+      "mode": "instant",
+      "line": "<span class=\"ok\">▼ ✓ Edit.patch</span> Edit.patch(fix request log truncation)"
+    },
+    {
+      "statusLeft": "flash @agent-task",
+      "statusCenter": "B:0.96 T:12 R:90 I:13.31M(98%) O:61.3K",
+      "statusRight": "C:231.1K(23%) ¥0.625 [tool]",
+      "input": "",
+      "mode": "instant",
+      "line": "Edit(master/src/main.rs) [+4 -1 lines] @master/src/main.rs#E9D4"
+    },
+    {
+      "statusLeft": "flash @agent-task",
+      "statusCenter": "B:0.96 T:12 R:90 I:13.31M(98%) O:61.4K",
+      "statusRight": "C:231.1K(23%) ¥0.626 [thinking]",
+      "input": "",
+      "mode": "typed",
+      "prefixHtml": "<span class=\"warn\">▶ thinking</span> | ",
+      "text": "两处改动都补上后，先编译确认没有引入新的错误；这个问题属于运行时 panic，至少先保证构建和静态检查通过。"
+    },
+    {
+      "statusLeft": "flash @agent-task",
+      "statusCenter": "B:0.96 T:12 R:90 I:13.31M(98%) O:61.5K",
+      "statusRight": "C:231.1K(23%) ¥0.629 [tool]",
+      "input": "",
+      "mode": "instant",
+      "line": "<span class=\"ok\">▼ ✓ Bash</span> Bash(cargo check)"
+    },
+    {
+      "statusLeft": "flash @agent-task",
+      "statusCenter": "B:0.96 T:12 R:90 I:13.31M(98%) O:61.6K",
+      "statusRight": "C:231.1K(23%) ¥0.629 [tool]",
+      "input": "",
+      "mode": "instant",
+      "line": "<span class=\"ok\">OK:</span> cargo check passed with no errors"
+    },
+    {
+      "statusLeft": "flash @agent-task",
+      "statusCenter": "B:0.96 T:12 R:90 I:13.31M(98%) O:61.7K",
+      "statusRight": "C:231.1K(23%) ¥0.632 [tool]",
+      "input": "",
+      "mode": "instant",
+      "line": "<span class=\"ok\">▼ ✓ Bash</span> Bash(git commit -m \"fix: mock 日志截断中文导致 panic\")"
+    },
+    {
+      "statusLeft": "flash @agent-task",
+      "statusCenter": "B:0.96 T:12 R:90 I:13.31M(98%) O:61.8K",
+      "statusRight": "C:231.1K(23%) ¥0.632 [tool]",
+      "input": "",
+      "mode": "instant",
+      "line": "commit: fix: mock 日志截断中文导致 panic"
+    },
+    {
+      "statusLeft": "flash @agent-task",
+      "statusCenter": "B:0.96 T:12 R:90 I:13.31M(98%) O:61.9K",
+      "statusRight": "C:231.1K(23%) ¥0.633 [idle]",
+      "input": "",
+      "mode": "typed",
+      "prefixHtml": "<span class=\"prompt\">&gt;</span> ",
+      "text": "完成：panic 的根因是 UTF-8 中文被按字节截断。两处日志预览都已改成先找最后一个完整字符边界，再安全截断。"
+    },
+    {
+      "statusLeft": "flash @agent-task",
+      "statusCenter": "B:0.96 T:12 R:90 I:13.31M(98%) O:62.0K",
+      "statusRight": "C:231.1K(23%) ¥0.634 [idle]",
+      "input": "",
+      "mode": "typed",
+      "prefixHtml": "<span class=\"prompt\">&gt;</span> ",
+      "text": "结果是：mock 命中日志、callback 日志都保留了预览能力，同时不会再因为中文字符被截断而触发 `char boundary` panic。"
+    }
+  ]
+}

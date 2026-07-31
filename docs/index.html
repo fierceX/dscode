@@ -1,0 +1,1589 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>mink — Rust-native AI agent runtime</title>
+<meta name="description" content="mink 是一个 Rust 原生、终端优先、可嵌入的 AI agent runtime。">
+<script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js" defer></script>
+<style>
+@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@600;700&family=Libre+Baskerville:wght@700&family=Manrope:wght@700&family=Outfit:wght@700&family=Sora:wght@700&family=Space+Grotesk:wght@400;500;700&display=swap");
+
+:root{
+  --bg:#f7f9fc;
+  --bg-soft:#eef3f9;
+  --panel:#ffffff;
+  --panel-soft:#f3f6fb;
+  --line:#d9e2ef;
+  --line-strong:#c9d5e6;
+  --text:#162030;
+  --text-soft:#445268;
+  --text-dim:#6f7e94;
+  --blue:#3f7cff;
+  --mint:#2ab58a;
+  --amber:#b7791f;
+  --shadow:0 18px 50px rgba(32,54,86,.08);
+  --radius-xl:26px;
+  --radius-lg:18px;
+  --radius-md:14px;
+  --radius-sm:10px;
+  --nav-h:56px;
+  --max:1120px;
+  --font-display:"Space Grotesk","Segoe UI",sans-serif;
+  --font-body:"Space Grotesk","Segoe UI",sans-serif;
+  --font-mono:"IBM Plex Mono","SFMono-Regular",monospace;
+}
+
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{
+  min-height:100vh;
+  color:var(--text);
+  font-family:var(--font-body);
+  background:
+    radial-gradient(circle at top left, rgba(63,124,255,.08), transparent 28%),
+    radial-gradient(circle at 82% 8%, rgba(42,181,138,.05), transparent 18%),
+    linear-gradient(180deg, #f8fbff 0%, #f7f9fc 56%, #f4f7fb 100%);
+  -webkit-font-smoothing:antialiased;
+}
+
+body::before{
+  content:"";
+  position:fixed;
+  inset:0;
+  pointer-events:none;
+  background:linear-gradient(180deg, rgba(255,255,255,.2), transparent 28%);
+}
+
+a{color:inherit}
+button{font:inherit}
+
+.shell{
+  width:min(var(--max), calc(100% - 32px));
+  margin:0 auto;
+}
+
+.nav{
+  position:sticky;
+  top:0;
+  z-index:50;
+  backdrop-filter:blur(18px);
+  background:rgba(248,250,253,.86);
+  border-bottom:1px solid rgba(22,32,48,.05);
+}
+
+.nav-inner{
+  width:min(var(--max), calc(100% - 32px));
+  margin:0 auto;
+  height:var(--nav-h);
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:20px;
+}
+
+.nav-cluster{
+  display:flex;
+  align-items:center;
+  gap:22px;
+  min-width:0;
+}
+
+.brand{
+  display:flex;
+  align-items:center;
+  text-decoration:none;
+}
+
+.brand-word{
+  font-family:"Sora", var(--font-display), sans-serif;
+  font-size:33px;
+  font-weight:700;
+  letter-spacing:-.06em;
+  line-height:.94;
+  display:inline-flex;
+  align-items:baseline;
+}
+
+.brand-word .m{
+  color:var(--blue);
+  display:inline-block;
+  transform:translateY(.5px);
+}
+
+.brand-word .rest{
+  color:var(--text);
+  display:inline-block;
+  margin-left:2px;
+  font-weight:600;
+  letter-spacing:-.03em;
+  transform:translateY(.5px);
+}
+
+.nav-links{
+  display:flex;
+  align-items:center;
+  gap:6px;
+  flex-wrap:wrap;
+}
+
+.nav-links.secondary{
+  gap:2px;
+}
+
+.nav-links a{
+  text-decoration:none;
+  color:var(--text-soft);
+  font-size:13px;
+  padding:7px 11px;
+  border-radius:999px;
+  transition:.18s ease;
+  cursor:pointer;
+}
+
+.nav-links a:hover,
+.nav-links a.active{
+  color:var(--text);
+  background:rgba(63,124,255,.07);
+}
+
+.page-section{display:none}
+.page-section.active{display:block}
+
+.hero{
+  padding:74px 0 22px;
+}
+
+.hero-grid{
+  display:grid;
+  grid-template-columns:minmax(0, 1.02fr) minmax(440px, .9fr);
+  gap:54px;
+  align-items:center;
+}
+
+.eyebrow{
+  display:inline-flex;
+  gap:10px;
+  align-items:center;
+  margin-bottom:16px;
+  color:var(--text-dim);
+  font-size:11px;
+  font-family:var(--font-mono);
+  letter-spacing:.10em;
+  text-transform:uppercase;
+}
+
+.eyebrow::before{
+  content:"";
+  width:36px;
+  height:1px;
+  background:currentColor;
+  opacity:.7;
+}
+
+.hero-copy h1{
+  font-family:var(--font-display);
+  font-size:clamp(42px, 5.8vw, 68px);
+  line-height:1.02;
+  letter-spacing:-.028em;
+  margin-bottom:16px;
+  max-width:620px;
+  text-wrap:balance;
+}
+
+.hero-copy h1 .accent{
+  color:var(--blue);
+}
+
+.hero-copy p.lead{
+  max-width:540px;
+  font-size:16px;
+  line-height:1.76;
+  color:var(--text-soft);
+  margin-bottom:12px;
+}
+
+.hero-highlights{
+  margin-top:22px;
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+  max-width:440px;
+}
+
+.hero-highlights span{
+  display:inline-flex;
+  align-items:center;
+  padding:7px 10px;
+  border-radius:999px;
+  background:rgba(63,124,255,.06);
+  border:1px solid rgba(63,124,255,.10);
+  color:var(--text-soft);
+  font-size:11px;
+  line-height:1.2;
+}
+
+.btn{
+  display:inline-flex;
+  align-items:center;
+  gap:10px;
+  text-decoration:none;
+  border-radius:999px;
+  padding:13px 18px;
+  font-size:14px;
+  font-weight:600;
+  transition:.18s ease;
+}
+
+.btn-primary{
+  color:#fff;
+  background:linear-gradient(135deg, var(--blue), #699dff);
+  box-shadow:0 10px 24px rgba(63,124,255,.18);
+}
+
+.btn-primary:hover{transform:translateY(-1px);filter:brightness(1.05)}
+
+.btn-ghost{
+  color:var(--text);
+  border:1px solid rgba(22,32,48,.10);
+  background:rgba(255,255,255,.7);
+}
+
+.btn-ghost:hover{
+  border-color:rgba(63,124,255,.28);
+  background:#fff;
+}
+
+.hero-panel{
+  align-self:start;
+  display:flex;
+  flex-direction:column;
+  width:100%;
+  padding-top:4px;
+}
+
+.terminal-card,
+.docs-shell,
+.features-strip,
+.quickstart-shell{
+  border-radius:22px;
+  border:1px solid rgba(22,32,48,.08);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,.82), rgba(255,255,255,.94)),
+    var(--panel);
+}
+
+.signal-pill{
+  font-family:var(--font-mono);
+  font-size:11px;
+  padding:6px 10px;
+  border-radius:999px;
+  color:var(--mint);
+  background:rgba(42,181,138,.08);
+  border:1px solid rgba(42,181,138,.16);
+}
+
+.terminal-card{
+  overflow:hidden;
+  max-width:486px;
+  margin-left:auto;
+  box-shadow:0 22px 52px rgba(15, 23, 42, .09);
+  background:#ffffff;
+  border-color:rgba(22,32,48,.07);
+}
+
+.terminal-head{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+  padding:13px 16px;
+  border-bottom:1px solid rgba(22,32,48,.08);
+  background:linear-gradient(180deg, rgba(250,252,255,.96), rgba(247,249,254,.90));
+}
+
+.dots{display:flex;gap:8px}
+.dots i{
+  width:10px;
+  height:10px;
+  border-radius:50%;
+  display:block;
+}
+.dots i:nth-child(1){background:#ff7f73}
+.dots i:nth-child(2){background:#ffd166}
+.dots i:nth-child(3){background:#75dd93}
+
+.terminal-head span{
+  color:var(--text-dim);
+  font-size:11px;
+  font-family:var(--font-mono);
+}
+
+.terminal-body{
+  padding:17px 17px 14px;
+  font-family:var(--font-mono);
+  font-size:11px;
+  line-height:1.7;
+  color:#4f5f7b;
+  background:linear-gradient(180deg, #f8fbff, #ffffff 22%);
+  min-height:286px;
+}
+
+.terminal-body .prompt{color:#2563eb}
+.terminal-body .ok{color:#16a34a}
+.terminal-body .warn{color:#d97706}
+.terminal-body .dim{color:#7b879d}
+.terminal-body .info{color:#4f46e5}
+.terminal-body .muted{color:#94a3b8}
+.terminal-body .danger{color:#ef4444}
+
+.tui-stage{
+  display:grid;
+  grid-template-rows:1fr auto auto;
+  gap:11px;
+  height:334px;
+}
+
+.tui-transcript{
+  height:264px;
+  display:flex;
+  flex-direction:column;
+  gap:4px;
+  overflow-y:auto;
+  overflow-x:hidden;
+  padding:4px 8px 6px 2px;
+  scrollbar-width:thin;
+  scrollbar-color:rgba(148,163,184,.55) transparent;
+}
+
+.tui-transcript::-webkit-scrollbar{
+  width:6px;
+}
+
+.tui-transcript::-webkit-scrollbar-track{
+  background:transparent;
+}
+
+.tui-transcript::-webkit-scrollbar-thumb{
+  background:rgba(148,163,184,.5);
+  border-radius:999px;
+}
+
+.tui-line{
+  font-size:11px;
+  line-height:1.72;
+  white-space:pre-wrap;
+  word-break:break-word;
+  opacity:0;
+  transform:translateY(3px);
+  transition:opacity .22s ease, transform .22s ease;
+}
+
+.tui-line.visible{
+  opacity:1;
+  transform:translateY(0);
+}
+
+.tui-line:not(.current){
+  color:#52627d;
+}
+
+.tui-line.current{
+  color:#2f415e;
+}
+
+.tui-prefix{
+  font-weight:600;
+}
+
+.tui-status{
+  display:grid;
+  grid-template-columns:auto 1fr auto;
+  align-items:center;
+  gap:12px;
+  font-size:10px;
+  color:#6b7890;
+  padding:7px 1px 0;
+  border-top:1px solid rgba(148,163,184,.16);
+  letter-spacing:.01em;
+}
+
+.tui-status-center{
+  text-align:center;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+
+.tui-status-right{
+  text-align:right;
+  white-space:nowrap;
+}
+
+.tui-input{
+  position:relative;
+  border-top:1px solid rgba(148,163,184,.16);
+  min-height:23px;
+  padding:6px 5px 2px;
+  font-size:12px;
+  line-height:1.32;
+  color:#34465e;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  z-index:0;
+}
+
+.tui-input::before{
+  content:"";
+  position:absolute;
+  left:1px;
+  right:1px;
+  top:3px;
+  bottom:0;
+  border-radius:6px 6px 0 0;
+  background:linear-gradient(180deg, rgba(249,251,254,.26), rgba(247,249,252,.10));
+  z-index:-1;
+}
+
+.tui-input .cursor{
+  display:inline-block;
+  width:6px;
+  height:1em;
+  vertical-align:0;
+  margin-left:3px;
+  border-radius:1px;
+  background:rgba(59,130,246,.58);
+  animation:blink 1s step-end infinite;
+}
+
+@keyframes blink{
+  50%{opacity:.18}
+}
+
+.section{
+  margin:84px 0 0;
+}
+
+.section-header{
+  display:flex;
+  justify-content:space-between;
+  align-items:flex-start;
+  gap:28px;
+  margin-bottom:20px;
+}
+
+.section-header h2{
+  font-family:var(--font-display);
+  font-size:clamp(26px, 3vw, 38px);
+  line-height:1;
+  letter-spacing:-.04em;
+}
+
+.section-header p{
+  max-width:400px;
+  color:var(--text-dim);
+  font-size:12px;
+  line-height:1.65;
+}
+
+.features-strip{
+  display:grid;
+  grid-template-columns:repeat(3, minmax(0, 1fr));
+  overflow:hidden;
+}
+
+.feature-item{
+  padding:30px 24px 28px;
+}
+
+.feature-item + .feature-item{
+  border-left:1px solid rgba(22,32,48,.08);
+}
+
+.feature-item .tag{
+  display:inline-flex;
+  padding:5px 9px;
+  border-radius:999px;
+  background:rgba(134,183,255,.10);
+  color:var(--blue);
+  font-size:10px;
+  font-family:var(--font-mono);
+  letter-spacing:.08em;
+  text-transform:uppercase;
+}
+
+.feature-item h3,
+.quick-note h3,
+.tab-copy h3{
+  margin:13px 0 8px;
+  font-size:19px;
+  font-family:var(--font-display);
+  letter-spacing:-.03em;
+}
+
+.feature-item p,
+.quick-note p,
+.tab-copy p{
+  font-size:14px;
+  line-height:1.68;
+  color:var(--text-dim);
+}
+
+.feature-item p{
+  max-width:28ch;
+}
+
+.quickstart-shell{
+  overflow:hidden;
+  box-shadow:var(--shadow);
+}
+
+.quickstart-tabs{
+  display:flex;
+  gap:10px;
+  padding:14px 16px 0;
+}
+
+.tab-button{
+  appearance:none;
+  border:none;
+  background:transparent;
+  color:var(--text-dim);
+  padding:10px 14px;
+  border-radius:999px;
+  cursor:pointer;
+  transition:.18s ease;
+}
+
+.tab-button:hover{
+  color:var(--text);
+  background:rgba(63,124,255,.06);
+}
+
+.tab-button.active{
+  color:var(--blue);
+  background:rgba(63,124,255,.08);
+}
+
+.tab-panel{
+  display:none;
+  grid-template-columns:300px 1fr;
+  gap:26px;
+  padding:18px 18px 20px;
+}
+
+.tab-panel.active{
+  display:grid;
+}
+
+.tab-copy{
+  padding:10px 4px 0;
+}
+
+.tab-copy ul{
+  margin-top:16px;
+  list-style:none;
+  display:grid;
+  gap:6px;
+}
+
+.tab-copy li{
+  color:var(--text-soft);
+  font-size:12px;
+  line-height:1.55;
+  padding-left:14px;
+  position:relative;
+}
+
+.tab-copy li::before{
+  content:"";
+  width:5px;
+  height:5px;
+  border-radius:50%;
+  background:var(--blue);
+  position:absolute;
+  left:0;
+  top:.7em;
+}
+
+.quick-code{
+  border:1px solid rgba(22,32,48,.08);
+  border-radius:18px;
+  background:#f8fbff;
+  overflow:hidden;
+  min-height:100%;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.55);
+}
+
+.quick-code .top{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  padding:14px 18px;
+  border-bottom:1px solid rgba(22,32,48,.08);
+}
+
+.quick-code .top strong{
+  font-size:12px;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+  color:var(--text-soft);
+}
+
+.quick-code pre{
+  margin:0;
+  padding:21px 22px 23px;
+  overflow:auto;
+}
+
+.quick-code code{
+  display:block;
+  white-space:pre;
+  font-family:var(--font-mono);
+  font-size:13px;
+  line-height:1.85;
+  color:#2d425d;
+}
+
+.quick-code .c{color:#6f7b90}
+.quick-code .g{color:#1e8f6b}
+.quick-code .b{color:var(--blue)}
+.quick-code .y{color:#9b6a17}
+
+.quick-note{
+  padding:0 0 6px;
+}
+
+.quick-note ul{
+  margin-top:18px;
+  list-style:none;
+  display:grid;
+  gap:10px;
+}
+
+.quick-note li{
+  padding:0 0 10px;
+  font-size:13px;
+  color:var(--text-soft);
+  line-height:1.75;
+  border-bottom:1px solid rgba(22,32,48,.08);
+}
+
+.quick-note code{
+  font-family:var(--font-mono);
+  color:var(--mint);
+}
+
+.docs-wrap{
+  margin-top:28px;
+  padding-bottom:64px;
+}
+
+.docs-shell{
+  overflow:hidden;
+  border-radius:0;
+  box-shadow:0 18px 48px rgba(33,54,86,.04);
+  border:1px solid rgba(22,32,48,.05);
+  background:#fcfdff;
+}
+
+.docs-topbar{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:14px;
+  padding:18px 30px 16px;
+  border-bottom:1px solid rgba(22,32,48,.06);
+  background:linear-gradient(180deg, rgba(251,252,254,.98), rgba(248,250,253,.96));
+}
+
+.docs-topbar-meta{
+  display:flex;
+  flex-direction:column;
+  gap:4px;
+  min-width:0;
+}
+
+.docs-topbar h2{
+  font-family:var(--font-display);
+  font-size:24px;
+  letter-spacing:-.045em;
+}
+
+.docs-topbar-path{
+  color:var(--text-dim);
+  font-size:12px;
+  font-family:var(--font-mono);
+  letter-spacing:.015em;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+
+.docs-topbar-actions{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  flex-wrap:wrap;
+}
+
+.doc-topbar-link,
+.doc-sidebar-toggle{
+  appearance:none;
+  border:1px solid rgba(63,124,255,.1);
+  background:rgba(255,255,255,.7);
+  color:var(--text-soft);
+  text-decoration:none;
+  padding:8px 13px;
+  font-size:12px;
+  line-height:1;
+  cursor:pointer;
+  transition:.16s ease;
+}
+
+.doc-topbar-link:hover,
+.doc-sidebar-toggle:hover{
+  background:rgba(63,124,255,.06);
+  border-color:rgba(63,124,255,.16);
+  color:var(--text);
+}
+
+.doc-sidebar-toggle{
+  display:none;
+}
+
+.docs-layout{
+  display:grid;
+  grid-template-columns:236px minmax(0, 1fr);
+  min-height:780px;
+}
+
+.doc-sidebar{
+  padding:28px 18px 32px;
+  border-right:1px solid rgba(22,32,48,.06);
+  background:linear-gradient(180deg, #f8fafd 0%, #f5f8fc 100%);
+}
+
+.doc-tree + .doc-tree{margin-top:30px}
+
+.doc-tree .group{
+  display:block;
+  margin-bottom:13px;
+  color:var(--text-dim);
+  font-size:11px;
+  font-family:var(--font-mono);
+  letter-spacing:.08em;
+  text-transform:uppercase;
+}
+
+.doc-tree a{
+  display:block;
+  text-decoration:none;
+  color:var(--text-soft);
+  padding:10px 10px 10px 14px;
+  border-radius:0;
+  font-size:13px;
+  line-height:1.46;
+  transition:.16s ease;
+  cursor:pointer;
+  border-left:2px solid transparent;
+}
+
+.doc-tree a:hover{
+  color:var(--text);
+  background:rgba(63,124,255,.03);
+}
+
+.doc-tree a.active{
+  color:var(--text);
+  background:linear-gradient(90deg, rgba(63,124,255,.07), rgba(63,124,255,.02));
+  border-left-color:rgba(63,124,255,.85);
+  box-shadow:none;
+}
+
+.doc-main{
+  min-width:0;
+  background:#ffffff;
+}
+
+.doc-main .doc-placeholder{
+  min-height:780px;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  justify-content:center;
+  gap:16px;
+  text-align:center;
+  color:var(--text-dim);
+  padding:32px;
+}
+
+.doc-main .doc-placeholder svg{
+  width:56px;
+  height:56px;
+  opacity:.32;
+}
+
+.doc-main .doc-placeholder p{
+  font-size:14px;
+  line-height:1.7;
+}
+
+.doc-content{
+  max-width:860px;
+  padding:50px 60px 76px;
+}
+
+.doc-content h1{
+  font-family:var(--font-display);
+  font-size:42px;
+  line-height:1.04;
+  letter-spacing:-.04em;
+  margin:0 0 24px;
+}
+
+.doc-content h1,
+.doc-content h2,
+.doc-content h3,
+.doc-content h4,
+.doc-content h5,
+.doc-content h6{
+  position:relative;
+  scroll-margin-top:90px;
+}
+
+.heading-anchor{
+  position:absolute;
+  left:-.95em;
+  top:0;
+  color:rgba(63,124,255,.4);
+  text-decoration:none;
+  opacity:0;
+  transition:.14s ease;
+  font-weight:500;
+}
+
+.doc-content h1:hover .heading-anchor,
+.doc-content h2:hover .heading-anchor,
+.doc-content h3:hover .heading-anchor,
+.doc-content h4:hover .heading-anchor,
+.doc-content h5:hover .heading-anchor,
+.doc-content h6:hover .heading-anchor,
+.heading-anchor:focus-visible{
+  opacity:1;
+}
+
+.doc-content h2{
+  font-family:var(--font-display);
+  font-size:26px;
+  line-height:1.12;
+  letter-spacing:-.03em;
+  margin:46px 0 18px;
+  padding-bottom:12px;
+  border-bottom:1px solid rgba(22,32,48,.06);
+}
+
+.doc-content h3{
+  font-size:20px;
+  line-height:1.3;
+  margin:32px 0 12px;
+}
+
+.doc-content h4{
+  font-size:16px;
+  margin:24px 0 8px;
+}
+
+.doc-content p,
+.doc-content li{
+  font-size:16px;
+  line-height:1.88;
+  color:var(--text-soft);
+}
+
+.doc-content p{margin:15px 0}
+.doc-content ul,
+.doc-content ol{margin:15px 0;padding-left:25px}
+.doc-content li{margin:7px 0}
+.doc-content strong{color:var(--text)}
+.doc-content a{
+  color:var(--blue);
+  text-decoration:none;
+  text-underline-offset:3px;
+}
+.doc-content a:hover{text-decoration:underline}
+.doc-content hr{
+  border:none;
+  border-top:1px solid rgba(22,32,48,.07);
+  margin:30px 0;
+}
+
+.doc-content blockquote{
+  margin:20px 0;
+  padding:16px 18px;
+  border-left:3px solid var(--blue);
+  background:rgba(63,124,255,.035);
+  border-radius:0;
+}
+
+.doc-content code{
+  font-family:var(--font-mono);
+  font-size:13px;
+  color:#27466e;
+  background:rgba(63,124,255,.045);
+  border:1px solid rgba(63,124,255,.07);
+  border-radius:4px;
+  padding:2px 7px;
+}
+
+.doc-content pre{
+  margin:20px 0;
+  overflow:auto;
+  border-radius:0;
+  border:1px solid rgba(22,32,48,.07);
+  background:#f7f9fc;
+  padding:18px 22px;
+}
+
+.doc-content pre code{
+  display:block;
+  background:none;
+  border:none;
+  padding:0;
+  white-space:pre;
+  line-height:1.8;
+}
+
+.doc-content table{
+  width:100%;
+  border-collapse:collapse;
+  margin:22px 0;
+  font-size:14px;
+}
+
+.doc-content th,
+.doc-content td{
+  text-align:left;
+  vertical-align:top;
+  border:1px solid rgba(22,32,48,.07);
+  padding:10px 12px;
+  color:var(--text-soft);
+}
+
+.doc-content th{
+  color:var(--text);
+  background:rgba(63,124,255,.04);
+}
+
+.doc-content img{
+  max-width:100%;
+  border-radius:0;
+  margin:16px 0;
+  border:1px solid rgba(22,32,48,.07);
+}
+
+.loading,
+.error{
+  font-size:14px;
+  color:var(--text-dim);
+  padding:48px 8px;
+}
+
+.error a{color:var(--blue)}
+
+.footer{
+  padding:10px 0 36px;
+}
+
+.footer-note{
+  border-top:1px solid rgba(22,32,48,.08);
+  padding-top:18px;
+  text-align:center;
+  color:rgba(87,102,125,.8);
+  font-size:12px;
+  letter-spacing:.03em;
+}
+
+@media (max-width: 1080px){
+  .hero-grid,
+  .tab-panel{
+    grid-template-columns:1fr;
+  }
+
+  .hero{padding-top:58px}
+  .features-strip{grid-template-columns:1fr}
+  .feature-item + .feature-item{border-left:none;border-top:1px solid rgba(22,32,48,.08)}
+  .hero-panel{padding-top:0}
+  .terminal-card{margin-left:0;max-width:none}
+}
+
+@media (max-width: 820px){
+  .nav-inner{height:auto;padding:10px 0 12px;align-items:stretch;flex-direction:column;gap:10px}
+  .nav-cluster{width:100%;justify-content:space-between;gap:12px;flex-wrap:wrap}
+  .nav-links{width:100%}
+  .nav-links.secondary{justify-content:flex-start}
+  .hero-grid{grid-template-columns:1fr;gap:28px}
+  .hero-panel{order:-1}
+  .docs-layout{grid-template-columns:1fr}
+  .doc-sidebar{
+    display:none;
+    border-right:none;
+    border-bottom:1px solid rgba(22,32,48,.08);
+  }
+  .docs-shell.sidebar-open .doc-sidebar{display:block}
+  .docs-topbar{padding:14px 18px}
+  .doc-sidebar-toggle{display:inline-flex}
+  .doc-main .doc-placeholder{min-height:420px}
+  .brand-word{font-size:29px}
+}
+
+@media (max-width: 640px){
+  .shell{width:min(var(--max), calc(100% - 20px))}
+  .hero{padding-top:20px}
+  .hero-copy h1{font-size:40px}
+  .hero-copy p.lead{font-size:16px}
+  .hero-highlights{max-width:none}
+  .terminal-head{padding:12px 14px}
+  .terminal-body{padding:15px 14px 13px}
+  .tui-stage{height:320px}
+  .tui-transcript{height:250px}
+  .quickstart-tabs{padding:14px 14px 0;overflow:auto}
+  .tab-panel{padding:14px}
+  .section-header{flex-direction:column;align-items:flex-start}
+  .doc-content{padding:28px 20px 46px}
+  .doc-content h1{font-size:32px}
+}
+</style>
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-inner">
+    <div class="nav-cluster">
+      <a class="brand" href="#" onclick="showPage('home'); return false;">
+        <span class="brand-word"><span class="m">M</span><span class="rest">ink</span></span>
+      </a>
+      <div class="nav-links primary">
+        <a id="nav-home" class="active" onclick="showPage('home')">首页</a>
+        <a id="nav-docs" onclick="showPage('docs')">文档</a>
+      </div>
+    </div>
+    <div class="nav-links secondary">
+      <a href="https://github.com/fierceX/mink/releases" target="_blank" rel="noreferrer">下载</a>
+      <a href="https://crates.io/crates/mink-core" target="_blank" rel="noreferrer">Rust crate</a>
+      <a href="https://pypi.org/project/mink-agent" target="_blank" rel="noreferrer">PyPI</a>
+      <a href="https://github.com/fierceX/mink" target="_blank" rel="noreferrer">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<section id="page-home" class="page-section active">
+  <div class="shell">
+    <div class="hero">
+      <div class="hero-frame">
+        <div class="hero-grid">
+          <div class="hero-copy">
+            <div class="eyebrow">Rust 原生 · 终端优先 · 可嵌入</div>
+            <h1>面向终端，也面向系统的 <span class="accent">AI agent runtime</span></h1>
+            <p class="lead">mink 用 Rust 实现，既适合在终端中直接工作，也适合嵌入到服务端、桌面端或内部工具中。</p>
+            <div class="hero-highlights">
+              <span>Rust runtime</span>
+              <span>上下文压缩</span>
+              <span>Anchored Edit</span>
+              <span>会话与 Artifact</span>
+            </div>
+          </div>
+
+          <div class="hero-panel">
+            <div class="terminal-card">
+              <div class="terminal-head">
+                <div class="dots"><i></i><i></i><i></i></div>
+                <span>mink --tui=inline</span>
+              </div>
+              <div class="terminal-body">
+                <div id="hero-tui-stage" class="tui-stage" aria-live="polite">
+                  <div id="hero-tui-transcript" class="tui-transcript"></div>
+                  <div id="hero-tui-input" class="tui-input"></div>
+                  <div class="tui-status">
+                    <span id="hero-tui-left">flash @agent-task</span>
+                    <span id="hero-tui-center" class="tui-status-center">B:0.89 T:12 R:90 I:13.30M(98%) O:58.8K</span>
+                    <span id="hero-tui-right" class="tui-status-right">C:231.1K(23%) ¥0.603 [idle]</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <section class="section">
+      <div class="section-header">
+        <h2>核心特点</h2>
+        <p>统一运行时、长任务可控，以及更可靠的编辑与状态管理。</p>
+      </div>
+      <div class="features-strip">
+        <article class="feature-item">
+          <span class="tag">Runtime</span>
+          <h3>可嵌入的运行时内核</h3>
+          <p>CLI、REPL、TUI、Python SDK 和 Rust 嵌入共享同一个 runtime，不需要为不同入口维护多套语义。</p>
+        </article>
+        <article class="feature-item">
+          <span class="tag">Context</span>
+          <h3>长上下文与长任务可控</h3>
+          <p>压缩、活跃投影和持久化会话共同工作，让上下文不会无限膨胀，也让长任务可以持续推进。</p>
+        </article>
+        <article class="feature-item">
+          <span class="tag">Reliability</span>
+          <h3>编辑与状态管理更可靠</h3>
+          <p>Anchored Edit、artifact 回读、会话状态和恢复机制共同约束修改与回读路径，不把正确性交给运气。</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-header">
+        <h2>快速开始</h2>
+        <p>根据你的使用方式，从终端、Python SDK 或 Rust 嵌入开始。</p>
+      </div>
+      <div class="quickstart-shell">
+        <div class="quickstart-tabs">
+          <button class="tab-button active" data-tab="terminal" onclick="switchQuickstart('terminal')">终端使用</button>
+          <button class="tab-button" data-tab="python" onclick="switchQuickstart('python')">Python SDK</button>
+          <button class="tab-button" data-tab="rust" onclick="switchQuickstart('rust')">Rust 嵌入</button>
+        </div>
+
+        <div id="tab-terminal" class="tab-panel active">
+          <div class="tab-copy">
+            <h3>直接在终端中运行</h3>
+            <p>适合在本地项目里直接工作。可以进入 REPL，也可以使用 Full TUI 或 Inline TUI。</p>
+            <ul>
+              <li>默认入口</li>
+              <li>支持继续最近会话</li>
+              <li>支持 REPL、Full TUI、Inline TUI</li>
+            </ul>
+          </div>
+          <div class="quick-code">
+            <div class="top">
+              <strong>Terminal</strong>
+              <span class="signal-pill">Rust 1.94+</span>
+            </div>
+            <pre><code><span class="c"># 编译</span>
+cargo build --release
+
+<span class="c"># REPL</span>
+<span class="b">$</span> ./target/release/mink -m flash -i
+
+<span class="c"># Full TUI</span>
+<span class="b">$</span> ./target/release/mink -m flash --tui
+
+<span class="c"># Inline TUI</span>
+<span class="b">$</span> ./target/release/mink -m flash --tui=inline
+
+<span class="c"># 恢复最近会话</span>
+<span class="b">$</span> ./target/release/mink -m flash --continue -i
+</code></pre>
+          </div>
+        </div>
+
+        <div id="tab-python" class="tab-panel">
+          <div class="tab-copy">
+            <h3>把 agent 接进脚本或服务</h3>
+            <p>适合用 Python 调用 mink，让它成为工作流或服务逻辑的一部分。</p>
+            <ul>
+              <li>适合脚本集成与自动化</li>
+              <li>不只是包装 CLI</li>
+              <li>适合已有 Python 系统接入</li>
+            </ul>
+          </div>
+          <div class="quick-code">
+            <div class="top">
+              <strong>Python SDK</strong>
+              <span class="signal-pill">pip</span>
+            </div>
+            <pre><code><span class="c"># 安装</span>
+pip install mink-agent
+
+<span class="c"># 最小示例</span>
+from mink_agent import Agent
+
+agent = Agent(
+    model="flash",
+    provider="deepseek",
+)
+
+result = agent.run("scan this repo and summarize")
+print(result.text)
+</code></pre>
+          </div>
+        </div>
+
+        <div id="tab-rust" class="tab-panel">
+          <div class="tab-copy">
+            <h3>直接嵌入到 Rust 系统中</h3>
+            <p>如果你希望把 agent 作为系统能力而不是外部进程使用，可以直接使用 <code>mink::runtime</code>。</p>
+            <ul>
+              <li>适合服务端、桌面端或内部工具</li>
+              <li>与 CLI 共享同一套运行时语义</li>
+              <li>不需要维护独立 agent 内核</li>
+            </ul>
+          </div>
+          <div class="quick-code">
+            <div class="top">
+              <strong>Rust Embed</strong>
+              <span class="signal-pill">cargo</span>
+            </div>
+            <pre><code><span class="c"># Cargo.toml</span>
+<span class="g">mink = { package = "mink-core", version = "0.2.0", default-features = false, features = ["runtime"] }</span>
+
+<span class="c"># 最小示例</span>
+use mink::runtime::AgentRuntime;
+
+let runtime = AgentRuntime::start(options).await?;
+let result = runtime.run_turn("explain this project").await?;
+println!("{}", result.text());
+runtime.shutdown().await?;
+</code></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </div>
+</section>
+
+<section id="page-docs" class="page-section">
+  <div class="shell docs-wrap">
+    <div class="docs-shell">
+      <div class="docs-topbar">
+        <div class="docs-topbar-meta">
+          <h2 id="doc-current-title">Documentation</h2>
+          <div id="doc-current-path" class="docs-topbar-path">docs/USAGE.md</div>
+        </div>
+        <div class="docs-topbar-actions">
+          <button class="doc-sidebar-toggle" type="button" onclick="toggleDocSidebar()">目录</button>
+          <a id="doc-source-link" class="doc-topbar-link" href="https://github.com/fierceX/mink/blob/main/docs/USAGE.md" target="_blank" rel="noreferrer">源文件</a>
+        </div>
+      </div>
+      <div class="docs-layout">
+        <aside class="doc-sidebar">
+          <div class="doc-tree">
+            <span class="group">用户手册</span>
+            <a onclick="loadDoc('USAGE.md')" data-path="USAGE.md">使用手册</a>
+            <a onclick="loadDoc('tools.md')" data-path="tools.md">工具参考</a>
+            <a onclick="loadDoc('ARCHITECTURE.md')" data-path="ARCHITECTURE.md">架构说明</a>
+            <a onclick="loadDoc('DESIGN.md')" data-path="DESIGN.md">设计文档</a>
+            <a onclick="loadDoc('CHANGELOG.md')" data-path="CHANGELOG.md">变更日志</a>
+          </div>
+          <div class="doc-tree">
+            <span class="group">设计哲学</span>
+            <a onclick="loadDoc('设计哲学-信号系统.md')" data-path="设计哲学-信号系统.md">信号系统</a>
+          </div>
+        </aside>
+
+        <main class="doc-main" id="doc-main">
+          <div class="doc-placeholder">
+            <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="1.4">
+              <rect x="7" y="5" width="34" height="38" rx="5"></rect>
+              <path d="M16 18h16M16 24h12M16 30h8" stroke-linecap="round"></path>
+            </svg>
+            <p>从左侧选择一篇文档，或先阅读使用手册。</p>
+          </div>
+        </main>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer class="footer">
+  <div class="shell">
+    <div class="footer-note">
+      Mink · MIT License
+    </div>
+  </div>
+</footer>
+
+<script>
+let currentDocPath = null;
+let docsBootstrapped = false;
+let heroTerminalTimer = null;
+let heroTuiReplay = [];
+let heroTuiMeta = {
+  maxVisibleRows: 14,
+};
+
+function prettyDocTitle(path) {
+  const name = path.split("/").pop()?.replace(/\.md$/i, "") || "Documentation";
+  const map = {
+    "USAGE": "使用手册",
+    "tools": "工具参考",
+    "ARCHITECTURE": "架构说明",
+    "DESIGN": "设计文档",
+    "CHANGELOG": "变更日志",
+    "设计哲学-信号系统": "信号系统",
+  };
+  return map[name] || name;
+}
+
+function githubDocUrl(path) {
+  const githubPath = path.startsWith("../") ? path.slice(3) : `docs/${path}`;
+  return `https://github.com/fierceX/mink/blob/main/${githubPath}`;
+}
+
+function updateDocChrome(path) {
+  const title = document.getElementById("doc-current-title");
+  const currentPath = document.getElementById("doc-current-path");
+  const sourceLink = document.getElementById("doc-source-link");
+  if (title) title.textContent = prettyDocTitle(path);
+  if (currentPath) currentPath.textContent = `docs/${path}`;
+  if (sourceLink) sourceLink.href = githubDocUrl(path);
+}
+
+function toggleDocSidebar(force) {
+  const shell = document.querySelector(".docs-shell");
+  if (!shell) return;
+  const open = typeof force === "boolean" ? force : !shell.classList.contains("sidebar-open");
+  shell.classList.toggle("sidebar-open", open);
+}
+
+function slugifyHeading(text) {
+  return text
+    .trim()
+    .toLowerCase()
+    .replace(/[^\p{Letter}\p{Number}\s-]/gu, "")
+    .replace(/\s+/g, "-");
+}
+
+function decorateDocContent(container) {
+  const used = new Map();
+  container.querySelectorAll("h1, h2, h3, h4, h5, h6").forEach((heading) => {
+    const base = slugifyHeading(heading.textContent || "") || "section";
+    const count = used.get(base) || 0;
+    used.set(base, count + 1);
+    heading.id = count === 0 ? base : `${base}-${count}`;
+    const anchor = document.createElement("a");
+    anchor.className = "heading-anchor";
+    anchor.href = `#${encodeURIComponent(heading.id)}`;
+    anchor.setAttribute("aria-label", `跳转到 ${heading.textContent}`);
+    anchor.textContent = "#";
+    heading.prepend(anchor);
+  });
+
+  container.querySelectorAll('a[href^="#"]').forEach((anchor) => {
+    const raw = decodeURIComponent(anchor.getAttribute("href").slice(1));
+    if (!raw) return;
+    anchor.addEventListener("click", (event) => {
+      event.preventDefault();
+      const target =
+        container.querySelector(`#${CSS.escape(raw)}`) ||
+        container.querySelector(`#${CSS.escape(slugifyHeading(raw))}`);
+      if (!target) return;
+      target.scrollIntoView({ behavior: "smooth", block: "start" });
+      history.replaceState(null, "", `#${encodeURIComponent(target.id)}`);
+    });
+  });
+}
+
+async function loadHeroReplay() {
+  try {
+    const resp = await fetch("assets/hero-replay.json");
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    heroTuiReplay = Array.isArray(data.steps) ? data.steps : [];
+    heroTuiMeta = {
+      maxVisibleRows: data.meta?.maxVisibleRows || 14,
+    };
+  } catch (_err) {
+    heroTuiReplay = [
+      {
+        statusLeft: "flash @agent-task",
+        statusCenter: "B:0.89 T:12 R:90 I:13.31M(98%) O:58.8K",
+        statusRight: "C:231.1K(23%) ¥0.603 [idle]",
+        input: "",
+        mode: "instant",
+        line: '<span class="prompt">&gt;</span> mink homepage replay unavailable',
+      },
+    ];
+    heroTuiMeta = { maxVisibleRows: 14 };
+  }
+}
+
+function setNavActive(name) {
+  document.querySelectorAll(".nav-links a[id^='nav-']").forEach((el) => el.classList.remove("active"));
+  const active = document.getElementById(`nav-${name}`);
+  if (active) active.classList.add("active");
+}
+
+function showPage(name) {
+  document.querySelectorAll(".page-section").forEach((el) => el.classList.remove("active"));
+  const page = document.getElementById(`page-${name}`);
+  if (page) page.classList.add("active");
+  setNavActive(name);
+
+  if (name === "docs" && !docsBootstrapped) {
+    docsBootstrapped = true;
+    loadDoc("USAGE.md");
+  } else {
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+}
+
+function startHeroTerminalLoop() {
+  const transcript = document.getElementById("hero-tui-transcript");
+  const input = document.getElementById("hero-tui-input");
+  const left = document.getElementById("hero-tui-left");
+  const center = document.getElementById("hero-tui-center");
+  const right = document.getElementById("hero-tui-right");
+  if (!transcript || !input || !left || !center || !right) return;
+
+  if (heroTerminalTimer) {
+    clearTimeout(heroTerminalTimer);
+    heroTerminalTimer = null;
+  }
+
+  let stepIndex = 0;
+  const visibleRows = [];
+  const maxVisibleRows = heroTuiMeta.maxVisibleRows || 14;
+
+  const scheduleNext = (delay) => {
+    heroTerminalTimer = window.setTimeout(runStep, delay);
+  };
+
+  const resetReplay = () => {
+    stepIndex = 0;
+    visibleRows.length = 0;
+    transcript.innerHTML = "";
+  };
+
+  const appendLine = (html) => {
+    const row = document.createElement("div");
+    row.className = "tui-line current";
+    row.innerHTML = html;
+    transcript.appendChild(row);
+    visibleRows.push(row);
+
+    if (visibleRows.length > 1) {
+      visibleRows[visibleRows.length - 2].classList.remove("current");
+    }
+
+    while (visibleRows.length > maxVisibleRows) {
+      const removed = visibleRows.shift();
+      removed.remove();
+    }
+
+    transcript.scrollTop = transcript.scrollHeight;
+    window.setTimeout(() => row.classList.add("visible"), 30);
+    return row;
+  };
+
+  const typeLine = (prefixHtml, text, done) => {
+    const row = appendLine(prefixHtml);
+    const prefix = row.innerHTML;
+    let charIndex = 0;
+
+    const tick = () => {
+      charIndex += 1;
+      row.innerHTML = `${prefix}${text.slice(0, charIndex)}`;
+      transcript.scrollTop = transcript.scrollHeight;
+      if (charIndex < text.length) {
+        heroTerminalTimer = window.setTimeout(tick, text[charIndex - 1] === "，" || text[charIndex - 1] === "。" ? 80 : 26);
+      } else {
+        done();
+      }
+    };
+
+    heroTerminalTimer = window.setTimeout(tick, 40);
+  };
+
+  const runStep = () => {
+    if (stepIndex >= heroTuiReplay.length) {
+      scheduleNext(5200);
+      resetReplay();
+      return;
+    }
+
+    const step = heroTuiReplay[stepIndex];
+    input.innerHTML = `&gt; ${step.input}<span class="cursor"></span>`;
+    left.textContent = step.statusLeft;
+    center.textContent = step.statusCenter;
+    right.textContent = step.statusRight;
+
+    const afterStep = () => {
+      stepIndex += 1;
+      scheduleNext(stepIndex === heroTuiReplay.length ? 5200 : 620);
+    };
+
+    if (step.mode === "typed") {
+      typeLine(step.prefixHtml, step.text, afterStep);
+      return;
+    }
+
+    appendLine(step.line);
+    afterStep();
+  };
+
+  resetReplay();
+  runStep();
+}
+
+function switchQuickstart(name) {
+  document.querySelectorAll(".tab-button").forEach((el) => {
+    el.classList.toggle("active", el.dataset.tab === name);
+  });
+  document.querySelectorAll(".tab-panel").forEach((el) => {
+    el.classList.toggle("active", el.id === `tab-${name}`);
+  });
+}
+
+async function loadDoc(path) {
+  currentDocPath = path;
+  updateDocChrome(path);
+  document.querySelectorAll(".doc-tree a").forEach((el) => el.classList.remove("active"));
+  const link = document.querySelector(`.doc-tree a[data-path="${path}"]`);
+  if (link) link.classList.add("active");
+  if (window.innerWidth <= 820) toggleDocSidebar(false);
+
+  const main = document.getElementById("doc-main");
+  main.innerHTML = '<div class="doc-content"><div class="loading">加载中…</div></div>';
+
+  try {
+    const resp = await fetch(path);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const md = await resp.text();
+    if (typeof marked === "undefined") throw new Error("marked not loaded");
+
+    const baseDir = path.includes("/") ? path.slice(0, path.lastIndexOf("/") + 1) : "";
+    const normalizePath = (input) => {
+      const parts = `${baseDir}${input}`.split("/");
+      const normalized = [];
+      for (const part of parts) {
+        if (!part || part === ".") continue;
+        if (part === "..") {
+          normalized.pop();
+        } else {
+          normalized.push(part);
+        }
+      }
+      return normalized.join("/");
+    };
+
+    const html = marked.parse(md, { breaks: true });
+    const fixed = html.replace(
+      /href="(?!https?:\/\/|#)([^"]+\.md[^"]*)"/gi,
+      (m, p) => `href="https://github.com/fierceX/mink/blob/main/${normalizePath(p)}"`
+    );
+
+    main.innerHTML = `<div class="doc-content">${fixed}</div>`;
+    const content = main.querySelector(".doc-content");
+    if (content) decorateDocContent(content);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  } catch (e) {
+    main.innerHTML = `<div class="doc-content"><div class="error">加载失败：${e.message}。可查看 <a href="${githubDocUrl(path)}" target="_blank" rel="noreferrer">GitHub 版本</a></div></div>`;
+  }
+}
+
+loadHeroReplay().then(startHeroTerminalLoop);
+</script>
+</body>
+</html>
