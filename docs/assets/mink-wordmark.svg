@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 60" fill="none">
+  <text
+    x="2"
+    y="50"
+    font-family="Sora, 'Space Grotesk', 'Segoe UI', 'Helvetica Neue', Arial, sans-serif"
+  >
+    <tspan
+      font-size="56"
+      font-weight="700"
+      letter-spacing="-3"
+      fill="#3F7CFF"
+    >M</tspan>
+    <tspan
+      font-size="50"
+      font-weight="600"
+      letter-spacing="-1.5"
+      fill="#162030"
+    >ink</tspan>
+  </text>
+</svg>

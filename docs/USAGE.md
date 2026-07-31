@@ -2,29 +2,17 @@
 
 > 更新日期：2026-07-30
 
-本文面向 mink 使用者，覆盖 CLI、Rust 嵌入、Python SDK 的运行方式、配置、沙箱、session、技能和常见工作流。
-内置工具的完整参数、结果格式和边界行为见 [工具参考](tools.md)；架构和内部模块职责见 [ARCHITECTURE.md](ARCHITECTURE.md)；
-工具与提示词解耦、自由组合见 [工具能力与提示词解耦设计文档](设计哲学-工具能力与提示词解耦.md)。
+本文面向终端用户，覆盖 CLI 交互模式、配置参数、沙箱、session、计划、压缩、工具、技能和
+常见工作流。Rust 库 / Python SDK 嵌入见 [嵌入与 SDK 使用](EMBEDDING.md)；机器协议
+（`--print` / `--agent-jsonl`）见 [机器协议](PROTOCOL.md)；内置工具的完整参数、结果格式和
+边界行为见 [工具参考](tools.md)；架构和内部模块职责见 [ARCHITECTURE.md](ARCHITECTURE.md)。
 
 ---
 
-## 目录
+[TOC]
 
-- [终端模式与操作](#终端模式与操作)
-- [配置与参数](#配置与参数)
-- [沙箱与安全](#沙箱与安全)
-- [Token 用量与费用](#token-用量与费用)
-- [Rust 库嵌入](#rust-库嵌入)
-- [会话管理](#会话管理)
-- [计划系统](#计划系统)
-- [上下文压缩](#上下文压缩)
-- [维修流水线](#维修流水线)
-- [工具系统](#工具系统)
-- [Skills（技能）](#skills技能)
-- [MISSION（自定义系统提示词）](#mission自定义系统提示词)
-- [SubAgent（子代理）](#subagent子代理)
-- [Stream-JSON 输出](#stream-json-输出)
-- [故障排查](#故障排查)
+> 嵌入与 SDK：[EMBEDDING.md](EMBEDDING.md) · 机器协议：[PROTOCOL.md](PROTOCOL.md) ·
+> Token 用量与费用：见 [EMBEDDING.md](EMBEDDING.md#token-用量与费用)
 
 ---
 
@@ -100,8 +88,7 @@ flash B:0.73 T:12 R:45 I:200K(50%) O:20K C:400K(40%) ¥0.12 [idle]
 - Full：鼠标捕获，应用内滚动，卡片可展开/折叠
 - Inline：鼠标由终端处理，自动折叠后不可展开；详情临时使用 alternate screen
 
-**TUI 操作：**
-
+**TUI / REPL 操作：**（REPL 支持同样的 slash 命令）
 | 操作 | 行为 |
 |------|------|
 | `Ctrl+C` | 工作中中断当前 turn；空闲时退出 |
@@ -114,6 +101,9 @@ flash B:0.73 T:12 R:45 I:200K(50%) O:20K C:400K(40%) ¥0.12 [idle]
 | `/exit` / `/quit` / `/q` | 退出 |
 | 未知 `/xxx` | 本地提示，不发送给 LLM |
 | 行首空格 + `/xxx` | 作为普通文本发送 |
+| `Ctrl+D` | REPL 中退出 |
+
+`/flash` / `/pro` 立即生效，不会发送给 LLM。
 
 ### 标题栏（REPL/CLI 模式）
 
@@ -135,20 +125,6 @@ cat main.rs | ./target/release/mink -m flash "review"
 
 prompt 为空且 stdin 是终端时自动进入交互模式。非终端 stdin 时读取 stdin 作为 prompt。
 
-### 交互命令（REPL / TUI）
-
-| 命令 | 说明 |
-|------|------|
-| `/flash` | 切换到 flash 模型 |
-| `/pro` | 切换到 pro 模型 |
-| `/compact` | 强制上下文压缩 |
-| `/skills` | 列出所有可用 skill |
-| `/help` | 显示可用命令列表 |
-| `exit` / `quit` | 退出 |
-| `Ctrl+C` | 取消当前正在执行的 turn |
-| `Ctrl+D` | 退出 |
-
-`/flash` 和 `/pro` 立即生效，不会发送给 LLM。
 
 ---
 
@@ -168,8 +144,8 @@ prompt 为空且 stdin 是终端时自动进入交互模式。非终端 stdin �
 | `-i` / `--interactive` | auto | REPL 交互模式 |
 | `--tui` / `--tui=full` | — | Full TUI |
 | `--tui=inline` | — | Inline TUI |
-| `--print` | — | ndjson 结构化输出 |
-| `--agent-jsonl` | — | Agent JSONL 协议（stdin request，stdout 事件流 + final） |
+| `--print` | — | ndjson 结构化输出，事件格式见 [机器协议](PROTOCOL.md) |
+| `--agent-jsonl` | — | Agent JSONL 协议（stdin request，stdout 事件流 + final），详见 [机器协议](PROTOCOL.md) |
 | `--api-key KEY` | env | 覆盖 API Key |
 | `--base-url URL` | 默认端点 | 覆盖 API 端点 |
 | `--enabled-tools <list>` | 默认集合 | 逗号分隔的精确工具列表；`none` 禁用全部 |
@@ -300,7 +276,7 @@ Read = "allow"
 
 ### 进程级沙箱
 
-通过 OS 原生工具（Linux nsjail/bubblewrap、macOS sandbox-exec）包裹 mink 进程。
+通过 OS 原生工具（Linux nsjail/bubblewrap、macOS sandbox-exec）包裹 Mink 进程。
 
 `.minkrc` 的 `[sandbox]` 段：
 
@@ -330,7 +306,7 @@ timeout_secs = 600
 
 ### 启动机制
 
-mink 检测 `[sandbox] enabled = true` 后自动通过 `exec()` 装入沙箱，设置 `MINK_SANDBOXED=1` 防无限递归。
+Mink 检测 `[sandbox] enabled = true` 后自动通过 `exec()` 装入沙箱，设置 `MINK_SANDBOXED=1` 防无限递归。
 不可用的后端会 fatal 退出，不会静默降级。
 
 ### PythonSandbox（CPython WASI 沙箱）
@@ -375,182 +351,6 @@ package_dirs = ["./packages"]
 
 ---
 
-## Token 用量与费用
-
-每轮 `run_turn()` 结束后，`TurnOutcome` 携带本轮所有 LLM 请求的 Token 消耗和人民币费用。
-
-### 字段说明
-
-| Rust 字段 | Python 字段 | 说明 |
-|-----------|------------|------|
-| `billing_turn_id` | `billing_turn_id` | 本轮稳定标识；Agent、压缩、子代理共用 |
-| `usage_records` | `usage_records` | 每笔 LLM 请求明细 |
-| `usage` | `usage` | `UsageSummary` 汇总：请求数、attempt 数、Token、纳元费用 |
-| `session.usage_path` | `usage_path` | `usage.jsonl` 路径 |
-
-### UsageSummary
-
-| 字段 | 说明 |
-|------|------|
-| `request_count` | 本轮逻辑请求数 |
-| `reported_request_count` | 返回 usage 的请求数 |
-| `unreported_request_count` | 未返回 usage 的请求数 |
-| `attempt_count` | HTTP 重试合计 |
-| `tokens` | [TokenUsage](#tokenusage) |
-| `cost_nano_cny` | 预估费用（纳元，`1 元 = 10⁹ 纳元`） |
-
-### TokenUsage
-
-| 字段 | 说明 |
-|------|------|
-| `input_tokens` | 输入 Token（已减缓存命中） |
-| `cache_read_tokens` | 缓存命中 Token（按折扣价） |
-| `cache_creation_tokens` | 新增缓存写入 Token（按全价） |
-| `output_tokens` | 输出 Token |
-
-### 采集路径
-
-```text
-Turn / Compaction / SubAgent → MeteredStream → usage.jsonl
-→ OrchActor::finish_usage() → TurnOutcome
-```
-
-Agent 工具循环、自动压缩、子代理共享同一 `billing_turn_id`。手动压缩使用 `operation-*`。
-
-### 定价模型
-
-DeepSeek API 官方单价（纳元整数运算）：
-
-| 模型 | 输入（纳元/token） | 输出（纳元/token） | 缓存读取（纳元/token） |
-|------|-------------------|-------------------|----------------------|
-| Flash | 1,000 | 2,000 | 20 |
-| Pro | 3,000 | 6,000 | 25 |
-
-计算公式：`input × input_nano + cache_creation × input_nano + cache_read × cache_read_nano + output × output_nano`
-
-未报告 usage 的请求 `cost_nano_cny` 为 `None`。未知模型只记录 Token，费用按 0 统计。
-
-### usage.jsonl 格式
-
-```json
-{"version":2,"billing_turn_id":"turn-...","request_id":"request-...",
- "kind":"agent","model":"deepseek-v4-flash","attempt_count":1,"status":"reported",
- "tokens":{"input_tokens":100,"cache_read_tokens":40,...},
- "cost_nano_cny":140800,"completed_at":"2026-06-18T00:00:00Z"}
-```
-
-### Rust 库中访问
-
-```rust
-use mink::prelude::{AgentOptions, AgentRuntime, UsageSummary};
-
-let outcome = AgentRuntime::start_with_options(
-    AgentOptions::new("/tmp/mink-session", ".")
-        .with_api_key(std::env::var("DEEPSEEK_API_KEY")?)
-        .with_model("flash"),
-).await?.run_turn("解释这段代码").await?;
-
-println!("input: {}, cost: {} 纳元",
-    outcome.usage.tokens.input_tokens, outcome.usage.cost_nano_cny);
-for record in &outcome.usage_records {
-    println!("  {}: kind={:?}, status={:?}", record.request_id, record.kind, record.status);
-}
-```
-
-### Python SDK 中访问
-
-```python
-from mink_agent import AgentSession, SandboxConfig
-
-session = AgentSession(SandboxConfig(api_key="sk-...", read_dirs=["."]))
-result = session.run("解释这段代码")
-print(f"cost: {result['usage']['cost_nano_cny']} nano-cny")
-for record in result['usage_records']:
-    print(f"  {record['request_id']}: kind={record['kind']}")
-session.close()
-```
-
-### CLI 中查看
-
-```bash
-mink -m flash --print "hello" | jq 'select(.type=="final") | {billing_turn_id, usage}'
-cat ~/.mink/projects/<project_key>/<session_id>/usage.jsonl | jq -c
-```
-
----
-
-## Rust 库嵌入
-
-Rust 发布包为 `mink-core`，库 crate 名为 `mink`。发布包只包含可嵌入 runtime 和 `Display` 协议层；
-终端 REPL/TUI 和二进制入口在 `mink-cli` workspace 包。
-
-```toml
-[dependencies]
-mink = { package = "mink-core", version = "0.2.0", default-features = false, features = ["runtime"] }
-```
-
-稳定入口：`mink::prelude`、`mink::runtime`、`mink::config`、`mink::sandbox`、`mink::sdk_protocol`。
-
-### Rust 嵌入式只读 VFS
-
-私有化服务可替换 `Read`、`Glob`、`Grep` 的后端为数据库：
-
-```rust
-use std::sync::Arc;
-use mink::prelude::{AgentOptions, AgentRuntime};
-
-let vfs = Arc::new(MyReadOnlyFileSystem::open("knowledge.db")?);
-let runtime = AgentRuntime::start_with_options(
-    AgentOptions::new("/tmp/mink-session", ".")
-        .with_resource_session_id("tenant-task-001")
-        .with_read_only_file_system(vfs),
-).await?;
-```
-
-实现同步的 `ReadOnlyFileSystem` trait。每个操作收到 `VfsScope`：
-- `resource_session_id`：知识库数据分区
-- `agent_session_id`：调用方 session id
-
-子代理继承 `resource_session_id`。虚拟 Read 不产生 snapshot。`Write`/`Edit` 仍操作本地文件。
-`artifact://`、`skill://`、`rule://`、`session://` 不进入 VFS。
-
-### Rust 嵌入式自定义 LLM backend
-
-默认 OpenAI-compatible backend 支持 `openai_extra_body` 和 `openai_tool_choice` 适配大多数兼容端点：
-
-```rust
-let runtime = AgentRuntime::start_with_options(
-    AgentOptions::new("/tmp/mink-session", ".")
-        .with_model("local")
-        .with_openai_reasoning_effort("high")
-        .with_openai_tool_choice("auto")
-        .with_openai_extra_body(BTreeMap::from([
-            ("custom_budget".to_string(), json!(8192)),
-        ])),
-).await?;
-```
-
-非兼容协议可使用自定义 backend：
-
-```rust
-let runtime = AgentRuntime::start_with_options(
-    AgentOptions::new("/tmp/mink-session", ".")
-        .with_model("local")
-        .with_llm_backend(Arc::new(MyLlmBackend::new())),
-).await?;
-```
-
-实现 `mink::runtime::LlmBackend`，从 `LlmRequest` 读取 system prompt、messages、tools、取消 token 和模型名。
-`LlmRequest.model` 是解析后的真实模型名；`LlmRequest.model_alias` 保留用户请求的别名。
-失败时返回 `LlmRequestFailure { attempt_count, error }`。
-
-完整示例：
-```bash
-cargo run -p mink-core --example custom_llm_backend
-```
-
----
-
 ## 会话管理
 
 ### Session layout
@@ -564,7 +364,7 @@ cargo run -p mink-core --example custom_llm_backend
 | `direct` | `HOME/<session_id>/` | 显式配置 |
 | `isolated` | `HOME/` | Rust `AgentOptions` |
 
-选择建议：终端用户用 `project`（按项目隔离）；Python SDK 用 `home`；Rust API 按任务建独立目录用 `isolated`；共享 mink 根目录用 `direct`。
+选择建议：终端用户用 `project`（按项目隔离）；Python SDK 用 `home`；Rust API 按任务建独立目录用 `isolated`；共享 Mink 根目录用 `direct`。
 
 ### 目录结构
 
@@ -618,6 +418,7 @@ LLM 提议 → PlanDraft(草稿) → 用户确认 → PlanConfirm → <current-p
 - `PlanClear()`：删除 `plan.md` + 清理残留 `plan.draft` + 请求压缩。下一轮移除动态计划。
 
 PlanConfirm/PlanClear 的压缩请求服从 TurnCompactor 同轮一次守卫，失败会返回当前 turn。
+执行阶段的 Todo 工具协议见 [工具系统 · Todo 协议](#todo-协议)。
 
 ---
 
@@ -679,29 +480,15 @@ context_compact_tail_tokens = 256000
 
 ## 维修流水线
 
-每次工具执行前自动运行三段修复。
+每次工具执行前自动运行三段修复，无需人工干预：
 
-### Scavenge — 回收
+- **Scavenge**：从 `reasoning_content` 和文本回复中回收遗漏的工具调用（支持 DSML/XML/
+  Bracket/裸 JSON/OpenAI/R1 等容器格式）
+- **Truncation**：修复截断的 JSON 参数（闭合引号、补全括号、去尾逗号）
+- **StormBreaker**：滑动窗口检测 `(工具名, 参数)` 重复，同一对出现 3 次时抑制调用；
+  mutating 工具执行时清空只读条目，允许 edit→re-read 正常模式
 
-从 `reasoning_content` 和文本回复中回收遗漏工具调用，支持 6 种格式：
-
-| 格式 | 示例 |
-|------|------|
-| DSML invoke | `<\|DSML\|invoke name="Read">...</\|DSML\|invoke>` |
-| XML 包装 | `<tool_call>{"name":"Bash",...}</tool_call>` |
-| Bracket | `[TOOL_CALL]{...}[/TOOL_CALL]` |
-| 裸 JSON | `{"name":"Grep",...}` |
-| OpenAI style | `{"type":"function","function":{"name":"Read",...}}` |
-| R1 free-form | `{"tool_name":"Bash","tool_args":{...}}` |
-
-### Truncation — 截断修复
-
-修复截断 JSON：闭合引号、补全括号、去尾逗号、填 null 到悬挂 key。
-
-### StormBreaker — 重复抑制
-
-滑动窗口（size=6）检测 `(工具名, 参数)` 重复。同一对出现 3 次时抑制调用。
-mutating 工具执行时清空只读条目，允许 edit→re-read 正常模式。
+完整设计见 [DESIGN.md](DESIGN.md#主题四维修流水线)。
 
 ---
 
@@ -726,49 +513,25 @@ mutating 工具执行时清空只读条目，允许 edit→re-read 正常模式�
 | `PlanConfirm` | 确认计划 | 无参数 |
 | `PlanClear` | 清空计划 | 无参数 |
 | `SubAgent` | 启动子代理 | `prompt`, `description`, `fork` |
+完整工具参数、结果格式和边界行为见 [工具参考](tools.md)。
 
-### 模型工具面（ModelToolSurface）
+### 工具选择与模型工具面
 
-工具可见性由 **`enabled_tools`** 唯一决定。每个 agent runtime 将此列表与 approval、角色、文件系统后端、编译 feature 和硬依赖结合，解析出 `ModelToolSurface` —— 即当前模型真正可见的工具集合。
-
-- `PrefixManager` 从 `ModelToolSurface` 生成 tools schema 和能力工作流 prompt
-- `ToolRunner::execute_all()` 在真实执行前校验同一 surface，形成纵深防线
-- semantic capabilities 层按能力分类工具（如“搜索内容”由 Grep 或受限 Bash 提供），自动组合工作流提示
-
-嵌入 Rust runtime 注入只读 VFS 后，`Read`、`Glob`、`Grep` 对普通路径使用虚拟后端；未注入时行为不变。
+工具可见性由 **`enabled_tools`** 唯一决定：它是 CLI、TOML、Rust API、Agent JSONL 与
+Python SDK 共用的唯一工具选择入口。未设置时使用 catalog 默认集合，空列表禁用全部；
+`PythonSandbox` 必须显式列出。surface 解析、语义能力和工作流组合的设计见
+[工具能力与提示词解耦设计文档](设计哲学-工具能力与提示词解耦.md)。
 
 ### Read selector 与资源 URL
 
-`Read.path` 支持 selector：
-- `src/main.rs:40-80`、`src/main.rs:40+20`、`src/main.rs:raw`、`src/main.rs:raw:40-80`
-
-轻量资源 URL：
-- `artifact://<id>`：读取被截断工具输出
-- `skill://list` / `skill://<name>` / `skill://<name>/<relative-path>`：列出或读取 skill
-- `rule://list` / `rule://<name>`：列出或读取 rule
-- `session://current` / `session://current/stats` / `session://current/messages` / `session://current/history` / `session://current/artifacts`：session 内省
-
-`Grep.path` 也可使用 registered resource URL。建议先搜索 `session://current/history`，再按行号用 `Read` selector 读取局部。
+`Read.path` 支持行 selector（`src/main.rs:40-80`、`:40+20`、`:raw` 等），并可读取轻量
+资源 URL（`artifact://`、`skill://`、`rule://`、`session://`）。完整协议见
+[工具参考](tools.md)。
 
 ### Anchored Edit
 
-本地文件非 raw `Read` 输出带有 `@PATH#TAG` 的 snapshot header：
-
-```text
-@src/foo.rs#0A3B
-41:fn target() {
-42:    old()
-```
-
-`Edit.patch` 只支持基于 snapshot header 的行操作：
-
-```json
-{"path": "src/foo.rs",
- "patch": "@src/foo.rs#0A3B\nreplace 41..42:\n+fn target() {\n+    new()\n+"}
-```
-
-同一文件多处修改时优先合并多个 hunk。成功的 Write/Edit 会让旧 snapshot 过期。
-VFS 普通路径不输出 `@PATH#TAG`，不能作为 Edit 输入。
+本地文件非 raw `Read` 输出带 `@PATH#TAG` snapshot header，`Edit.patch` 基于它做行锚定
+修改，snapshot 过期时 fail closed。完整规则和示例见 [工具参考](tools.md)。
 
 ### Todo 协议
 
@@ -782,15 +545,8 @@ session 恢复或压缩丢失最新 revision 时追加一次 TodoSync。一个 s
 
 ### SubAgent 工具
 
-LLM 自动调用，支持最多 8 个并发。结果统一收集后进入信号采集。
-
-| 模式 | 上下文 | 适用 |
-|------|--------|------|
-| 独立（默认） | 全新空会话 | 调查、搜索、隔离验证 |
-| Fork（`fork=true`） | 继承完整 session 状态 | 需要上下文延续的任务 |
-
-Fork 在 runtime 初始化前克隆父 session 目录。Artifact 序号从克隆 index 继续，旧 `artifact://` 引用保持有效。
-技能和规则来自父 capability snapshot。
+LLM 自动调用，支持最多 8 个并发。模式、参数和输出格式详见
+[SubAgent（子代理）](#subagent子代理)。
 
 ---
 
@@ -864,12 +620,8 @@ mink --mission ./my-task.mission.md -i
 mink --mission ./my-task.mission.md --config 'skills=["debugging"]' -i
 ```
 
-```python
-# Python SDK
-SandboxConfig(mission_file="./my-task.mission.md")
-SandboxConfig(mission_content="# agent-identity\n...")  # 内联，无临时文件
-SandboxConfig(signal_mode="off")
-```
+Python SDK 使用 `SandboxConfig(mission_file=...)` 或内联 `mission_content`，见
+[嵌入与 SDK 使用](EMBEDDING.md)。
 
 ### 迁移规则
 
@@ -908,31 +660,6 @@ Text: ...
 ```
 
 Token 用量计入父会话统计。默认超时 300 秒（`sub_agent_timeout` 可调）。超时后标记为 `failed`。
-
----
-
-## Stream-JSON 输出
-
-```bash
-mink -m flash --print "explain this"
-```
-
-每行一个 JSON 事件：
-
-```json
-{"type":"thinking","content":"Let me analyze..."}
-{"type":"text","content":"Here is the explanation..."}
-{"type":"tool_call","name":"Read","id":"...","input":{"path":"/x"}}
-{"type":"tool_result","tool_use_id":"...","name":"Read","content":"..."}
-{"type":"usage","input_tokens":100,"output_tokens":50}
-{"type":"stop","reason":"end_turn"}
-```
-
-JQ 下游处理：
-
-```bash
-mink -m flash --print "fix the bug" | jq 'select(.type=="text") | .content'
-```
 
 ---
 

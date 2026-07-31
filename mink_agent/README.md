@@ -1,8 +1,10 @@
 # mink-agent 使用文档
 
+> 更新日期：2026-07-30
+
 ## 简介
 
-mink-agent 是 [mink](https://github.com/fierceX/mink) 的 Python 封装。SDK 专用的 `mink-core` 二进制内置在 pip 包中，无需额外安装。
+mink-agent 是 [Mink](https://github.com/fierceX/mink) 的 Python 封装。SDK 专用的 `mink-core` 二进制内置在 pip 包中，无需额外安装。
 
 ```bash
 pip install mink-agent

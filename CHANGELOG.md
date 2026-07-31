@@ -392,7 +392,7 @@
 - 新增 `[sandbox_python]` 配置段（CPython WASI 沙箱路径和权限）
 - 新增 `--enable-python-sandbox` CLI 参数
 - 新增 `.minkrc.example` 完整配置示例
-- 更新 `.minkrc` 统一为 mink 格式
+- 更新 `.minkrc` 统一为 Mink 格式
 
 ### SDK & Protocol
 

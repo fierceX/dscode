@@ -3,9 +3,11 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>mink — Rust-native AI agent runtime</title>
-<meta name="description" content="mink 是一个 Rust 原生、终端优先、可嵌入的 AI agent runtime。">
+<title>Mink — Rust-native AI agent runtime</title>
+<meta name="description" content="Mink 是一个 Rust 原生、终端优先、可嵌入的 AI agent runtime。">
 <script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js" defer></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js" defer></script>
 <style>
 @import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@600;700&family=Libre+Baskerville:wght@700&family=Manrope:wght@700&family=Outfit:wght@700&family=Sora:wght@700&family=Space+Grotesk:wght@400;500;700&display=swap");
 
@@ -29,9 +31,9 @@
   --radius-sm:10px;
   --nav-h:56px;
   --max:1120px;
-  --font-display:"Space Grotesk","Segoe UI",sans-serif;
-  --font-body:"Space Grotesk","Segoe UI",sans-serif;
-  --font-mono:"IBM Plex Mono","SFMono-Regular",monospace;
+  --font-display:"Space Grotesk","Noto Sans SC","PingFang SC","Segoe UI",sans-serif;
+  --font-body:"Space Grotesk","Noto Sans SC","PingFang SC","Microsoft YaHei","Segoe UI",sans-serif;
+  --font-mono:"IBM Plex Mono","SFMono-Regular","Cascadia Code",monospace;
 }
 
 *{box-sizing:border-box;margin:0;padding:0}
@@ -755,8 +757,57 @@ button{font:inherit}
 
 .docs-layout{
   display:grid;
-  grid-template-columns:236px minmax(0, 1fr);
+  grid-template-columns:236px minmax(0, 1fr) 220px;
   min-height:780px;
+}
+
+/* right-side doc TOC panel */
+.doc-toc-panel{
+  border-left:1px solid rgba(22,32,48,.06);
+  background:linear-gradient(180deg,#f8fafd 0%,#f5f8fc 100%);
+  padding:28px 16px 32px;
+  display:none;
+}
+.doc-toc-panel.has-toc{display:block}
+.doc-toc-inner{
+  position:sticky;
+  top:calc(var(--nav-h) + 20px);
+  max-height:calc(100vh - var(--nav-h) - 40px);
+  overflow-y:auto;
+}
+.doc-toc-title{
+  font-size:11px;
+  font-family:var(--font-mono);
+  letter-spacing:.08em;
+  text-transform:uppercase;
+  color:var(--text-dim);
+  margin-bottom:13px;
+}
+.doc-toc-list{
+  list-style:none;
+  margin:0;
+  padding:0;
+  display:grid;
+  gap:2px;
+}
+.doc-toc-list a{
+  display:block;
+  padding:6px 10px;
+  border-radius:6px;
+  font-size:12.5px;
+  color:var(--text-dim);
+  text-decoration:none;
+  line-height:1.4;
+  border-left:2px solid transparent;
+  transition:.12s ease;
+}
+.doc-toc-list a:hover{color:var(--text);background:rgba(63,124,255,.04)}
+.doc-toc-list a.level-2{font-weight:500;color:var(--text-soft)}
+.doc-toc-list a.level-3{padding-left:20px;font-size:12px}
+.doc-toc-list a.active{
+  color:var(--blue);
+  background:rgba(63,124,255,.06);
+  border-left-color:rgba(63,124,255,.6);
 }
 
 .doc-sidebar{
@@ -992,6 +1043,66 @@ button{font:inherit}
 
 .error a{color:var(--blue)}
 
+/* reading progress */
+.reading-progress{
+  position:fixed;top:0;left:0;right:0;height:2px;z-index:60;
+  background:transparent;pointer-events:none
+}
+.reading-progress span{
+  display:block;height:100%;width:0;
+  background:linear-gradient(90deg,var(--blue),#699dff);
+  transition:width .08s linear
+}
+
+/* back to top */
+.back-to-top{
+  position:fixed;right:22px;bottom:22px;z-index:60;
+  width:38px;height:38px;border-radius:999px;
+  display:flex;align-items:center;justify-content:center;
+  background:rgba(255,255,255,.92);border:1px solid var(--line);
+  color:var(--text-soft);cursor:pointer;opacity:0;pointer-events:none;
+  transform:translateY(6px);transition:.2s ease;box-shadow:0 6px 18px rgba(32,54,86,.10)
+}
+.back-to-top.show{opacity:1;pointer-events:auto;transform:translateY(0)}
+.back-to-top:hover{color:var(--blue);border-color:rgba(63,124,255,.35)}
+
+/* code block chrome */
+.code-frame{
+  margin:20px 0;border:1px solid var(--line);border-radius:var(--radius-md);
+  overflow:hidden;background:#f8fafd
+}
+.code-frame .code-head{
+  display:flex;align-items:center;justify-content:space-between;gap:10px;
+  padding:8px 14px;background:linear-gradient(180deg,#fbfcfe,#f4f7fb);
+  border-bottom:1px solid var(--line)
+}
+.code-frame .code-lang{
+  font-family:var(--font-mono);font-size:10.5px;letter-spacing:.08em;
+  text-transform:uppercase;color:var(--text-dim)
+}
+.code-frame .code-copy{
+  appearance:none;border:1px solid var(--line);background:#fff;color:var(--text-soft);
+  font-size:11px;line-height:1;padding:5px 10px;border-radius:999px;cursor:pointer;transition:.14s ease
+}
+.code-frame .code-copy:hover{border-color:rgba(63,124,255,.35);color:var(--blue)}
+.code-frame .code-copy.copied{color:var(--mint);border-color:rgba(42,181,138,.4)}
+.code-frame pre{margin:0;padding:15px 18px;overflow:auto;background:#f8fafd}
+.code-frame pre code{
+  display:block;background:none;border:none;padding:0;
+  font-family:var(--font-mono);font-size:13px;line-height:1.75;white-space:pre;
+  color:#2d425d
+}
+.code-frame code .hljs-comment,.code-frame code .hljs-quote{color:#6f7b90;font-style:italic}
+.code-frame code .hljs-keyword,.code-frame code .hljs-selector-tag,.code-frame code .hljs-literal{color:#8b3cf0}
+.code-frame code .hljs-string,.code-frame code .hljs-attr,.code-frame code .hljs-template-tag{color:#0b8a57}
+.code-frame code .hljs-number,.code-frame code .hljs-symbol,.code-frame code .hljs-variable{color:#b45f06}
+.code-frame code .hljs-title,.code-frame code .hljs-title.class_{color:#d73a49}
+.code-frame code .hljs-built_in,.code-frame code .hljs-type{color:#005cc5}
+.code-frame code .hljs-meta{color:#6f7b90}
+
+/* doc content polish */
+.doc-content h1{font-size:32px}
+.doc-content table{display:block;overflow-x:auto;max-width:100%}
 .footer{
   padding:10px 0 36px;
 }
@@ -1003,6 +1114,12 @@ button{font:inherit}
   color:rgba(87,102,125,.8);
   font-size:12px;
   letter-spacing:.03em;
+}
+
+@media (max-width: 1240px){
+  /* 中屏隐藏右侧目录，回到两栏 */
+  .docs-layout{grid-template-columns:236px minmax(0, 1fr)}
+  .doc-toc-panel{display:none !important}
 }
 
 @media (max-width: 1080px){
@@ -1086,7 +1203,7 @@ button{font:inherit}
           <div class="hero-copy">
             <div class="eyebrow">Rust 原生 · 终端优先 · 可嵌入</div>
             <h1>面向终端，也面向系统的 <span class="accent">AI agent runtime</span></h1>
-            <p class="lead">mink 用 Rust 实现，既适合在终端中直接工作，也适合嵌入到服务端、桌面端或内部工具中。</p>
+            <p class="lead">Mink 用 Rust 实现，既适合在终端中直接工作，也适合嵌入到服务端、桌面端或内部工具中。</p>
             <div class="hero-highlights">
               <span>Rust runtime</span>
               <span>上下文压缩</span>
@@ -1190,7 +1307,7 @@ cargo build --release
         <div id="tab-python" class="tab-panel">
           <div class="tab-copy">
             <h3>把 agent 接进脚本或服务</h3>
-            <p>适合用 Python 调用 mink，让它成为工作流或服务逻辑的一部分。</p>
+            <p>适合用 Python 调用 Mink，让它成为工作流或服务逻辑的一部分。</p>
             <ul>
               <li>适合脚本集成与自动化</li>
               <li>不只是包装 CLI</li>
@@ -1206,16 +1323,15 @@ cargo build --release
 pip install mink-agent
 
 <span class="c"># 最小示例</span>
-from mink_agent import Agent
+from mink_agent import AgentSession, SandboxConfig
 
-agent = Agent(
-    model="flash",
-    provider="deepseek",
-)
-
-result = agent.run("scan this repo and summarize")
-print(result.text)
-</code></pre>
+session = AgentSession(SandboxConfig(
+    api_key="sk-...",               <span class="c"># 或设置 DEEPSEEK_API_KEY</span>
+    read_dirs=["src"],
+))
+result = session.run("scan this repo and summarize")
+print(result["text"])
+session.close()</code></pre>
           </div>
         </div>
 
@@ -1238,13 +1354,22 @@ print(result.text)
 <span class="g">mink = { package = "mink-core", version = "0.2.0", default-features = false, features = ["runtime"] }</span>
 
 <span class="c"># 最小示例</span>
-use mink::runtime::AgentRuntime;
+use mink::prelude::{AgentOptions, AgentRuntime};
 
-let runtime = AgentRuntime::start(options).await?;
-let result = runtime.run_turn("explain this project").await?;
-println!("{}", result.text());
-runtime.shutdown().await?;
-</code></pre>
+#[tokio::main]
+async fn main() -&gt; anyhow::Result&lt;()&gt; {
+    let rt = AgentRuntime::start_with_options(
+        AgentOptions::new("/tmp/mink-home", ".")
+            .with_api_key(std::env::var("DEEPSEEK_API_KEY")?)
+            .with_model("flash"),
+    ).await?;
+
+    let outcome = rt.run_turn("explain this project").await?;
+    println!("{}", outcome.text);
+
+    rt.shutdown().await?;
+    Ok(())
+}</code></pre>
           </div>
         </div>
       </div>
@@ -1271,14 +1396,20 @@ runtime.shutdown().await?;
           <div class="doc-tree">
             <span class="group">用户手册</span>
             <a onclick="loadDoc('USAGE.md')" data-path="USAGE.md">使用手册</a>
+            <a onclick="loadDoc('EMBEDDING.md')" data-path="EMBEDDING.md">嵌入与 SDK</a>
+            <a onclick="loadDoc('PROTOCOL.md')" data-path="PROTOCOL.md">机器协议</a>
             <a onclick="loadDoc('tools.md')" data-path="tools.md">工具参考</a>
-            <a onclick="loadDoc('ARCHITECTURE.md')" data-path="ARCHITECTURE.md">架构说明</a>
-            <a onclick="loadDoc('DESIGN.md')" data-path="DESIGN.md">设计文档</a>
-            <a onclick="loadDoc('CHANGELOG.md')" data-path="CHANGELOG.md">变更日志</a>
           </div>
           <div class="doc-tree">
-            <span class="group">设计哲学</span>
+            <span class="group">架构与设计</span>
+            <a onclick="loadDoc('ARCHITECTURE.md')" data-path="ARCHITECTURE.md">架构说明</a>
+            <a onclick="loadDoc('DESIGN.md')" data-path="DESIGN.md">设计文档</a>
+            <a onclick="loadDoc('设计哲学-工具能力与提示词解耦.md')" data-path="设计哲学-工具能力与提示词解耦.md">工具能力与提示词解耦</a>
             <a onclick="loadDoc('设计哲学-信号系统.md')" data-path="设计哲学-信号系统.md">信号系统</a>
+          </div>
+          <div class="doc-tree">
+            <span class="group">其它</span>
+            <a onclick="loadDoc('CHANGELOG.md')" data-path="CHANGELOG.md">变更日志</a>
           </div>
         </aside>
 
@@ -1291,6 +1422,12 @@ runtime.shutdown().await?;
             <p>从左侧选择一篇文档，或先阅读使用手册。</p>
           </div>
         </main>
+        <aside class="doc-toc-panel" id="doc-toc-panel">
+          <div class="doc-toc-inner">
+            <div class="doc-toc-title">本文目录</div>
+            <ul class="doc-toc-list" id="doc-toc-list"></ul>
+          </div>
+        </aside>
       </div>
     </div>
   </div>
@@ -1304,9 +1441,20 @@ runtime.shutdown().await?;
   </div>
 </footer>
 
+<div class="reading-progress"><span id="reading-progress-bar"></span></div>
+<button class="back-to-top" id="back-to-top" type="button" aria-label="返回顶部">↑</button>
+
 <script>
 let currentDocPath = null;
+let currentDocAnchor = null;
 let docsBootstrapped = false;
+
+// 站内可加载文档白名单：文档互链命中时站内切换，其余（crates/*、AGENTS 等）跳 GitHub
+const SITE_DOCS = new Set([
+  "USAGE.md", "EMBEDDING.md", "PROTOCOL.md", "tools.md",
+  "ARCHITECTURE.md", "DESIGN.md",
+  "设计哲学-工具能力与提示词解耦.md", "设计哲学-信号系统.md",
+]);
 let heroTerminalTimer = null;
 let heroTuiReplay = [];
 let heroTuiMeta = {
@@ -1317,10 +1465,13 @@ function prettyDocTitle(path) {
   const name = path.split("/").pop()?.replace(/\.md$/i, "") || "Documentation";
   const map = {
     "USAGE": "使用手册",
+    "EMBEDDING": "嵌入与 SDK",
+    "PROTOCOL": "机器协议",
     "tools": "工具参考",
     "ARCHITECTURE": "架构说明",
     "DESIGN": "设计文档",
     "CHANGELOG": "变更日志",
+    "设计哲学-工具能力与提示词解耦": "工具能力与提示词解耦",
     "设计哲学-信号系统": "信号系统",
   };
   return map[name] || name;
@@ -1383,6 +1534,160 @@ function decorateDocContent(container) {
       history.replaceState(null, "", `#${encodeURIComponent(target.id)}`);
     });
   });
+
+  // 站内文档互链：命中白名单的 .md 链接站内切换（支持跨文档锚点）
+  container.querySelectorAll("a.site-doc-link").forEach((a) => {
+    a.addEventListener("click", (event) => {
+      event.preventDefault();
+      const href = a.getAttribute("href") || "";
+      const [docPath, docAnchor] = href.split("#");
+      loadDoc(docPath, docAnchor || null);
+    });
+  });
+
+  renderDocToc(container);
+  decorateCodeBlocks(container);
+}
+
+// 将 markdown 中的 [TOC] 占位提取为右侧目录面板
+let currentTocEntries = [];
+
+function renderDocToc(container) {
+  const panel = document.getElementById("doc-toc-panel");
+  const list = document.getElementById("doc-toc-list");
+  currentTocEntries = [];
+  if (panel) panel.classList.remove("has-toc");
+  if (list) list.innerHTML = "";
+  if (!panel || !list) return;
+
+  // 移除正文中的 [TOC] 占位（目录渲染到右侧面板）
+  container.querySelectorAll("p, div, span").forEach((el) => {
+    if (el.children.length === 0 && el.textContent.trim() === "[TOC]") {
+      el.remove();
+    }
+  });
+  const items = [];
+  container.querySelectorAll("h2, h3").forEach((heading) => {
+    items.push({
+      id: heading.id,
+      text: heading.textContent.replace(/^\s*#\s*/, "").trim(),
+      level: parseInt(heading.tagName[1], 10),
+    });
+  });
+  if (!items.length) return;
+
+  for (const item of items) {
+    const li = document.createElement("li");
+    const a = document.createElement("a");
+    a.href = `#${encodeURIComponent(item.id)}`;
+    a.className = `level-${item.level}`;
+    a.textContent = item.text;
+    a.addEventListener("click", (event) => {
+      event.preventDefault();
+      const target = container.querySelector(`#${CSS.escape(item.id)}`);
+      if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+    li.appendChild(a);
+    list.appendChild(li);
+  }
+  currentTocEntries = items;
+  panel.classList.add("has-toc");
+}
+
+function updateScrollChrome() {
+  const bar = document.getElementById("reading-progress-bar");
+  const btn = document.getElementById("back-to-top");
+  const max = document.documentElement.scrollHeight - window.innerHeight;
+  if (bar) {
+    bar.style.width = max > 0 ? `${Math.min(100, (window.scrollY / max) * 100)}%` : "0%";
+  }
+  if (btn) btn.classList.toggle("show", window.scrollY > 420);
+
+  // 右侧目录 scrollspy：高亮当前章节
+  const tocLinks = document.querySelectorAll(".doc-toc-list a");
+  if (tocLinks.length && currentTocEntries.length) {
+    let current = null;
+    const probe = window.scrollY + 96;
+    for (let i = 0; i < currentTocEntries.length; i++) {
+      const el = document.getElementById(currentTocEntries[i].id);
+      if (el && el.offsetTop <= probe) current = i;
+    }
+    tocLinks.forEach((link, i) => {
+      link.classList.toggle("active", i === current);
+    });
+  }
+}
+
+function initScrollChrome() {
+  let ticking = false;
+  window.addEventListener("scroll", () => {
+    if (!ticking) {
+      ticking = true;
+      requestAnimationFrame(() => {
+        ticking = false;
+        updateScrollChrome();
+      });
+    }
+  }, { passive: true });
+  const btn = document.getElementById("back-to-top");
+  if (btn) {
+    btn.addEventListener("click", () => {
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    });
+  }
+  updateScrollChrome();
+}
+function decorateCodeBlocks(container) {
+  container.querySelectorAll("pre > code").forEach((codeEl) => {
+    const pre = codeEl.parentElement;
+    if (pre.closest(".code-frame")) return;
+    let language = "";
+    const cls = [...codeEl.classList].find((c) => c.startsWith("language-"));
+    if (cls) language = cls.slice("language-".length);
+    if (typeof hljs !== "undefined") {
+      try {
+        hljs.highlightElement(codeEl);
+        if (!language) {
+          language = codeEl.dataset.highlighted
+            ? (codeEl.className.match(/language-([\w+-]+)/) || [])[1] || ""
+            : "";
+        }
+      } catch (_err) { /* keep plain */ }
+    }
+    if (!language) {
+      const langHint = codeEl.className.match(/language-([\w+-]+)/);
+      language = langHint ? langHint[1] : "";
+    }
+    if (!language) language = "text";
+
+    const frame = document.createElement("div");
+    frame.className = "code-frame";
+    const head = document.createElement("div");
+    head.className = "code-head";
+    const lang = document.createElement("span");
+    lang.className = "code-lang";
+    lang.textContent = language;
+    const copy = document.createElement("button");
+    copy.className = "code-copy";
+    copy.type = "button";
+    copy.textContent = "复制";
+    copy.addEventListener("click", () => {
+      const text = codeEl.innerText;
+      navigator.clipboard?.writeText(text).then(() => {
+        copy.textContent = "已复制";
+        copy.classList.add("copied");
+        setTimeout(() => {
+          copy.textContent = "复制";
+          copy.classList.remove("copied");
+        }, 1600);
+      }).catch(() => {});
+    });
+    head.appendChild(lang);
+    head.appendChild(copy);
+    pre.parentElement.insertBefore(frame, pre);
+    frame.appendChild(head);
+    frame.appendChild(pre);
+  });
 }
 
 async function loadHeroReplay() {
@@ -1402,7 +1707,7 @@ async function loadHeroReplay() {
         statusRight: "C:231.1K(23%) ¥0.603 [idle]",
         input: "",
         mode: "instant",
-        line: '<span class="prompt">&gt;</span> mink homepage replay unavailable',
+        line: '<span class="prompt">&gt;</span> Mink homepage replay unavailable',
       },
     ];
     heroTuiMeta = { maxVisibleRows: 14 };
@@ -1536,8 +1841,9 @@ function switchQuickstart(name) {
   });
 }
 
-async function loadDoc(path) {
+async function loadDoc(path, anchor) {
   currentDocPath = path;
+  currentDocAnchor = anchor || null;
   updateDocChrome(path);
   document.querySelectorAll(".doc-tree a").forEach((el) => el.classList.remove("active"));
   const link = document.querySelector(`.doc-tree a[data-path="${path}"]`);
@@ -1549,7 +1855,14 @@ async function loadDoc(path) {
 
   try {
     const resp = await fetch(path);
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    if (!resp.ok) {
+      if (resp.status === 404) {
+        // 本地预览时 docs/CHANGELOG.md 等由 CI 生成的文档不存在 → 跳 GitHub
+        window.location.href = githubDocUrl(path);
+        return;
+      }
+      throw new Error(`HTTP ${resp.status}`);
+    }
     const md = await resp.text();
     if (typeof marked === "undefined") throw new Error("marked not loaded");
 
@@ -1571,18 +1884,40 @@ async function loadDoc(path) {
     const html = marked.parse(md, { breaks: true });
     const fixed = html.replace(
       /href="(?!https?:\/\/|#)([^"]+\.md[^"]*)"/gi,
-      (m, p) => `href="https://github.com/fierceX/mink/blob/main/${normalizePath(p)}"`
+      (m, p) => {
+        const [docPath, docAnchor] = p.split("#");
+        const resolved = normalizePath(docPath);
+        if (SITE_DOCS.has(resolved)) {
+          const anchorPart = docAnchor ? `#${docAnchor}` : "";
+          return `href="${resolved}${anchorPart}" class="site-doc-link"`;
+        }
+        const anchorPart = docAnchor ? `#${docAnchor}` : "";
+        return `href="https://github.com/fierceX/mink/blob/main/${resolved}${anchorPart}"`;
+      }
     );
 
     main.innerHTML = `<div class="doc-content">${fixed}</div>`;
     const content = main.querySelector(".doc-content");
     if (content) decorateDocContent(content);
-    window.scrollTo({ top: 0, behavior: "smooth" });
+
+    if (currentDocAnchor) {
+      const target =
+        document.getElementById(currentDocAnchor) ||
+        document.getElementById(slugifyHeading(currentDocAnchor));
+      if (target) {
+        target.scrollIntoView({ behavior: "smooth", block: "start" });
+      } else {
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      }
+    } else {
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
   } catch (e) {
     main.innerHTML = `<div class="doc-content"><div class="error">加载失败：${e.message}。可查看 <a href="${githubDocUrl(path)}" target="_blank" rel="noreferrer">GitHub 版本</a></div></div>`;
   }
 }
 
+initScrollChrome();
 loadHeroReplay().then(startHeroTerminalLoop);
 </script>
 </body>

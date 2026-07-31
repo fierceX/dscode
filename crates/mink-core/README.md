@@ -1,5 +1,7 @@
 # mink-core
 
+> 更新日期：2026-07-30
+
 `mink-core` 是对外发布的 Rust 包；库 crate 名为 `mink`。
 
 这个子包只承载可嵌入的 agent runtime 和核心能力，不包含 REPL/TUI 的具体终端实现，也不生成
@@ -14,7 +16,7 @@
   REPL/TUI 渲染不在本包。
 - `mink::sdk_protocol`：Agent JSONL 协议类型和 SDK 适配。
 - `mink::sandbox`：进程级沙箱 re-exec 能力。
-- `src/agent`、`src/tools`、`src/session`、`src/llm`：mink 的主循环、工具、持久化和 LLM 流式客户端核心。
+- `src/agent`、`src/tools`、`src/session`、`src/llm`：Mink 的主循环、工具、持久化和 LLM 流式客户端核心。
 
 ## 上下文与会话历史
 
@@ -80,6 +82,22 @@ async fn main() -> anyhow::Result<()> {
     rt.shutdown().await?;
     Ok(())
 }
+```
+
+流式 turn 使用 `try_stream_turn()` 逐条消费事件，结束时通过 `outcome()` 取回结果：
+
+```rust
+use mink::prelude::{AgentEvent, AgentRuntime};
+
+let mut stream = rt.try_stream_turn("explain")?;
+while let Some(ev) = stream.recv().await {
+    match ev {
+        AgentEvent::Text { content } => print!("{content}"),
+        AgentEvent::Final { .. } => break,
+        _ => {}
+    }
+}
+let outcome = stream.outcome().await?;
 ```
 
 ## Read-only virtual filesystem
@@ -179,5 +197,7 @@ spawn worker 子进程，worker 先调用 `mink::sandbox::reexec_in_sandbox()` �
 
 - 根项目总览：[../../README.md](../../README.md)
 - 使用手册：[../../docs/USAGE.md](../../docs/USAGE.md)
+- 嵌入与 SDK：[../../docs/EMBEDDING.md](../../docs/EMBEDDING.md)
+- 机器协议：[../../docs/PROTOCOL.md](../../docs/PROTOCOL.md)
 - 工具参考：[../../docs/tools.md](../../docs/tools.md)
 - 架构说明：[../../docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md)

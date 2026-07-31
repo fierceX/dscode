@@ -34,21 +34,30 @@ jobs:
 
       - name: Validate homepage assets
         run: |
+          test -f docs/.nojekyll
           test -f docs/index.html
           test -f docs/assets/hero-replay.json
           test -f docs/USAGE.md
+          test -f docs/EMBEDDING.md
+          test -f docs/PROTOCOL.md
           test -f docs/tools.md
           test -f docs/ARCHITECTURE.md
           test -f docs/DESIGN.md
           test -f docs/CHANGELOG.md
           test -f docs/设计哲学-信号系统.md
+          test -f docs/设计哲学-工具能力与提示词解耦.md
 
       - name: Validate hero replay JSON
         run: python3 -m json.tool docs/assets/hero-replay.json > /dev/null
 
       - name: Check homepage doc references
         run: |
-          grep -q 'loadDoc("USAGE.md")' docs/index.html
+          # 侧栏引用的每篇文档都必须存在（含 CI 生成的 CHANGELOG.md）
+          for f in USAGE.md EMBEDDING.md PROTOCOL.md tools.md ARCHITECTURE.md DESIGN.md \
+                   CHANGELOG.md 设计哲学-信号系统.md 设计哲学-工具能力与提示词解耦.md; do
+            grep -q "loadDoc('$f')" docs/index.html || { echo "missing sidebar ref: $f"; exit 1; }
+            test -f "docs/$f" || { echo "missing doc file: docs/$f"; exit 1; }
+          done
           grep -q "fetch(path)" docs/index.html
           grep -q 'fetch("assets/hero-replay.json")' docs/index.html
 
@@ -249,7 +258,7 @@ jobs:
 
   # ── GitHub Pages (docs/ as site root) ──────────────────────────
   pages:
-    if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && github.repository == 'fierceX/mink'
     needs: [test, pages-check]
     runs-on: ubuntu-latest
     permissions:
@@ -266,7 +275,10 @@ jobs:
         uses: actions/configure-pages@v5
 
       - name: Prepare published docs files
-        run: cp CHANGELOG.md docs/CHANGELOG.md
+        run: |
+          cp CHANGELOG.md docs/CHANGELOG.md
+          # 内部文档不上传到站点（避免公开维护建议与技术笔记）
+          rm -f docs/TUI_OPTIMIZATION_ROADMAP.md docs/VFS_FORMATTER_RG_STYLE_GAP.md
 
       - name: Upload docs site artifact
         uses: actions/upload-pages-artifact@v3

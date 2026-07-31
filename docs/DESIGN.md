@@ -2,29 +2,19 @@
 
 > 更新日期：2026-07-30
 
-本文记录 mink 的设计取舍和关键不变式，不作为用户手册或工具协议参考。用户入口、配置和
-运行方式见 [USAGE.md](USAGE.md)；工具参数与边界见 [tools.md](tools.md)；模块分层见
-[ARCHITECTURE.md](ARCHITECTURE.md)。
+本文记录 Mink 的设计取舍和关键不变式，不作为用户手册或工具协议参考。终端用户入口、
+配置和运行方式见 [USAGE.md](USAGE.md)；Rust/Python 嵌入见 [EMBEDDING.md](EMBEDDING.md)；
+机器协议见 [PROTOCOL.md](PROTOCOL.md)；工具参数与边界见 [tools.md](tools.md)；
+模块分层见 [ARCHITECTURE.md](ARCHITECTURE.md)。
+
+> **分工说明**：信号系统的完整设计见 [设计哲学-信号系统.md](设计哲学-信号系统.md)；
+> 工具 surface、语义能力与提示词解耦的完整设计见
+> [设计哲学-工具能力与提示词解耦.md](设计哲学-工具能力与提示词解耦.md)。
+> 本文主题五、主题六只保留关键不变式与实现模型摘要，细节以对应设计文档为准。
 
 ---
 
-## 目录
-
-- [主题一：Agent 主循环](#主题一agent-主循环)
-- [主题二：内存模型](#主题二内存模型)
-- [主题三：上下文压缩](#主题三上下文压缩)
-- [主题四：维修流水线](#主题四维修流水线)
-- [主题五：信号驱动的信念系统](#主题五信号驱动的信念系统)
-- [主题六：工具执行模型](#主题六工具执行模型)
-- [主题七：SSE 流式解析](#主题七sse-流式解析)
-- [主题八：Session 与持久化](#主题八session-与持久化)
-- [主题九：SubAgent（子代理）](#主题九subagent子代理)
-- [主题十：配置系统](#主题十配置系统)
-- [主题十一：并发模型](#主题十一并发模型)
-- [主题十二：系统提示词构建](#主题十二系统提示词构建)
-- [主题十三：Protocol 事件](#主题十三protocol-事件)
-- [主题十四：不变式（Invariants）](#主题十四不变式invariants)
-- [主题十五：Rust 库 API 设计](#主题十五rust-库-api-设计)
+[TOC]
 
 ---
 
@@ -377,403 +367,45 @@ StormDecision::Suppress(reason) => {
 
 ## 主题五：信号驱动的信念系统
 
-### 设计思想
+信号系统是 Mink 的反馈回路：工具执行质量被采集为信号，合并为单一信念度 `B`，
+低信念时向 LLM 注入修正提示（或中止），构成闭环。完整设计（设计思想、信号采集、
+信念计算、决策干预、边界情况、组件接口、展示协议）见
+[设计哲学-信号系统.md](设计哲学-信号系统.md)。
 
-信号系统的设计根植于两个学科。从工程控制论出发，它构建了一个负反馈回路：信念度是系统的测量值，注入/中止是控制动作，LLM 行为是被控对象。信念度偏低时施加修正，回升后撤销干预——修正力始终与偏差反向。冷却机制对应控制论中的抗积分饱和（anti-windup），防止执行器因重复提示而过早饱和。
+### 关键不变式
 
-从贝叶斯统计出发，信念度不是拍脑袋的评分，而是 Beta-Binomial 模型的均值。α=3, β=1 的信任先验编码了"模型大概率能正确使用工具"的初始假设。每次工具调用是一次伯努利试验，多条错误信号取 max 不叠加——因为一次调用只有成功或失败两种真实状态，重复计数违反试验独立性。
-
-两者交汇在置信度加权反馈：贝叶斯推断将离散的间接信号（退出码、错误文本）合成为一个稳定的统计量 B，控制论的回路再用这个 B 做决策。
-
-### 信号采集流程
-
-每次工具执行后，`SignalCollector` 根据工具输出和调用历史采集三类信号：
-
-| 信号 | 检测方式 | 严重度 | 可信度 |
-|------|---------|--------|--------|
-| `ToolFailed` | 退出码检测 / `"Error:"` 前缀 | 1.0 | 最高（命令自报告失败） |
-| `ToolError` | 输出内容 regex 匹配（Rust 编译错、测试失败等） | 0.3~0.9 | 中等（启发式） |
-| `EditLoop` | 滑动窗口 W=6 检测编辑-检查循环 | 0.4~0.9 | 高（序列模式） |
-
-**EditLoop 触发条件**：
-- Edit 调用 > 4 次（窗口内），按次数分级 0.6/0.8/0.9
-- Edit↔Diff 交替且无 Bash/Grep/Read，按交替数分级 0.4/0.7/0.9
-
-`SignalCollector` 自维护调用历史（`VecDeque<String>`），跨多次工具调用追踪序列。
-
-### BeliefTracker
-
-信号通过拉普拉斯平滑合并为单一信念度：
-
-```rust
-// 一次工具调用的多个信号 → 取 max(severity)，不叠加
-success_weight = 1.0 - max_severity
-failure_weight = max_severity
-
-// 滑动窗口（默认 16 次工具调用）
-α = 1 + Σ success_weight_i
-β = 1 + Σ failure_weight_i
-
-B = α / (α + β) ∈ [0, 1]
-```
-
-**关键特性**：
-- 信任先验 α=3, β=1：无观测时 B=0.75（模型调用工具大概率成功）
-- max 合并：ToolFailed(0.9) + ToolError(0.8) → failure=1.0（不重复计数）
-- 滑动窗口：旧错误自然退出，信念自动恢复
-- 每轮用户输入重置窗口
-
-### 信号来源
-
-三类信号，两个确性定一条启发式：
-
-| 信号 | 来源 | 检测方式 | 确定性 | 说明 |
-|------|------|---------|--------|------|
-| `ToolFailed` | 工具执行结果 | exit_code ≠ 0 或 `"Error:"` 前缀 | ✅ | 命令真失败了，权重统一 1.0 |
-| `ToolError` | 输出文本 | regex 匹配 | ❌ | 输出中有错误关键词，权重 0.3~0.9 |
-| `EditLoop` | 工具序列 (W=6) | Edit > 4 或 Edit↔Diff 交替 | ✅ | 盲写循环，权重分级 0.4~0.9 |
-
-`ToolFailed` 和 `ToolError` 是两条独立链路——exit_code 通过 `child.status.code()` 从 bash 执行层获取，不经过输出文本 regex。
-
-### DecisionEngine
-
-`DecisionEngine` 由 `TurnExecutor` 持久持有，内部管理冷却计数器：
-
-```rust
-pub fn decide(&mut self, belief: f64, errors: &[String]) -> Decision {
-    if belief < 0.30    → Abort（绕过冷却）
-    if cooldown > 0     → cooldown -= 1 → None（跳过注入）
-    if belief < 0.50    → Inject(warning + 最近 5 条错误) + 激活冷却
-    if belief < 0.70    → Inject(reminder + 最近 3 条错误) + 激活冷却
-    else                → None
-}
-
-// 新增方法
-pub fn reset(&mut self)              // 新用户输入时清零冷却
-pub fn cooldown_remaining(&self)     // 查询剩余冷却轮数
-```
-
-`decide()` 改为 `&mut self`，冷却计数器由引擎自主管理，调用方 turn.rs 不传任何冷却相关参数。
-
-**注入位置：任务循环内部**。注入发生在 `turn.rs::execute()` 的循环内，工具执行完成后、下一轮 LLM 调用之前：
-
-```
-Phase 3: 工具执行 → 信号 → BeliefTracker.observe()
-Phase 4: stop = "tool_use"
-  ├─ DecisionEngine.decide(belief, errors)
-  │   ├─ 引擎内部检查冷却 → 跳过注入
-  │   ├─ Inject → store.add_user(...) + 激活冷却 + 恢复首步守卫
-  │   └─ Abort  → 返回 Failed，中断本轮（绕过冷却）
-  └─ continue → 下一轮 LLM: messages = compaction.active_messages()（包含注入消息）
-```
-
-不在系统 prompt 中注入（保护前缀缓存），也不追加到用户输入末尾。而是作为一条独立的 User 消息（含 `[System note: ...]`）写入对话存储，LLM 在下一轮调用时自然看到。
-
-**注入内容包含具体可靠性信号**：`DecisionEngine` 只返回结构化
-`RecoveryDirective`；`RecoveryPolicy` 再根据当前 capability bindings 生成短控制消息和最近信号。
-消息只列当前 surface 中可执行、且满足检查 scope 的 primary providers：
-
-```
-[System note: belief 0.37 indicates repeated tool failure. Enter SIGNAL_RECOVERY mode. Your next tool call must be a current-state inspection using one of these active providers: <resolved providers>.
-Recent reliability signals:
-- process exited with code 1
-- Rust compilation error (error[E0308])]
-```
-
-**信念度感知**：默认情况下系统提示词包含 `<belief-awareness>` 区块，提前告知模型存在信念度机制、注入触发条件和 `SIGNAL_RECOVERY` 协议。模型在被注入时能理解上下文，按指引先读后写，而不是继续盲目操作。区块位于 `<execution-codes>` 之后，纯英文。设置 `MINK_SIGNAL_MODE=off` 时，该区块不会出现在系统提示词中，信号采集、注入、Abort 和恢复守卫也不会运行。
-
-**恢复首步守卫**：注入后，下一轮首个工具调用必须通过同一 capability policy 的参数级
-scope classifier。只有已登记的读取、搜索、发现、资源检查或聚焦 verification 命令可通过。
-这套资格判定只决定能否解除 Recovery 首步守卫，不替代普通 Bash 的危险命令检查和误用拦截。
-若 surface 没有检查能力，守卫保持 pending 并阻止所有工具调用，模型只能报告限制并结束当前
-turn。
-
-### 错误分类
-
-`crates/mink-core/src/errors.rs`
-
-```rust
-pub enum ErrorCategory {
-    Network,    // 连接/超时/5xx
-    Auth,       // 401/403/API key 无效
-    RateLimit,  // 429
-    Parse,      // JSON/SSE 解析
-    Tool,       // 工具执行失败
-    Internal,   // 其他
-}
-```
-
-分类仅用于日志，不驱动任何决策。
-
-### 信念度展示
-
-信念度实时显示在终端界面上：
-
-- **Full TUI**（`--tui` / `--tui=full`）：应用内 transcript、鼠标卡片操作和状态栏
-- **Inline TUI**（`--tui=inline`）：原生 scrollback、结构化紧凑卡片和状态栏
-- **REPL/CLI 模式**（`-i` / 单次）：ANSI 标题栏 `\x1b]0;...\x07` 相同格式
-
-两种模式共享同一套统计数据结构（`StatsSnapshot`），每轮工具执行后由 `render_title_update()` 刷新。
+- 信号采集：`ToolFailed`（退出码/`Error:` 前缀）、`ToolError`（regex 启发式）、
+  `EditLoop`（滑动窗口序列检测）三类；一次调用多条信号取 `max(severity)`，不叠加
+- 信念计算：Beta-Binomial 拉普拉斯平滑，先验 `α=3, β=1`（无观测时 `B=0.75`），
+  滑动窗口 W=16，每次用户输入重置
+- 决策阈值：`B ≥ 0.70` 不干预；`B < 0.70` 注入（带冷却）；`B < 0.30` 中止（绕过冷却）；
+  `DecisionEngine` 每个用户输入重置冷却
+- 注入协议：以独立 User 消息（`[System note: ...]`）写入 conversation，不污染 system
+  prefix；`RecoveryPolicy` 按 resolved capabilities 渲染恢复提示并校验恢复首步
+- `MINK_SIGNAL_MODE=off`：不生成 `<belief-awareness>` prompt 段，不采集、不注入、
+  不中止、不启用恢复守卫
+- 错误分类（`errors.rs` 的 `ErrorCategory`：Network/Auth/RateLimit/Parse/Tool/Internal）
+  仅用于日志与用户提示，不驱动任何决策
 
 ## 主题六：工具执行模型
 
-### 分发架构
+工具执行模型分为三层：模型可见的 surface（`enabled_tools` → `ModelToolSurface` →
+resolved capabilities）、执行门禁（surface 校验 → StormBreaker → ToolExec dispatch）、
+结果格式化（大小保护 → artifact → 双通道）。surface 与语义能力的完整设计见
+[设计哲学-工具能力与提示词解耦.md](设计哲学-工具能力与提示词解耦.md)；
+工具参数、执行流程和结果协议见 [tools.md](tools.md)。
 
-`ToolRunner` 持有工具执行上下文、StormBreaker 和全局工具注册表：
+### 关键不变式
 
-```rust
-pub struct ToolRunner {
-    ctx: Arc<ToolContext>,
-    storm: Mutex<StormBreaker>,
-    tools: &'static [Box<dyn ToolExec>],
-}
-```
-
-每个工具实现 `ToolExec`，必须声明 metadata：
-
-```rust
-pub trait ToolExec: Send + Sync {
-    fn metadata(&self) -> ToolMetadata;
-    fn execute(&self, input: &Value, ctx: &ToolContext) -> Result<ToolOutcome>;
-}
-```
-
-`ToolMetadata` 包含工具名、摘要、approval tier、结果类型、副作用、storm 例外、internal、discoverable 和 sub-agent 标记。调用方直接读取 metadata，不再保留 `name/mutating/storm_exempt/internal/spawns_sub_agent` 这类旧 helper API。
-
-内置工具通过 `TOOL_REGISTRY: LazyLock<Vec<Box<dyn ToolExec>>>` 注册。新增工具需要实现 `ToolExec`、加入 registry，并同步更新 `assets/tools.json`。
-
-工具调用在 `execute_all()` 中按顺序扫描并分段处理：连续的只读工具批量进入 `spawn_blocking` 并发执行；写入、执行、控制和 SubAgent 类工具会先 flush 前面的只读批次，再按调用顺序单独执行。这样保留了 Read/Glob/Grep 的吞吐收益，同时避免同批工具之间出现读写竞态。
-
-```rust
-pub async fn execute_all(&self, calls: Vec<ToolCallEvent>) -> Result<Vec<ToolRunResult>> {
-    let mut read_batch = Vec::new();
-    for call in calls {
-        if requires_sequential_execution(metadata_for(&call)) {
-            results.extend(execute_read_batch(read_batch).await?);
-            results.push(execute_prepared_call(call).await?);
-        } else {
-            read_batch.push(call);
-        }
-    }
-    results.extend(execute_read_batch(read_batch).await?);
-}
-```
-
-### 单工具执行
-
-`execute_one_sync()` 根据 `call.name` 从 registry 找到对应 `ToolExec`。每个工具在自己的实现中通过 serde 从 `call.input_json` 反序列化参数：
-
-```rust
-impl ToolExec for ReadTool {
-    fn metadata(&self) -> ToolMetadata { ... }
-    fn execute(&self, input: &Value, ctx: &ToolContext) -> Result<ToolOutcome> {
-        let args: Args = serde_json::from_value(input.clone())?;
-        read_with_context(&args.path, ctx).map(ToolOutcome::text)
-    }
-}
-```
-
-如果 serde 反序列化失败（参数不匹配），返回 `Error:` 前缀的错误消息，而不是 panic。这确保 LLM 收到结构化的错误反馈而非原始异常。
-
-### 结果格式化
-
-工具结果统一经过 `format_tool_result()` 处理：
-
-- 超过 `tool_result_max_bytes`（默认 100KB）时截断，并将完整输出写入 session artifact
-- Bash 输出经过 `filter_bash_noise()` 处理（ANSI 转义剥离 + 重复行压缩）
-- Read/Write 结果加上行数/字节数统计前缀
-- Edit 结果包含新的 snapshot header、修改区域附近的行号窗口和 diff，便于模型继续锚定后续修改；Edit 失败时尽量返回建议重读范围和当前相关行上下文
-
-工具结果有两个通道：
-
-| 字段 | 用途 |
-|------|------|
-| `content` | UI 展示和默认 tool_result 内容，已过最大字节保护 |
-| `conv_content` | 非空时优先进入 LLM conversation，适合给模型更短的结果 |
-
-`TurnExecutor` 渲染工具结果时会构造 `PresentedToolResultDisplay`。其中基础字段仍由
-`ToolResultDisplay` 承载，结构化层补充 `success`、`result_kind`、Plan/Todo presentation
-和 artifact 元数据：
-
-```rust
-ToolResultDisplay {
-    tool_name,
-    content_preview,
-    content,
-    tool_use_id,
-    exit_code,
-}
-```
-
-`content_preview` 用于简短展示，`content` 是工具层截断/过滤后的展示内容。LLM 读取的是 `ConversationStore` 写入的 tool result。
-TUI 使用 `tool_use_id` 合并调用和结果；实时事件和 events.jsonl replay 进入同一个 transcript
-reducer。Full 模式在应用内 viewport 中提供鼠标命中和可逆折叠；Inline 模式将自动折叠后的
-sealed item 与稳定 Markdown 块渐进提交到原生 scrollback。两种模式使用同一套语义卡片、
-Markdown 和 Plan/Todo/Artifact presentation。Display 包装器保持结构化调用 ID 与
-presentation，不把增强协议降级为旧的文本回调。Inline 通过 terminal scrolling region 写入
-稳定前缀，空闲时保留最后一个 item，避免完成时清空动态区并整体重排。
-TUI 初始化从当前 session 的 Plan/Todo 状态文件建立详情基线；超长工具结果折叠后仍保留首个
-`artifact://ID`，Artifact 详情最多读取 256 KiB。
-Plan、Todo 和 Artifact 详情按实际内容区宽度折行，并以折行后的可视行作为垂直滚动单位。
-
-### 同步只读 VFS hook
-
-私有化嵌入场景可能需要把知识库保存在数据库中，并按业务 session 隔离。这里不增加新工具，也不把数据库能力暴露给模型；`Read`、`Glob`、`Grep` 的名称、参数和调度方式保持不变，只允许宿主应用注入普通路径的读取后端：
-
-```rust
-pub trait ReadOnlyFileSystem: Send + Sync {
-    fn read(&self, scope: &VfsScope, request: &VfsReadRequest)
-        -> anyhow::Result<VfsReadResult>;
-    fn glob(&self, scope: &VfsScope, request: &VfsGlobRequest)
-        -> anyhow::Result<VfsGlobResult>;
-    fn grep(&self, scope: &VfsScope, request: &VfsGrepRequest)
-        -> anyhow::Result<VfsGrepResult>;
-}
-```
-
-该接口保持同步，因为三个现有工具本身在只读批次中通过 `spawn_blocking` 执行。宿主可在实现内部使用 redb、SQLite 或其他同步嵌入式数据库，不需要改变工具执行模型。
-
-核心设计边界：
-
-- **本地正确性优先**：未注入 `read_only_fs` 时，工具继续进入原有本地实现；VFS 是前置可选分支，不以抽象统一为由重写本地路径。
-- **只接管普通路径**：`artifact://`、`skill://`、`rule://`、`session://` 先按资源路由处理，不进入 VFS。
-- **只读且不可编辑**：虚拟 `Read` 输出行号和只读标记，但不记录 snapshot。`Edit` / `Write` 不委托给 VFS。
-- **结构化搜索结果**：后端返回路径、匹配行、扫描数和截断状态，由 `mink-core` 统一生成 Glob/Grep 文本，避免后端复制用户可见协议。
-- **核心保留防线**：glob 和 regex 在调用后端前校验；完整 Read 有工具层兜底字节检查；搜索文本由核心统一格式化并保留 100KB 输出保护。
-- **后端限制契约**：`VfsGlobRequest.max_files` 和 `VfsGrepRequest.max_files/max_results` 必须由后端遵守。`mink-core` 只校验请求、格式化结构化结果，不提供第二套 VFS 搜索实现。
-
-每次调用收到：
-
-```rust
-VfsScope {
-    resource_session_id, // 数据/知识库分区
-    agent_session_id,    // 当前主代理或子代理身份
-}
-```
-
-`resource_session_id` 未配置时默认取 runtime session id。子代理继承父代理的 resource scope，同时使用自己的 agent session id。这样数据库 key 可以稳定按业务任务隔离，审计日志仍能区分具体调用代理。
-
-`mink-core` 只定义 hook、协议、请求校验和结果格式化，不绑定数据库，也不提供独立 VFS 搜索实现。`examples/redb_vfs.rs` 是示例适配器：以 `resource_session_id + NUL + normalized_path` 作为有序 key，使用 redb range iterator 惰性扫描，并在达到请求限制时停止读取。redb 仅为 dev/example 依赖，不进入正常 `mink-core` 依赖树。
-
-### Registered resources 与 capability snapshot
-
-轻量资源和模型能力看起来都由 `Read` 暴露，但它们承担不同职责：
-
-- resource 是“按 URL 读取一段内容”的协议，例如 `skill://debugging`、`rule://default-agent-rules`、`session://current/messages`。
-- capability 是“本轮 agent 可见的能力视图”，例如哪些 skill 可被发现、哪些 rule 总是进入 prompt、哪些 context file 应进入 system prompt。
-
-因此设计上分成两条路径：
-
-```text
-ResourceRouter
-  解决 scheme://... 如何被 Read 分发和格式化
-
-CapabilitySnapshot
-  解决 prompt、skill/rule index、selected skills 和 prefix fingerprint 看到什么
-```
-
-这个拆分避免了两个常见问题。第一，`Read` 不需要知道每类资源如何发现能力，只负责在普通路径、registered resource 和 VFS 之间选择后端。第二，prompt 构建不会直接扫描文件系统或调用 resource handler，而是消费 runtime 构建好的 snapshot。
-
-资源与能力系统由五个协作面组成：
-
-1. `ResourceRouter` 负责 `artifact://`、`skill://`、`rule://`、`session://` 等轻量资源 URL 的 scheme 分发。
-2. `SkillProvider` / `SkillSnapshot` 负责 skill 的发现、去重、exposure 和按名读取，prompt skill index、selected skills 与 `skill://` 共用这份视图。
-3. runtime builder 负责把 runtime skills、自定义 skill provider、自定义 resource handler 和 discovery policy 固化到 shared context。
-4. Agent JSONL / Python SDK 以 selected skills、inline skills 和 discovery policy 表达能力配置，Rust SDK adapter 负责映射到 runtime config。
-5. context files 和 rules 作为 capability snapshot 的组成部分进入 prompt、resource 读取和 prefix fingerprint；`rule://` 是 rules 的按需读取入口。
-
-项目保持显式模块边界，而不是用一个泛型 `CapabilityProvider<T>` 覆盖所有能力类型。skills、rules、context files 的去重、exposure 和 prompt 消费方式并不完全相同，显式模块能更清楚地表达各自约束。
-
-Skill 必须区分“显式选择的正文”和“按需子资源访问”。selected skill 的 SKILL.md 正文由
-`SkillSnapshot.selected` 直接进入 prompt，不依赖读取工具；skill index 和
-`skill://<name>/<relative-path>` 则由已解析的 `ResourceRead` binding 提供。当前内置
-provider 是 `Read`，但 Skill scheme 的协议和内容解析属于 `ResourceRouter` handler。
-
-设计不变式：
-
-- registered resource 先于 VFS；未知 URL-like scheme fail closed。
-- `skill://list` 和 `<skill-index>` 来自同一 `SkillSnapshot.discoverable`。
-- selected skills 和 `skill://<name>` 读取同一 `SkillSnapshot.by_name`，但 exposure 决定是否可发现/可读取/仅 host 使用。
-- rules 和 context files 的 dependency fingerprint 必须进入 `CapabilitySnapshot`，再进入 `ImmutablePrefix`。
-- 子代理继承父代理 `ResourceRouter` 和 `CapabilitySnapshot`，保持能力视图一致。
-
-### Read 资源入口
-
-`Read.path` 支持普通文件 selector。未注入 VFS 时普通路径读取本地文件；注入后普通路径由 VFS 读取：
-
-| 形式 | 含义 |
-|------|------|
-| `path:raw` | 原始输出，不加 snapshot header |
-| `path:N` | 从第 N 行开始 |
-| `path:N-M` | 第 N 到 M 行 |
-| `path:N+K` | 从 N 开始 K 行 |
-| `path:N-M:raw` / `path:raw:N-M` | 范围 + raw |
-
-`Read.path` 也支持轻量 internal URL：
-
-- `artifact://<id>`
-- `skill://list`
-- `skill://<name>`
-- `rule://list`
-- `rule://<name>`
-- `session://current`
-- `session://current/stats`
-- `session://current/messages`
-- `session://current/messages/all`
-- `session://current/history`
-- `session://current/artifacts`
-
-`session://current/history` 是从完整 `conversation.jsonl` 生成的有损 Markdown transcript：
-保留 user/assistant 文本，省略 thinking，将 tool call/result 配对折叠成状态行，不保留完整工具结果正文。
-它不暴露物理 session 路径，可先用
-`Grep(path="session://current/history")` 定位，再用 `Read` selector 读取命中范围。
-Grep 可搜索任意 registered resource 的文本；resource Grep 本身不接受 selector，避免相对行号
-被误认为完整资源行号。
-
-这些资源是只读内容，不产生可编辑 snapshot，也不经过 VFS；current session 资源会随会话更新，
-不声明为 immutable。
-
-### Anchored Edit
-
-本地文件非 raw `Read` 输出会记录当前文件状态 snapshot，并渲染所请求范围：
-
-```text
-@src/foo.rs#0A3B
-41:fn target() {
-42:    old()
-```
-
-`Edit` 支持 `patch`。`old_string/new_string` 不属于当前工具协议；新建或完整覆盖文件使用 `Write`。
-
-```text
-@src/foo.rs#0A3B
-replace 41..42:
-+fn target() {
-+    new()
-+}
-replace 45:
-+    return value;
-delete 80..82
-insert after 90:
-+println!("done");
-```
-
-校验规则：
-
-- header path 必须和 `Edit.path` 一致。
-- tag 必须存在于当前 session snapshot store。
-- replace/delete 目标行 hash 必须仍匹配。
-- insert before/after 必须校验 anchor 行。
-- insert head/tail 校验完整文件 hash。
-- stale、overlap、unknown tag、no-op 均 fail closed。
-- 同一文件成功 `Edit` 或 `Write` 后，旧 snapshot tag 和旧行号不再作为后续编辑依据。
-- 成功 `Edit` 会返回新的 `@PATH#TAG` 和修改区域附近的行号；后续同一区域编辑可直接使用该新 header，其他区域应重新 `Read`。
-- 同一 snapshot 下的多处修改应合并为一次 multi-hunk patch。
-- patch 行号指向原始 snapshot 行号；同一次 patch 内多个 hunk 的行号不会因前面的 hunk 而位移。
-- body 行只出现在 replace/insert 下，只能是 `+` 前缀的最终内容；`-old`、原始上下文行和 unified diff hunk header 都不是协议内容。
-- stale、unknown tag、未覆盖行和 no-op 错误给出建议重读范围和当前相关行上下文，不做自动 stale recovery。
-
----
+- `enabled_tools` 是唯一工具启用输入；`ModelToolSurface` 在 session/prefix 构造前
+  一次解析，`ToolRunner::execute_all()` 在执行前校验同一 surface
+- 只读工具按连续批次并发执行；写入、执行、控制和 SubAgent 工具按调用顺序串行执行
+- 工具结果统一经过 `format_tool_result()`：`tool_result_max_bytes` 截断 + artifact 落盘、
+  Bash noise filter、Read/Write 行数摘要、Edit 新 header + diff
+- 结果双通道：`content`（UI/默认 tool_result）与 `conv_content`（非空时优先进 LLM）
+- 同步只读 VFS hook（`ReadOnlyFileSystem`）只替换普通路径后端，不注册新工具；
+  `artifact://`、`skill://`、`rule://`、`session://` 不进入 VFS
+- 工具执行失败返回 `Error:` 前缀的结构化消息，不 panic
 
 ## 主题七：SSE 流式解析
 
@@ -853,11 +485,11 @@ runtime 在构建阶段创建或接收共享 backend。主代理、子代理和�
 |--------|-------------|--------------|
 | `project` | 用户或服务根目录 | `home/.mink/projects/<project_key(cwd)>/<session_id>/` |
 | `home` | 用户或服务根目录 | `home/.mink/sessions/<session_id>/` |
-| `direct` | mink session 集合根目录 | `home/<session_id>/` |
+| `direct` | Mink session 集合根目录 | `home/<session_id>/` |
 | `isolated` | 当前 session 根目录 | `home/` |
 
 CLI 默认使用 `project`，Python SDK 默认使用 `home`，Rust 嵌入式 `AgentOptions` 默认使用 `isolated`。
-`direct` 用于一个共享 mink 根目录下保存多个 session。`isolated` 用于外层服务已经按任务/session
+`direct` 用于一个共享 Mink 根目录下保存多个 session。`isolated` 用于外层服务已经按任务/session
 创建独立目录的场景，此时不再追加 `session_id` 子目录。
 
 以 `project` layout 为例：
@@ -1255,4 +887,4 @@ Rust crate mink ───┘
 
 ### 隐藏 worker 模式
 
-私有化业务服务可以通过自身隐藏 worker 分支 + `sandbox::reexec_in_sandbox()` 实现进程级沙箱。沙箱配置走 argv，任务数据走 stdin（re-exec 后读），和 mink CLI 流程完全一致。该隐藏分支属于业务服务实现细节，不要求 `mink` / `mink-core` 暴露新的公开 CLI。
+私有化业务服务可以通过自身隐藏 worker 分支 + `sandbox::reexec_in_sandbox()` 实现进程级沙箱。沙箱配置走 argv，任务数据走 stdin（re-exec 后读），和 Mink CLI 流程完全一致。该隐藏分支属于业务服务实现细节，不要求 `mink` / `mink-core` 暴露新的公开 CLI。

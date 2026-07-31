@@ -1,8 +1,14 @@
 # Agents Guide
 
+> 更新日期：2026-07-30
+
+[TOC]
+
+---
+
 ## 项目概览
 
-mink 是一个 Rust 实现的轻量 AI coding agent，专为 DeepSeek/OpenAI-compatible API 优化。项目目标是单二进制、低运行时依赖、终端优先，同时可作为 Rust 库嵌入任何 Rust 项目（`mink::runtime`）。
+Mink 是一个 Rust 实现的轻量 AI coding agent，专为 DeepSeek/OpenAI-compatible API 优化。项目目标是单二进制、低运行时依赖、终端优先，同时可作为 Rust 库嵌入任何 Rust 项目（`mink::runtime`）。
 
 核心能力：
 
@@ -263,7 +269,7 @@ DecisionEngine.decide()
 
 | 文件 | 职责 |
 |------|------|
-| `crates/mink-cli/src/cli.rs` | **mink / mink-core 共用 CLI adapter**，参数解析、配置合并、sandbox re-exec、模式分发 |
+| `crates/mink-cli/src/cli.rs` | **Mink / mink-core 共用 CLI adapter**，参数解析、配置合并、sandbox re-exec、模式分发 |
 | `crates/mink-cli/src/main.rs` | `mink` binary thin wrapper → `mink_cli::cli::main_entry()` |
 | `crates/mink-cli/src/bin/mink-core.rs` | `mink-core` SDK binary thin wrapper → `mink_cli::cli::main_entry()` |
 | `config.rs` | Config 结构体、CLI/env/配置文件合并、API key 和 sandbox 配置 |
@@ -527,8 +533,10 @@ grep '"Injecting hint"' events.jsonl
 | 文档 | 说明 |
 |------|------|
 | `docs/ARCHITECTURE.md` | 运行时分层、模块职责、核心数据流 |
-| `docs/DESIGN.md` | 设计哲学：执行循环、内存、压缩、维修、信号、工具 |
+| `docs/DESIGN.md` | 设计总纲与关键不变式；信号/工具能力细节见对应设计哲学文档 |
 | `docs/USAGE.md` | CLI 参数、环境变量、会话管理、工具参考 |
+| `docs/EMBEDDING.md` | Rust 库 / Python SDK 嵌入、Token 用量与费用 |
+| `docs/PROTOCOL.md` | `--print` stream-json 与 `--agent-jsonl` 协议 |
 | `docs/tools.md` | 内置工具参数与行为 |
 | `docs/设计哲学-工具能力与提示词解耦.md` | 工具 surface、语义能力、自由组合、前向求值和 prompt 所有权 |
 | `docs/设计哲学-信号系统.md` | 信号系统完整设计 |

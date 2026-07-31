@@ -1,12 +1,14 @@
 # 内置工具
 
-更新日期：2026-07-30
+> 更新日期：2026-07-30
 
-本文是 mink 内置工具的协议参考，面向需要理解工具参数、执行模型、结果通道、资源 URL、
-审批和构建裁剪的使用者与开发者。CLI 参数、session、沙箱、技能和常见工作流见
-[使用手册](USAGE.md)；模块分层和内部数据流见 [ARCHITECTURE.md](ARCHITECTURE.md)；工具
-surface、语义能力和跨工具 workflow 的设计见
+本文是 Mink 内置工具的协议参考，面向需要理解工具参数、执行模型、结果通道、资源 URL、
+审批和构建裁剪的使用者与开发者。终端使用与配置见 [使用手册](USAGE.md)；Rust/Python
+嵌入见 [EMBEDDING.md](EMBEDDING.md)；模块分层和内部数据流见
+[ARCHITECTURE.md](ARCHITECTURE.md)；工具 surface、语义能力和跨工具 workflow 的设计见
 [工具能力与提示词解耦设计文档](设计哲学-工具能力与提示词解耦.md)。
+
+[TOC]
 
 ## 执行模型
 
@@ -31,8 +33,9 @@ ToolCallEvent
 OpenAI SSE parser 在生成 `ToolCallEvent` 前合并碎片化 arguments，并要求输入是 JSON object。
 首次解析失败时调用 `repair_truncated_json()`；只有修复结果能够重新解析且
 `fallback=false` 才继续，无法可靠修复的输入直接返回解析错误。Scavenge 回收的候选调用也
-通过同一个 `build_tool_call_event()` 结构化校验。Runner 接收结构化 `input_json`，并保留
-同样的非 fallback 输入守卫。
+通过同一个 `build_tool_call_event()` 结构化校验。Runner 接收结构化 `input_json`，每个工具
+通过 serde 从 `input_json` 反序列化参数；参数不匹配时返回 `Error:` 前缀的结构化错误，
+不 panic。
 
 工具结果有两个内容通道：
 
@@ -190,7 +193,7 @@ cargo build --release
 - patch range 应保持 tight，只覆盖实际变化的行。要修改不连续行时，使用多个 hunk。
 - snapshot 对应一个文件状态；同一文件成功 `Edit` 或 `Write` 后，之前的 snapshot tag 和行号都视为过期。
 - 同一文件如果要修改多个位置，优先在一次 `Edit.patch` 中合并多个 hunk。
-- 成功 `Edit` 会返回新的 `@PATH#TAG` 和修改区域附近的行号，可用于紧接着在该可见区域继续编辑；其他区域应重新 `Read`。
+- 成功 `Edit` 会返回新的 `@PATH#TAG`、修改区域附近的行号和 diff，可用于紧接着在该可见区域继续编辑；其他区域应重新 `Read`。
 - snapshot 过期、未知 tag、未覆盖行、no-op 或任何无法完全解释的结果，都应先按工具提示重新 `Read path:N-M`，再用新 header 重试。
 - 不要用 `Edit` 做机械格式化、import 排序、空白清理或纯缩进调整；语义修改后运行项目 formatter。
 

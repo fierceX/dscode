@@ -1,15 +1,18 @@
 # 架构说明
 
-更新日期：2026-07-30
+> 更新日期：2026-07-30
 
-本文描述 mink 当前代码结构、模块职责和运行时数据流。面向用户的命令、配置和工作流见
-[USAGE.md](USAGE.md)；完整工具协议见 [tools.md](tools.md)；设计取舍和不变式见
+本文描述 Mink 当前代码结构、模块职责和运行时数据流。终端用户命令、配置和工作流见
+[USAGE.md](USAGE.md)；Rust/Python 嵌入见 [EMBEDDING.md](EMBEDDING.md)；机器协议见
+[PROTOCOL.md](PROTOCOL.md)；完整工具协议见 [tools.md](tools.md)；设计取舍和不变式见
 [DESIGN.md](DESIGN.md)。工具 surface、语义能力、自由组合和前向求值算法见
 [工具能力与提示词解耦设计文档](设计哲学-工具能力与提示词解耦.md)。
 
+[TOC]
+
 ## 项目定位
 
-mink 是一个 Rust 实现的轻量 AI coding agent，默认面向 DeepSeek / OpenAI-compatible API，优先服务终端中的编码工作流；作为 Rust 库嵌入时也可注入自定义 LLM backend。
+Mink 是一个 Rust 实现的轻量 AI coding agent，默认面向 DeepSeek / OpenAI-compatible API，优先服务终端中的编码工作流；作为 Rust 库嵌入时也可注入自定义 LLM backend。
 
 核心目标：
 
@@ -203,7 +206,7 @@ ToolRunResult
 
 | 文件 | 职责 |
 |------|------|
-| `crates/mink-cli/src/cli.rs` | **mink / mink-core 共用 CLI adapter**，参数解析、配置合并、sandbox re-exec、模式分发；调用 `mink::runtime`，但 REPL/TUI 实现归属 CLI crate |
+| `crates/mink-cli/src/cli.rs` | **Mink / mink-core 共用 CLI adapter**，参数解析、配置合并、sandbox re-exec、模式分发；调用 `mink::runtime`，但 REPL/TUI 实现归属 CLI crate |
 | `crates/mink-cli/src/main.rs` | `mink` binary thin wrapper → `mink_cli::cli::main_entry()` |
 | `crates/mink-cli/src/bin/mink-core.rs` | `mink-core` binary thin wrapper → `mink_cli::cli::main_entry()` |
 | `config.rs` | `Config`、CLI 解析、`.minkrc` 合并、环境变量默认值、sandbox 配置 |
@@ -451,7 +454,7 @@ Session 目录保存 conversation、events、metadata、summary、stats 和 arti
 |--------|-------------|--------------|
 | `project` / `ProjectScoped` | 用户或服务根目录 | `home/.mink/projects/<project_key(cwd)>/<session_id>/` |
 | `home` / `HomeScoped` | 用户或服务根目录 | `home/.mink/sessions/<session_id>/` |
-| `direct` / `Direct` | mink session 集合根目录 | `home/<session_id>/` |
+| `direct` / `Direct` | Mink session 集合根目录 | `home/<session_id>/` |
 | `isolated` / `Isolated` | 当前 session 根目录 | `home/` |
 
 默认入口：
@@ -459,7 +462,7 @@ Session 目录保存 conversation、events、metadata、summary、stats 和 arti
 - `mink` 和裸 `mink-core --agent-jsonl` 使用 `project`，保持历史 CLI 行为。
 - Python SDK 默认使用 `home`，适合同一个 SDK home 下管理多个 session。
 - Rust 嵌入式 `AgentOptions` 默认使用 `isolated`，适合外层服务已经按任务/session 创建独立目录。
-- `direct` 适合服务持有一个共享 mink 根目录，但仍希望 mink 按 `session_id` 分目录。
+- `direct` 适合服务持有一个共享 Mink 根目录，但仍希望 Mink 按 `session_id` 分目录。
 
 以 `project` layout 为例：
 

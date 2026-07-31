@@ -1,5 +1,7 @@
 # mink-cli
 
+> 更新日期：2026-07-30
+
 `mink-cli` 是 workspace 内部二进制包，不发布到 crates.io。它依赖
 [`mink-core`](../mink-core/README.md)，并提供两个二进制入口：
 
