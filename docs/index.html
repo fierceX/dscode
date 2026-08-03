@@ -1201,14 +1201,14 @@ button{font:inherit}
       <div class="hero-frame">
         <div class="hero-grid">
           <div class="hero-copy">
-            <div class="eyebrow">Rust 原生 · 终端优先 · 可嵌入</div>
-            <h1>面向终端，也面向系统的 <span class="accent">AI agent runtime</span></h1>
-            <p class="lead">Mink 用 Rust 实现，既适合在终端中直接工作，也适合嵌入到服务端、桌面端或内部工具中。</p>
+            <div class="eyebrow">Rust 原生 · 轻量级 · 可嵌入</div>
+            <h1>轻量级、可嵌入的 <span class="accent">AI agent runtime</span></h1>
+            <p class="lead">Mink 是 Rust 实现的轻量 AI coding agent：单二进制、低运行时依赖、终端优先；runtime 可直接嵌入任何 Rust 项目（mink::runtime），也提供 CLI/TUI、Python SDK 与单二进制 Web 服务——一个核心，多种形态。</p>
             <div class="hero-highlights">
-              <span>Rust runtime</span>
+              <span>轻量可嵌入</span>
               <span>上下文压缩</span>
               <span>Anchored Edit</span>
-              <span>会话与 Artifact</span>
+              <span>Server &amp; Web</span>
             </div>
           </div>
 
@@ -1243,8 +1243,8 @@ button{font:inherit}
       <div class="features-strip">
         <article class="feature-item">
           <span class="tag">Runtime</span>
-          <h3>可嵌入的运行时内核</h3>
-          <p>CLI、REPL、TUI、Python SDK 和 Rust 嵌入共享同一个 runtime，不需要为不同入口维护多套语义。</p>
+          <h3>多端统一的运行时内核</h3>
+          <p>CLI、REPL、TUI、Web 与 Python SDK 共享同一个 runtime——终端、浏览器和系统行为完全一致，不需要为不同入口维护多套语义。</p>
         </article>
         <article class="feature-item">
           <span class="tag">Context</span>
@@ -1269,6 +1269,7 @@ button{font:inherit}
           <button class="tab-button active" data-tab="terminal" onclick="switchQuickstart('terminal')">终端使用</button>
           <button class="tab-button" data-tab="python" onclick="switchQuickstart('python')">Python SDK</button>
           <button class="tab-button" data-tab="rust" onclick="switchQuickstart('rust')">Rust 嵌入</button>
+          <button class="tab-button" data-tab="server" onclick="switchQuickstart('server')">Server 与 Web</button>
         </div>
 
         <div id="tab-terminal" class="tab-panel active">
@@ -1351,7 +1352,7 @@ session.close()</code></pre>
               <span class="signal-pill">cargo</span>
             </div>
             <pre><code><span class="c"># Cargo.toml</span>
-<span class="g">mink = { package = "mink-core", version = "0.2.0", default-features = false, features = ["runtime"] }</span>
+<span class="g">mink = { package = "mink-core", version = "0.3.0", default-features = false, features = ["runtime"] }</span>
 
 <span class="c"># 最小示例</span>
 use mink::prelude::{AgentOptions, AgentRuntime};
@@ -1370,6 +1371,34 @@ async fn main() -&gt; anyhow::Result&lt;()&gt; {
     rt.shutdown().await?;
     Ok(())
 }</code></pre>
+          </div>
+        </div>
+
+        <div id="tab-server" class="tab-panel">
+          <div class="tab-copy">
+            <h3>轻量，也适合服务端</h3>
+            <p>mink-server 把同一个 runtime 暴露为 REST + SSE 服务，前端直接嵌入二进制——一条命令启动，浏览器里继续终端里的工作。</p>
+            <ul>
+              <li>单二进制，构建时自动嵌入前端</li>
+              <li>与 TUI 共享同一会话目录</li>
+              <li>开发模式服务磁盘产物，热迭代</li>
+            </ul>
+          </div>
+          <div class="quick-code">
+            <div class="top">
+              <strong>Server</strong>
+              <span class="signal-pill">cargo build -p mink-server</span>
+            </div>
+            <pre><code><span class="c"># 构建（自动嵌入前端）</span>
+cargo build -p mink-server
+
+<span class="c"># 启动（默认 http://localhost:8765）</span>
+<span class="b">$</span> ./target/release/mink-server
+
+<span class="c"># 指定端口 / 开发模式（服务磁盘 web/dist）</span>
+<span class="b">$</span> MINK_SERVER_PORT=9000 ./target/release/mink-server
+<span class="b">$</span> MINK_SERVER_DEV_WEB=1 ./target/release/mink-server
+</code></pre>
           </div>
         </div>
       </div>
@@ -1399,6 +1428,7 @@ async fn main() -&gt; anyhow::Result&lt;()&gt; {
             <a onclick="loadDoc('EMBEDDING.md')" data-path="EMBEDDING.md">嵌入与 SDK</a>
             <a onclick="loadDoc('PROTOCOL.md')" data-path="PROTOCOL.md">机器协议</a>
             <a onclick="loadDoc('tools.md')" data-path="tools.md">工具参考</a>
+            <a onclick="loadDoc('server.md')" data-path="server.md">Server 与 Web</a>
           </div>
           <div class="doc-tree">
             <span class="group">架构与设计</span>

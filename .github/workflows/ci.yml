@@ -46,6 +46,7 @@ jobs:
           test -f docs/CHANGELOG.md
           test -f docs/设计哲学-信号系统.md
           test -f docs/设计哲学-工具能力与提示词解耦.md
+          test -f docs/server.md
 
       - name: Validate hero replay JSON
         run: python3 -m json.tool docs/assets/hero-replay.json > /dev/null
@@ -54,7 +55,7 @@ jobs:
         run: |
           # 侧栏引用的每篇文档都必须存在（含 CI 生成的 CHANGELOG.md）
           for f in USAGE.md EMBEDDING.md PROTOCOL.md tools.md ARCHITECTURE.md DESIGN.md \
-                   CHANGELOG.md 设计哲学-信号系统.md 设计哲学-工具能力与提示词解耦.md; do
+                   CHANGELOG.md server.md 设计哲学-信号系统.md 设计哲学-工具能力与提示词解耦.md; do
             grep -q "loadDoc('$f')" docs/index.html || { echo "missing sidebar ref: $f"; exit 1; }
             test -f "docs/$f" || { echo "missing doc file: docs/$f"; exit 1; }
           done

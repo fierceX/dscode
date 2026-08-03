@@ -69,7 +69,7 @@ session.close()
 
 ```toml
 [dependencies]
-mink = { package = "mink-core", version = "0.2.0", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.3.0", default-features = false, features = ["runtime"] }
 ```
 
 ```rust
@@ -148,6 +148,7 @@ async fn main() -> anyhow::Result<()> {
 - **子代理（SubAgent）** — 隔离或目录级 fork 完整 session 状态，复用父 runtime 的 LLM backend，支持并发执行
 - **自定义提示词** — `--mission` 加载 MISSION.md，允许覆盖白名单 core section，runtime 保留 section fail closed
 - **模型别名系统** — `flash` / `pro` 内置 DeepSeek 别名，`model_aliases` 可覆盖；任意模型名未命中时原样传递
+- **Server 与 Web** — `mink-server` 单二进制 Web 工作区服务器：REST + SSE 实时流，前端构建产物嵌入二进制，与 TUI 共享会话，浏览器里继续终端里的工作
 
 ---
 
@@ -157,6 +158,16 @@ async fn main() -> anyhow::Result<()> {
 | [crates/mink-core](crates/mink-core/README.md) | Rust 发布包 `mink-core`，库 crate 名 `mink`，包含可嵌入 runtime、工具核心、session、sandbox 和 SDK 协议 |
 | [crates/mink-cli](crates/mink-cli/README.md) | workspace 内部二进制包，生成 `mink` 终端二进制和 `mink-core` SDK 精简二进制，持有 REPL/TUI 实现 |
 | [mink_agent](mink_agent/README.md) | Python SDK，wheel 内置无 TUI 的 `mink-core` 二进制 |
+| [crates/mink-server](crates/mink-server/README.md) | Web 工作区服务器：REST + SSE + 嵌入前端，`build.rs` 自动构建并嵌入 web 产物 |
+
+---
+
+## 参考项目
+
+| 项目 | 说明 |
+|------|------|
+| [oh-my-pi](https://github.com/can1357/oh-my-pi) | 开源 CLI agent（Bun/TypeScript），Edit 工具的行号锚定与快照协议参考实现 |
+| [bash-agent](https://github.com/lloydzhou/bash-agent) | 终端 Agent（Bash 优先），交互与工具执行参考 |
 
 ---
 
@@ -171,6 +182,7 @@ async fn main() -> anyhow::Result<()> {
 | [架构说明](docs/ARCHITECTURE.md) | 运行时分层、模块职责、资源/能力系统、核心数据流 |
 | [设计文档](docs/DESIGN.md) | 设计总纲与关键不变式；信号与工具能力细节见对应设计哲学文档 |
 | [变更日志](CHANGELOG.md) | 版本变更记录 |
+| [Server 与 Web](docs/server.md) | mink-server：REST/SSE API、嵌入构建、配置与部署 |
 | [工具能力与提示词解耦](docs/设计哲学-工具能力与提示词解耦.md) | 工具 surface、语义能力、自由组合和前向求值算法 |
 | [信号系统设计](docs/设计哲学-信号系统.md) | 控制论 + 贝叶斯、冷却机制、信念度展示 |
 | [Agent 开发指南](AGENTS.md) | 面向 AI agent：项目结构、模块索引、开发惯例 |

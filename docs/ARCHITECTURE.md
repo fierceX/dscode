@@ -1,6 +1,6 @@
 # 架构说明
 
-> 更新日期：2026-07-30
+> 更新日期：2026-08-03
 
 本文描述 Mink 当前代码结构、模块职责和运行时数据流。终端用户命令、配置和工作流见
 [USAGE.md](USAGE.md)；Rust/Python 嵌入见 [EMBEDDING.md](EMBEDDING.md)；机器协议见
@@ -223,6 +223,19 @@ ToolRunResult
 | `events.rs` | typed event log 类型 |
 | `errors.rs` | error 分类和用户提示 |
 | `util.rs` | 截断等通用工具 |
+
+### mink-server（Server + Web）
+
+| 文件 | 职责 |
+|------|------|
+| `crates/mink-server/src/main.rs` | 服务装配：config 加载、registry、嵌入/磁盘静态服务 |
+| `crates/mink-server/src/api.rs` | REST + SSE 路由（sessions/conversation/plan/todo/artifacts/files/stream） |
+| `crates/mink-server/src/session/registry.rs` | 会话扫描、锁协议、active map、usage.jsonl 汇总注入列表 |
+| `crates/mink-server/src/session/runtime.rs` | AgentRuntime 包装、turn 事件循环、超时保护、AgentEvent→SSE JSON |
+| `crates/mink-server/src/session/config.rs` | ServerConfig（env > toml > ~/.minkrc > 默认） |
+| `crates/mink-server/src/web_assets.rs` | 嵌入前端服务（content-type/SPA fallback/缓存） |
+| `crates/mink-server/build.rs` | 自动 npm build + dist 嵌入（include_str! 清单） |
+| `crates/mink-server/web/` | Vue 3 SPA：单栏对话、指标行、面板体系、Edit 结构化渲染 |
 
 ### Rust 库门面
 

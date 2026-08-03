@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.3.0 (2026-08-03)
+
+### mink-server：Server 与 Web 前端（全新）
+
+- **mink-server**：单二进制 Web 工作区服务器——REST + SSE API（会话管理、conversation/plan/todo/artifacts/files、`/stream` 实时事件流）、Session registry 与锁协议、turn 超时保护；与 TUI/CLI 共享 `~/.mink/projects` 会话布局。
+- **前端嵌入**：`build.rs` 自动构建 web 产物并嵌入二进制（单文件分发）；`MINK_SERVER_DEV_WEB=1` 回退磁盘产物用于开发迭代；默认读取 `~/.minkrc`。
+- **Web 前端**：单栏对话优先布局（顶栏面包屑、实时指标行、状态徽标）；上下文面板（计划/Todo/Artifacts/用量/文件）、文件预览（Markdown + 代码着色）、会话抽屉、空状态工作台、Home；Edit 卡片结构化渲染（anchored/unified diff，实时流 input 透传）；移动端适配（字母指标、顶栏换行、面板合并）。
+
+### Edit 工具协议重构（Breaking）
+
+- 输入协议从 `@path#tag + replace/insert/delete/append` 迁移至 `[PATH#TAG] + PUT/CUT/REM/MV`：单 `input` 参数、指令语义单一（替换/插入/删除/移动）、fail-closed（过期 tag 明确拒绝并提示重读）、structural-closer 安全保护，旧格式不再兼容。
+
+### 测试
+
+- E2E 14 用例（真实浏览器 + 真实后端：布局几何/组件交互/数据渲染/实时广播/滚动状态机/移动端）；vitest 44；Rust 全量回归。
+
+---
 ## v0.2.0 (2026-07-30)
 
 ### 工具选择统一与 Web 工具移除（Breaking）

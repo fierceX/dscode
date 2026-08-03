@@ -1,6 +1,6 @@
 # 使用手册
 
-> 更新日期：2026-07-30
+> 更新日期：2026-08-03
 
 本文面向终端用户，覆盖 CLI 交互模式、配置参数、沙箱、session、计划、压缩、工具、技能和
 常见工作流。Rust 库 / Python SDK 嵌入见 [嵌入与 SDK 使用](EMBEDDING.md)；机器协议
@@ -287,6 +287,21 @@ Read = "allow"
 `MINK_SIGNAL_MODE=full` 时，低 belief 注入会要求 Recovery 首步先检查状态。Recovery 首步资格是独立的参数级能力判断，不等同于普通 Bash 安全策略。
 
 ---
+
+## mink-server：Web 工作区服务器
+
+单二进制 Web 服务（REST + SSE + 嵌入前端），与 TUI/CLI 共享同一 `~/.mink/projects` 会话目录，终端与浏览器可无缝交接。
+
+```bash
+cargo build -p mink-server        # build.rs 自动构建并嵌入前端
+./target/debug/mink-server        # 默认 8765 端口，读取 ~/.minkrc
+MINK_SERVER_PORT=9000 ./target/debug/mink-server
+MINK_SERVER_DEV_WEB=1 ./target/debug/mink-server   # 开发模式：服务磁盘 web/dist
+```
+
+- 配置优先级：环境变量 > `mink-server.toml` > `~/.minkrc` > 默认
+- 关键环境变量：`MINK_SERVER_HOST/PORT`、`MINK_HOME`、`MODEL`、`MINK_SERVER_MAX_RUNNING`、`MINK_SERVER_TURN_TIMEOUT`、`MINK_SERVER_DEV_WEB`
+- REST/SSE API 与事件格式详见 [server.md](server.md)
 
 ## 沙箱与安全
 
