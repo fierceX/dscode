@@ -98,11 +98,12 @@ jobs:
             pkg install -y rust llvm node npm
           run: |
             cd crates/mink-server/web && npm ci && cd ../..
-            cargo build --release -p mink-server
-            cargo build --release
+            cargo build --release -p mink-cli -p mink-server
+            ls -la target/release/ | grep mink || true
             mkdir -p dist
             cp target/release/mink dist/mink-freebsd-amd64
             cp target/release/mink-server dist/mink-server-freebsd-amd64
+            test -s dist/mink-freebsd-amd64
             test -s dist/mink-server-freebsd-amd64
 
       # ── Linux / macOS build ──

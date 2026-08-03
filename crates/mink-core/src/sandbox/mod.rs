@@ -59,6 +59,7 @@ pub fn reexec_in_sandbox(config: &SandboxConfig, exe: &Path, args: &[String]) {
     std::process::exit(1);
 }
 
+#[allow(unused_variables, dead_code)] // 非 Linux/macOS 平台（如 FreeBSD）无 sandbox 实现
 fn try_reexec(config: &SandboxConfig, exe: &Path, args: &[String]) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
@@ -112,6 +113,7 @@ fn try_reexec(config: &SandboxConfig, exe: &Path, args: &[String]) -> Result<(),
 
 /// Replace the current process with the given command.
 /// Does NOT return on success.
+#[allow(dead_code)] // FreeBSD 等无 sandbox 平台不调用
 fn exec_cmd(cmd: &[String]) -> Result<(), String> {
     let (prog, args) = cmd
         .split_first()
