@@ -121,9 +121,17 @@ jobs:
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: pip install -q cargo-zigbuild
 
+      - name: Setup Node (embedded frontend build)
+        if: '!matrix.freebsd'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
       - name: Install web deps (embedded frontend)
         if: '!matrix.freebsd'
-        run: npm ci --prefix crates/mink-server/web
+        run: |
+          cd crates/mink-server/web
+          npm ci
 
       - name: Build mink + mink-server binaries
         if: '!matrix.freebsd'
