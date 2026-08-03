@@ -82,10 +82,12 @@ use PromptFact::{SpecializedWithFallback, ToolCapability};
 use ToolSemanticCapability::*;
 
 const SEARCH_FACTS: &[PromptFact] = &[ToolCapability(ContentSearch), ToolCapability(PathRead)];
-const EDIT_FACTS: &[PromptFact] = &[
+const HASHLINE_EDIT_FACTS: &[PromptFact] = &[
     ToolCapability(EditableSnapshotRead),
-    ToolCapability(AnchoredEdit),
+    ToolCapability(HashlineEdit),
 ];
+const REPLACE_EDIT_FACTS: &[PromptFact] =
+    &[ToolCapability(PathRead), ToolCapability(ContentReplaceEdit)];
 const ROUTING_FACTS: &[PromptFact] = &[
     SpecializedWithFallback(PathRead),
     SpecializedWithFallback(ContentSearch),
@@ -95,7 +97,7 @@ const MUTATION_ROUTING_ALL: &[PromptFact] = &[ToolCapability(ShellExec)];
 const MUTATION_ROUTING_ANY: &[PromptFact] = &[
     ToolCapability(FileCreate),
     ToolCapability(FileOverwrite),
-    ToolCapability(AnchoredEdit),
+    ToolCapability(FileEdit),
 ];
 const PYTHON_FACTS: &[PromptFact] = &[
     ToolCapability(HostPythonExec),
@@ -126,12 +128,20 @@ static WORKFLOWS: &[PromptWorkflowSpec] = &[
         render: render_search_then_inspect,
     },
     PromptWorkflowSpec {
-        id: "anchored-edit",
-        tag: "anchored-edit",
-        requires: WorkflowRequirement::All(EDIT_FACTS),
-        exclusive_group: None,
+        id: "hashline-edit",
+        tag: "hashline-edit",
+        requires: WorkflowRequirement::All(HASHLINE_EDIT_FACTS),
+        exclusive_group: Some("edit-protocol"),
         priority: 100,
-        render: render_anchored_edit,
+        render: render_hashline_edit,
+    },
+    PromptWorkflowSpec {
+        id: "replace-edit",
+        tag: "replace-edit",
+        requires: WorkflowRequirement::All(REPLACE_EDIT_FACTS),
+        exclusive_group: Some("edit-protocol"),
+        priority: 100,
+        render: render_replace_edit,
     },
     PromptWorkflowSpec {
         id: "specialized-provider-routing",
@@ -393,22 +403,36 @@ fn render_search_then_inspect(
     })
 }
 
-fn render_anchored_edit(
-    _: &PromptBuildContext,
+fn render_hashline_edit(
+    context: &PromptBuildContext,
     tools: &ResolvedToolCapabilities,
 ) -> Result<RenderedPromptPack> {
+    ensure!(
+        context.edit_mode == crate::config::EditMode::Hashline,
+        "hashline workflow/config mismatch"
+    );
     let read = tools.primary_provider(EditableSnapshotRead).unwrap();
-    let edit = tools.primary_provider(AnchoredEdit).unwrap();
-    let mut content = include_str!("../assets/prompts/workflows/anchored_edit.md")
-        .replace("{{SNAPSHOT_PROVIDER}}", read.tool)
-        .replace("{{EDIT_PROVIDER}}", edit.tool);
+    let edit = tools.primary_provider(HashlineEdit).unwrap();
+    let mut content = include_str!("../assets/prompts/workflows/hashline_edit.md")
+        .replace("{{READ_PROVIDER}}", read.tool)
+        .replace("{{EDIT_PROVIDER}}", edit.tool)
+        .replace(
+            "{{SEEN_LINE_MODE}}",
+            if context.edit_enforce_seen_lines {
+                "enabled"
+            } else {
+                "disabled"
+            },
+        );
     let mut referenced_tools: BTreeSet<_> = [read.tool, edit.tool].into_iter().collect();
-    let mut consumed_facts: BTreeSet<_> = EDIT_FACTS.iter().copied().collect();
+    let mut consumed_facts: BTreeSet<_> = HASHLINE_EDIT_FACTS.iter().copied().collect();
+    if let Some(search) = tools.primary_provider(ContentSearch) {
+        content.push_str(&format!("\n{} results may also provide per-file hashline headers and mark only displayed match/context lines as seen.", search.tool));
+        referenced_tools.insert(search.tool);
+        consumed_facts.insert(ToolCapability(ContentSearch));
+    }
     if let Some(write) = tools.primary_provider(FileOverwrite) {
-        content.push_str(&format!(
-            "\nA successful {} overwrite invalidates older snapshot headers for that file.",
-            write.tool
-        ));
+        content.push_str(&format!("\nA successful {} returns a new hashline header while older versions remain available for safe stale recovery.", write.tool));
         referenced_tools.insert(write.tool);
         consumed_facts.insert(ToolCapability(FileOverwrite));
     }
@@ -416,6 +440,39 @@ fn render_anchored_edit(
         content: content.trim().into(),
         referenced_tools,
         consumed_facts,
+    })
+}
+
+fn render_replace_edit(
+    context: &PromptBuildContext,
+    tools: &ResolvedToolCapabilities,
+) -> Result<RenderedPromptPack> {
+    ensure!(
+        context.edit_mode == crate::config::EditMode::Replace,
+        "replace workflow/config mismatch"
+    );
+    let read = tools.primary_provider(PathRead).unwrap();
+    let edit = tools.primary_provider(ContentReplaceEdit).unwrap();
+    Ok(RenderedPromptPack {
+        content: include_str!("../assets/prompts/workflows/replace_edit.md")
+            .replace("{{READ_PROVIDER}}", read.tool)
+            .replace("{{EDIT_PROVIDER}}", edit.tool)
+            .replace(
+                "{{FUZZY_MODE}}",
+                if context.edit_fuzzy_match {
+                    "enabled"
+                } else {
+                    "disabled"
+                },
+            )
+            .replace(
+                "{{FUZZY_THRESHOLD}}",
+                &format!("{:.3}", context.edit_fuzzy_threshold),
+            )
+            .trim()
+            .into(),
+        referenced_tools: [read.tool, edit.tool].into_iter().collect(),
+        consumed_facts: REPLACE_EDIT_FACTS.iter().copied().collect(),
     })
 }
 
@@ -501,15 +558,15 @@ fn render_specialized_mutation_routing(
         referenced_tools.insert(overwrite.tool);
         consumed_facts.insert(ToolCapability(FileOverwrite));
     }
-    if let Some(edit) = tools.primary_provider(AnchoredEdit)
+    if let Some(edit) = tools.primary_provider(FileEdit)
         && edit.tool != shell.tool
     {
         lines.push(format!(
-            "- For changes to existing file content, use {} with its anchored protocol rather than mutation commands through {} such as sed or awk.",
+            "- For changes to existing file content, use {} with its resolved edit protocol rather than mutation commands through {} such as sed or awk.",
             edit.tool, shell.tool
         ));
         referenced_tools.insert(edit.tool);
-        consumed_facts.insert(ToolCapability(AnchoredEdit));
+        consumed_facts.insert(ToolCapability(FileEdit));
     }
     ensure!(
         !lines.is_empty(),

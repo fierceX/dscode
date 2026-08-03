@@ -7,14 +7,14 @@
 //! reclaimed by dead-pid or timestamp detection.
 
 use crate::session::runtime::SessionRuntime;
-use std::sync::Arc;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use mink::runtime::{AgentOptions, SessionPolicy};
 use mink::session::metadata::SessionMetadata;
 use mink::session::usage::UsageRecord;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
@@ -61,9 +61,14 @@ fn summarize_usage(dir: &Path) -> (u64, u64, u64, u64, u64) {
             // 输入不含缓存（与实时 usage 事件语义一致；缓存单独统计）
             input = input.saturating_add(tokens.input_tokens);
             output = output.saturating_add(tokens.output_tokens);
-            cache = cache.saturating_add(tokens.cache_read_tokens).saturating_add(tokens.cache_creation_tokens);
+            cache = cache
+                .saturating_add(tokens.cache_read_tokens)
+                .saturating_add(tokens.cache_creation_tokens);
             // 最后一条记录 = 最近一次请求的上下文（当前上下文，含缓存）
-            last_context = tokens.input_tokens.saturating_add(tokens.cache_read_tokens).saturating_add(tokens.cache_creation_tokens);
+            last_context = tokens
+                .input_tokens
+                .saturating_add(tokens.cache_read_tokens)
+                .saturating_add(tokens.cache_creation_tokens);
         }
         cost = cost.saturating_add(record.cost_nano_cny.unwrap_or(0));
     }
@@ -104,12 +109,13 @@ impl Registry {
                 continue;
             }
             let id = metadata.as_ref().map(|m| m.id.clone()).unwrap_or_else(|| {
-                dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+                dir.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default()
             });
             // 防御性过滤：子代理会话不单独展示（sub_ 前缀 / parent 字段）。
             // 实际子代理在 <session>/subagents/sub_xxx/ 深层目录，一层扫描本就不含。
-            if id.starts_with("sub_")
-                || metadata.as_ref().and_then(|m| m.parent.as_ref()).is_some()
+            if id.starts_with("sub_") || metadata.as_ref().and_then(|m| m.parent.as_ref()).is_some()
             {
                 continue;
             }
@@ -124,7 +130,11 @@ impl Registry {
             summary.status = status.unwrap_or("free");
             out.push(summary);
         }
-        out.sort_by(|a, b| b.modified_secs.unwrap_or(0).cmp(&a.modified_secs.unwrap_or(0)));
+        out.sort_by(|a, b| {
+            b.modified_secs
+                .unwrap_or(0)
+                .cmp(&a.modified_secs.unwrap_or(0))
+        });
         Ok(out)
     }
 
@@ -177,7 +187,6 @@ impl Registry {
             anyhow::bail!("opened session {actual_id} instead of {id}");
         }
 
-
         // 并发 open 防重入：构建期间另一请求可能已插入同一 id（锁内决定）。
         let already_open = { self.active.lock().unwrap().contains_key(id) };
         if already_open {
@@ -203,7 +212,11 @@ impl Registry {
     /// events land in `events.jsonl` via the core (same file as the TUI).
     /// 获取活动 runtime 的事件 receiver（SSE 订阅；Arc 在取 receiver 后释放）。
     pub fn active_runtime(&self, id: &str) -> Option<Arc<SessionRuntime>> {
-        self.active.lock().unwrap().get(id).map(|a| a.runtime.clone())
+        self.active
+            .lock()
+            .unwrap()
+            .get(id)
+            .map(|a| a.runtime.clone())
     }
 
     pub fn start_turn(&self, id: &str, input: String) -> Result<()> {
@@ -303,9 +316,7 @@ impl Registry {
         if let Some(prompt) = first_prompt {
             options = options.with_first_prompt(prompt);
         }
-        options
-            .with_project_scoped_sessions()
-            .with_log_events(true)
+        options.with_project_scoped_sessions().with_log_events(true)
     }
 }
 
@@ -329,7 +340,8 @@ fn summary_from_metadata(
         first_prompt: None,
         summary: None,
     });
-    let (tokens_in, tokens_out, cache_read_tokens, cost_nano_cny, last_context_tokens) = summarize_usage(dir);
+    let (tokens_in, tokens_out, cache_read_tokens, cost_nano_cny, last_context_tokens) =
+        summarize_usage(dir);
     SessionSummary {
         id: m.id.clone(),
         alias: m.alias.clone(),
@@ -401,8 +413,7 @@ fn write_lock(path: &Path) -> Result<()> {
         std::process::id(),
         now_secs()
     );
-    std::fs::write(path, text)
-        .map_err(|e| anyhow!("failed to write lock {}: {e}", path.display()))
+    std::fs::write(path, text).map_err(|e| anyhow!("failed to write lock {}: {e}", path.display()))
 }
 
 fn now_secs() -> u64 {
@@ -469,10 +480,8 @@ mod tests {
 
     #[test]
     fn lock_parse_and_stale_detection() {
-        let dir = std::env::temp_dir().join(format!(
-            "mink-server-lock-test-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("mink-server-lock-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(LOCK_FILE);
         // Dead pid is never alive in practice.

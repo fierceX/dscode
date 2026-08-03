@@ -61,7 +61,7 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
         return Ok(CliExit { code: 0 });
     }
 
-    apply_config_file(&mut cfg);
+    apply_config_file(&mut cfg)?;
 
     if !cfg.agent_jsonl {
         apply_provider_defaults(&mut cfg)?;
@@ -563,7 +563,7 @@ async fn list_sessions(home: &Path, cwd: &Path) -> Result<()> {
         println!("No sessions found.");
         return Ok(());
     }
-    rows.sort_by(|a, b| b.modified.cmp(&a.modified));
+    rows.sort_by_key(|row| std::cmp::Reverse(row.modified));
     println!(
         "{} {} {} ID",
         pad_display("ALIAS", 20),
@@ -623,10 +623,10 @@ async fn resolve_session_title(
         Err(_) => return "-".to_string(),
     };
     // Double-check title in the raw JSON (may differ from cached struct)
-    if let Some(t) = value.get("title").and_then(|v| v.as_str()) {
-        if !t.is_empty() {
-            return t.to_string();
-        }
+    if let Some(t) = value.get("title").and_then(|v| v.as_str())
+        && !t.is_empty()
+    {
+        return t.to_string();
     }
     let conv_path = session_dir.join("conversation.jsonl");
     let conv_text = match tokio::fs::read_to_string(&conv_path).await {
@@ -719,12 +719,16 @@ fn print_usage() {
     println!("  --print                 Stream JSON events to stdout");
     println!("  --agent-jsonl           Agent JSONL protocol");
     println!("  --enabled-tools <list>  Comma-separated tools to enable, or 'none'");
+    println!("  --edit-mode MODE        Edit protocol: hashline (default) or replace");
+    println!("  --edit-fuzzy-match BOOL Enable Replace progressive/fuzzy matching");
+    println!("  --edit-fuzzy-threshold N Replace fuzzy threshold, 0.0..=1.0 (default: 0.95)");
+    println!("  --edit-enforce-seen-lines BOOL Require displayed Hashline anchors");
     println!("  --config <toml>         Set config via TOML string");
     println!("                          Example: --config \"max_tokens=4096\\ntool_timeout=300\"");
     println!("                          Supports: model, max_tokens, max_turns, max_context,");
     println!("                          context_compact_*, context_reserve_tokens,");
     println!("                          tool_timeout, sub_agent_timeout, llm_*_timeout,");
-    println!("                          output_format, approval_mode, skills, verbose,");
+    println!("                          output_format, approval_mode, edit_*, skills, verbose,");
     println!("                          and [sandbox_python] section");
     println!("  -h, --help              Show this help");
     println!();
@@ -736,4 +740,8 @@ fn print_usage() {
     println!("  DEEPSEEK_BASE_URL       DeepSeek base URL");
     println!("  LOG_EVENTS              Enable event logging (default: true)");
     println!("  MINK_SIGNAL_MODE        Signal system mode: off | full (default: full)");
+    println!("  MINK_EDIT_MODE          Edit protocol: hashline | replace");
+    println!("  MINK_EDIT_FUZZY_MATCH   Replace fuzzy matching: true | false");
+    println!("  MINK_EDIT_FUZZY_THRESHOLD Replace fuzzy threshold, 0.0..=1.0");
+    println!("  MINK_EDIT_ENFORCE_SEEN_LINES Hashline seen-line guard: true | false");
 }

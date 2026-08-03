@@ -70,6 +70,12 @@ max_search_results = 1000                   # Grep 最大匹配结果行数
 # ── 工具结果限制 ─────────────────────────────────────────────
 # 也可通过 TOOL_RESULT_MAX_BYTES 和 FILE_WRITE_MAX_BYTES 环境变量设置
 
+# ── Edit 协议 ────────────────────────────────────────────────
+edit_mode = "hashline"                    # hashline（默认）/ replace；runtime 启动后固定
+edit_fuzzy_match = true                    # 仅 replace：启用归一化行窗口 fuzzy 匹配
+edit_fuzzy_threshold = 0.95                # 仅 replace：有限数，范围 0.0..=1.0
+edit_enforce_seen_lines = false            # 仅 hashline：锚点必须已由 Read/Grep 展示
+
 # ── 工具审批 ─────────────────────────────────────────────────
 
 # ── 工具选择（同时限制模型可见工具和真实执行）───────────────

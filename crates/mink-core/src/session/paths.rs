@@ -2,11 +2,12 @@ use anyhow::{Result, bail};
 use std::path::{Path, PathBuf};
 
 /// Filesystem layout used to derive the session directory from `home`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum SessionLayout {
     /// Historical CLI layout. `home` is a user/service root:
     /// `home/.mink/projects/<project_key(cwd)>/<session_id>`.
     #[serde(rename = "project")]
+    #[default]
     ProjectScoped,
     /// Shared SDK home layout. `home` is a user/service root:
     /// `home/.mink/sessions/<session_id>`.
@@ -19,12 +20,6 @@ pub enum SessionLayout {
     /// Embedded isolated layout. `home` is already the concrete session root.
     #[serde(rename = "isolated")]
     Isolated,
-}
-
-impl Default for SessionLayout {
-    fn default() -> Self {
-        Self::ProjectScoped
-    }
 }
 
 /// Resolved file-system paths for a session directory.

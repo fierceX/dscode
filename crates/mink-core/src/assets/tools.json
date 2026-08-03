@@ -1,7 +1,7 @@
 [
   {
     "name": "Read",
-    "description": "Read one local or configured virtual-filesystem path or registered lightweight resource. Use multiple calls for multiple targets. Local non-raw reads include numbered lines and an @PATH#TAG editable snapshot header; raw, virtual-filesystem, and registered-resource reads never create an editable snapshot. Path selectors select line ranges.\n\nSupported targets include local paths, artifact://<id>, skill:// resources, rule:// resources, and session://current resources. A full result may be truncated; request a narrower selector when exact lines are known.",
+    "description": "Read one local or configured virtual-filesystem path or registered lightweight resource. Use multiple calls for multiple targets. Local output is mode-aware: Hashline mode adds a [PATH#TAG] header to non-raw editable files and records the actual raw/non-raw range as seen; Replace mode uses ordinary numbered output. Virtual-filesystem and registered-resource reads are always read-only and never create an editable snapshot. Path selectors select line ranges.\n\nSupported targets include local paths, artifact://<id>, skill:// resources, rule:// resources, and session://current resources. A full result may be truncated; request a narrower selector when exact lines are known.",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -37,7 +37,7 @@
   },
   {
     "name": "Grep",
-    "description": "Search content through the configured filesystem backend or a registered resource URL such as session://current/history. Uses ripgrep-compatible regex/search/printer behavior and returns path:line:match output, context lines, and -- between context groups. Resource paths do not accept selectors or globs. Use context to identify exact target ranges, a single rg -g override glob to restrict filesystem targets, and multiple calls for independent patterns.",
+    "description": "Search content through the configured filesystem backend or a registered resource URL such as session://current/history. Local Hashline mode groups results per editable file under [PATH#TAG]; Replace mode and read-only backends use ripgrep-style path:line:match output. Resource paths do not accept selectors or globs. Use context to identify exact target ranges, a single rg -g override glob to restrict filesystem targets, and multiple calls for independent patterns.",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -55,7 +55,7 @@
         },
         "context": {
           "type": "integer",
-          "description": "Number of lines before and after each match. Search output never provides an editable @PATH#TAG."
+          "description": "Number of lines before and after each match. In Hashline mode, each editable local file group includes its own [PATH#TAG] and only complete displayed match/context lines become seen; Replace and read-only backends retain ordinary search output."
         }
       },
       "required": [
@@ -86,23 +86,19 @@
   },
   {
     "name": "Edit",
-    "description": "Apply an anchored patch to an existing local file. The patch must begin with a fresh @PATH#TAG editable snapshot header for the same path; stale, missing, uncovered, overlapping, or no-op patches fail closed. A successful operation returns a fresh header and numbered lines around the change. Combine multiple ranges grounded in one snapshot into one patch, keep ranges tight, and prefix every final body row with +. old_string/new_string and context-diff rows are not supported.",
+    "description": "Apply a hashline edit. The runtime-selected Edit mode replaces this catalog template before exposing it to the model.",
     "input_schema": {
       "type": "object",
       "properties": {
-        "path": {
+        "input": {
           "type": "string",
-          "description": "Path to the file to edit"
-        },
-        "patch": {
-          "type": "string",
-          "description": "Anchored line patch. The first non-blank line must be a fresh @PATH#TAG editable snapshot header for the same path. Supports replace N..M:, replace N:, delete N..M, delete N, insert before N:, insert after N:, insert head:, and insert tail:. Numbers refer to original snapshot lines and do not shift within one patch. Body rows are final new lines prefixed with +; never include original lines, -old rows, or bare context lines. Example: @src/foo.rs#0A3B\\nreplace 5..5:\\n+    return result"
+          "description": "Hashline patch input"
         }
       },
       "required": [
-        "path",
-        "patch"
-      ]
+        "input"
+      ],
+      "additionalProperties": false
     }
   },
   {

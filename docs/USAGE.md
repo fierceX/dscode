@@ -149,6 +149,10 @@ prompt 为空且 stdin 是终端时自动进入交互模式。非终端 stdin �
 | `--api-key KEY` | env | 覆盖 API Key |
 | `--base-url URL` | 默认端点 | 覆盖 API 端点 |
 | `--enabled-tools <list>` | 默认集合 | 逗号分隔的精确工具列表；`none` 禁用全部 |
+| `--edit-mode <mode>` | `hashline` | `hashline` / `replace`；runtime 启动后固定 |
+| `--edit-fuzzy-match <bool>` | `true` | Replace 行窗口模糊匹配开关 |
+| `--edit-fuzzy-threshold <n>` | `0.95` | Replace 阈值，有限数且在 `0.0..=1.0` |
+| `--edit-enforce-seen-lines <bool>` | `false` | Hashline 是否强制锚点已由 Read/Grep 展示 |
 | `--config <toml>` | — | TOML 字符串设置配置 |
 | `-v` / `--verbose` | `false` | 详细日志 |
 
@@ -175,6 +179,10 @@ max_search_files = 5000
 max_search_results = 1000
 output_format = "stream-json"
 enabled_tools = ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]
+edit_mode = "hashline"
+edit_fuzzy_match = true
+edit_fuzzy_threshold = 0.95
+edit_enforce_seen_lines = false
 approval_mode = "write"
 skills = ["python", "debugging"]
 openai_reasoning_effort = "max"          # "off" 表示不发送
@@ -226,6 +234,10 @@ log_events = true
 max_search_files = 5000
 max_search_results = 1000
 enabled_tools = ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]
+edit_mode = "hashline"
+edit_fuzzy_match = true
+edit_fuzzy_threshold = 0.95
+edit_enforce_seen_lines = false
 openai_reasoning_effort = "max"
 openai_include_usage = true
 openai_token_param = "max_tokens"
@@ -260,6 +272,10 @@ Read = "allow"
 | `MAX_SEARCH_RESULTS` | `1000` | Grep 最大匹配结果行数 |
 | `LOG_EVENTS` | `true` | 设为 `0`/`false` 关闭 events.jsonl |
 | `MINK_SIGNAL_MODE` | `full` | 信号模式：`full` 启用信念跟踪和注入；`off` 关闭 |
+| `MINK_EDIT_MODE` | `hashline` | Edit 协议：`hashline` / `replace` |
+| `MINK_EDIT_FUZZY_MATCH` | `true` | Replace 模糊匹配开关 |
+| `MINK_EDIT_FUZZY_THRESHOLD` | `0.95` | Replace 模糊阈值，`0.0..=1.0` |
+| `MINK_EDIT_ENFORCE_SEEN_LINES` | `false` | Hashline seen-line 守卫 |
 | `MINK_HOME` | `$HOME` | session 存储目录覆盖 |
 | `MINK_LIMITS` | — | JSON sandbox 限制配置 |
 
@@ -500,7 +516,7 @@ context_compact_tail_tokens = 256000
 |------|------|---------|
 | `Read` | 读文件或轻量资源，支持 selector | `path` |
 | `Write` | 写文件 | `path`, `content` |
-| `Edit` | anchored patch 编辑 | `path`, `patch` |
+| `Edit` | runtime 固定的 Hashline 或 Replace 编辑 | Hashline: `input`；Replace: `path`, `edits` |
 | `Bash` | 执行命令 | `command`, `timeout` |
 | `Python` | 运行 Python（宿主环境，完整生态） | `script` / `script_file`, `timeout` |
 | `PythonSandbox` | WASI 沙箱 Python（受限，需显式列出） | `script` / `script_file`, `timeout` |
@@ -528,10 +544,13 @@ Python SDK 共用的唯一工具选择入口。未设置时使用 catalog 默认
 资源 URL（`artifact://`、`skill://`、`rule://`、`session://`）。完整协议见
 [工具参考](tools.md)。
 
-### Anchored Edit
+### Edit 双模式
 
-本地文件非 raw `Read` 输出带 `@PATH#TAG` snapshot header，`Edit.patch` 基于它做行锚定
-修改，snapshot 过期时 fail closed。完整规则和示例见 [工具参考](tools.md)。
+`edit_mode` 在 runtime 创建时固定，恢复 session 时可重新选择，但不会翻译历史工具调用。
+默认 Hashline 模式让本地 Read/Grep 输出 `[PATH#TAG]`，支持跨文件 section、调用内匿名剪贴板、session 命名寄存器、
+历史 snapshot 和安全 stale 恢复；Replace 模式保持普通 Read/Grep 输出，以唯一 `old_text`
+执行 exact/行窗口 fuzzy 匹配，并在歧义时拒绝。schema、system prompt 和 executor 总是来自同一 resolved
+mode；切换模式会改变 immutable prefix fingerprint。完整协议见 [工具参考](tools.md)。
 
 ### Todo 协议
 

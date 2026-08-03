@@ -17,7 +17,9 @@ pub enum ToolSemanticCapability {
     ResourceSearch,
     FileCreate,
     FileOverwrite,
-    AnchoredEdit,
+    FileEdit,
+    HashlineEdit,
+    ContentReplaceEdit,
     ShellExec,
     FocusedVerificationExec,
     HostPythonExec,
@@ -156,7 +158,23 @@ static OFFERS: &[CapabilityOfferSpec] = &[
     offer!("Write", FileOverwrite, Specialized, 100, Always, LocalPath),
     offer!(
         "Edit",
-        AnchoredEdit,
+        FileEdit,
+        Specialized,
+        100,
+        LocalFilesystemBackend,
+        LocalPath
+    ),
+    offer!(
+        "Edit",
+        HashlineEdit,
+        Specialized,
+        100,
+        LocalFilesystemBackend,
+        LocalPath
+    ),
+    offer!(
+        "Edit",
+        ContentReplaceEdit,
         Specialized,
         100,
         LocalFilesystemBackend,
@@ -286,7 +304,8 @@ static OFFERS: &[CapabilityOfferSpec] = &[
 ];
 
 const CAPABILITY_HARD_DEPENDENCIES: &[(ToolSemanticCapability, &[ToolSemanticCapability])] = &[
-    (AnchoredEdit, &[EditableSnapshotRead]),
+    (HashlineEdit, &[EditableSnapshotRead]),
+    (ContentReplaceEdit, &[PathRead]),
     (TodoStructureMutation, &[TodoInspect]),
     (TodoProgressTransition, &[TodoInspect]),
 ];
@@ -311,8 +330,18 @@ impl ToolCapabilityRegistry {
         for offer in self.offers {
             if !surface.has(offer.provider_tool)
                 || !availability_matches(offer.available_if, context)
+                || (offer.capability == EditableSnapshotRead
+                    && context.edit_mode() != crate::config::EditMode::Hashline)
             {
                 continue;
+            }
+            if offer.provider_tool == "Edit" {
+                let hashline = context.edit_mode() == crate::config::EditMode::Hashline;
+                if (offer.capability == HashlineEdit && !hashline)
+                    || (offer.capability == ContentReplaceEdit && hashline)
+                {
+                    continue;
+                }
             }
             grouped
                 .entry(offer.capability)
@@ -617,7 +646,34 @@ mod tests {
         let resolved = resolved(&["Read", "Glob", "Grep", "Write"], true);
         assert!(resolved.has(PathRead));
         assert!(!resolved.has(EditableSnapshotRead));
-        assert!(!resolved.has(AnchoredEdit));
+        assert!(!resolved.has(FileEdit));
+        assert!(!resolved.has(HashlineEdit));
+        assert!(!resolved.has(ContentReplaceEdit));
         assert!(resolved.has(FileOverwrite));
+    }
+
+    #[test]
+    fn edit_modes_expose_mutually_exclusive_semantic_facts() {
+        for (mode, snapshot, hashline, replace) in [
+            (crate::config::EditMode::Hashline, true, true, false),
+            (crate::config::EditMode::Replace, false, false, true),
+        ] {
+            let mut config = ToolConfig::from_config(&Config {
+                edit_mode: mode,
+                ..Config::default()
+            });
+            config.enabled_tools = Some(vec!["Read".into(), "Edit".into()]);
+            let context = ToolResolutionContext::from_runtime(AgentRole::Primary, &config, false);
+            let surface =
+                ModelToolSurface::resolve(ToolCatalog::builtin().unwrap(), &config, &context)
+                    .unwrap();
+            let resolved = ToolCapabilityRegistry::builtin()
+                .resolve(&surface, &context)
+                .unwrap();
+            assert_eq!(resolved.has(EditableSnapshotRead), snapshot);
+            assert_eq!(resolved.has(HashlineEdit), hashline);
+            assert_eq!(resolved.has(ContentReplaceEdit), replace);
+            assert!(resolved.has(FileEdit));
+        }
     }
 }

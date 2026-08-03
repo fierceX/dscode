@@ -78,6 +78,7 @@ let outcome = stream.outcome().await?;
 |------|------|
 | 基础 | `with_api_key()` / `with_base_url()` / `with_model()` / `with_session()` / `with_session_layout()`（或 `with_isolated_sessions()` 等快捷方法） |
 | 工具 | `with_enabled_tools()`（唯一工具选择入口；空列表禁用全部） |
+| Edit | `with_edit_mode()` / `with_edit_fuzzy_match()` / `with_edit_fuzzy_threshold()` / `with_edit_enforce_seen_lines()` |
 | 压缩 | `with_max_context_tokens()` / `with_context_compact_pct()` / `with_context_reserve_tokens()` / `with_context_compact_tail_tokens()` / `with_context_compact_max_output_tokens()` / `with_context_compact_input_reduction()` |
 | 超时 | `with_tool_timeout_secs()` / `with_sub_agent_timeout_secs()` / `with_llm_timeouts(first, idle, heartbeat)` |
 | 输出限制 | `with_tool_result_max_bytes()` / `with_file_write_max_bytes()` / `with_search_limits(max_files, max_results)` / `with_max_tokens()` / `with_max_turns()` |
@@ -150,7 +151,8 @@ let runtime = AgentRuntime::start_with_options(
 - `resource_session_id`：知识库数据分区；子代理继承该值
 - `agent_session_id`：实际发起调用的主代理或子代理 session id
 
-虚拟 Read 是只读的，不产生 anchored Edit snapshot；`Write`/`Edit` 仍操作本地文件。
+虚拟 Read 是只读的，不产生 Hashline snapshot；`Write`/`Edit` 仍操作本地文件。VFS runtime
+不会暴露 Edit；显式要求 Edit 会在启动时失败。
 `artifact://`、`skill://`、`rule://`、`session://` 不进入 VFS。
 完整 redb 示例见
 [`crates/mink-core/examples/redb_vfs.rs`](../crates/mink-core/examples/redb_vfs.rs)。
@@ -207,6 +209,7 @@ print(result["text"])
 | 路径 | `mink_home` / `session_layout` / `cwd` | session 根目录与布局（SDK 默认 `home`） |
 | 文件系统 | `read_dirs` / `write_dirs` | agent 可读/可写目录 |
 | 工具 | `enabled_tools` | 精确工具选择；`None` 用默认集合，显式列出 `PythonSandbox` 才启用它 |
+| Edit | `edit_mode` / `edit_fuzzy_match` / `edit_fuzzy_threshold` / `edit_enforce_seen_lines` | 与 Rust/CLI 相同的双模式配置 |
 | 信号 | `signal_mode` | `"full"` / `"off"` / `None`（继承 `MINK_SIGNAL_MODE`） |
 | 提示词 | `mission_file` / `mission_content` | MISSION.md 文件或内联内容（二选一，内联避免临时文件） |
 | 技能 | `skills` / `inline_skills` / `skill_discovery_policy` | 技能选择与注入 |

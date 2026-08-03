@@ -1,6 +1,6 @@
 use crate::resources::selector::{select_text_lines, split_read_path_selection};
 use crate::tools::surface::FilesystemBackend;
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail, ensure};
 use similar::{ChangeTag, TextDiff};
 use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
@@ -9,8 +9,6 @@ use std::path::{Component, Path, PathBuf};
 
 /// Threshold for switching to streaming read (bytes).
 const STREAM_READ_THRESHOLD: u64 = 1_048_576; // 1MB
-const EDIT_REREAD_CONTEXT_LINES: usize = 12;
-const EDIT_ERROR_CONTEXT_LINES: usize = 2;
 
 fn ensure_full_read_within_limit(
     path: &Path,
@@ -169,7 +167,7 @@ pub fn write(path: &str, content: &str, max_bytes: usize) -> Result<String> {
 }
 
 /// Generate a unified diff using the `similar` crate (pure Rust, no subprocess).
-fn inline_diff(path: &str, old: &str, new: &str) -> Result<(String, usize, usize)> {
+pub(crate) fn inline_diff(path: &str, old: &str, new: &str) -> Result<(String, usize, usize)> {
     if old == new {
         return Ok((String::new(), 0, 0));
     }
@@ -376,48 +374,66 @@ impl super::runner::ToolExec for ReadTool {
             selection.limit,
             ctx.tool_config.tool_result_max_bytes,
         )?;
-        let content = read(
-            &path.display().to_string(),
-            selection.offset,
-            selection.limit,
+        let start_line = selection.offset.unwrap_or(1);
+        let editable_limit = 4 * 1024 * 1024usize;
+        let full_text = if ctx.tool_config.edit_mode == crate::config::EditMode::Hashline
+            && std::fs::metadata(&path)?.len() as u128
+                <= editable_limit.min(ctx.tool_config.file_write_max_bytes) as u128
+        {
+            Some(
+                std::fs::read_to_string(&path)
+                    .map_err(|error| anyhow!("Error: cannot read {}: {error}", path.display()))?,
+            )
+        } else {
+            None
+        };
+        let content = full_text.as_ref().map_or_else(
+            || {
+                read(
+                    &path.display().to_string(),
+                    selection.offset,
+                    selection.limit,
+                )
+            },
+            |text| Ok(select_text_lines(text, selection.offset, selection.limit)),
         )?;
+        let visible_count = crate::tools::snapshot::split_content_lines(&content).len();
         if selection.raw {
+            if let Some(full_text) = &full_text {
+                ensure!(
+                    content.len() <= ctx.tool_config.tool_result_max_bytes,
+                    "Error: selected Hashline Read output is too large ({} bytes > {} bytes); request a narrower line range",
+                    content.len(),
+                    ctx.tool_config.tool_result_max_bytes
+                );
+                ctx.snapshots
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .record(&path, full_text, start_line..start_line + visible_count);
+            }
             return Ok(super::runner::ToolOutcome::text(content));
         }
-        let start_line = selection.offset.unwrap_or(1);
-        let (snapshot_content, snapshot_start_line) = snapshot_source_for_read(
-            &path,
-            &content,
-            start_line,
-            ctx.tool_config.file_write_max_bytes,
-        );
-        let snapshot = ctx
-            .snapshots
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .record(&path, &snapshot_content, snapshot_start_line);
-        Ok(super::runner::ToolOutcome::text(format_read_snapshot(
-            &selection.path,
-            &snapshot.tag,
-            start_line,
-            &content,
-        )))
-    }
-}
-
-fn snapshot_source_for_read(
-    path: &Path,
-    displayed_content: &str,
-    displayed_start_line: usize,
-    max_edit_bytes: usize,
-) -> (String, usize) {
-    let full_text = std::fs::metadata(path)
-        .ok()
-        .filter(|meta| meta.len() as u128 <= max_edit_bytes as u128)
-        .and_then(|_| std::fs::read_to_string(path).ok());
-    match full_text {
-        Some(text) => (text, 1),
-        None => (displayed_content.to_string(), displayed_start_line),
+        let rendered = match full_text {
+            Some(full_text) => {
+                let tag = crate::tools::snapshot::compute_file_tag(&full_text);
+                let rendered = format_hashline_read(&selection.path, &tag, start_line, &content);
+                ensure!(
+                    rendered.len() <= ctx.tool_config.tool_result_max_bytes,
+                    "Error: selected Hashline Read output is too large ({} bytes > {} bytes); request a narrower line range",
+                    rendered.len(),
+                    ctx.tool_config.tool_result_max_bytes
+                );
+                let snapshot = ctx
+                    .snapshots
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .record(&path, &full_text, start_line..start_line + visible_count);
+                debug_assert_eq!(snapshot.tag, tag);
+                rendered
+            }
+            None => format_numbered_read(start_line, &content),
+        };
+        Ok(super::runner::ToolOutcome::text(rendered))
     }
 }
 
@@ -449,10 +465,21 @@ impl super::runner::ToolExec for WriteTool {
             &args.content,
             ctx.tool_config.file_write_max_bytes,
         )?;
-        ctx.snapshots
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .invalidate_path(&path);
+        if ctx.tool_config.edit_mode == crate::config::EditMode::Hashline
+            && args.content.len()
+                <= (4 * 1024 * 1024usize).min(ctx.tool_config.file_write_max_bytes)
+        {
+            let line_count = crate::tools::snapshot::split_content_lines(&args.content).len();
+            let snapshot = ctx
+                .snapshots
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .record(&path, &args.content, 1..=line_count);
+            return Ok(super::runner::ToolOutcome::text(format!(
+                "{result}\n[{}#{}]",
+                args.path, snapshot.tag
+            )));
+        }
         Ok(super::runner::ToolOutcome::text(result))
     }
 }
@@ -473,53 +500,34 @@ impl super::runner::ToolExec for EditTool {
         input: &serde_json::Value,
         ctx: &crate::context::ToolContext,
     ) -> anyhow::Result<super::runner::ToolOutcome> {
-        if input.get("old_string").is_some() || input.get("new_string").is_some() {
-            bail!(
-                "Error: Edit old_string/new_string is not supported. Use Read on the target range to get @PATH#TAG, then call Edit with the patch parameter."
-            );
+        match ctx.tool_config.edit_mode {
+            crate::config::EditMode::Hashline => execute_hashline_edit(input, ctx),
+            crate::config::EditMode::Replace => execute_replace_edit(input, ctx),
         }
-        #[derive(serde::Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Args {
-            path: String,
-            #[serde(default)]
-            patch: Option<String>,
-        }
-        let args: Args = serde_json::from_value(input.clone())?;
-        let path = resolve_tool_path(&ctx.cwd, &args.path)?;
-        let Some(patch) = args.patch else {
-            bail!(
-                "Error: Edit requires patch. Re-read the target range, then retry with the @PATH#TAG anchored patch header."
-            );
-        };
-        let result = apply_anchored_patch(
-            &path,
-            &args.path,
-            &patch,
-            ctx.tool_config.file_write_max_bytes,
-            &ctx.snapshots,
-        )?;
-        Ok(result).map(|s| super::runner::ToolOutcome {
-            conversation_content: s.clone(),
-            content: s,
-            is_bash: false,
-            exit_code: None,
-            success: true,
-            diagnostics: Vec::new(),
-            plan_command: None,
-            state_metadata: None,
-            presentation: None,
-        })
     }
 }
 
-fn format_read_snapshot(display_path: &str, tag: &str, start_line: usize, content: &str) -> String {
-    let mut out = format!("@{display_path}#{tag}");
+fn format_hashline_read(display_path: &str, tag: &str, start_line: usize, content: &str) -> String {
+    let mut out = format!("[{display_path}#{tag}]");
     for (idx, line) in crate::tools::snapshot::split_content_lines(content)
         .iter()
         .enumerate()
     {
         out.push('\n');
+        out.push_str(&format!("{}:{line}", start_line + idx));
+    }
+    out
+}
+
+fn format_numbered_read(start_line: usize, content: &str) -> String {
+    let mut out = String::new();
+    for (idx, line) in crate::tools::snapshot::split_content_lines(content)
+        .iter()
+        .enumerate()
+    {
+        if !out.is_empty() {
+            out.push('\n');
+        }
         out.push_str(&format!("{}:{line}", start_line + idx));
     }
     out
@@ -537,1601 +545,795 @@ fn format_read_only_virtual(display_path: &str, start_line: usize, content: &str
     out
 }
 
-fn format_post_edit_snapshot(
-    display_path: &str,
-    tag: &str,
-    content: &str,
-    hunks: &[PatchHunk],
-) -> String {
-    let lines = crate::tools::snapshot::split_content_lines(content);
-    if lines.is_empty() {
-        return format!("@{display_path}#{tag}");
-    }
-
-    let mut min_line = usize::MAX;
-    let mut max_line = 1usize;
-    for hunk in hunks {
-        let (start, end) = hunk_post_edit_span(hunk, lines.len());
-        min_line = min_line.min(start);
-        max_line = max_line.max(end);
-    }
-    if min_line == usize::MAX {
-        min_line = 1;
-        max_line = lines.len().min(1);
-    }
-
-    let start = min_line.saturating_sub(EDIT_REREAD_CONTEXT_LINES).max(1);
-    let end = (max_line + EDIT_REREAD_CONTEXT_LINES).min(lines.len());
-    format_read_snapshot(display_path, tag, start, &lines[start - 1..end].join("\n"))
+#[derive(Debug, Clone)]
+struct TextShape {
+    bom: bool,
+    crlf: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PatchHunk {
-    Replace {
-        start: usize,
-        end: usize,
-        body: Vec<String>,
-    },
-    Delete {
-        start: usize,
-        end: usize,
-    },
-    InsertBefore {
-        line: usize,
-        body: Vec<String>,
-    },
-    InsertAfter {
-        line: usize,
-        body: Vec<String>,
-    },
-    InsertHead {
-        body: Vec<String>,
-    },
-    InsertTail {
-        body: Vec<String>,
-    },
+fn decode_text_shape(raw: &str) -> (TextShape, String) {
+    let bom = raw.starts_with('\u{feff}');
+    let without_bom = raw.strip_prefix('\u{feff}').unwrap_or(raw);
+    let crlf = without_bom
+        .find("\r\n")
+        .is_some_and(|crlf| without_bom.find('\n').is_none_or(|lf| crlf <= lf));
+    (
+        TextShape { bom, crlf },
+        crate::tools::snapshot::normalize_snapshot_text(without_bom),
+    )
 }
 
-fn apply_anchored_patch(
-    path: &Path,
-    display_path: &str,
-    patch: &str,
-    max_bytes: usize,
-    snapshots: &std::sync::Arc<std::sync::Mutex<crate::tools::snapshot::FileSnapshotStore>>,
-) -> Result<String> {
-    let (parsed, warnings) = crate::tools::hashline::parse_patch(patch)?;
-    if parsed.path != display_path {
-        bail!(
-            "Error: patch header path '{}' does not match Edit path '{}'",
-            parsed.path,
-            display_path
-        );
-    }
-
-    let mut snapshot_guard = snapshots.lock().unwrap_or_else(|e| e.into_inner());
-    let content = std::fs::read_to_string(path)
-        .map_err(|_| anyhow!("Error: file not found: {}", path.display()))?;
-    if content.len() > max_bytes {
-        bail!(
-            "Error: file too large for edit_file ({} bytes > {} bytes)",
-            content.len(),
-            max_bytes
-        );
-    }
-    let mut lines = crate::tools::snapshot::split_content_lines(&content);
-    let snapshot = snapshot_guard
-        .get(path, &parsed.tag)
-        .cloned()
-        .ok_or_else(|| {
-            let target = suggested_read_target(display_path, &parsed.hunks, lines.len());
-            let context = format_current_context(
-                &lines,
-                &collect_hunk_anchor_lines(&parsed.hunks, lines.len()),
-            );
-            anyhow!(
-                "Error: snapshot tag {} for {} is unknown. Re-read {}, then retry Edit with the new header.{}",
-                parsed.tag,
-                display_path,
-                target,
-                context
-            )
-        })?;
-
-    validate_patch_hunks(&parsed.hunks, &snapshot, &lines, display_path)?;
-    apply_hunks(&mut lines, &parsed.hunks)?;
-
-    let mut updated = lines.join("\n");
-    if content.ends_with('\n') {
-        updated.push('\n');
-    }
-    if updated == content {
-        let target = suggested_read_target(display_path, &parsed.hunks, lines.len());
-        let context = format_current_context(
-            &lines,
-            &collect_hunk_anchor_lines(&parsed.hunks, lines.len()),
-        );
-        bail!(
-            "Error: patch parsed cleanly but produced no changes. Re-read {target} before retrying.{context}"
-        );
-    }
-
-    let (diff, added, removed) = inline_diff(&path.display().to_string(), &content, &updated)?;
-    std::fs::write(path, &updated)?;
-    snapshot_guard.invalidate_path(path);
-    let snapshot = snapshot_guard.record(path, &updated, 1);
-    let followup = format_post_edit_snapshot(display_path, &snapshot.tag, &updated, &parsed.hunks);
-    let warning_block = if warnings.is_empty() {
-        String::new()
+fn restore_text_shape(shape: &TextShape, normalized: &str) -> String {
+    let text = if shape.crlf {
+        normalized.replace('\n', "\r\n")
     } else {
-        format!("\nWarnings:\n{}\n", warnings.join("\n"))
+        normalized.to_string()
     };
-    Ok(format!(
-        "Edit({}) [+{} -{} lines]\n{}\n{}{}\n",
-        display_path, added, removed, followup, warning_block, diff
-    ))
+    if shape.bom {
+        format!("\u{feff}{text}")
+    } else {
+        text
+    }
+}
+
+fn atomic_write(path: &Path, content: &str) -> Result<()> {
+    use std::io::Write as _;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("file");
+    let temporary = parent.join(format!(".{name}.mink-edit-{}-{stamp}", std::process::id()));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    if let Ok(metadata) = std::fs::metadata(path)
+        && let Err(error) = file.set_permissions(metadata.permissions())
+    {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error.into());
+    }
+    if let Err(error) = file
+        .write_all(content.as_bytes())
+        .and_then(|_| file.sync_all())
+    {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error.into());
+    }
+    if let Err(error) = std::fs::rename(&temporary, path) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error.into());
+    }
+    Ok(())
+}
+
+fn move_file_noclobber(source: &Path, destination: &Path, replacement: Option<&str>) -> Result<()> {
+    use std::io::Write as _;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    ensure!(
+        !destination.exists(),
+        "MV destination already exists: {}",
+        destination.display()
+    );
+
+    if let Some(content) = replacement {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let name = destination
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("file");
+        let temporary = parent.join(format!(".{name}.mink-move-{}-{stamp}", std::process::id()));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        let operation = (|| -> Result<()> {
+            if let Ok(metadata) = std::fs::metadata(source) {
+                file.set_permissions(metadata.permissions())?;
+            }
+            file.write_all(content.as_bytes())?;
+            file.sync_all()?;
+            // hard_link is the portable no-clobber publication primitive used
+            // here: it fails if destination appeared after preflight.
+            std::fs::hard_link(&temporary, destination)?;
+            Ok(())
+        })();
+        let _ = std::fs::remove_file(&temporary);
+        operation?;
+    } else {
+        std::fs::hard_link(source, destination)?;
+    }
+
+    if let Err(error) = std::fs::remove_file(source) {
+        let _ = std::fs::remove_file(destination);
+        return Err(error.into());
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
-pub(crate) struct ParsedPatch {
-    pub(crate) path: String,
-    pub(crate) tag: String,
-    pub(crate) hunks: Vec<PatchHunk>,
+enum HashlineAction {
+    Write {
+        updated: String,
+        shape: TextShape,
+    },
+    Remove,
+    Move {
+        destination: PathBuf,
+        updated: String,
+        shape: TextShape,
+    },
 }
 
-fn validate_patch_hunks(
-    hunks: &[PatchHunk],
-    snapshot: &crate::tools::snapshot::FileSnapshot,
-    current_lines: &[String],
-    display_path: &str,
-) -> Result<()> {
-    let mut targeted = BTreeSet::new();
-    for hunk in hunks {
-        match hunk {
-            PatchHunk::Replace { start, end, .. } | PatchHunk::Delete { start, end } => {
-                for line in *start..=*end {
-                    validate_snapshot_line(snapshot, current_lines, line, display_path)?;
-                    if !targeted.insert(line) {
-                        bail!(
-                            "Error: overlapping edit hunks target line {line}. Use one hunk per range."
-                        );
-                    }
-                }
-            }
-            PatchHunk::InsertBefore { line, .. } | PatchHunk::InsertAfter { line, .. } => {
-                validate_snapshot_line(snapshot, current_lines, *line, display_path)?;
-            }
-            PatchHunk::InsertHead { .. } | PatchHunk::InsertTail { .. } => {
-                let current_hash = crate::tools::snapshot::hash_text(&current_lines.join("\n"));
-                if current_hash != snapshot.file_hash {
-                    let target = suggested_read_target(
-                        display_path,
-                        std::slice::from_ref(hunk),
-                        current_lines.len(),
-                    );
-                    let context = format_current_context(
-                        current_lines,
-                        &hunk_anchor_lines(hunk, current_lines.len()),
-                    );
-                    bail!(
-                        "Error: snapshot mismatch in {display_path}. The file changed since Read. Re-read {target} before editing.{context}"
-                    );
-                }
-            }
-        }
+#[derive(Debug)]
+struct PreparedHashline {
+    path: PathBuf,
+    display_path: String,
+    normalized_original: String,
+    action: HashlineAction,
+    warnings: Vec<String>,
+    clipboard_after: crate::tools::hashline::Clipboard,
+}
+
+fn execute_hashline_edit(
+    input: &serde_json::Value,
+    ctx: &crate::context::ToolContext,
+) -> Result<super::runner::ToolOutcome> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Args {
+        input: String,
     }
-    Ok(())
-}
-
-fn validate_snapshot_line(
-    snapshot: &crate::tools::snapshot::FileSnapshot,
-    current_lines: &[String],
-    line: usize,
-    display_path: &str,
-) -> Result<()> {
-    let expected = snapshot.expected_hash(line).ok_or_else(|| {
-        let target = suggested_read_target_for_line(display_path, line, current_lines.len());
-        let context = format_current_context(current_lines, &[line]);
+    let args: Args = serde_json::from_value(input.clone()).map_err(|error| {
         anyhow!(
-            "Error: line {line} in {display_path} was not covered by snapshot {}. Re-read {target} before editing.{context}",
-            snapshot.tag
+            "Error: Hashline Edit accepts only {{\"input\": \"[PATH#TAG]...\"}}; legacy path/patch and old_string/new_string inputs are unsupported: {error}"
         )
     })?;
-    let Some(current) = current_lines.get(line - 1) else {
-        bail!("Error: line {line} does not exist in {display_path}");
-    };
-    if crate::tools::snapshot::hash_text(current) != expected {
-        let target = suggested_read_target_for_line(display_path, line, current_lines.len());
-        let context = format_current_context(current_lines, &[line]);
-        bail!(
-            "Error: snapshot mismatch in {display_path} at line {line}. The file changed since Read. Re-read {target} before editing.{context}"
+    let patch = crate::tools::hashline::parse(&args.input)?;
+    let mut store = ctx
+        .snapshots
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let mut clipboard =
+        crate::tools::hashline::Clipboard::with_named(store.named_clipboard().clone());
+    let mut prepared = Vec::new();
+    let mut canonical_targets = BTreeSet::new();
+    let mut move_destinations = BTreeSet::new();
+
+    for authored in &patch.sections {
+        let authored_path = resolve_tool_path(&ctx.cwd, &authored.path)?;
+        let (path, recovered_path) = if authored_path.exists() {
+            (authored_path, None)
+        } else {
+            let file_name = authored_path
+                .file_name()
+                .ok_or_else(|| anyhow!("Error: {} has no recoverable filename", authored.path))?;
+            let recovered = store
+                .unique_path_for_tag_and_name(&authored.tag, file_name, &authored_path)
+                .map_err(|message| {
+                    anyhow!("Error: {} does not exist and {message}", authored.path)
+                })?;
+            (recovered, Some(authored.path.clone()))
+        };
+        let canonical = crate::tools::snapshot::canonical_snapshot_path(&path);
+        ensure!(
+            canonical_targets.insert(canonical.clone()),
+            "Error: multiple hashline sections resolve to the same canonical path {}",
+            canonical.display()
+        );
+        store.begin_noop_attempt(&canonical, &args.input);
+        let original = std::fs::read_to_string(&canonical)
+            .map_err(|error| anyhow!("Error: cannot read {}: {error}", canonical.display()))?;
+        ensure!(
+            original.len() <= ctx.tool_config.file_write_max_bytes,
+            "Error: file too large for Edit ({} bytes > {} bytes): {}",
+            original.len(),
+            ctx.tool_config.file_write_max_bytes,
+            canonical.display()
+        );
+        let (shape, normalized) = decode_text_shape(&original);
+        let current_tag = crate::tools::snapshot::compute_file_tag(&normalized);
+        let authored_anchors = crate::tools::hashline::anchor_lines(authored);
+        let versions = store.versions(&canonical, &authored.tag);
+        ensure!(
+            !versions.is_empty(),
+            "Error: snapshot tag #{} for {} is unknown in this session; Read or Grep the target and retry",
+            authored.tag,
+            authored.path
+        );
+
+        let mut warnings = Vec::new();
+        if let Some(authored_path) = recovered_path {
+            warnings.push(format!(
+                "path {authored_path:?} does not exist; matched its filename and snapshot tag #{} to {}",
+                authored.tag,
+                display_relative_path(&ctx.cwd, &canonical)
+            ));
+        }
+        let (section, snapshot) = if current_tag.eq_ignore_ascii_case(&authored.tag) {
+            let snapshot = versions
+                .iter()
+                .find(|snapshot| {
+                    snapshot.text == normalized
+                        || hash_equivalent_snapshot_text(&snapshot.text, &normalized)
+                })
+                .cloned()
+                .ok_or_else(|| {
+                    anyhow!(
+                        "Error: tag #{} collides with unobserved content for {}; re-read the file",
+                        authored.tag,
+                        authored.path
+                    )
+                })?;
+            (authored.clone(), snapshot)
+        } else if crate::tools::hashline::is_head_tail_only(authored) {
+            warnings.push(format!(
+                "stale snapshot #{}: HEAD/TAIL-only operations were applied to the current file",
+                authored.tag
+            ));
+            (authored.clone(), versions[0].clone())
+        } else {
+            let mut recovered = Vec::new();
+            for snapshot in versions {
+                if let Ok(offset) =
+                    recover_uniform_offset(&snapshot.text, &normalized, &authored_anchors)
+                    && let Ok(section) = crate::tools::hashline::remap_anchors(authored, offset)
+                {
+                    recovered.push((section, snapshot, offset));
+                }
+            }
+            ensure!(
+                recovered.len() == 1,
+                "Error: stale snapshot #{} for {} could not be recovered unambiguously; an anchor changed, was deleted/split, repeated, or mapped with an inconsistent offset",
+                authored.tag,
+                authored.path
+            );
+            let (section, snapshot, offset) = recovered.remove(0);
+            warnings.push(format!(
+                "recovered stale snapshot #{} with a uniform {offset:+} line offset",
+                authored.tag
+            ));
+            (section, snapshot)
+        };
+
+        if ctx.tool_config.edit_enforce_seen_lines {
+            let missing = authored_anchors
+                .difference(&snapshot.seen_lines)
+                .copied()
+                .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                let lines = crate::tools::snapshot::split_content_lines(&snapshot.text);
+                let preview = missing
+                    .iter()
+                    .take(200)
+                    .filter_map(|line| lines.get(line - 1).map(|text| format!("{line}:{text}")))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let message = format!(
+                    "Error: hashline anchors were not shown by Read/Grep for {}: {}{}{}",
+                    authored.path,
+                    missing
+                        .iter()
+                        .map(usize::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    if preview.is_empty() { "" } else { "\n" },
+                    preview
+                );
+                let fully_echoed = missing.len() <= 200
+                    && missing.iter().all(|line| {
+                        lines
+                            .get(line.saturating_sub(1))
+                            .is_some_and(|text| text.len() <= 500)
+                    })
+                    && message.len() <= ctx.tool_config.tool_result_max_bytes;
+                if fully_echoed {
+                    store.add_seen_lines(
+                        &canonical,
+                        &snapshot.tag,
+                        &snapshot.text,
+                        missing.iter().copied(),
+                    );
+                }
+                bail!(message);
+            }
+        }
+
+        let applied = crate::tools::hashline::apply(&normalized, &section, &mut clipboard)?;
+        warnings.extend(applied.warnings);
+        let updated = applied.text;
+        let file_operation = section
+            .operations
+            .last()
+            .and_then(|operation| match operation {
+                crate::tools::hashline::Operation::Remove => Some((None, true)),
+                crate::tools::hashline::Operation::Move { destination } => {
+                    Some((Some(destination.as_str()), false))
+                }
+                _ => None,
+            });
+        let action = match file_operation {
+            Some((None, true)) => {
+                ensure!(
+                    current_tag.eq_ignore_ascii_case(&authored.tag),
+                    "Error: REM refuses a stale file tag; re-read {}",
+                    authored.path
+                );
+                HashlineAction::Remove
+            }
+            Some((Some(destination), false)) => {
+                let destination = resolve_tool_path(&ctx.cwd, destination)?;
+                let destination = crate::tools::snapshot::canonical_snapshot_path(&destination);
+                ensure!(
+                    !destination.exists(),
+                    "Error: MV destination already exists: {}",
+                    destination.display()
+                );
+                ensure!(
+                    move_destinations.insert(destination.clone()),
+                    "Error: multiple Hashline sections move to the same destination {}",
+                    destination.display()
+                );
+                ensure!(
+                    !canonical_targets.contains(&destination),
+                    "Error: MV destination is also a source path in this Hashline batch: {}",
+                    destination.display()
+                );
+                let final_text = restore_text_shape(&shape, &updated);
+                ensure!(
+                    final_text.len() <= ctx.tool_config.file_write_max_bytes,
+                    "Error: moved file would exceed file_write_max_bytes"
+                );
+                HashlineAction::Move {
+                    destination,
+                    updated,
+                    shape,
+                }
+            }
+            _ => {
+                if updated == normalized {
+                    let count = store.note_noop(&canonical, &args.input);
+                    if count >= 3 {
+                        bail!(
+                            "Error: identical hashline input produced no changes three consecutive times for {}",
+                            authored.path
+                        );
+                    }
+                    bail!(
+                        "Error: hashline input produced no changes for {} (identical no-op count: {count})",
+                        authored.path
+                    );
+                }
+                let final_text = restore_text_shape(&shape, &updated);
+                ensure!(
+                    final_text.len() <= ctx.tool_config.file_write_max_bytes,
+                    "Error: edited file would exceed file_write_max_bytes"
+                );
+                HashlineAction::Write { updated, shape }
+            }
+        };
+        prepared.push(PreparedHashline {
+            path: canonical,
+            display_path: authored.path.clone(),
+            normalized_original: normalized,
+            action,
+            warnings,
+            clipboard_after: clipboard.clone(),
+        });
+    }
+
+    let section_names = prepared
+        .iter()
+        .map(|item| item.display_path.clone())
+        .collect::<Vec<_>>();
+    let mut rendered = Vec::new();
+    let mut committed = Vec::new();
+    for (index, item) in prepared.into_iter().enumerate() {
+        let result: Result<String> = (|| match item.action {
+            HashlineAction::Write { updated, shape } => {
+                let final_text = restore_text_shape(&shape, &updated);
+                atomic_write(&item.path, &final_text)?;
+                let (diff, added, removed) =
+                    inline_diff(&item.display_path, &item.normalized_original, &updated)?;
+                let (start, end) = changed_line_window(&item.normalized_original, &updated);
+                let lines = crate::tools::snapshot::split_content_lines(&updated);
+                let start = start.saturating_sub(12).max(1);
+                let end = (end + 12).min(lines.len()).max(start.min(lines.len()));
+                let visible = if lines.is_empty() {
+                    1..1
+                } else {
+                    start..end.saturating_add(1)
+                };
+                let snapshot = store.record(&item.path, &updated, visible.clone());
+                store.reset_noop(&item.path);
+                let body = if lines.is_empty() || start > end {
+                    format!("[{}#{}]", item.display_path, snapshot.tag)
+                } else {
+                    format_hashline_read(
+                        &item.display_path,
+                        &snapshot.tag,
+                        start,
+                        &lines[start - 1..end].join("\n"),
+                    )
+                };
+                Ok(format!(
+                    "Edit({}) [+{} -{} lines]\n{}{}\n{}",
+                    item.display_path,
+                    added,
+                    removed,
+                    body,
+                    format_warnings(&item.warnings),
+                    diff
+                ))
+            }
+            HashlineAction::Remove => {
+                std::fs::remove_file(&item.path)?;
+                store.reset_noop(&item.path);
+                Ok(format!(
+                    "Removed {}{}",
+                    item.display_path,
+                    format_warnings(&item.warnings)
+                ))
+            }
+            HashlineAction::Move {
+                destination,
+                updated,
+                shape,
+            } => {
+                let final_text = restore_text_shape(&shape, &updated);
+                let replacement =
+                    (updated != item.normalized_original).then_some(final_text.as_str());
+                move_file_noclobber(&item.path, &destination, replacement)?;
+                store.relocate(&item.path, &destination);
+                let display = display_relative_path(&ctx.cwd, &destination);
+                let snapshot = store.record(&destination, &updated, std::iter::empty());
+                store.reset_noop(&destination);
+                Ok(format!(
+                    "Moved {} -> {}\n[{}#{}]{}",
+                    item.display_path,
+                    display,
+                    display,
+                    snapshot.tag,
+                    format_warnings(&item.warnings)
+                ))
+            }
+        })();
+        match result {
+            Ok(text) => {
+                committed.push(item.display_path.clone());
+                store.set_named_clipboard(item.clipboard_after.named().clone());
+                rendered.push(text);
+            }
+            Err(error) => {
+                let uncommitted = section_names[index + 1..].join(", ");
+                bail!(
+                    "Error: multi-file Hashline commit stopped; committed [{}]; failed {}: {error}; not committed [{}]",
+                    committed.join(", "),
+                    item.display_path,
+                    uncommitted
+                );
+            }
+        }
+    }
+    let content = rendered.join("\n\n");
+    let summary = format!(
+        "Hashline Edit committed {} section(s): {}",
+        committed.len(),
+        committed.join(", ")
+    );
+    Ok(tool_outcome(content, summary))
+}
+
+fn hash_equivalent_snapshot_text(left: &str, right: &str) -> bool {
+    left.split('\n')
+        .map(|line| line.trim_end_matches([' ', '\t', '\r']))
+        .eq(right
+            .split('\n')
+            .map(|line| line.trim_end_matches([' ', '\t', '\r'])))
+}
+
+fn recover_uniform_offset(old: &str, current: &str, anchors: &BTreeSet<usize>) -> Result<isize> {
+    ensure!(
+        !anchors.is_empty(),
+        "no content anchors are available for stale recovery"
+    );
+    let diff = TextDiff::from_lines(old, current);
+    let old_lines = old.split('\n').collect::<Vec<_>>();
+    let current_lines = current.split('\n').collect::<Vec<_>>();
+    let mut line_map = vec![None; old_lines.len()];
+    for operation in diff
+        .ops()
+        .iter()
+        .filter(|operation| operation.tag() == similar::DiffTag::Equal)
+    {
+        for offset in 0..operation.old_range().len() {
+            line_map[operation.old_range().start + offset] =
+                Some(operation.new_range().start + offset);
+        }
+    }
+
+    let duplicated_old = duplicated_line_values(&old_lines);
+    let duplicated_current = duplicated_line_values(&current_lines);
+    let sorted = anchors.iter().copied().collect::<Vec<_>>();
+    let mut offsets = BTreeSet::new();
+    let mut run_start = 0usize;
+    while run_start < sorted.len() {
+        let mut run_end = run_start;
+        while run_end + 1 < sorted.len() && sorted[run_end + 1] == sorted[run_end] + 1 {
+            run_end += 1;
+        }
+        let first = sorted[run_start];
+        let last = sorted[run_end];
+        let before = first.checked_sub(1).filter(|line| *line >= 1);
+        let after = (last < old_lines.len()).then_some(last + 1);
+        for anchor in &sorted[run_start..=run_end] {
+            let old_index = anchor - 1;
+            let mapped = line_map
+                .get(old_index)
+                .and_then(|mapped| *mapped)
+                .ok_or_else(|| anyhow!("anchor line {anchor} changed or was deleted"))?;
+            let offset = mapped as isize - old_index as isize;
+            offsets.insert(offset);
+
+            let context_matches = |line: usize| {
+                let index = line - 1;
+                line_map.get(index).and_then(|mapped| *mapped) == index.checked_add_signed(offset)
+            };
+            let duplicate = duplicated_old.contains(old_lines[old_index])
+                || duplicated_current.contains(current_lines[mapped]);
+            let context_valid = if duplicate {
+                let mut checked = false;
+                let mut valid = true;
+                if let Some(line) = before {
+                    checked = true;
+                    valid &= context_matches(line);
+                }
+                if let Some(line) = after {
+                    checked = true;
+                    valid &= context_matches(line);
+                }
+                checked && valid
+            } else {
+                after.is_some_and(context_matches) || before.is_some_and(context_matches)
+            };
+            ensure!(
+                context_valid,
+                "anchor context at line {anchor} is changed or ambiguous"
+            );
+        }
+        run_start = run_end + 1;
+    }
+    ensure!(offsets.len() == 1, "anchors do not share one line offset");
+    Ok(*offsets.first().expect("one offset"))
+}
+
+fn duplicated_line_values<'a>(lines: &'a [&'a str]) -> BTreeSet<&'a str> {
+    let mut seen = BTreeSet::new();
+    let mut duplicated = BTreeSet::new();
+    for line in lines {
+        if !seen.insert(*line) {
+            duplicated.insert(*line);
+        }
+    }
+    duplicated
+}
+
+fn format_warnings(warnings: &[String]) -> String {
+    if warnings.is_empty() {
+        String::new()
+    } else {
+        format!("\nWarnings:\n{}", warnings.join("\n"))
+    }
+}
+
+fn changed_line_window(old: &str, new: &str) -> (usize, usize) {
+    let diff = TextDiff::from_lines(old, new);
+    let mut start = usize::MAX;
+    let mut end = 1;
+    for operation in diff
+        .ops()
+        .iter()
+        .filter(|operation| operation.tag() != similar::DiffTag::Equal)
+    {
+        start = start.min(operation.new_range().start + 1);
+        end = end.max(
+            operation
+                .new_range()
+                .end
+                .max(operation.new_range().start + 1),
         );
     }
-    Ok(())
-}
-
-fn collect_hunk_anchor_lines(hunks: &[PatchHunk], line_count: usize) -> Vec<usize> {
-    let mut lines = Vec::new();
-    for hunk in hunks {
-        lines.extend(hunk_anchor_lines(hunk, line_count));
-    }
-    lines.sort_unstable();
-    lines.dedup();
-    lines
-}
-
-fn hunk_anchor_lines(hunk: &PatchHunk, line_count: usize) -> Vec<usize> {
-    let clamp = |line: usize| {
-        if line_count == 0 {
-            1
-        } else {
-            line.clamp(1, line_count)
-        }
-    };
-    match hunk {
-        PatchHunk::Replace { start, end, .. } | PatchHunk::Delete { start, end } => {
-            let start = clamp(*start);
-            let end = clamp(*end);
-            if start == end {
-                vec![start]
-            } else {
-                vec![start, end]
-            }
-        }
-        PatchHunk::InsertBefore { line, .. } | PatchHunk::InsertAfter { line, .. } => {
-            vec![clamp(*line)]
-        }
-        PatchHunk::InsertHead { .. } => vec![1],
-        PatchHunk::InsertTail { .. } => vec![line_count.max(1)],
+    if start == usize::MAX {
+        (1, 1)
+    } else {
+        (start, end)
     }
 }
 
-fn format_current_context(current_lines: &[String], anchor_lines: &[usize]) -> String {
-    if current_lines.is_empty() || anchor_lines.is_empty() {
-        return String::new();
-    }
-    let anchors: BTreeSet<usize> = anchor_lines
-        .iter()
-        .copied()
-        .filter(|line| *line >= 1 && *line <= current_lines.len())
-        .collect();
-    if anchors.is_empty() {
-        return String::new();
-    }
-
-    let mut display_lines = BTreeSet::new();
-    for line in &anchors {
-        let start = line.saturating_sub(EDIT_ERROR_CONTEXT_LINES).max(1);
-        let end = (*line + EDIT_ERROR_CONTEXT_LINES).min(current_lines.len());
-        for display_line in start..=end {
-            display_lines.insert(display_line);
-        }
-    }
-
-    let mut out = String::from("\nCurrent context:\n");
-    let mut previous = 0usize;
-    for line in display_lines {
-        if previous != 0 && line > previous + 1 {
-            out.push_str("...\n");
-        }
-        previous = line;
-        let marker = if anchors.contains(&line) { '*' } else { ' ' };
-        let text = current_lines
-            .get(line - 1)
-            .map(String::as_str)
-            .unwrap_or("");
-        out.push_str(&format!("{marker}{line}:{text}\n"));
-    }
-    out
+fn display_relative_path(cwd: &Path, path: &Path) -> String {
+    path.strip_prefix(cwd)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/")
 }
 
-fn suggested_read_target(display_path: &str, hunks: &[PatchHunk], line_count: usize) -> String {
-    if line_count == 0 {
-        return display_path.to_string();
+fn execute_replace_edit(
+    input: &serde_json::Value,
+    ctx: &crate::context::ToolContext,
+) -> Result<super::runner::ToolOutcome> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Args {
+        path: String,
+        edits: Vec<crate::tools::replace::ReplaceEntry>,
     }
-    let mut min_line = usize::MAX;
-    let mut max_line = 1usize;
-    for hunk in hunks {
-        let (start, end) = hunk_read_span(hunk, line_count);
-        min_line = min_line.min(start);
-        max_line = max_line.max(end);
+    let args: Args = serde_json::from_value(input.clone()).map_err(|error| {
+        anyhow!("Error: Replace Edit requires path and edits with old_text/new_text/all; legacy patch inputs are unsupported: {error}")
+    })?;
+    ensure!(
+        !args.edits.is_empty(),
+        "Error: edits must contain at least one entry"
+    );
+    let path = resolve_replace_target(&ctx.cwd, &args.path)?;
+    let display_path = display_relative_path(&ctx.cwd, &path);
+    let mut output = Vec::new();
+    let mut applied = 0usize;
+    for (index, edit) in args.edits.iter().enumerate() {
+        let original = std::fs::read_to_string(&path)
+            .map_err(|error| anyhow!("Error: cannot read {}: {error}", path.display()))?;
+        ensure!(
+            original.len() <= ctx.tool_config.file_write_max_bytes,
+            "Error: file too large for Edit"
+        );
+        let (shape, normalized) = decode_text_shape(&original);
+        let old_text = crate::tools::snapshot::normalize_snapshot_text(&edit.old_text);
+        let new_text = crate::tools::snapshot::normalize_snapshot_text(&edit.new_text);
+        let result = crate::tools::replace::replace_text(
+            &normalized,
+            &old_text,
+            &new_text,
+            edit.all,
+            ctx.tool_config.edit_fuzzy_match,
+            ctx.tool_config.edit_fuzzy_threshold,
+            &display_path,
+        )
+        .map_err(|error| {
+            anyhow!(
+                "{}{}",
+                error,
+                if applied > 0 {
+                    format!("\n{applied} earlier edit(s) in this call were already committed")
+                } else {
+                    String::new()
+                }
+            )
+        })?;
+        let final_text = restore_text_shape(&shape, &result.content);
+        ensure!(
+            final_text.len() <= ctx.tool_config.file_write_max_bytes,
+            "Error: edited file would exceed file_write_max_bytes"
+        );
+        atomic_write(&path, &final_text)?;
+        let (diff, added, removed) = inline_diff(&display_path, &normalized, &result.content)?;
+        output.push(format!(
+            "Edit {}.{}: replaced {} occurrence(s) via {} [+{} -{} lines]\n{}",
+            display_path,
+            index + 1,
+            result.count,
+            result.strategy,
+            added,
+            removed,
+            diff
+        ));
+        applied += 1;
     }
-    if min_line == usize::MAX {
-        return display_path.to_string();
-    }
-    format_read_target(display_path, min_line, max_line, line_count)
+    let summary = format!("Replace Edit committed {applied} edit(s) in {display_path}");
+    Ok(tool_outcome(output.join("\n\n"), summary))
 }
 
-fn suggested_read_target_for_line(display_path: &str, line: usize, line_count: usize) -> String {
-    if line_count == 0 {
-        return display_path.to_string();
+fn resolve_replace_target(cwd: &Path, authored: &str) -> Result<PathBuf> {
+    let direct = resolve_tool_path(cwd, authored)?;
+    if direct.is_file() {
+        return Ok(crate::tools::snapshot::canonical_snapshot_path(&direct));
     }
-    let line = line.clamp(1, line_count);
-    format_read_target(display_path, line, line, line_count)
-}
-
-fn format_read_target(
-    display_path: &str,
-    start_line: usize,
-    end_line: usize,
-    line_count: usize,
-) -> String {
-    let start = start_line.saturating_sub(EDIT_REREAD_CONTEXT_LINES).max(1);
-    let end = (end_line + EDIT_REREAD_CONTEXT_LINES).min(line_count);
-    format!("{display_path}:{start}-{end}")
-}
-
-fn hunk_read_span(hunk: &PatchHunk, line_count: usize) -> (usize, usize) {
-    match hunk {
-        PatchHunk::Replace { start, end, .. } | PatchHunk::Delete { start, end } => {
-            ((*start).min(line_count), (*end).min(line_count))
-        }
-        PatchHunk::InsertBefore { line, .. } | PatchHunk::InsertAfter { line, .. } => {
-            let line = (*line).min(line_count);
-            (line, line)
-        }
-        PatchHunk::InsertHead { .. } => (1, 1),
-        PatchHunk::InsertTail { .. } => (line_count, line_count),
-    }
-}
-
-fn hunk_post_edit_span(hunk: &PatchHunk, line_count: usize) -> (usize, usize) {
-    if line_count == 0 {
-        return (1, 1);
-    }
-    match hunk {
-        PatchHunk::Replace { start, body, .. } => {
-            let start = (*start).min(line_count).max(1);
-            let end = start
-                .saturating_add(body.len().saturating_sub(1))
-                .min(line_count);
-            (start, end.max(start))
-        }
-        PatchHunk::Delete { start, .. } => {
-            let line = (*start).min(line_count).max(1);
-            (line, line)
-        }
-        PatchHunk::InsertBefore { line, body } => {
-            let start = (*line).min(line_count).max(1);
-            let end = start
-                .saturating_add(body.len().saturating_sub(1))
-                .min(line_count);
-            (start, end.max(start))
-        }
-        PatchHunk::InsertAfter { line, body } => {
-            let start = line.saturating_add(1).min(line_count).max(1);
-            let end = start
-                .saturating_add(body.len().saturating_sub(1))
-                .min(line_count);
-            (start, end.max(start))
-        }
-        PatchHunk::InsertHead { body } => (1, body.len().max(1).min(line_count)),
-        PatchHunk::InsertTail { body } => {
-            let count = body.len().max(1).min(line_count);
-            (line_count - count + 1, line_count)
-        }
+    let suffix = Path::new(authored)
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value.to_owned()),
+            _ => None,
+        })
+        .collect::<PathBuf>();
+    ensure!(
+        !suffix.as_os_str().is_empty(),
+        "Error: file not found: {authored}"
+    );
+    let mut candidates = ignore::WalkBuilder::new(cwd)
+        .standard_filters(true)
+        .parents(false)
+        .build()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
+        .map(|entry| entry.into_path())
+        .filter(|path| path.ends_with(&suffix))
+        .take(6)
+        .collect::<Vec<_>>();
+    candidates.sort();
+    match candidates.as_slice() {
+        [path] => Ok(crate::tools::snapshot::canonical_snapshot_path(path)),
+        [] => bail!("Error: file not found: {authored}"),
+        _ => bail!(
+            "Error: path suffix {authored:?} is ambiguous: {}",
+            candidates
+                .iter()
+                .map(|path| display_relative_path(cwd, path))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
     }
 }
 
-fn apply_hunks(lines: &mut Vec<String>, hunks: &[PatchHunk]) -> Result<()> {
-    let mut ordered = hunks.to_vec();
-    ordered.sort_by_key(|hunk| std::cmp::Reverse(hunk_apply_index(hunk, lines.len())));
-    for hunk in ordered {
-        match hunk {
-            PatchHunk::Replace { start, end, body } => {
-                lines.splice(start - 1..end, body);
-            }
-            PatchHunk::Delete { start, end } => {
-                lines.drain(start - 1..end);
-            }
-            PatchHunk::InsertBefore { line, body } => {
-                lines.splice(line - 1..line - 1, body);
-            }
-            PatchHunk::InsertAfter { line, body } => {
-                lines.splice(line..line, body);
-            }
-            PatchHunk::InsertHead { body } => {
-                lines.splice(0..0, body);
-            }
-            PatchHunk::InsertTail { body } => {
-                lines.extend(body);
-            }
-        }
-    }
-    Ok(())
-}
-
-fn hunk_apply_index(hunk: &PatchHunk, line_count: usize) -> usize {
-    match hunk {
-        PatchHunk::Replace { start, .. }
-        | PatchHunk::Delete { start, .. }
-        | PatchHunk::InsertBefore { line: start, .. } => *start,
-        PatchHunk::InsertAfter { line, .. } => line + 1,
-        PatchHunk::InsertHead { .. } => 0,
-        PatchHunk::InsertTail { .. } => line_count + 1,
+fn tool_outcome(content: String, conversation_content: String) -> super::runner::ToolOutcome {
+    super::runner::ToolOutcome {
+        conversation_content,
+        content,
+        is_bash: false,
+        exit_code: None,
+        success: true,
+        diagnostics: Vec::new(),
+        plan_command: None,
+        state_metadata: None,
+        presentation: None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context::{ToolConfig, ToolContext};
-    use crate::session::artifacts::ArtifactManager;
-    use crate::session::store::ConversationStore;
-    use crate::tools::runner::ToolExec;
-    use serde_json::json;
-    use std::fs;
-    use std::sync::atomic::AtomicBool;
-    use std::sync::{Arc, Mutex};
 
-    fn temp_file(name: &str, content: &str) -> String {
-        let path = format!("/tmp/mink-test-{}-{}", name, std::process::id());
-        fs::write(&path, content).unwrap();
-        path
-    }
-
-    fn temp_tool_context(name: &str) -> ToolContext {
-        let root =
-            std::env::temp_dir().join(format!("mink-tool-context-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        let home = root.join("home");
-        let cwd = root.join("workspace");
-        let session = home.join(".mink/projects/-workspace/session-1");
-        fs::create_dir_all(&cwd).unwrap();
-        fs::create_dir_all(session.join("artifacts")).unwrap();
-        fs::write(session.join("conversation.jsonl"), "").unwrap();
-        fs::write(session.join("stats.json"), "{}\n").unwrap();
-        let artifacts = Arc::new(ArtifactManager::new(session.join("artifacts")));
-        artifacts.ensure().unwrap();
-        let capability_snapshot = Arc::new(
-            crate::capabilities::CapabilitySnapshot::load_default(
-                &cwd,
-                &home,
-                "session-1",
-                "session-1",
-                &[],
-            )
-            .unwrap(),
-        );
-        let tool_config = ToolConfig::from_config(&crate::config::Config::default());
-        let (tool_resolution_context, tool_surface, tool_capabilities) =
-            crate::context::resolve_tool_runtime(&tool_config, false, false).unwrap();
-        ToolContext {
-            vfs_scope: crate::tools::vfs::VfsScope {
-                resource_session_id: "session-1".into(),
-                agent_session_id: "session-1".into(),
-            },
-            read_only_fs: None,
-            cwd,
-            home: home.clone(),
-            store: Arc::new(ConversationStore::new(session.join("conversation.jsonl"))),
-            artifacts,
-            snapshots: Arc::new(Mutex::new(
-                crate::tools::snapshot::FileSnapshotStore::default(),
-            )),
-            plan_store: Arc::new(crate::session::plan::PlanStore::new(
-                home.join("plan.md"),
-                home.join("plan.draft"),
-            )),
-            todo_store: Arc::new(
-                crate::session::todo::TodoStore::load(session.join("todos.json")).unwrap(),
-            ),
-            tool_config,
-            interrupt: Arc::new(AtomicBool::new(false)),
-            resource_router: Arc::new(crate::resources::ResourceRouter::with_builtin_handlers()),
-            capability_snapshot,
-            tool_resolution_context,
-            tool_surface,
-            tool_capabilities,
-        }
-    }
-
-    fn read_skill_resource(url: &str, ctx: &ToolContext) -> anyhow::Result<String> {
-        let selection = split_read_path_selection(url)?;
-        ctx.resource_router
-            .resolve(&selection, ctx)
-            .map(|resource| resource.content)
-    }
-
-    struct VirtualReadOnlyFs;
-
-    impl crate::tools::vfs::ReadOnlyFileSystem for VirtualReadOnlyFs {
-        fn read(
-            &self,
-            scope: &crate::tools::vfs::VfsScope,
-            request: &crate::tools::vfs::VfsReadRequest,
-        ) -> anyhow::Result<crate::tools::vfs::VfsReadResult> {
-            assert_eq!(scope.resource_session_id, "session-1");
-            assert_eq!(scope.agent_session_id, "session-1");
-            assert_eq!(request.path, "knowledge/guide.md");
-            Ok(crate::tools::vfs::VfsReadResult {
-                content: "alpha\nbeta".into(),
-                total_lines: 2,
-                total_bytes: 10,
-            })
-        }
-
-        fn glob(
-            &self,
-            _scope: &crate::tools::vfs::VfsScope,
-            _request: &crate::tools::vfs::VfsGlobRequest,
-        ) -> anyhow::Result<crate::tools::vfs::VfsGlobResult> {
-            unreachable!()
-        }
-
-        fn grep(
-            &self,
-            _scope: &crate::tools::vfs::VfsScope,
-            _request: &crate::tools::vfs::VfsGrepRequest,
-        ) -> anyhow::Result<crate::tools::vfs::VfsGrepResult> {
-            unreachable!()
-        }
+    #[test]
+    fn text_shape_round_trips_bom_and_crlf() {
+        let original = "\u{feff}a\r\nb\r\n";
+        let (shape, normalized) = decode_text_shape(original);
+        assert_eq!(normalized, "a\nb\n");
+        assert_eq!(restore_text_shape(&shape, &normalized), original);
     }
 
     #[test]
-    fn read_tool_routes_virtual_files_without_edit_snapshot() {
-        let mut ctx = temp_tool_context("virtual-read");
-        ctx.read_only_fs = Some(Arc::new(VirtualReadOnlyFs));
-        let outcome = ReadTool
-            .execute(&json!({"path": "knowledge/guide.md"}), &ctx)
-            .unwrap();
+    fn numbered_hashline_format_uses_bracket_header() {
+        assert_eq!(
+            format_hashline_read("src/a.rs", "A1B2", 4, "a\nb"),
+            "[src/a.rs#A1B2]\n4:a\n5:b"
+        );
+    }
 
+    #[test]
+    fn replace_suffix_recovery_rejects_ambiguity() {
+        let root = std::env::temp_dir().join(format!("mink-replace-suffix-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("a")).unwrap();
+        std::fs::create_dir_all(root.join("b")).unwrap();
+        std::fs::write(root.join("a/x.rs"), "a").unwrap();
+        std::fs::write(root.join("b/x.rs"), "b").unwrap();
         assert!(
-            outcome
-                .content
-                .starts_with("[read-only virtual file: knowledge/guide.md]")
+            resolve_replace_target(&root, "x.rs")
+                .unwrap_err()
+                .to_string()
+                .contains("ambiguous")
         );
-        assert!(outcome.content.contains("1:alpha"));
-        assert!(!outcome.content.starts_with('@'));
-    }
-
-    #[test]
-    fn read_tool_enforces_full_read_limit_for_virtual_backend() {
-        let mut ctx = temp_tool_context("virtual-read-limit");
-        ctx.read_only_fs = Some(Arc::new(VirtualReadOnlyFs));
-        ctx.tool_config.tool_result_max_bytes = 5;
-        let error = match ReadTool.execute(&json!({"path": "knowledge/guide.md"}), &ctx) {
-            Ok(_) => panic!("virtual full read should exceed configured limit"),
-            Err(error) => error,
-        };
-        assert!(error.to_string().contains("file too large for full Read"));
-    }
-
-    #[test]
-    fn unknown_resource_scheme_fails_closed() {
-        let ctx = temp_tool_context("unknown-resource");
-        let err = match ReadTool.execute(&json!({"path": "kb://policy/rust"}), &ctx) {
-            Ok(_) => panic!("unknown resource scheme should fail closed"),
-            Err(error) => error.to_string(),
-        };
-        assert!(err.contains("unknown resource scheme: kb"), "{err}");
-    }
-
-    #[test]
-    fn unknown_resource_scheme_does_not_enter_vfs() {
-        let mut ctx = temp_tool_context("unknown-resource-vfs");
-        ctx.read_only_fs = Some(Arc::new(VirtualReadOnlyFs));
-        let err = match ReadTool.execute(&json!({"path": "kb://policy/rust"}), &ctx) {
-            Ok(_) => panic!("unknown resource scheme should fail before VFS"),
-            Err(error) => error.to_string(),
-        };
-        assert!(err.contains("unknown resource scheme: kb"), "{err}");
-    }
-
-    #[test]
-    fn resource_router_does_not_change_local_read_snapshot() {
-        let ctx = temp_tool_context("router-local-snapshot");
-        fs::write(ctx.cwd.join("local.txt"), "alpha\nbeta\n").unwrap();
-
-        let outcome = ReadTool
-            .execute(&json!({"path": "local.txt"}), &ctx)
-            .unwrap();
-
-        assert!(
-            outcome.content.starts_with("@local.txt#"),
-            "{}",
-            outcome.content
-        );
-        assert!(outcome.content.contains("1:alpha"), "{}", outcome.content);
-        assert!(outcome.content.contains("2:beta"), "{}", outcome.content);
-        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
-    }
-
-    #[test]
-    fn resource_router_does_not_consume_selector_twice() {
-        let ctx = temp_tool_context("router-selector-once");
-        let record = ctx
-            .artifacts
-            .write_text("Bash", "full output", "one\ntwo\nthree\n")
-            .unwrap();
-
-        let outcome = ReadTool
-            .execute(
-                &json!({"path": format!("artifact://{}:2-2", record.id)}),
-                &ctx,
-            )
-            .unwrap();
-
-        assert_eq!(outcome.content, "two");
-        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
-    }
-
-    #[test]
-    fn read_whole_file() {
-        let p = temp_file("read-whole", "line1\nline2\nline3\n");
-        let result = read(&p, None, None).unwrap();
-        assert_eq!(result, "line1\nline2\nline3\n");
-        fs::remove_file(&p).ok();
-    }
-
-    #[test]
-    fn read_with_offset_limit() {
-        let p = temp_file("read-ol", "line1\nline2\nline3\nline4\nline5\n");
-        let result = read(&p, Some(2), Some(2)).unwrap();
-        assert_eq!(result, "line2\nline3");
-        fs::remove_file(&p).ok();
-    }
-
-    #[test]
-    fn read_offset_exceeds_lines_error() {
-        let p = temp_file("read-err", "only\n");
-        let result = read(&p, Some(5), None);
-        assert!(result.is_err());
-        fs::remove_file(&p).ok();
-    }
-
-    #[test]
-    fn read_large_file_offset_exceeds_lines_error() {
-        let p = temp_file(
-            "read-large-err",
-            &format!(
-                "first\n{}\nlast\n",
-                "x".repeat(STREAM_READ_THRESHOLD as usize)
-            ),
-        );
-        let result = read(&p, Some(4), None);
-        assert!(result.is_err());
-        fs::remove_file(&p).ok();
-    }
-
-    #[test]
-    fn read_large_file_range_matches_line_semantics() {
-        let p = temp_file(
-            "read-large-range",
-            &format!(
-                "first\n{}\nthird\nfourth\n",
-                "x".repeat(STREAM_READ_THRESHOLD as usize)
-            ),
-        );
-        let result = read(&p, Some(3), Some(1)).unwrap();
-        assert_eq!(result, "third");
-        fs::remove_file(&p).ok();
-    }
-
-    #[test]
-    fn read_empty_path_error() {
-        assert!(read("", None, None).is_err());
-    }
-
-    #[test]
-    fn split_read_path_selection_plain_has_no_range() {
-        let selection = split_read_path_selection("src/main.rs").unwrap();
-        assert_eq!(selection.path, "src/main.rs");
-        assert_eq!(selection.offset, None);
-        assert_eq!(selection.limit, None);
-        assert!(!selection.raw);
-    }
-
-    #[test]
-    fn split_read_path_selection_raw_suffix() {
-        let selection = split_read_path_selection("src/main.rs:raw").unwrap();
-        assert_eq!(selection.path, "src/main.rs");
-        assert_eq!(selection.offset, None);
-        assert_eq!(selection.limit, None);
-        assert!(selection.raw);
-    }
-
-    #[test]
-    fn split_read_path_selection_range() {
-        let selection = split_read_path_selection("src/main.rs:10-14").unwrap();
-        assert_eq!(selection.path, "src/main.rs");
-        assert_eq!(selection.offset, Some(10));
-        assert_eq!(selection.limit, Some(5));
-    }
-
-    #[test]
-    fn split_read_path_selection_plus_count() {
-        let selection = split_read_path_selection("src/main.rs:10+4").unwrap();
-        assert_eq!(selection.path, "src/main.rs");
-        assert_eq!(selection.offset, Some(10));
-        assert_eq!(selection.limit, Some(4));
-    }
-
-    #[test]
-    fn split_read_path_selection_range_raw() {
-        let selection = split_read_path_selection("src/main.rs:10-14:raw").unwrap();
-        assert_eq!(selection.path, "src/main.rs");
-        assert_eq!(selection.offset, Some(10));
-        assert_eq!(selection.limit, Some(5));
-        assert!(selection.raw);
-    }
-
-    #[test]
-    fn split_read_path_selection_raw_range() {
-        let selection = split_read_path_selection("src/main.rs:raw:10-14").unwrap();
-        assert_eq!(selection.path, "src/main.rs");
-        assert_eq!(selection.offset, Some(10));
-        assert_eq!(selection.limit, Some(5));
-        assert!(selection.raw);
-    }
-
-    #[test]
-    fn split_read_path_selection_unknown_colon_suffix_left_in_path() {
-        let selection = split_read_path_selection("src/main.rs:notes").unwrap();
-        assert_eq!(selection.path, "src/main.rs:notes");
-        assert_eq!(selection.offset, None);
-        assert_eq!(selection.limit, None);
-    }
-
-    #[test]
-    fn split_read_path_selection_rejects_zero_line() {
-        assert!(split_read_path_selection("src/main.rs:0").is_err());
-    }
-
-    #[test]
-    fn split_read_path_selection_rejects_backwards_range() {
-        assert!(split_read_path_selection("src/main.rs:10-4").is_err());
-    }
-
-    #[test]
-    fn read_tool_accepts_offset_limit_args() {
-        let ctx = temp_tool_context("read-offset-limit-args");
-        // Create a file with known content
-        let dir = std::env::temp_dir().join("mink-test-read-offset-limit-args");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let p = dir.join("test.txt");
-        std::fs::write(&p, "line1\nline2\nline3\nline4\nline5\n").unwrap();
-        let abspath = std::fs::canonicalize(&p).unwrap();
-        let result = ReadTool.execute(
-            &json!({"path": abspath.to_string_lossy(), "offset": 2, "limit": 2}),
-            &ctx,
-        );
-        assert!(
-            result.is_ok(),
-            "Read with offset/limit should succeed: {:?}",
-            result.err()
-        );
-        let outcome = result.unwrap();
-        assert!(outcome.content.contains("line2"), "should contain line2");
-        assert!(outcome.content.contains("line3"), "should contain line3");
-        assert!(
-            !outcome.content.contains("line1"),
-            "should not contain line1"
-        );
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn read_tool_rejects_large_full_read_before_loading_content() {
-        let mut ctx = temp_tool_context("read-large-full-limit");
-        ctx.tool_config.tool_result_max_bytes = 8;
-        let p = ctx.cwd.join("large.txt");
-        std::fs::write(&p, "0123456789abcdef\nsecond\n").unwrap();
-
-        let err = match ReadTool.execute(&json!({"path": "large.txt"}), &ctx) {
-            Ok(_) => panic!("large full Read should be rejected"),
-            Err(err) => err.to_string(),
-        };
-        assert!(err.contains("file too large for full Read"), "{err}");
-
-        let ranged = ReadTool
-            .execute(&json!({"path": "large.txt", "offset": 2, "limit": 1}), &ctx)
-            .unwrap();
-        assert!(ranged.content.contains("second"), "{}", ranged.content);
-
-        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
-    }
-
-    #[test]
-    fn edit_tool_rejects_legacy_string_replace_args() {
-        let ctx = temp_tool_context("edit-legacy-args");
-        let err = match EditTool.execute(
-            &json!({"path":"src/main.rs","old_string":"old","new_string":"new"}),
-            &ctx,
-        ) {
-            Ok(_) => panic!("legacy Edit old_string/new_string args should be rejected"),
-            Err(err) => err.to_string(),
-        };
-        assert!(
-            err.contains("old_string/new_string is not supported"),
-            "{err}"
-        );
-    }
-
-    #[test]
-    fn ranged_read_records_full_file_snapshot_for_edit() {
-        let ctx = temp_tool_context("read-range-full-snapshot");
-        let p = ctx.cwd.join("range.txt");
-        fs::write(&p, "one\ntwo\nthree\n").unwrap();
-
-        let read = ReadTool
-            .execute(&json!({"path":"range.txt:2-2"}), &ctx)
-            .unwrap()
-            .content;
-        assert!(read.contains("@range.txt#"), "{read}");
-        assert!(read.contains("2:two"), "{read}");
-        assert!(!read.contains("1:one"), "{read}");
-        let tag = read
-            .lines()
-            .next()
-            .unwrap()
-            .strip_prefix("@range.txt#")
-            .unwrap();
-
-        let patch = format!("@range.txt#{tag}\nreplace 1:\n+ONE");
-        let edited = EditTool
-            .execute(&json!({"path":"range.txt","patch":patch}), &ctx)
-            .unwrap()
-            .content;
-
-        assert!(edited.contains("@range.txt#"), "{edited}");
-        assert_eq!(fs::read_to_string(&p).unwrap(), "ONE\ntwo\nthree\n");
-        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
-    }
-
-    #[test]
-    fn select_text_lines_applies_range() {
-        let result = select_text_lines("a\nb\nc\nd\n", Some(2), Some(2));
-        assert_eq!(result, "b\nc");
-    }
-
-    #[test]
-    fn read_skill_resource_lists_skills() {
-        let ctx = temp_tool_context("skill-list");
-        let result = read_skill_resource("skill://list", &ctx).unwrap();
-        assert!(result.contains("# Skills"));
-        assert!(result.contains("debugging"));
-        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
-    }
-
-    #[test]
-    fn read_skill_resource_returns_skill_content() {
-        let ctx = temp_tool_context("skill-content");
-        let result = read_skill_resource("skill://debugging", &ctx).unwrap();
-        assert!(result.contains("# skill://debugging"));
-        assert!(result.contains("Base directory: <built-in>"));
-        assert!(result.contains("Phase 1"));
-        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
-    }
-
-    #[test]
-    fn read_skill_resource_allows_trailing_slash() {
-        let ctx = temp_tool_context("skill-trailing-slash");
-        let result = read_skill_resource("skill://debugging/", &ctx).unwrap();
-        assert!(result.contains("# skill://debugging"));
-        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
-    }
-
-    #[test]
-    fn read_skill_resource_rejects_empty_authority_path() {
-        let ctx = temp_tool_context("skill-empty-authority");
-        let err = read_skill_resource("skill:///debugging", &ctx)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("invalid skill resource"), "{err}");
-        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
-    }
-
-    #[test]
-    fn read_skill_resource_prefers_filesystem_skill() {
-        let mut ctx = temp_tool_context("skill-local");
-        let skill_dir = ctx.cwd.join(".claude/skills/debugging");
-        fs::create_dir_all(&skill_dir).unwrap();
-        fs::write(
-            skill_dir.join("SKILL.md"),
-            "---\ndescription: \"Local debugging\"\n---\n\nUse local steps.",
-        )
-        .unwrap();
-        ctx.capability_snapshot = Arc::new(
-            crate::capabilities::CapabilitySnapshot::load_default(
-                &ctx.cwd,
-                &ctx.home,
-                "session-1",
-                "session-1",
-                &[],
-            )
-            .unwrap(),
-        );
-
-        let result = read_skill_resource("skill://debugging", &ctx).unwrap();
-
-        assert!(result.contains("Description: Local debugging"));
-        assert!(result.contains("Use local steps."));
-        assert!(result.contains(&format!("Base directory: {}", skill_dir.display())));
-        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
-    }
-
-    #[test]
-    fn skill_list_excludes_model_addressable() {
-        let mut ctx = temp_tool_context("skill-hidden-list");
-        let skill_dir = ctx.cwd.join("skills/hidden-review");
-        fs::create_dir_all(&skill_dir).unwrap();
-        fs::write(
-            skill_dir.join("SKILL.md"),
-            "---\ndescription: \"Hidden review\"\nhide: true\n---\n\nUse hidden steps.",
-        )
-        .unwrap();
-        ctx.capability_snapshot = Arc::new(
-            crate::capabilities::CapabilitySnapshot::load_default(
-                &ctx.cwd,
-                &ctx.home,
-                "session-1",
-                "session-1",
-                &[],
-            )
-            .unwrap(),
-        );
-
-        let result = read_skill_resource("skill://list", &ctx).unwrap();
-
-        assert!(!result.contains("hidden-review"), "{result}");
-        let hidden = read_skill_resource("skill://hidden-review", &ctx).unwrap();
-        assert!(hidden.contains("Use hidden steps."));
-        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
-    }
-
-    #[test]
-    fn skill_list_all_includes_model_addressable_and_selected() {
-        let mut ctx = temp_tool_context("skill-list-all");
-        let skill_dir = ctx.cwd.join("skills/hidden-review");
-        fs::create_dir_all(&skill_dir).unwrap();
-        fs::write(
-            skill_dir.join("SKILL.md"),
-            "---\ndescription: \"Hidden review\"\nhide: true\n---\n\nUse hidden steps.",
-        )
-        .unwrap();
-        ctx.capability_snapshot = Arc::new(
-            crate::capabilities::CapabilitySnapshot::load_default(
-                &ctx.cwd,
-                &ctx.home,
-                "session-1",
-                "session-1",
-                &["hidden-review".to_string()],
-            )
-            .unwrap(),
-        );
-
-        let result = read_skill_resource("skill://list/all", &ctx).unwrap();
-
-        assert!(result.contains("## Discoverable"));
-        assert!(result.contains("## Addressable"));
-        assert!(result.contains("## Selected"));
-        assert!(result.contains("- hidden-review [skills, model-addressable]: Hidden review"));
-        assert!(result.contains("- hidden-review [skills]: Hidden review"));
-        let alias = read_skill_resource("skill://all", &ctx).unwrap();
-        assert_eq!(result, alias);
-        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
-    }
-
-    #[test]
-    fn skill_list_all_does_not_leak_host_only() {
-        let mut ctx = temp_tool_context("skill-list-all-host-only");
-        let loaded = crate::capabilities::skills::LoadedSkill {
-            skill: crate::capabilities::skills::SkillCapability {
-                name: "host-secret".to_string(),
-                description: "Do not leak this description".to_string(),
-                content: "secret body".to_string(),
-                base_dir: "/secret/base".to_string(),
-                disable_model_invocation: true,
-            },
-            source: crate::capabilities::SourceMeta {
-                provider_id: "test-provider".to_string(),
-                provider_name: "test provider".to_string(),
-                level: crate::capabilities::SourceLevel::Runtime,
-                source_path: None,
-                display_label: Some("test".to_string()),
-            },
-            exposure: crate::capabilities::CapabilityExposure::HostOnly,
-            revision: "rev".to_string(),
-        };
-        let mut by_name = std::collections::BTreeMap::new();
-        by_name.insert("host-secret".to_string(), loaded.clone());
-        ctx.capability_snapshot = Arc::new(crate::capabilities::CapabilitySnapshot {
-            skills: crate::capabilities::SkillSnapshot {
-                all: vec![loaded],
-                by_name,
-                warnings: vec![crate::capabilities::CapabilityWarning {
-                    provider_id: "test-provider".to_string(),
-                    message: "host-only skill 'host-secret' is hidden".to_string(),
-                }],
-                dependency_fingerprint: "deps".to_string(),
-                ..crate::capabilities::SkillSnapshot::default()
-            },
-            context_files: crate::capabilities::ContextFileSnapshot::default(),
-            rules: crate::capabilities::RuleSnapshot::default(),
-            warnings: Vec::new(),
-            dependency_fingerprint: "deps".to_string(),
-        });
-
-        let result = read_skill_resource("skill://list/all", &ctx).unwrap();
-
-        assert!(result.contains("host-only skill 'host-secret' is hidden"));
-        assert!(!result.contains("Do not leak this description"), "{result}");
-        assert!(!result.contains("secret body"), "{result}");
-        assert!(!result.contains("/secret/base"), "{result}");
-        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
-    }
-
-    #[test]
-    fn host_only_skill_cannot_be_read() {
-        let mut ctx = temp_tool_context("skill-host-only");
-        let loaded = crate::capabilities::skills::LoadedSkill {
-            skill: crate::capabilities::skills::SkillCapability {
-                name: "host-secret".to_string(),
-                description: "Host secret".to_string(),
-                content: "secret body".to_string(),
-                base_dir: "<runtime>".to_string(),
-                disable_model_invocation: true,
-            },
-            source: crate::capabilities::SourceMeta {
-                provider_id: "test".to_string(),
-                provider_name: "test".to_string(),
-                level: crate::capabilities::SourceLevel::Runtime,
-                source_path: None,
-                display_label: Some("test".to_string()),
-            },
-            exposure: crate::capabilities::CapabilityExposure::HostOnly,
-            revision: "rev".to_string(),
-        };
-        let mut by_name = std::collections::BTreeMap::new();
-        by_name.insert("host-secret".to_string(), loaded.clone());
-        ctx.capability_snapshot = Arc::new(crate::capabilities::CapabilitySnapshot {
-            skills: crate::capabilities::SkillSnapshot {
-                all: vec![loaded],
-                by_name,
-                dependency_fingerprint: "deps".to_string(),
-                ..crate::capabilities::SkillSnapshot::default()
-            },
-            context_files: crate::capabilities::ContextFileSnapshot::default(),
-            rules: crate::capabilities::RuleSnapshot::default(),
-            warnings: Vec::new(),
-            dependency_fingerprint: "deps".to_string(),
-        });
-
-        let err = read_skill_resource("skill://host-secret", &ctx)
-            .unwrap_err()
-            .to_string();
-
-        assert!(err.contains("host-only"), "{err}");
-        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
-    }
-
-    #[test]
-    fn read_skill_subresource_returns_file_content() {
-        let mut ctx = temp_tool_context("skill-subresource");
-        let skill_dir = ctx.cwd.join("skills/local-guide");
-        fs::create_dir_all(skill_dir.join("references")).unwrap();
-        fs::write(
-            skill_dir.join("SKILL.md"),
-            "---\ndescription: \"Local guide\"\n---\n\nUse references/details.md.",
-        )
-        .unwrap();
-        fs::write(
-            skill_dir.join("references/details.md"),
-            "alpha\nbeta\ngamma\n",
-        )
-        .unwrap();
-        ctx.capability_snapshot = Arc::new(
-            crate::capabilities::CapabilitySnapshot::load_default(
-                &ctx.cwd,
-                &ctx.home,
-                "session-1",
-                "session-1",
-                &[],
-            )
-            .unwrap(),
-        );
-
-        let result =
-            read_skill_resource("skill://local-guide/references/details.md", &ctx).unwrap();
-
-        assert!(result.contains("# skill://local-guide/references/details.md"));
-        assert!(result.contains("Content-Type: text/markdown"));
-        assert!(result.contains("alpha\nbeta\ngamma"));
-        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
-    }
-
-    #[test]
-    fn read_skill_subresource_applies_line_selector() {
-        let mut ctx = temp_tool_context("skill-subresource-selector");
-        let skill_dir = ctx.cwd.join("skills/local-guide");
-        fs::create_dir_all(skill_dir.join("references")).unwrap();
-        fs::write(
-            skill_dir.join("SKILL.md"),
-            "---\ndescription: \"Local guide\"\n---\n\nUse references/details.txt.",
-        )
-        .unwrap();
-        fs::write(skill_dir.join("references/details.txt"), "a\nb\nc\nd\n").unwrap();
-        ctx.capability_snapshot = Arc::new(
-            crate::capabilities::CapabilitySnapshot::load_default(
-                &ctx.cwd,
-                &ctx.home,
-                "session-1",
-                "session-1",
-                &[],
-            )
-            .unwrap(),
-        );
-
-        let result = ReadTool
-            .execute(
-                &json!({"path":"skill://local-guide/references/details.txt:6-7"}),
-                &ctx,
-            )
-            .unwrap()
-            .content;
-
-        assert_eq!(result, "a\nb");
-        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
-    }
-
-    #[test]
-    fn read_skill_subresource_rejects_parent_dir() {
-        let mut ctx = temp_tool_context("skill-subresource-parent");
-        let skill_dir = ctx.cwd.join("skills/local-guide");
-        fs::create_dir_all(&skill_dir).unwrap();
-        fs::write(
-            skill_dir.join("SKILL.md"),
-            "---\ndescription: \"Local guide\"\n---\n\nbody",
-        )
-        .unwrap();
-        ctx.capability_snapshot = Arc::new(
-            crate::capabilities::CapabilitySnapshot::load_default(
-                &ctx.cwd,
-                &ctx.home,
-                "session-1",
-                "session-1",
-                &[],
-            )
-            .unwrap(),
-        );
-
-        let err = read_skill_resource("skill://local-guide/../secret", &ctx)
-            .unwrap_err()
-            .to_string();
-
-        assert!(err.contains("escapes skill directory"), "{err}");
-        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
-    }
-
-    #[test]
-    fn read_skill_subresource_rejects_encoded_parent_dir() {
-        let mut ctx = temp_tool_context("skill-subresource-encoded-parent");
-        let skill_dir = ctx.cwd.join("skills/local-guide");
-        fs::create_dir_all(&skill_dir).unwrap();
-        fs::write(
-            skill_dir.join("SKILL.md"),
-            "---\ndescription: \"Local guide\"\n---\n\nbody",
-        )
-        .unwrap();
-        ctx.capability_snapshot = Arc::new(
-            crate::capabilities::CapabilitySnapshot::load_default(
-                &ctx.cwd,
-                &ctx.home,
-                "session-1",
-                "session-1",
-                &[],
-            )
-            .unwrap(),
-        );
-
-        let err = read_skill_resource("skill://local-guide/%2E%2E/secret", &ctx)
-            .unwrap_err()
-            .to_string();
-
-        assert!(err.contains("escapes skill directory"), "{err}");
-        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
-    }
-
-    #[test]
-    fn read_skill_subresource_rejects_absolute_path() {
-        let mut ctx = temp_tool_context("skill-subresource-absolute");
-        let skill_dir = ctx.cwd.join("skills/local-guide");
-        fs::create_dir_all(&skill_dir).unwrap();
-        fs::write(
-            skill_dir.join("SKILL.md"),
-            "---\ndescription: \"Local guide\"\n---\n\nbody",
-        )
-        .unwrap();
-        ctx.capability_snapshot = Arc::new(
-            crate::capabilities::CapabilitySnapshot::load_default(
-                &ctx.cwd,
-                &ctx.home,
-                "session-1",
-                "session-1",
-                &[],
-            )
-            .unwrap(),
-        );
-
-        let err = read_skill_resource("skill://local-guide/%2Ftmp/secret", &ctx)
-            .unwrap_err()
-            .to_string();
-
-        assert!(err.contains("must be relative"), "{err}");
-        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
-    }
-
-    #[test]
-    fn read_skill_subresource_rejects_builtin() {
-        let ctx = temp_tool_context("skill-subresource-builtin");
-        let err = read_skill_resource("skill://debugging/references/foo.md", &ctx)
-            .unwrap_err()
-            .to_string();
-
-        assert!(err.contains("filesystem-backed skills"), "{err}");
-        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
-    }
-
-    #[test]
-    fn read_skill_subresource_rejects_host_only() {
-        let mut ctx = temp_tool_context("skill-subresource-host-only");
-        let loaded = crate::capabilities::skills::LoadedSkill {
-            skill: crate::capabilities::skills::SkillCapability {
-                name: "host-secret".to_string(),
-                description: "Host secret".to_string(),
-                content: "secret body".to_string(),
-                base_dir: "<runtime>".to_string(),
-                disable_model_invocation: true,
-            },
-            source: crate::capabilities::SourceMeta {
-                provider_id: "test".to_string(),
-                provider_name: "test".to_string(),
-                level: crate::capabilities::SourceLevel::Runtime,
-                source_path: None,
-                display_label: Some("test".to_string()),
-            },
-            exposure: crate::capabilities::CapabilityExposure::HostOnly,
-            revision: "rev".to_string(),
-        };
-        let mut by_name = std::collections::BTreeMap::new();
-        by_name.insert("host-secret".to_string(), loaded.clone());
-        ctx.capability_snapshot = Arc::new(crate::capabilities::CapabilitySnapshot {
-            skills: crate::capabilities::SkillSnapshot {
-                all: vec![loaded],
-                by_name,
-                dependency_fingerprint: "deps".to_string(),
-                ..crate::capabilities::SkillSnapshot::default()
-            },
-            context_files: crate::capabilities::ContextFileSnapshot::default(),
-            rules: crate::capabilities::RuleSnapshot::default(),
-            warnings: Vec::new(),
-            dependency_fingerprint: "deps".to_string(),
-        });
-
-        let err = read_skill_resource("skill://host-secret/secret.txt", &ctx)
-            .unwrap_err()
-            .to_string();
-
-        assert!(err.contains("host-only"), "{err}");
-        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn read_skill_subresource_rejects_symlink_escape() {
-        use std::os::unix::fs::symlink;
-
-        let mut ctx = temp_tool_context("skill-subresource-symlink");
-        let skill_dir = ctx.cwd.join("skills/local-guide");
-        fs::create_dir_all(skill_dir.join("references")).unwrap();
-        fs::write(
-            skill_dir.join("SKILL.md"),
-            "---\ndescription: \"Local guide\"\n---\n\nbody",
-        )
-        .unwrap();
-        fs::write(ctx.cwd.join("outside.txt"), "secret").unwrap();
-        symlink(
-            ctx.cwd.join("outside.txt"),
-            skill_dir.join("references/outside.txt"),
-        )
-        .unwrap();
-        ctx.capability_snapshot = Arc::new(
-            crate::capabilities::CapabilitySnapshot::load_default(
-                &ctx.cwd,
-                &ctx.home,
-                "session-1",
-                "session-1",
-                &[],
-            )
-            .unwrap(),
-        );
-
-        let err = read_skill_resource("skill://local-guide/references/outside.txt", &ctx)
-            .unwrap_err()
-            .to_string();
-
-        assert!(err.contains("escapes skill directory"), "{err}");
-        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
-    }
-
-    #[test]
-    fn read_rule_resource_lists_and_returns_content() {
-        let ctx = temp_tool_context("rule-resource");
-        let list = crate::resources::rule::read_rule_resource("rule://list", &ctx).unwrap();
-        assert!(list.contains("default-agent-rules"));
-
-        let rule =
-            crate::resources::rule::read_rule_resource("rule://default-agent-rules", &ctx).unwrap();
-        assert!(rule.contains("# rule://default-agent-rules"));
-        assert!(rule.contains("Prefer safe, exact edits."));
-        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
-    }
-
-    #[test]
-    fn read_tool_routes_rule_resource() {
-        let ctx = temp_tool_context("rule-read-tool");
-        let result = ReadTool
-            .execute(
-                &serde_json::json!({"path":"rule://default-agent-rules"}),
-                &ctx,
-            )
-            .unwrap();
-        assert!(result.content.contains("Prefer safe, exact edits."));
-        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
-    }
-
-    #[test]
-    fn read_session_current_summarizes_paths_and_resources() {
-        let ctx = temp_tool_context("session-current");
-        let session = ctx.store.path().parent().unwrap().to_path_buf();
-        fs::write(
-            session.join("stats.json"),
-            r#"{"current_turn_count":2,"agent_request_count":3,"total_input_tokens":10,"total_output_tokens":4}"#,
-        )
-        .unwrap();
-        fs::write(
-            session.join("conversation.jsonl"),
-            format!(
-                "{}\n{}\n",
-                json!({"role":"user","content":"hello"}),
-                json!({"role":"assistant","content":[{"type":"text","text":"hi"}]})
-            ),
-        )
-        .unwrap();
-
-        let result =
-            crate::resources::session::read_session_resource("session://current", &ctx).unwrap();
-
-        assert!(result.contains("session_id: session-1"));
-        assert!(result.contains("conversation_messages: 2"));
-        assert!(result.contains("turns: 2"));
-        assert!(result.contains("session://current/messages"));
-        assert!(result.contains("session://current/history"));
-        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
-    }
-
-    #[test]
-    fn read_session_messages_summarizes_conversation_jsonl() {
-        let ctx = temp_tool_context("session-messages");
-        let session = ctx.store.path().parent().unwrap().to_path_buf();
-        fs::write(
-            session.join("conversation.jsonl"),
-            format!(
-                "{}\n{}\n{}\n",
-                json!({"role":"user","content":"please read file"}),
-                json!({"role":"assistant","content":[{"type":"thinking","thinking":"abc"},{"type":"tool_use","name":"Read","id":"u1","input":{"path":"Cargo.toml"}}]}),
-                json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"u1","content":"done"}]})
-            ),
-        )
-        .unwrap();
-
-        let result =
-            crate::resources::session::read_session_resource("session://current/messages", &ctx)
-                .unwrap();
-
-        assert!(result.contains("1 user: please read file"));
-        assert!(result.contains("tool_use Read"));
-        assert!(result.contains("tool_result u1 4 bytes"));
-        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
-    }
-
-    #[test]
-    fn read_session_history_preserves_text_and_collapses_tool_exchanges() {
-        let ctx = temp_tool_context("session-history");
-        let session = ctx.store.path().parent().unwrap().to_path_buf();
-        fs::write(
-            session.join("conversation.jsonl"),
-            format!(
-                "{}\n{}\n{}\n",
-                json!({"role":"user","content":"please inspect the parser"}),
-                json!({"role":"assistant","content":[
-                    {"type":"thinking","thinking":"private reasoning"},
-                    {"type":"text","text":"I will inspect it."},
-                    {"type":"tool_use","name":"Read","id":"u1","input":{"path":"src/parser.rs"}}
-                ]}),
-                json!({"role":"user","content":[
-                    {"type":"tool_result","tool_use_id":"u1","content":"line one\nline two"}
-                ]})
-            ),
-        )
-        .unwrap();
-
-        let result =
-            crate::resources::session::read_session_resource("session://current/history", &ctx)
-                .unwrap();
-
-        assert!(result.contains("## user\n\nplease inspect the parser"));
-        assert!(result.contains("## assistant\n\nI will inspect it."));
-        assert!(result.contains("-> Read(src/parser.rs) => ok - 2 lines"));
-        assert!(!result.contains("private reasoning"));
-        assert!(!result.contains("line one"));
-        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
-    }
-
-    #[test]
-    fn write_creates_file() {
-        let p = format!("/tmp/mink-test-write-{}", std::process::id());
-        let result = write(&p, "hello", 1000).unwrap();
-        assert!(result.contains("OK"));
-        assert_eq!(fs::read_to_string(&p).unwrap(), "hello");
-        fs::remove_file(&p).ok();
-    }
-
-    #[test]
-    fn write_tool_invalidates_existing_snapshots() {
-        let ctx = temp_tool_context("write-invalidates-snapshot");
-        let p = ctx.cwd.join("write-stale.txt");
-        fs::write(&p, "old\n").unwrap();
-        let tag = ctx.snapshots.lock().unwrap().record(&p, "old\n", 1).tag;
-
-        WriteTool
-            .execute(&json!({"path":"write-stale.txt","content":"new\n"}), &ctx)
-            .unwrap();
-        let patch = format!("@write-stale.txt#{tag}\nreplace 1:\n+again");
-        let err = match EditTool.execute(&json!({"path":"write-stale.txt","patch":patch}), &ctx) {
-            Ok(_) => panic!("stale tag after Write should be rejected"),
-            Err(err) => err.to_string(),
-        };
-
-        assert!(err.contains("unknown"), "{err}");
-        let _ = fs::remove_dir_all(ctx.home.parent().unwrap());
-    }
-
-    #[test]
-    fn write_exceeds_max_bytes_error() {
-        let p = format!("/tmp/mink-test-write-big-{}", std::process::id());
-        assert!(write(&p, "toolarge", 5).is_err());
-    }
-
-    #[test]
-    fn format_read_snapshot_includes_header_and_line_numbers() {
-        let rendered = format_read_snapshot("src/a.rs", "0A3B", 41, "alpha\nbeta\n");
-        assert_eq!(rendered, "@src/a.rs#0A3B\n41:alpha\n42:beta");
-    }
-
-    #[test]
-    fn anchored_patch_replace_success() {
-        let p = temp_file("anchored-replace", "one\ntwo\nthree\n");
-        let path = PathBuf::from(&p);
-        let snapshots = std::sync::Arc::new(std::sync::Mutex::new(
-            crate::tools::snapshot::FileSnapshotStore::default(),
-        ));
-        let tag = snapshots
-            .lock()
-            .unwrap()
-            .record(&path, "one\ntwo\nthree\n", 1)
-            .tag;
-        let patch = format!("@{p}#{tag}\nreplace 2:\n+TWO");
-
-        let result = apply_anchored_patch(&path, &p, &patch, 1000, &snapshots).unwrap();
-
-        assert!(result.contains("Edit("));
-        assert!(result.contains(&format!("@{p}#")), "{result}");
-        assert!(result.contains("2:TWO"), "{result}");
-        assert_eq!(fs::read_to_string(&p).unwrap(), "one\nTWO\nthree\n");
-        fs::remove_file(&p).ok();
-    }
-
-    #[test]
-    fn anchored_patch_result_includes_parser_warnings() {
-        let p = temp_file("anchored-warning", "one\ntwo\nthree\n");
-        let path = PathBuf::from(&p);
-        let snapshots = std::sync::Arc::new(std::sync::Mutex::new(
-            crate::tools::snapshot::FileSnapshotStore::default(),
-        ));
-        let tag = snapshots
-            .lock()
-            .unwrap()
-            .record(&path, "one\ntwo\nthree\n", 1)
-            .tag;
-        let patch = format!("@{p}#{tag}\nreplace 2:\nTWO");
-
-        let result = apply_anchored_patch(&path, &p, &patch, 1000, &snapshots).unwrap();
-
-        assert!(result.contains("Warnings:"), "{result}");
-        assert!(result.contains("body row missing '+' prefix"), "{result}");
-        assert_eq!(fs::read_to_string(&p).unwrap(), "one\nTWO\nthree\n");
-        fs::remove_file(&p).ok();
-    }
-
-    #[test]
-    fn anchored_patch_invalidates_old_tags_after_success() {
-        let p = temp_file("anchored-invalidates-old", "one\ntwo\nthree\n");
-        let path = PathBuf::from(&p);
-        let snapshots = std::sync::Arc::new(std::sync::Mutex::new(
-            crate::tools::snapshot::FileSnapshotStore::default(),
-        ));
-        let old_tag = snapshots
-            .lock()
-            .unwrap()
-            .record(&path, "one\ntwo\nthree\n", 1)
-            .tag;
-        let first_patch = format!("@{p}#{old_tag}\nreplace 1:\n+ONE");
-        apply_anchored_patch(&path, &p, &first_patch, 1000, &snapshots).unwrap();
-
-        let stale_patch = format!("@{p}#{old_tag}\nreplace 3:\n+THREE");
-        let err = apply_anchored_patch(&path, &p, &stale_patch, 1000, &snapshots)
-            .unwrap_err()
-            .to_string();
-
-        assert!(err.contains("unknown"), "{err}");
-        assert_eq!(fs::read_to_string(&p).unwrap(), "ONE\ntwo\nthree\n");
-        fs::remove_file(&p).ok();
-    }
-
-    #[test]
-    fn anchored_patch_rejects_stale_line() {
-        let p = temp_file("anchored-stale", "one\ntwo\nthree\n");
-        let path = PathBuf::from(&p);
-        let snapshots = std::sync::Arc::new(std::sync::Mutex::new(
-            crate::tools::snapshot::FileSnapshotStore::default(),
-        ));
-        let tag = snapshots
-            .lock()
-            .unwrap()
-            .record(&path, "one\ntwo\nthree\n", 1)
-            .tag;
-        fs::write(&p, "one\nchanged\nthree\n").unwrap();
-        let patch = format!("@{p}#{tag}\nreplace 2:\n+TWO");
-
-        let err = apply_anchored_patch(&path, &p, &patch, 1000, &snapshots)
-            .unwrap_err()
-            .to_string();
-
-        assert!(err.contains("snapshot mismatch"), "{err}");
-        assert!(err.contains(&format!("Re-read {p}:1-3")), "{err}");
-        assert!(err.contains("Current context:"), "{err}");
-        assert!(err.contains("*2:changed"), "{err}");
-        assert_eq!(fs::read_to_string(&p).unwrap(), "one\nchanged\nthree\n");
-        fs::remove_file(&p).ok();
-    }
-
-    #[test]
-    fn anchored_patch_rejects_unknown_tag() {
-        let p = temp_file("anchored-unknown", "one\ntwo\n");
-        let path = PathBuf::from(&p);
-        let snapshots = std::sync::Arc::new(std::sync::Mutex::new(
-            crate::tools::snapshot::FileSnapshotStore::default(),
-        ));
-        let patch = format!("@{p}#FFFF\nreplace 1:\n+ONE");
-
-        let err = apply_anchored_patch(&path, &p, &patch, 1000, &snapshots)
-            .unwrap_err()
-            .to_string();
-
-        assert!(err.contains("unknown"), "{err}");
-        assert!(err.contains(&format!("Re-read {p}:1-2")), "{err}");
-        assert!(err.contains("Current context:"), "{err}");
-        assert!(err.contains("*1:one"), "{err}");
-        fs::remove_file(&p).ok();
-    }
-
-    #[test]
-    fn anchored_patch_rejects_delete_body() {
-        let err = crate::tools::hashline::parse_patch("@a#0001\ndelete 1\n+bad")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("delete does not take body"), "{err}");
+        let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -444,6 +444,16 @@ impl super::runner::ToolExec for GrepTool {
             ));
         }
         let root = resolve_search_root(&ctx.cwd, &path);
+        if ctx.tool_config.edit_mode == crate::config::EditMode::Hashline {
+            return grep_hashline(
+                &args.pattern,
+                &root,
+                args.glob.as_deref().unwrap_or(""),
+                args.context,
+                ctx,
+            )
+            .map(super::runner::ToolOutcome::text);
+        }
         grep(
             &args.pattern,
             &root.display().to_string(),
@@ -454,6 +464,141 @@ impl super::runner::ToolExec for GrepTool {
         )
         .map(super::runner::ToolOutcome::text)
     }
+}
+
+fn grep_hashline(
+    pattern: &str,
+    root: &Path,
+    file_glob: &str,
+    context: Option<usize>,
+    ctx: &crate::context::ToolContext,
+) -> Result<String> {
+    if pattern.is_empty() {
+        bail!("Error: no pattern provided");
+    }
+    let matcher = regex::Regex::new(pattern)
+        .map_err(|error| anyhow!("Error: invalid regex pattern '{pattern}': {error}"))?;
+    let mut walker = ignore::WalkBuilder::new(root);
+    configure_search_walker(&mut walker);
+    if !file_glob.is_empty() {
+        let overrides = build_rg_overrides(root, file_glob)
+            .map_err(|error| anyhow!("Error: invalid glob '{file_glob}': {error}"))?
+            .build()
+            .map_err(|error| anyhow!("Error: invalid glob '{file_glob}': {error}"))?;
+        walker.overrides(overrides);
+    }
+    let mut files_seen = 0usize;
+    let mut matches_seen = 0usize;
+    let mut output = String::new();
+    let mut truncated = false;
+    for entry in walker.build() {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        if !entry.file_type().is_some_and(|kind| kind.is_file()) {
+            continue;
+        }
+        files_seen += 1;
+        if files_seen > ctx.tool_config.max_search_files {
+            truncated = true;
+            break;
+        }
+        let path = entry.path();
+        let Ok(content) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        if content.as_bytes().contains(&0) {
+            continue;
+        }
+        let lines = crate::tools::snapshot::split_content_lines(&content);
+        let mut visible = std::collections::BTreeSet::new();
+        let radius = context.unwrap_or(0);
+        for (index, line) in lines.iter().enumerate() {
+            if !matcher.is_match(line) {
+                continue;
+            }
+            matches_seen += 1;
+            if matches_seen > ctx.tool_config.max_search_results {
+                truncated = true;
+                break;
+            }
+            let line_number = index + 1;
+            let start = line_number.saturating_sub(radius).max(1);
+            let end = line_number.saturating_add(radius).min(lines.len());
+            visible.extend(start..=end);
+        }
+        if visible.is_empty() {
+            if truncated {
+                break;
+            }
+            continue;
+        }
+        let display = display_search_path(path.strip_prefix(&ctx.cwd).unwrap_or(path));
+        let separator = if output.is_empty() { "" } else { "\n--\n" };
+        let editable =
+            content.len() <= (4 * 1024 * 1024usize).min(ctx.tool_config.file_write_max_bytes);
+        if editable {
+            let tag = crate::tools::snapshot::compute_file_tag(&content);
+            let header = format!("[{display}#{tag}]");
+            let mut chunk = header.clone();
+            let mut emitted = std::collections::BTreeSet::new();
+            for line_number in &visible {
+                let Some(line) = lines.get(line_number - 1) else {
+                    continue;
+                };
+                let row = format!("\n{line_number}:{line}");
+                if output.len() + separator.len() + chunk.len() + row.len()
+                    > MAX_OUTPUT_BYTES.min(ctx.tool_config.tool_result_max_bytes)
+                {
+                    truncated = true;
+                    break;
+                }
+                chunk.push_str(&row);
+                emitted.insert(*line_number);
+            }
+            if emitted.is_empty() {
+                truncated = true;
+                break;
+            }
+            let snapshot = ctx
+                .snapshots
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .record(path, &content, emitted);
+            debug_assert_eq!(snapshot.tag, tag);
+            output.push_str(separator);
+            output.push_str(&chunk);
+        } else {
+            let mut chunk = String::new();
+            for line_number in &visible {
+                if let Some(line) = lines.get(line_number - 1) {
+                    let line_separator = if chunk.is_empty() { "" } else { "\n" };
+                    let row = format!("{line_separator}{display}:{line_number}:{line}");
+                    if output.len() + separator.len() + chunk.len() + row.len() > MAX_OUTPUT_BYTES {
+                        truncated = true;
+                        break;
+                    }
+                    chunk.push_str(&row);
+                }
+            }
+            if chunk.is_empty() {
+                truncated = true;
+                break;
+            }
+            output.push_str(separator);
+            output.push_str(&chunk);
+        }
+        if truncated {
+            break;
+        }
+    }
+    if truncated {
+        if !output.is_empty() && !output.ends_with('\n') {
+            output.push('\n');
+        }
+        output.push_str("... truncated: additional matches were not shown and are not marked seen");
+    }
+    Ok(output)
 }
 
 fn resolve_search_root(cwd: &Path, raw: &str) -> PathBuf {

@@ -179,8 +179,10 @@ mod tests {
 
     #[test]
     fn sandbox_profile_normalizes_write_dir_subpaths() {
-        let mut config = SandboxConfig::default();
-        config.write_dirs = vec!["./qa_cache/./session".into(), "/tmp/./absolute".into()];
+        let config = SandboxConfig {
+            write_dirs: vec!["./qa_cache/./session".into(), "/tmp/./absolute".into()],
+            ..SandboxConfig::default()
+        };
         let cwd = Path::new("/tmp/mink-work");
 
         let profile = build_sb_profile(&config, Path::new("/bin/echo"), cwd);
@@ -194,8 +196,10 @@ mod tests {
 
     #[test]
     fn sandbox_profile_allows_custom_mink_home_root() {
-        let mut config = SandboxConfig::default();
-        config.write_dirs = vec!["/tmp/workspace".into()];
+        let config = SandboxConfig {
+            write_dirs: vec!["/tmp/workspace".into()],
+            ..SandboxConfig::default()
+        };
         let cwd = Path::new("/tmp/mink-work");
 
         let profile = build_sb_profile_with_env(
@@ -217,8 +221,10 @@ mod tests {
 
     #[test]
     fn sandbox_profile_keeps_home_scope_narrow_when_mink_home_is_home() {
-        let mut config = SandboxConfig::default();
-        config.write_dirs = vec!["/tmp/workspace".into()];
+        let config = SandboxConfig {
+            write_dirs: vec!["/tmp/workspace".into()],
+            ..SandboxConfig::default()
+        };
         let cwd = Path::new("/tmp/mink-work");
 
         let profile = build_sb_profile_with_env(&config, cwd, "/Users/alice", Some("/Users/alice"));
@@ -235,8 +241,10 @@ mod tests {
 
     #[test]
     fn sandbox_profile_resolves_relative_mink_home_from_cwd() {
-        let mut config = SandboxConfig::default();
-        config.write_dirs = vec!["/tmp/workspace".into()];
+        let config = SandboxConfig {
+            write_dirs: vec!["/tmp/workspace".into()],
+            ..SandboxConfig::default()
+        };
         let cwd = Path::new("/tmp/mink-work");
 
         let profile =

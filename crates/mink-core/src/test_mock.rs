@@ -351,6 +351,10 @@ fn system_prompt_contains_causal_reasoning() {
         mission_content: None,
         tool_surface,
         tool_capabilities,
+        edit_mode: tool_config.edit_mode,
+        edit_fuzzy_match: tool_config.edit_fuzzy_match,
+        edit_fuzzy_threshold: tool_config.edit_fuzzy_threshold,
+        edit_enforce_seen_lines: tool_config.edit_enforce_seen_lines,
     };
     let prompt = builder.build_system_prompt().unwrap();
     assert!(

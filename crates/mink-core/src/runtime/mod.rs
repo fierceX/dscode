@@ -10,6 +10,7 @@ pub use crate::capabilities::{
     CapabilityExposure, LoadedSkill, RuntimeSkill, SkillCapability, SkillDiscoveryPolicy,
     SkillLoadContext, SkillProvider, SourceLevel, SourceMeta,
 };
+pub use crate::config::EditMode;
 pub use crate::llm::client::{
     BackendLlmClient, LlmBackend, LlmCancelToken, LlmErrorEvent, LlmEvent, LlmEventStream,
     LlmPurpose, LlmRequest, LlmRequestFailure, LlmResponseStream, LlmRetryEvent, LlmStopEvent,

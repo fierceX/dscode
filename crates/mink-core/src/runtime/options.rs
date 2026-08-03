@@ -1,6 +1,6 @@
 use crate::capabilities::{CapabilityExposure, RuntimeSkill, SkillDiscoveryPolicy, SkillProvider};
 use crate::config::{
-    Config, OpenAiTokenParamConfig, OutputFormat, SandboxConfig, SandboxPythonConfig,
+    Config, EditMode, OpenAiTokenParamConfig, OutputFormat, SandboxConfig, SandboxPythonConfig,
     ToolApprovalMode, ToolApprovalPolicy,
 };
 use crate::llm::client::{LlmBackend, TokenParamKind};
@@ -348,6 +348,26 @@ impl AgentOptions {
 
     pub fn with_file_write_max_bytes(mut self, bytes: usize) -> Self {
         self.config.file_write_max_bytes = bytes;
+        self
+    }
+
+    pub fn with_edit_mode(mut self, mode: EditMode) -> Self {
+        self.config.edit_mode = mode;
+        self
+    }
+
+    pub fn with_edit_fuzzy_match(mut self, enabled: bool) -> Self {
+        self.config.edit_fuzzy_match = enabled;
+        self
+    }
+
+    pub fn with_edit_fuzzy_threshold(mut self, threshold: f64) -> Self {
+        self.config.edit_fuzzy_threshold = threshold;
+        self
+    }
+
+    pub fn with_edit_enforce_seen_lines(mut self, enabled: bool) -> Self {
+        self.config.edit_enforce_seen_lines = enabled;
         self
     }
 

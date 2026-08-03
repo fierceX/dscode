@@ -5,8 +5,8 @@
 use anyhow::Result;
 use mink::runtime::{AgentEvent, AgentOptions, AgentRuntime};
 use serde_json::json;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::broadcast;
 
 pub struct SessionRuntime {
@@ -84,7 +84,12 @@ fn agent_event_to_json(ev: &AgentEvent) -> serde_json::Value {
     match ev {
         AgentEvent::Thinking { content } => json!({ "type": "thinking", "content": content }),
         AgentEvent::Text { content } => json!({ "type": "text", "content": content }),
-        AgentEvent::ToolCall { id, name, summary, input } => {
+        AgentEvent::ToolCall {
+            id,
+            name,
+            summary,
+            input,
+        } => {
             json!({ "type": "tool_call", "id": id, "name": name, "summary": summary, "input": input })
         }
         AgentEvent::ToolResult {
@@ -98,7 +103,11 @@ fn agent_event_to_json(ev: &AgentEvent) -> serde_json::Value {
             "content": content,
             "exit_code": exit_code,
         }),
-        AgentEvent::Signal { signal_kind, severity, message } => json!({
+        AgentEvent::Signal {
+            signal_kind,
+            severity,
+            message,
+        } => json!({
             "type": "signal",
             "signal_kind": signal_kind,
             "severity": severity,
@@ -119,7 +128,9 @@ fn agent_event_to_json(ev: &AgentEvent) -> serde_json::Value {
             "context_tokens": stats.current_context_tokens,
             "max_context": stats.max_context_tokens,
         }),
-        AgentEvent::SubAgentStatus { session_id, status, .. } => {
+        AgentEvent::SubAgentStatus {
+            session_id, status, ..
+        } => {
             json!({ "type": "sub_agent", "session_id": session_id, "status": status })
         }
         AgentEvent::SubAgentOutput { .. } => json!({ "type": "sub_agent_output" }),

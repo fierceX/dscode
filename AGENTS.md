@@ -22,7 +22,7 @@ Mink 是一个 Rust 实现的轻量 AI coding agent，专为 DeepSeek/OpenAI-com
 - Artifact 持久化：超长工具输出落到 session `artifacts/`，序号可恢复且禁止覆盖已有正文，可通过 `Read artifact://<id>` 读取
 - 工具元数据与审批策略：每个工具声明 approval tier、结果类型、副作用和 discoverable 状态
 - 轻量资源读取：`Read` 支持本地文件、artifact、skill、rule 和 session introspection URL，并通过 `ResourceRouter` 分发 registered scheme
-- Anchored Edit：`Read` 生成 snapshot header，`Edit.patch` 可按行锚定修改并检测 stale snapshot
+- Edit 双模式：默认 Hashline snapshot/stale 恢复，或 Replace exact/行窗口 fuzzy 内容匹配；runtime 启动后固定
 - 两种终端交互模式：REPL + TUI
 - 子代理：统一使用父 session 下的 isolated home；可从空目录启动或目录级 fork 当前 session 状态
 
@@ -156,8 +156,10 @@ TurnExecutor (agent/turn.rs)
 │ tools/runner.rs       │ ToolRegistry + resolved surface gate + StormBreaker + artifact spill
 │ tools/todo.rs         │ TodoRead / TodoWrite / TodoAdvance 与追加式状态事件
 │ tools/metadata.rs     │ approval tier、结果类型、副作用等工具元数据
-│ tools/file.rs         │ Read/Write/Edit + selector/resource/anchored patch
-│ tools/snapshot.rs     │ Read snapshot 和 anchored edit hash 校验
+│ tools/file.rs         │ Read/Write/双模式 Edit + selector/resource/prepare/commit
+│ tools/hashline.rs     │ 非 Block Hashline grammar 和原始坐标 apply
+│ tools/replace.rs      │ Replace exact/行窗口 fuzzy 匹配、歧义诊断和缩进转换
+│ tools/snapshot.rs     │ Hashline 版本历史、seen-lines、tag 和淘汰
 │ tools/search.rs       │ Glob/Grep
 │ tools/vfs.rs          │ Read/Glob/Grep 同步只读 VFS hook、请求/结果协议和数据库 helper
 │ tools/bash.rs         │ Bash 执行 + 误用拦截
@@ -327,8 +329,10 @@ DecisionEngine.decide()
 | `tools/runtime_guidance.rs` | 带结构化工具引用的运行时引导消息 |
 | `tools/runner.rs` | ToolExec registry、resolved surface gate、批量分发、结果格式化、artifact spill、SubAgent tool |
 | `tools/todo.rs` | `TodoRead` / `TodoWrite` / `TodoAdvance`，revision 校验、增量事件和物化投影 |
-| `tools/file.rs` | Read/Write/Edit、path selector、resource URL、anchored patch |
-| `tools/snapshot.rs` | FileSnapshotStore、hashline 轻量校验 |
+| `tools/file.rs` | Read/Write/双模式 Edit、path selector、resource URL、prepare/commit |
+| `tools/hashline.rs` | 非 Block parser、坐标操作和剪贴板 apply |
+| `tools/replace.rs` | exact/行窗口 fuzzy 匹配、歧义诊断和缩进转换 |
+| `tools/snapshot.rs` | FileSnapshotStore、版本历史、seen-lines、tag 和路径迁移 |
 | `tools/search.rs` | Glob/Grep |
 | `tools/vfs.rs` | `ReadOnlyFileSystem`、session scope、结构化 VFS 请求/结果和虚拟路径 helper |
 | `tools/bash.rs` | Bash、危险命令检查、误用拦截 |
@@ -357,17 +361,22 @@ DecisionEngine.decide()
 - `session://current/history`：从完整 `conversation.jsonl` 生成的有损检索 transcript，可由 Grep 直接搜索；不包含 thinking 和完整工具结果正文
 - `session://current/artifacts`：artifact 列表
 
-本地文件非 raw `Read` 输出带 snapshot header：
+Hashline 模式下，本地文件非 raw `Read` 输出带 snapshot header：
 
 ```text
-@src/foo.rs#0A3B
+[src/foo.rs#0A3B]
 41:fn target() {
 42:    old()
 ```
 
-`Edit` 仅支持 `patch`：基于 `@PATH#TAG` header 的 `replace/delete/insert` 行操作。
+`Edit` 在 runtime 启动时固定为 `hashline` 或 `replace`。Hashline 只接受带
+`[PATH#TAG]` section 的 `input`；Replace 只接受 `path + edits[{old_text,new_text,all}]`。
+旧 `path + patch` / `@PATH#TAG` 协议不兼容。`N*` Block locator 明确拒绝，Mink 不提供
+tree-sitter block resolver。
 
-Anchored patch 只修改 snapshot 覆盖且未漂移的行。tag 缺失、行 hash 不匹配、hunk 重叠、no-op 等情况必须 fail closed，并提示重新 `Read`。
+Hashline 保留 session 内历史版本并只在全部锚点能唯一映射、共享一致偏移时恢复 stale
+内容；Replace 默认要求唯一候选。歧义、目标冲突、越权路径和无法解释的 no-op 都必须
+fail closed。
 
 ### UI
 
@@ -461,7 +470,7 @@ Anchored patch 只修改 snapshot 覆盖且未漂移的行。tag 缺失、行 ha
 - MISSION 只能覆盖 allowlisted core；runtime-owned section fail fast，普通自定义规则不得使用 reserved 的 `# rules`
 - 嵌入式 runtime 可为普通路径注入同步只读 VFS，仅替换 Read/Glob/Grep 后端；未注入时必须严格保持原有本地执行路径
 - VFS 调用同时携带继承的 `resource_session_id` 和当前 `agent_session_id`；虚拟 Read 不生成 snapshot，Edit/Write 始终操作本地文件
-- `Edit.patch` 的 header path 必须和 `Edit.path` 一致，snapshot stale 时拒绝编辑
+- Hashline stale 恢复仅允许所有锚点唯一映射且共享一致偏移；Replace 多候选必须拒绝
 - Display 包装层必须原样转发 `render_tool_call_detail()` 和
   `render_tool_result_presented()`；不得退化丢失 `tool_use_id`、presentation 或 artifact 元数据。
 - TUI 光标必须始终落在 UTF-8 char boundary。

@@ -189,20 +189,17 @@ impl StatsSnapshot {
     }
     pub fn cache_pct(&self) -> String {
         let total = self.total_input_tokens + self.total_cache_read_tokens;
-        if total > 0 {
-            format!("{}%", self.total_cache_read_tokens * 100 / total)
-        } else {
-            "—".to_string()
-        }
+        self.total_cache_read_tokens
+            .checked_mul(100)
+            .and_then(|tokens| tokens.checked_div(total))
+            .map_or_else(|| "—".to_string(), |pct| format!("{pct}%"))
     }
 
     pub fn ctx_pct(&self) -> String {
-        if self.max_context_tokens > 0 {
-            let pct = self.current_context_tokens * 100 / self.max_context_tokens;
-            format!("{}%", pct)
-        } else {
-            "—".to_string()
-        }
+        self.current_context_tokens
+            .checked_mul(100)
+            .and_then(|tokens| tokens.checked_div(self.max_context_tokens))
+            .map_or_else(|| "—".to_string(), |pct| format!("{pct}%"))
     }
 
     pub fn format_cost(&self) -> String {

@@ -8,6 +8,32 @@ pub enum OutputFormat {
     StreamJson,
 }
 
+/// Runtime-selected wire protocol and matching engine for the `Edit` tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EditMode {
+    #[default]
+    Hashline,
+    Replace,
+}
+
+impl EditMode {
+    pub fn parse(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "hashline" => Ok(Self::Hashline),
+            "replace" => Ok(Self::Replace),
+            _ => bail!("invalid edit_mode {value:?}; expected 'hashline' or 'replace'"),
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Hashline => "hashline",
+            Self::Replace => "replace",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TuiMode {
     #[default]
@@ -207,6 +233,10 @@ pub struct MinkConfigFile {
     pub output_format: Option<String>,
     pub approval_mode: Option<String>,
     pub enabled_tools: Option<Vec<String>>,
+    pub edit_mode: Option<EditMode>,
+    pub edit_fuzzy_match: Option<bool>,
+    pub edit_fuzzy_threshold: Option<f64>,
+    pub edit_enforce_seen_lines: Option<bool>,
     pub skills: Option<Vec<String>>,
     /// `[sandbox]` section — when enabled, mink re-execs itself inside a sandbox.
     #[serde(default)]
@@ -321,6 +351,10 @@ pub struct Config {
     pub llm_wait_heartbeat_secs: i32,
     pub tool_result_max_bytes: usize,
     pub file_write_max_bytes: usize,
+    pub edit_mode: EditMode,
+    pub edit_fuzzy_match: bool,
+    pub edit_fuzzy_threshold: f64,
+    pub edit_enforce_seen_lines: bool,
     pub max_search_files: usize,
     pub max_search_results: usize,
     pub output_format: OutputFormat,
@@ -380,6 +414,10 @@ pub struct CliOverrides {
     pub tool_approval_mode: bool,
     pub output_format: bool,
     pub enabled_tools: bool,
+    pub edit_mode: bool,
+    pub edit_fuzzy_match: bool,
+    pub edit_fuzzy_threshold: bool,
+    pub edit_enforce_seen_lines: bool,
 }
 
 impl Default for Config {
@@ -400,6 +438,10 @@ impl Default for Config {
             llm_wait_heartbeat_secs: 30,
             tool_result_max_bytes: 100_000,
             file_write_max_bytes: 1_048_576,
+            edit_mode: EditMode::Hashline,
+            edit_fuzzy_match: true,
+            edit_fuzzy_threshold: 0.95,
+            edit_enforce_seen_lines: false,
             max_search_files: 5000,
             max_search_results: 1000,
             output_format: OutputFormat::Human,
@@ -532,6 +574,30 @@ pub fn parse_args(args: Vec<String>) -> Result<Config> {
                 cfg.cli_overrides.enabled_tools = true;
                 i += 2;
             }
+            "--edit-mode" => {
+                cfg.edit_mode = EditMode::parse(&require_value(&args, i)?)?;
+                cfg.cli_overrides.edit_mode = true;
+                i += 2;
+            }
+            "--edit-fuzzy-match" => {
+                cfg.edit_fuzzy_match =
+                    parse_bool_value("--edit-fuzzy-match", &require_value(&args, i)?)?;
+                cfg.cli_overrides.edit_fuzzy_match = true;
+                i += 2;
+            }
+            "--edit-fuzzy-threshold" => {
+                cfg.edit_fuzzy_threshold = require_value(&args, i)?.parse().map_err(|_| {
+                    anyhow!("--edit-fuzzy-threshold requires a number in 0.0..=1.0")
+                })?;
+                cfg.cli_overrides.edit_fuzzy_threshold = true;
+                i += 2;
+            }
+            "--edit-enforce-seen-lines" => {
+                cfg.edit_enforce_seen_lines =
+                    parse_bool_value("--edit-enforce-seen-lines", &require_value(&args, i)?)?;
+                cfg.cli_overrides.edit_enforce_seen_lines = true;
+                i += 2;
+            }
             "--config" => {
                 let toml_str = require_value(&args, i)?;
                 cfg.cli_config = Some(toml::from_str::<MinkConfigFile>(&toml_str)?);
@@ -572,16 +638,24 @@ fn parse_enabled_tools(value: String) -> Result<Vec<String>> {
     Ok(tools)
 }
 
-pub fn apply_config_file(cfg: &mut Config) {
+fn parse_bool_value(name: &str, value: &str) -> Result<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        _ => bail!("{name} requires true or false"),
+    }
+}
+
+pub fn apply_config_file(cfg: &mut Config) -> Result<()> {
     let defaults = Config::default();
-    apply_env_defaults(cfg, &defaults);
+    apply_env_defaults(cfg, &defaults)?;
     // SDK 协议模式：所有配置已通过 --config TOML 传入，跳过文件 I/O
     if cfg.agent_jsonl {
         let cli_cfg = cfg.cli_config.take();
         apply_config_sources(cfg, &defaults, None, None, cli_cfg.as_ref());
         apply_sandbox_config(cfg, None, None, cli_cfg.as_ref());
         cfg.cli_config = cli_cfg;
-        return;
+        return Ok(());
     }
     // Priority: CLI > project .minkrc > user ~/.minkrc > env > default.
     // CLI is inferred by comparing the already-parsed config to defaults.
@@ -592,8 +666,8 @@ pub fn apply_config_file(cfg: &mut Config) {
             .unwrap_or_else(|_| String::from(".")),
     );
 
-    let user_cfg = read_config_file(&home.join(".minkrc"));
-    let project_cfg = read_config_file(&cwd.join(".minkrc"));
+    let user_cfg = read_config_file(&home.join(".minkrc"))?;
+    let project_cfg = read_config_file(&cwd.join(".minkrc"))?;
     let cli_cfg = cfg.cli_config.take();
     apply_config_sources(
         cfg,
@@ -609,21 +683,45 @@ pub fn apply_config_file(cfg: &mut Config) {
         cli_cfg.as_ref(),
     );
     cfg.cli_config = cli_cfg;
+    Ok(())
 }
 
-fn apply_env_defaults(cfg: &mut Config, defaults: &Config) {
+fn apply_env_defaults(cfg: &mut Config, defaults: &Config) -> Result<()> {
     if cfg.log_events == defaults.log_events
         && let Ok(v) = std::env::var("LOG_EVENTS")
     {
         apply_log_events_env_value(cfg, v.as_str());
     }
+    if !cfg.cli_overrides.edit_mode
+        && let Ok(value) = std::env::var("MINK_EDIT_MODE")
+    {
+        cfg.edit_mode = EditMode::parse(&value)?;
+    }
+    if !cfg.cli_overrides.edit_fuzzy_match
+        && let Ok(value) = std::env::var("MINK_EDIT_FUZZY_MATCH")
+    {
+        cfg.edit_fuzzy_match = parse_bool_value("MINK_EDIT_FUZZY_MATCH", &value)?;
+    }
+    if !cfg.cli_overrides.edit_fuzzy_threshold
+        && let Ok(value) = std::env::var("MINK_EDIT_FUZZY_THRESHOLD")
+    {
+        cfg.edit_fuzzy_threshold = value
+            .parse()
+            .map_err(|_| anyhow!("MINK_EDIT_FUZZY_THRESHOLD requires a number in 0.0..=1.0"))?;
+    }
+    if !cfg.cli_overrides.edit_enforce_seen_lines
+        && let Ok(value) = std::env::var("MINK_EDIT_ENFORCE_SEEN_LINES")
+    {
+        cfg.edit_enforce_seen_lines = parse_bool_value("MINK_EDIT_ENFORCE_SEEN_LINES", &value)?;
+    }
+    Ok(())
 }
 
 fn apply_log_events_env_value(cfg: &mut Config, value: &str) {
     cfg.log_events = value != "0" && value != "false" && value != "no";
 }
 
-fn read_config_file(path: &std::path::Path) -> Option<MinkConfigFile> {
+fn read_config_file(path: &std::path::Path) -> Result<Option<MinkConfigFile>> {
     let data = match std::fs::read_to_string(path) {
         Ok(d) => d,
         Err(e) => {
@@ -634,20 +732,16 @@ fn read_config_file(path: &std::path::Path) -> Option<MinkConfigFile> {
                     e
                 );
             }
-            return None;
+            return if e.kind() == std::io::ErrorKind::NotFound {
+                Ok(None)
+            } else {
+                Err(e.into())
+            };
         }
     };
-    match toml::from_str(&data) {
-        Ok(cfg) => Some(cfg),
-        Err(e) => {
-            eprintln!(
-                "[mink] Warning: failed to parse config file {}: {}",
-                path.display(),
-                e
-            );
-            None
-        }
-    }
+    toml::from_str(&data)
+        .map(Some)
+        .map_err(|e| anyhow!("failed to parse config file {}: {e}", path.display()))
 }
 
 fn apply_config_sources(
@@ -679,6 +773,10 @@ fn apply_config_sources(
     let cli_output_format =
         cfg.cli_overrides.output_format || cfg.output_format != defaults.output_format;
     let cli_enabled_tools = cfg.cli_overrides.enabled_tools;
+    let cli_edit_mode = cfg.cli_overrides.edit_mode;
+    let cli_edit_fuzzy_match = cfg.cli_overrides.edit_fuzzy_match;
+    let cli_edit_fuzzy_threshold = cfg.cli_overrides.edit_fuzzy_threshold;
+    let cli_edit_enforce_seen_lines = cfg.cli_overrides.edit_enforce_seen_lines;
 
     for toml_cfg in [user_cfg, project_cfg, cli_cfg].into_iter().flatten() {
         if !cli_model && let Some(model) = &toml_cfg.model {
@@ -818,10 +916,23 @@ fn apply_config_sources(
         if !cli_enabled_tools && let Some(ref v) = toml_cfg.enabled_tools {
             cfg.enabled_tools = Some(v.clone());
         }
-        if !cli_tool_approval_mode && let Some(ref v) = toml_cfg.approval_mode {
-            if let Ok(m) = ToolApprovalMode::parse(v) {
-                cfg.tool_approval_mode = m;
-            }
+        if !cli_edit_mode && let Some(mode) = toml_cfg.edit_mode {
+            cfg.edit_mode = mode;
+        }
+        if !cli_edit_fuzzy_match && let Some(enabled) = toml_cfg.edit_fuzzy_match {
+            cfg.edit_fuzzy_match = enabled;
+        }
+        if !cli_edit_fuzzy_threshold && let Some(threshold) = toml_cfg.edit_fuzzy_threshold {
+            cfg.edit_fuzzy_threshold = threshold;
+        }
+        if !cli_edit_enforce_seen_lines && let Some(enabled) = toml_cfg.edit_enforce_seen_lines {
+            cfg.edit_enforce_seen_lines = enabled;
+        }
+        if !cli_tool_approval_mode
+            && let Some(ref v) = toml_cfg.approval_mode
+            && let Ok(m) = ToolApprovalMode::parse(v)
+        {
+            cfg.tool_approval_mode = m;
         }
     }
 }
@@ -979,6 +1090,9 @@ pub fn model_resolver(cfg: &Config) -> ModelResolver {
 }
 
 pub fn validate_runtime_config(cfg: &Config) -> Result<()> {
+    if !cfg.edit_fuzzy_threshold.is_finite() || !(0.0..=1.0).contains(&cfg.edit_fuzzy_threshold) {
+        bail!("edit_fuzzy_threshold must be a finite number in 0.0..=1.0");
+    }
     if cfg.max_tokens <= 0 {
         bail!("max_tokens must be greater than 0");
     }
@@ -1269,7 +1383,7 @@ mod tests {
         let toml = "max_search_files = 15000\nmax_search_results = 10000";
         let mut cfg =
             parse_args(vec!["--agent-jsonl".into(), "--config".into(), toml.into()]).unwrap();
-        apply_config_file(&mut cfg);
+        apply_config_file(&mut cfg).unwrap();
         assert_eq!(cfg.max_search_files, 15000);
         assert_eq!(cfg.max_search_results, 10000);
     }
@@ -1628,5 +1742,56 @@ Read = "allow"
         cfg.cli_config = cli;
         assert_eq!(cfg.max_turns, 50);
         assert_eq!(cfg.tool_timeout_secs, 300);
+    }
+
+    #[test]
+    fn edit_configuration_defaults_and_cli_overrides_are_typed() {
+        let defaults = Config::default();
+        assert_eq!(defaults.edit_mode, EditMode::Hashline);
+        assert!(defaults.edit_fuzzy_match);
+        assert_eq!(defaults.edit_fuzzy_threshold, 0.95);
+        assert!(!defaults.edit_enforce_seen_lines);
+
+        let cfg = parse_args(vec![
+            "--edit-mode".into(),
+            "replace".into(),
+            "--edit-fuzzy-match".into(),
+            "false".into(),
+            "--edit-fuzzy-threshold".into(),
+            "0.88".into(),
+            "--edit-enforce-seen-lines".into(),
+            "true".into(),
+        ])
+        .unwrap();
+        assert_eq!(cfg.edit_mode, EditMode::Replace);
+        assert!(!cfg.edit_fuzzy_match);
+        assert_eq!(cfg.edit_fuzzy_threshold, 0.88);
+        assert!(cfg.edit_enforce_seen_lines);
+    }
+
+    #[test]
+    fn edit_configuration_toml_and_threshold_validation_fail_fast() {
+        let file: MinkConfigFile = toml::from_str(
+            "edit_mode = 'replace'\nedit_fuzzy_match = false\nedit_fuzzy_threshold = 0.9\nedit_enforce_seen_lines = true",
+        )
+        .unwrap();
+        assert_eq!(file.edit_mode, Some(EditMode::Replace));
+        assert_eq!(file.edit_fuzzy_match, Some(false));
+        assert_eq!(file.edit_fuzzy_threshold, Some(0.9));
+        assert_eq!(file.edit_enforce_seen_lines, Some(true));
+        assert!(toml::from_str::<MinkConfigFile>("edit_mode = 'patch'").is_err());
+
+        let mut cfg = Config {
+            edit_fuzzy_threshold: f64::NAN,
+            ..Config::default()
+        };
+        assert!(
+            validate_runtime_config(&cfg)
+                .unwrap_err()
+                .to_string()
+                .contains("finite")
+        );
+        cfg.edit_fuzzy_threshold = 1.01;
+        assert!(validate_runtime_config(&cfg).is_err());
     }
 }

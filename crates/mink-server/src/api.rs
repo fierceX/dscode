@@ -26,11 +26,19 @@ pub struct ApiResponse {
 
 impl ApiResponse {
     fn ok(data: serde_json::Value) -> Self {
-        Self { code: 200, message: String::new(), data }
+        Self {
+            code: 200,
+            message: String::new(),
+            data,
+        }
     }
 
     fn err(code: u16, message: impl Into<String>) -> Self {
-        Self { code, message: message.into(), data: serde_json::Value::Null }
+        Self {
+            code,
+            message: message.into(),
+            data: serde_json::Value::Null,
+        }
     }
 }
 
@@ -106,7 +114,6 @@ fn default_limit() -> usize {
     500
 }
 
-
 #[derive(Deserialize)]
 struct FilesQuery {
     path: Option<String>,
@@ -117,19 +124,14 @@ struct FilesQuery {
 const FILE_RAW_MAX_BYTES: u64 = 1 << 20; // 1 MiB
 
 /// Resolve a session's directory; returns ApiResponse 404 on failure.
-async fn session_dir_or_err(
-    state: &ApiState,
-    id: &str,
-) -> Result<std::path::PathBuf, ApiResponse> {
+async fn session_dir_or_err(state: &ApiState, id: &str) -> Result<std::path::PathBuf, ApiResponse> {
     state
         .registry
         .session_dir(id)
         .await
         .map_err(|e| ApiResponse::err(404, e.to_string()))
 }
-async fn list_sessions(
-    State(state): State<Arc<ApiState>>,
-) -> ApiResponse {
+async fn list_sessions(State(state): State<Arc<ApiState>>) -> ApiResponse {
     match state.registry.list().await {
         Ok(sessions) => ApiResponse::ok(json!(sessions)),
         Err(e) => ApiResponse::err(500, e.to_string()),
@@ -218,9 +220,7 @@ async fn close_session(
     AxumPath(id): AxumPath<String>,
 ) -> ApiResponse {
     match state.registry.close(&id).await {
-        Ok(_) => {
-            ApiResponse::ok(json!({ "id": id, "status": "free" }))
-        }
+        Ok(_) => ApiResponse::ok(json!({ "id": id, "status": "free" })),
         Err(e) => ApiResponse::err(404, e.to_string()),
     }
 }
@@ -275,7 +275,15 @@ async fn events_history(
         Err(_) => return ApiResponse::err(404, format!("session {id} not found")),
     };
     let events_path = dir.join("events.jsonl");
-    match read_history(&events_path, query.from_seq, query.limit, query.tail, query.before_seq).await {
+    match read_history(
+        &events_path,
+        query.from_seq,
+        query.limit,
+        query.tail,
+        query.before_seq,
+    )
+    .await
+    {
         Ok(events) => ApiResponse::ok(json!(events)),
         Err(e) => ApiResponse::err(500, e.to_string()),
     }
@@ -290,7 +298,15 @@ async fn conversation_history(
         Err(_) => return ApiResponse::err(404, format!("session {id} not found")),
     };
     let conv_path = dir.join("conversation.jsonl");
-    match read_conversation(&conv_path, query.from_seq, query.limit, query.tail, query.before_seq).await {
+    match read_conversation(
+        &conv_path,
+        query.from_seq,
+        query.limit,
+        query.tail,
+        query.before_seq,
+    )
+    .await
+    {
         Ok(events) => ApiResponse::ok(json!(events)),
         Err(e) => ApiResponse::err(500, e.to_string()),
     }
@@ -480,7 +496,8 @@ async fn get_files(
         items.sort_by(|a, b| {
             let da = a["dir"].as_bool().unwrap_or(false);
             let db = b["dir"].as_bool().unwrap_or(false);
-            db.cmp(&da).then_with(|| a["name"].as_str().cmp(&b["name"].as_str()))
+            db.cmp(&da)
+                .then_with(|| a["name"].as_str().cmp(&b["name"].as_str()))
         });
         ApiResponse::ok(json!({ "path": rel, "dir": true, "items": items }))
     }
@@ -525,7 +542,11 @@ mod tests {
     /// 临时 home + 一个含 3 行 conversation 的会话 + 1 个 artifact
     fn test_router() -> Router {
         let home = std::env::temp_dir().join(format!("mink-server-itest-{}", std::process::id()));
-        let sess = home.join(".mink").join("projects").join("proj").join("test-session");
+        let sess = home
+            .join(".mink")
+            .join("projects")
+            .join("proj")
+            .join("test-session");
         std::fs::create_dir_all(&sess).unwrap();
         std::fs::write(
             sess.join("session.json"),
@@ -542,14 +563,23 @@ mod tests {
         std::fs::write(sess.join("artifacts/abc.txt"), "artifact body").unwrap();
 
         let registry = Arc::new(Registry::new(home, "flash".to_string(), 4));
-        let state = Arc::new(ApiState { registry, cwd: std::env::temp_dir() });
+        let state = Arc::new(ApiState {
+            registry,
+            cwd: std::env::temp_dir(),
+        });
         router(state)
     }
 
     async fn req(app: &Router, method: Method, uri: &str) -> (StatusCode, serde_json::Value) {
         let resp = app
             .clone()
-            .oneshot(Request::builder().method(method).uri(uri).body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         let status = resp.status();
@@ -562,14 +592,24 @@ mod tests {
     async fn conversation_pagination_and_seq() {
         let app = test_router();
         // tail：返回最后 2 行，注入行号 seq
-        let (s, body) = req(&app, Method::GET, "/api/sessions/test-session/conversation?limit=2&tail=true").await;
+        let (s, body) = req(
+            &app,
+            Method::GET,
+            "/api/sessions/test-session/conversation?limit=2&tail=true",
+        )
+        .await;
         assert_eq!(s, StatusCode::OK);
         let rows = body["data"].as_array().unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0]["seq"], serde_json::json!(2));
         assert_eq!(rows[1]["content"], serde_json::json!("three"));
         // before_seq：取 seq 之前的行
-        let (_, body) = req(&app, Method::GET, "/api/sessions/test-session/conversation?limit=1&before_seq=3").await;
+        let (_, body) = req(
+            &app,
+            Method::GET,
+            "/api/sessions/test-session/conversation?limit=1&before_seq=3",
+        )
+        .await;
         let rows = body["data"].as_array().unwrap();
         assert_eq!(rows[0]["seq"], serde_json::json!(2));
         // 不存在的会话 → 404
@@ -580,7 +620,12 @@ mod tests {
     #[tokio::test]
     async fn files_path_escape_rejected() {
         let app = test_router();
-        let (s, body) = req(&app, Method::GET, "/api/sessions/test-session/files?path=../../../etc").await;
+        let (s, body) = req(
+            &app,
+            Method::GET,
+            "/api/sessions/test-session/files?path=../../../etc",
+        )
+        .await;
         assert_eq!(s, StatusCode::BAD_REQUEST);
         assert!(body["message"].as_str().unwrap_or("").contains("escape"));
     }
@@ -588,10 +633,20 @@ mod tests {
     #[tokio::test]
     async fn artifact_name_filtered() {
         let app = test_router();
-        let (s, b) = req(&app, Method::GET, "/api/sessions/test-session/artifacts/..%2F..%2Fpasswd").await;
+        let (s, _body) = req(
+            &app,
+            Method::GET,
+            "/api/sessions/test-session/artifacts/..%2F..%2Fpasswd",
+        )
+        .await;
         assert_eq!(s, StatusCode::BAD_REQUEST);
         // 正常 artifact 可读
-        let (s, body) = req(&app, Method::GET, "/api/sessions/test-session/artifacts/abc").await;
+        let (s, body) = req(
+            &app,
+            Method::GET,
+            "/api/sessions/test-session/artifacts/abc",
+        )
+        .await;
         assert_eq!(s, StatusCode::OK);
         assert_eq!(body["data"]["content"], serde_json::json!("artifact body"));
     }

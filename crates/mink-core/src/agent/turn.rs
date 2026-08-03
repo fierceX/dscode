@@ -822,9 +822,6 @@ impl TurnExecutor {
 
         let (mut system_prompt, mut tools_json) = self.ensure_prefix()?;
         messages = self.ctx.compaction.active_messages().await?;
-        // 当前请求上下文估计（每轮更新，随 usage 事件广播给前端指标行）
-        let mut current_context_tokens: usize = 0;
-
         while turn < max_turns {
             turn += 1;
 
@@ -863,12 +860,18 @@ impl TurnExecutor {
                      estimated {estimated_tokens} tokens, limit {input_limit}"
                 );
             }
-            current_context_tokens = estimated_tokens;
+            // 当前请求上下文估计（每轮更新，随 usage 事件广播给前端指标行）
+            let current_context_tokens = estimated_tokens;
 
             // Phase 1: LLM 流式响应
             let stream_output = loop {
                 match self
-                    .stream_llm_response(&request_messages, &system_prompt, &tools_json, current_context_tokens)
+                    .stream_llm_response(
+                        &request_messages,
+                        &system_prompt,
+                        &tools_json,
+                        current_context_tokens,
+                    )
                     .await
                 {
                     Ok(output) => break output,

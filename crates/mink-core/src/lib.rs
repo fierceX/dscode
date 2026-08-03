@@ -21,8 +21,8 @@ pub mod ui;
 /// CLI binaries and the library runtime.
 pub mod prelude {
     pub use crate::runtime::{
-        AgentEvent, AgentEventStream, AgentOptions, AgentRuntime, CapabilityExposure, EventSink,
-        LlmBackend, LlmCancelToken, LlmErrorEvent, LlmEvent, LlmEventStream, LlmPurpose,
+        AgentEvent, AgentEventStream, AgentOptions, AgentRuntime, CapabilityExposure, EditMode,
+        EventSink, LlmBackend, LlmCancelToken, LlmErrorEvent, LlmEvent, LlmEventStream, LlmPurpose,
         LlmRequest, LlmRequestFailure, LlmResponseStream, LlmRetryEvent, LlmStopEvent,
         LlmTextEvent, LlmThinkingEvent, LlmToolCallEvent, LlmUsageEvent, LoadedSkill,
         OpenAiCompatibleBackend, OpenAiCompatibleOptions, ReadOnlyFileSystem, ResourceHandler,

@@ -1,6 +1,6 @@
 use crate::cancel::CancellationToken;
 use crate::capabilities::CapabilitySnapshot;
-use crate::config::{Config, OutputFormat, ToolApprovalMode, ToolApprovalPolicy};
+use crate::config::{Config, EditMode, OutputFormat, ToolApprovalMode, ToolApprovalPolicy};
 use crate::llm::client::LlmBackend;
 use crate::resources::ResourceRouter;
 use crate::session::artifacts::ArtifactManager;
@@ -33,6 +33,10 @@ pub struct ToolConfig {
     pub sub_agent_timeout_secs: i32,
     pub tool_result_max_bytes: usize,
     pub file_write_max_bytes: usize,
+    pub edit_mode: EditMode,
+    pub edit_fuzzy_match: bool,
+    pub edit_fuzzy_threshold: f64,
+    pub edit_enforce_seen_lines: bool,
     pub max_search_files: usize,
     pub max_search_results: usize,
     /// 工具选择：`None` 使用默认工具集；`Some(vec![])` 不启用任何工具。
@@ -50,6 +54,10 @@ impl ToolConfig {
             sub_agent_timeout_secs: cfg.sub_agent_timeout_secs,
             tool_result_max_bytes: cfg.tool_result_max_bytes,
             file_write_max_bytes: cfg.file_write_max_bytes,
+            edit_mode: cfg.edit_mode,
+            edit_fuzzy_match: cfg.edit_fuzzy_match,
+            edit_fuzzy_threshold: cfg.edit_fuzzy_threshold,
+            edit_enforce_seen_lines: cfg.edit_enforce_seen_lines,
             max_search_files: cfg.max_search_files,
             max_search_results: cfg.max_search_results,
             enabled_tools: cfg.enabled_tools.clone(),

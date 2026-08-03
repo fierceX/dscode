@@ -86,6 +86,18 @@ pub fn apply_sdk_request_options(cfg: &mut Config, req: &SdkRequest) {
     if let Some(tools) = &opts.enabled_tools {
         cfg.enabled_tools = Some(tools.clone());
     }
+    if let Some(mode) = opts.edit_mode {
+        cfg.edit_mode = mode;
+    }
+    if let Some(enabled) = opts.edit_fuzzy_match {
+        cfg.edit_fuzzy_match = enabled;
+    }
+    if let Some(threshold) = opts.edit_fuzzy_threshold {
+        cfg.edit_fuzzy_threshold = threshold;
+    }
+    if let Some(enabled) = opts.edit_enforce_seen_lines {
+        cfg.edit_enforce_seen_lines = enabled;
+    }
     if let Some(skills) = &opts.skills {
         cfg.skills = skills.clone();
     }
@@ -207,6 +219,10 @@ mod tests {
                     "llm_wait_heartbeat": 9,
                     "verbose": true,
                     "enabled_tools": ["Read", "Bash"],
+                    "edit_mode": "replace",
+                    "edit_fuzzy_match": false,
+                    "edit_fuzzy_threshold": 0.89,
+                    "edit_enforce_seen_lines": true,
                     "skills": ["debugging", "verification"],
                     "inline_skills": [{
                         "name": "company-policy",
@@ -249,6 +265,10 @@ mod tests {
             cfg.enabled_tools,
             Some(vec!["Read".to_string(), "Bash".to_string()])
         );
+        assert_eq!(cfg.edit_mode, crate::config::EditMode::Replace);
+        assert!(!cfg.edit_fuzzy_match);
+        assert_eq!(cfg.edit_fuzzy_threshold, 0.89);
+        assert!(cfg.edit_enforce_seen_lines);
         assert_eq!(
             cfg.skills,
             vec!["debugging".to_string(), "verification".to_string()]

@@ -6,6 +6,7 @@ pub mod hashline;
 pub mod metadata;
 pub mod plan;
 pub mod python;
+pub mod replace;
 pub mod runner;
 pub mod runtime_guidance;
 #[cfg(feature = "python-sandbox")]

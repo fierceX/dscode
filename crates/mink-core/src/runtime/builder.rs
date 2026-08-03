@@ -804,7 +804,11 @@ mod tests {
                 event,
                 AgentEvent::Info { message } if message == "Compressing..."
             )));
-            assert!(events.iter().any(|event| matches!(event, AgentEvent::Stop { .. })));
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, AgentEvent::Stop { .. }))
+            );
         }
 
         let _ = tokio::fs::remove_dir_all(home).await;

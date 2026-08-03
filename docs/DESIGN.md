@@ -113,6 +113,19 @@ while turn < max_turns {
 
 ---
 
+## Edit 协议绑定
+
+Edit 是 runtime 配置变体，不是单一 schema 的运行时猜测。`ModelToolSurface::resolve()` 根据
+`EditMode` 只物化 Hashline 或 Replace 中的一种 schema；相同配置重复构建保持字节稳定，
+切换模式则改变 schema 和 immutable prefix fingerprint。提示词工作流通过互斥语义能力
+`HashlineEdit` / `ContentReplaceEdit` 选择，并与 executor 使用同一份最终配置。
+
+Hashline 维护 session 内完整文本历史、seen-lines 和跨调用剪贴板。历史边界是 30 个路径、
+每路径 4 个版本、全局 64 MiB；stale 恢复只接受所有锚点唯一映射且共享一致偏移的情况。
+Replace 不依赖 snapshot，以 exact 和归一化行窗口 fuzzy 匹配处理有限格式差异，但唯一性优先于相似度：高置信度候选
+多于一个时仍拒绝。两种模式都保留现有 approval、路径安全、写入大小、artifact、信号系统和
+串行 mutation 边界。Block Hashline 操作明确不支持，也不引入 tree-sitter。
+
 ## 主题二：内存模型
 
 ### 运行时状态分层

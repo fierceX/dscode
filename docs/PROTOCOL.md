@@ -81,6 +81,10 @@ echo '{"version":2,"prompt":"scan this repo"}' | mink-core --agent-jsonl
 | `verbose` | `bool?` | 详细日志 |
 | `stream_events` | `bool?` | `false` 时只输出最终 `final`，不输出过程事件 |
 | `enabled_tools` | `string[]?` | 精确工具选择（唯一工具入口） |
+| `edit_mode` | `string?` | `hashline`（默认）/ `replace`；本 runtime 固定 |
+| `edit_fuzzy_match` | `bool?` | Replace 行窗口模糊匹配开关 |
+| `edit_fuzzy_threshold` | `number?` | Replace 阈值，有限数且为 `0.0..=1.0` |
+| `edit_enforce_seen_lines` | `bool?` | Hashline seen-line 守卫 |
 | `skills` | `string[]?` | 选中技能 |
 | `inline_skills` | `object[]?` | 内联技能（`name`/`description`/`content`/`exposure`/`revision`） |
 | `skill_discovery_policy` | `string?` | `defaults` / `runtime_only` / `explicit_only` |
@@ -101,6 +105,8 @@ echo '{"version":2,"prompt":"scan this repo"}' | mink-core --agent-jsonl
     "max_context": 64000,
     "context_compact_pct": 65,
     "context_reserve_tokens": 12000,
+    "edit_mode": "hashline",
+    "edit_enforce_seen_lines": false,
     "enabled_tools": ["Read", "Write", "Edit", "Grep", "Glob", "Bash"],
     "stream_events": false
   }

@@ -4,7 +4,7 @@
 //! the default mink home (`~/.mink/projects/...`) and share `events.jsonl`
 //! with the TUI, enabling seamless hand-off between terminal and browser.
 
-use crate::session::config::{validate_runtime_config, ServerConfig};
+use crate::session::config::{ServerConfig, validate_runtime_config};
 use crate::session::registry::Registry;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
@@ -36,7 +36,9 @@ async fn main() -> Result<()> {
         cwd: cwd.clone(),
     });
     // Web UI：Svelte 构建产物（web/dist/），由 `npm run build` 生成。
-    let web_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("web").join("dist");
+    let web_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("web")
+        .join("dist");
     let app = api::router(state).fallback_service(ServeDir::new(web_dir));
 
     let addr = format!("{}:{}", cfg.host, cfg.port);

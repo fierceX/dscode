@@ -1,512 +1,1349 @@
-//! Hashline patch parser — 手写 Tokenizer + Executor 状态机。
+//! Non-Block Hashline parser and pure applier.
 //!
-//! 将 LLM 输出的 anchored patch 文本解析为 `ParsedPatch`，
-//! 兼容 mink 现有的 `PatchHunk` 类型。
-//!
-//! 相比早期内联 parser 的关键区别：
-//! - 遇到非 `+` 前缀的 body 行（如 markdown 表格 `|`），作为 body 行接受（附带警告）
-//! - 空白行在 hunk body 中被跳过而非终止 body 收集
-//! - 两阶段设计：Tokenizer 逐行分类 → Executor 状态机
+//! This tracks the current oh-my-pi `PUT`/`CUT` protocol. Syntactic-block
+//! locators remain intentionally unsupported because Mink does not ship the
+//! tree-sitter resolver used upstream.
 
-use crate::tools::file::PatchHunk;
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail, ensure};
+use std::collections::{BTreeMap, BTreeSet};
 
-// ── Token 定义 ────────────────────────────────────────────────────────────
+const MAX_RANGE_LINES: usize = 100_000;
+const MAX_OPERATIONS: usize = 10_000;
+const MAX_REGISTER_NAME: usize = 64;
 
-#[derive(Debug, PartialEq)]
-enum BlockTarget {
-    Replace { start: usize, end: usize },
-    Delete { start: usize, end: usize },
-    InsertBefore { line: usize },
-    InsertAfter { line: usize },
-    InsertHead,
-    InsertTail,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Cursor {
+    Head,
+    Tail,
+    Before(usize),
+    After(usize),
 }
 
-#[derive(Debug)]
-enum Token {
-    Header { path: String, tag: String },
-    OpBlock(BlockTarget),
-    PayloadLiteral(String),
-    Raw(String),
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PasteTarget {
+    Gap(Cursor),
+    Range { start: usize, end: usize },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Operation {
+    Put {
+        start: usize,
+        end: usize,
+        body: Vec<String>,
+    },
+    Cut {
+        start: usize,
+        end: usize,
+        register: Option<String>,
+    },
+    Insert {
+        cursor: Cursor,
+        body: Vec<String>,
+    },
+    Paste {
+        target: PasteTarget,
+        register: Option<String>,
+    },
+    Remove,
+    Move {
+        destination: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Section {
+    pub path: String,
+    pub tag: String,
+    pub operations: Vec<Operation>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Patch {
+    pub sections: Vec<Section>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Clipboard {
+    anonymous: Option<Vec<String>>,
+    pending_anonymous_cuts: Vec<String>,
+    named: BTreeMap<String, Vec<String>>,
+}
+
+impl Clipboard {
+    pub fn with_named(named: BTreeMap<String, Vec<String>>) -> Self {
+        Self {
+            named,
+            ..Self::default()
+        }
+    }
+
+    pub fn named(&self) -> &BTreeMap<String, Vec<String>> {
+        &self.named
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplyResult {
+    pub text: String,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+enum PendingKind {
+    Put { start: usize, end: usize },
+    Insert { cursor: Cursor },
+}
+
+#[derive(Debug, Clone)]
+enum BodyRow {
+    Explicit(String),
+    Bare(String),
+    Minus(String),
     Blank,
 }
 
-// ── Tokenizer ──────────────────────────────────────────────────────────────
+#[derive(Debug, Clone)]
+struct Pending {
+    kind: PendingKind,
+    rows: Vec<BodyRow>,
+    deferred_blanks: usize,
+    line_num: usize,
+}
 
-struct Tokenizer;
+pub fn parse(input: &str) -> Result<Patch> {
+    ensure!(
+        !input.trim().is_empty(),
+        "Error: hashline input must not be empty"
+    );
+    let normalized = input
+        .strip_prefix('\u{feff}')
+        .unwrap_or(input)
+        .replace("\r\n", "\n")
+        .replace('\r', "\n");
+    let lines = normalized.split('\n').collect::<Vec<_>>();
+    let mut sections = Vec::new();
+    let mut current: Option<Section> = None;
+    let mut pending: Option<Pending> = None;
 
-impl Tokenizer {
-    fn classify_line(line: &str) -> Token {
+    for (index, line) in lines.iter().enumerate() {
+        let line_num = index + 1;
         let trimmed = line.trim();
-
-        // 空行
-        if trimmed.is_empty() {
-            return Token::Blank;
+        if trimmed == "*** Begin Patch" {
+            continue;
+        }
+        if trimmed == "*** End Patch" || trimmed == "*** Abort" {
+            break;
         }
 
-        // @PATH#TAG header
-        if let Some(rest) = trimmed.strip_prefix('@') {
-            if let Some((path, tag)) = rest.rsplit_once('#') {
-                if !path.is_empty() && !tag.is_empty() && tag.len() <= 16 {
-                    return Token::Header {
-                        path: path.to_string(),
-                        tag: tag.to_string(),
-                    };
-                }
+        if let Some(parsed) = try_parse_header(trimmed, line_num)? {
+            if let Some(pending) = pending.take() {
+                flush_pending(current.as_mut(), pending)?;
             }
-        }
-
-        // + 前缀 body 行
-        if line.starts_with('+') {
-            return Token::PayloadLiteral(line[1..].to_string());
-        }
-
-        // Hunk 头部: replace / delete / insert
-        if let Some(target) = try_parse_hunk_header(trimmed) {
-            return Token::OpBlock(target);
-        }
-
-        // 其他内容行
-        Token::Raw(line.to_string())
-    }
-}
-
-fn try_parse_hunk_header(s: &str) -> Option<BlockTarget> {
-    // replace N..M: 或 replace N:
-    if let Some(range) = s.strip_prefix("replace ") {
-        let range = range.strip_suffix(':')?;
-        let (start, end) = parse_line_range(range).or_else(|| parse_single_line(range))?;
-        return Some(BlockTarget::Replace { start, end });
-    }
-
-    // delete N..M 或 delete N
-    if let Some(range) = s.strip_prefix("delete ") {
-        let range = range.strip_suffix(':').unwrap_or(range);
-        let (start, end) = parse_line_range(range).or_else(|| parse_single_line(range))?;
-        return Some(BlockTarget::Delete { start, end });
-    }
-
-    // insert ...
-    if let Some(target) = s.strip_prefix("insert ") {
-        let target = target.strip_suffix(':').unwrap_or(target);
-        // insert before N:
-        if let Some(n) = target.strip_prefix("before ") {
-            let line: usize = n.trim().parse().ok()?;
-            return Some(BlockTarget::InsertBefore { line });
-        }
-        // insert after N:
-        if let Some(n) = target.strip_prefix("after ") {
-            let line: usize = n.trim().parse().ok()?;
-            return Some(BlockTarget::InsertAfter { line });
-        }
-        // insert head:
-        if target.trim() == "head" {
-            return Some(BlockTarget::InsertHead);
-        }
-        // insert tail:
-        if target.trim() == "tail" {
-            return Some(BlockTarget::InsertTail);
-        }
-    }
-
-    None
-}
-
-/// 解析 "N..M" 或 "N.. M" 形式的行范围
-fn parse_line_range(s: &str) -> Option<(usize, usize)> {
-    let s = s.trim();
-    let dots = s.find("..")?;
-    let start: usize = s[..dots].trim().parse().ok()?;
-    let end: usize = s[dots + 2..].trim().parse().ok()?;
-    if start >= 1 { Some((start, end)) } else { None }
-}
-
-/// 解析单个行号 "N"
-fn parse_single_line(s: &str) -> Option<(usize, usize)> {
-    let n: usize = s.trim().parse().ok()?;
-    if n >= 1 { Some((n, n)) } else { None }
-}
-
-// ── Executor 状态机 ───────────────────────────────────────────────────────
-
-struct Executor {
-    path: Option<String>,
-    tag: Option<String>,
-    hunks: Vec<PatchHunk>,
-    pending: Option<PendingHunk>,
-    warnings: Vec<String>,
-    line_no: usize,
-}
-
-struct PendingHunk {
-    target: BlockTarget,
-    body: Vec<String>,
-    header_line: usize,
-}
-
-impl Executor {
-    fn new() -> Self {
-        Executor {
-            path: None,
-            tag: None,
-            hunks: Vec::new(),
-            pending: None,
-            warnings: Vec::new(),
-            line_no: 0,
-        }
-    }
-
-    fn feed(&mut self, token: Token) -> Result<()> {
-        self.line_no += 1;
-        match token {
-            Token::Header { path, tag } => {
-                self.flush_pending()?;
-                self.path = Some(path);
-                self.tag = Some(tag);
+            if let Some(section) = current.take()
+                && !section.operations.is_empty()
+            {
+                sections.push(section);
             }
-            Token::OpBlock(target) => {
-                // 校验范围合法性
-                if let BlockTarget::Replace { start, end } | BlockTarget::Delete { start, end } =
-                    &target
-                {
-                    if end < start {
-                        bail!(
-                            "Error: line {}: range {}..{} ends before it starts",
-                            self.line_no,
-                            start,
-                            end
-                        );
-                    }
+            current = Some(parsed);
+            continue;
+        }
+
+        if !is_operation_line(trimmed)
+            && let Some(pending) = pending.as_mut()
+        {
+            if trimmed.is_empty() {
+                pending.deferred_blanks += 1;
+            } else {
+                for _ in 0..pending.deferred_blanks {
+                    pending.rows.push(BodyRow::Blank);
                 }
-                self.flush_pending()?;
-                let header_line = self.line_no;
-                self.pending = Some(PendingHunk {
-                    target,
-                    body: Vec::new(),
-                    header_line,
-                });
-            }
-            Token::PayloadLiteral(text) => {
-                if let Some(ref pending) = self.pending {
-                    match pending.target {
-                        BlockTarget::Delete { .. } => {
-                            bail!(
-                                "Error: line {}: delete does not take body rows",
-                                self.line_no
-                            );
-                        }
-                        _ => {}
-                    }
-                }
-                if let Some(ref mut pending) = self.pending {
-                    pending.body.push(text);
+                pending.deferred_blanks = 0;
+                if let Some(payload) = line.strip_prefix('+') {
+                    pending.rows.push(BodyRow::Explicit(payload.to_string()));
+                } else if line.starts_with('-') {
+                    pending.rows.push(BodyRow::Minus((*line).to_string()));
                 } else {
-                    bail!(
-                        "Error: line {}: payload line has no preceding hunk header",
-                        self.line_no
-                    );
+                    pending.rows.push(BodyRow::Bare((*line).to_string()));
                 }
             }
-            Token::Raw(text) => {
-                let trimmed = text.trim();
-                // 完全空行 → 跳过
-                if trimmed.is_empty() {
-                    return Ok(());
-                }
-                if let Some(ref mut pending) = self.pending {
-                    // 非 + 行作为 body 行处理（带警告）
-                    // 跳过 delete 的 body 检查
-                    match pending.target {
-                        BlockTarget::Delete { .. } => {
-                            bail!(
-                                "Error: line {}: delete does not take body rows",
-                                self.line_no
-                            );
-                        }
-                        _ => {
-                            if !self
-                                .warnings
-                                .contains(&BARE_BODY_AUTO_PIPED_WARNING.to_string())
-                            {
-                                self.warnings.push(BARE_BODY_AUTO_PIPED_WARNING.to_string());
-                            }
-                            pending.body.push(trimmed.to_string());
-                        }
-                    }
-                } else {
-                    bail!(
-                        "Error: line {}: invalid patch hunk '{}'",
-                        self.line_no,
-                        trimmed
-                    );
-                }
-            }
-            Token::Blank => {
-                // 空白行：不清除 pending，允许 hunk body 中有空行
-            }
+            continue;
         }
-        Ok(())
-    }
 
-    fn flush_pending(&mut self) -> Result<()> {
-        let Some(pending) = self.pending.take() else {
-            return Ok(());
+        if let Some(pending) = pending.take() {
+            flush_pending(current.as_mut(), pending)?;
+        }
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some(section) = current.as_mut() else {
+            if trimmed.starts_with('@') {
+                bail!("Error: legacy @PATH#TAG headers are unsupported; use [PATH#TAG]");
+            }
+            bail!("Error: line {line_num}: hashline input must begin with [PATH#TAG]");
         };
-        let header_line = pending.header_line;
-        match pending.target {
-            BlockTarget::Replace { start, end } => {
-                if pending.body.is_empty() {
-                    bail!("Error: line {header_line}: replace hunk requires at least one body row");
-                }
-                // 检查是否有 body 行以 `|` 开头（markdown 表格常见错误）
-                self.hunks.push(PatchHunk::Replace {
-                    start,
-                    end,
-                    body: pending.body,
-                });
-            }
-            BlockTarget::Delete { start, end } => {
-                self.hunks.push(PatchHunk::Delete { start, end });
-            }
-            BlockTarget::InsertBefore { line } => {
-                if pending.body.is_empty() {
-                    bail!("Error: line {header_line}: insert hunk requires at least one body row");
-                }
-                self.hunks.push(PatchHunk::InsertBefore {
-                    line,
-                    body: pending.body,
-                });
-            }
-            BlockTarget::InsertAfter { line } => {
-                if pending.body.is_empty() {
-                    bail!("Error: line {header_line}: insert hunk requires at least one body row");
-                }
-                self.hunks.push(PatchHunk::InsertAfter {
-                    line,
-                    body: pending.body,
-                });
-            }
-            BlockTarget::InsertHead => {
-                if pending.body.is_empty() {
-                    bail!("Error: line {header_line}: insert hunk requires at least one body row");
-                }
-                self.hunks
-                    .push(PatchHunk::InsertHead { body: pending.body });
-            }
-            BlockTarget::InsertTail => {
-                if pending.body.is_empty() {
-                    bail!("Error: line {header_line}: insert hunk requires at least one body row");
-                }
-                self.hunks
-                    .push(PatchHunk::InsertTail { body: pending.body });
-            }
-        }
-        Ok(())
+        parse_operation(trimmed, line_num, section, &mut pending)?;
+        ensure!(
+            section.operations.len() <= MAX_OPERATIONS,
+            "Error: too many hashline operations"
+        );
     }
 
-    fn end(&mut self) -> Result<()> {
-        self.flush_pending()?;
-        if self.hunks.is_empty() {
-            bail!("Error: patch contains no edit hunks");
+    if let Some(pending) = pending.take() {
+        flush_pending(current.as_mut(), pending)?;
+    }
+    if let Some(section) = current.take()
+        && !section.operations.is_empty()
+    {
+        sections.push(section);
+    }
+    ensure!(
+        !sections.is_empty(),
+        "Error: hashline input did not contain a [PATH#TAG] section"
+    );
+    for section in &sections {
+        let file_ops = section
+            .operations
+            .iter()
+            .filter(|operation| matches!(operation, Operation::Remove | Operation::Move { .. }))
+            .count();
+        ensure!(
+            file_ops <= 1,
+            "Error: section {} contains multiple file operations",
+            section.path
+        );
+        if let Some(position) = section
+            .operations
+            .iter()
+            .position(|operation| matches!(operation, Operation::Remove | Operation::Move { .. }))
+        {
+            ensure!(
+                position + 1 == section.operations.len(),
+                "Error: REM or MV must be the final operation in section {}",
+                section.path
+            );
         }
-        Ok(())
+    }
+    Ok(Patch { sections })
+}
+
+fn try_parse_header(line: &str, line_num: usize) -> Result<Option<Section>> {
+    if !line.starts_with('[') {
+        return Ok(None);
+    }
+    let body = line
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .ok_or_else(|| anyhow!("Error: line {line_num}: malformed [PATH#TAG] header"))?;
+    let body = strip_apply_patch_path_noise(body.trim());
+    let (path, tag) = body.rsplit_once('#').ok_or_else(|| {
+        anyhow!("Error: line {line_num}: header must include a four-hex snapshot tag")
+    })?;
+    let path = unquote_path(path.trim());
+    ensure!(
+        !path.is_empty(),
+        "Error: line {line_num}: header path is empty"
+    );
+    ensure!(
+        !path.contains('#'),
+        "Error: line {line_num}: header path may not contain '#'"
+    );
+    ensure!(
+        tag.len() == 4 && tag.chars().all(|ch| ch.is_ascii_hexdigit()),
+        "Error: line {line_num}: snapshot tag must contain exactly four hexadecimal characters"
+    );
+    Ok(Some(Section {
+        path,
+        tag: tag.to_ascii_uppercase(),
+        operations: Vec::new(),
+        warnings: Vec::new(),
+    }))
+}
+
+fn strip_apply_patch_path_noise(path: &str) -> &str {
+    let mut value = path.trim_start_matches('*').trim_start();
+    for prefix in [
+        "Update File:",
+        "Update:",
+        "Add File:",
+        "Delete File:",
+        "Move to:",
+    ] {
+        if value
+            .get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+        {
+            value = value[prefix.len()..].trim_start();
+            break;
+        }
+    }
+    value
+}
+
+fn unquote_path(path: &str) -> String {
+    if path.len() >= 2 {
+        let first = path.as_bytes()[0];
+        let last = path.as_bytes()[path.len() - 1];
+        if matches!(first, b'\'' | b'"') && first == last {
+            return path[1..path.len() - 1].to_string();
+        }
+    }
+    path.to_string()
+}
+
+fn is_operation_line(line: &str) -> bool {
+    ["PUT", "CUT", "REM", "MV"]
+        .iter()
+        .any(|keyword| keyword_rest(line, keyword).is_some() || line.eq_ignore_ascii_case(keyword))
+        || line.starts_with('[')
+        || line.starts_with("@@")
+        || line.starts_with("***")
+        || line.starts_with("diff --git ")
+}
+
+fn keyword_rest<'a>(line: &'a str, keyword: &str) -> Option<&'a str> {
+    let head = line.get(..keyword.len())?;
+    (head.eq_ignore_ascii_case(keyword)
+        && line
+            .as_bytes()
+            .get(keyword.len())
+            .is_some_and(u8::is_ascii_whitespace))
+    .then(|| line[keyword.len()..].trim_start())
+}
+
+fn parse_operation(
+    line: &str,
+    line_num: usize,
+    section: &mut Section,
+    pending: &mut Option<Pending>,
+) -> Result<()> {
+    if line.starts_with("@@") {
+        bail!("Error: line {line_num}: unified-diff hunk header is not valid in hashline");
+    }
+    if line.starts_with("***") || line.starts_with("diff --git ") {
+        bail!("Error: line {line_num}: apply_patch/unified-diff syntax is not valid in hashline");
+    }
+    if line.contains('*')
+        && (keyword_rest(line, "PUT").is_some() || keyword_rest(line, "CUT").is_some())
+    {
+        bail!(
+            "Error: line {line_num}: Block hashline operations using `*` are unsupported in Mink"
+        );
+    }
+    if line.eq_ignore_ascii_case("REM") {
+        section.operations.push(Operation::Remove);
+        return Ok(());
+    }
+    if let Some(destination) = keyword_rest(line, "MV") {
+        ensure!(
+            !destination.is_empty(),
+            "Error: line {line_num}: MV requires a destination path"
+        );
+        section.operations.push(Operation::Move {
+            destination: unquote_path(destination),
+        });
+        return Ok(());
+    }
+    if let Some(rest) = keyword_rest(line, "CUT") {
+        let (rest, had_colon) = strip_optional_colon(rest);
+        if had_colon {
+            section
+                .warnings
+                .push("Ignored trailing `:` on CUT; CUT takes no body rows.".to_string());
+        }
+        let (locator, register) = split_register(rest, line_num)?;
+        let (start, end) = parse_range(locator, line_num)?;
+        section.operations.push(Operation::Cut {
+            start,
+            end,
+            register,
+        });
+        return Ok(());
+    }
+    if let Some(rest) = keyword_rest(line, "PUT") {
+        let (rest, had_colon) = strip_optional_colon(rest);
+        let (locator, register) = split_register(rest, line_num)?;
+        if locator == ">$" {
+            return put_gap(
+                Cursor::Tail,
+                register,
+                had_colon,
+                line_num,
+                section,
+                pending,
+            );
+        }
+        if let Some(raw) = locator.strip_prefix('<') {
+            let line = parse_line_number(raw.trim(), line_num)?;
+            let cursor = if line == 1 {
+                Cursor::Head
+            } else {
+                Cursor::Before(line)
+            };
+            return put_gap(cursor, register, had_colon, line_num, section, pending);
+        }
+        if let Some(raw) = locator.strip_prefix('>') {
+            let line = parse_line_number(raw.trim(), line_num)?;
+            return put_gap(
+                Cursor::After(line),
+                register,
+                had_colon,
+                line_num,
+                section,
+                pending,
+            );
+        }
+        let (start, end) = parse_range(locator, line_num)?;
+        if let Some(register) = register {
+            ensure!(
+                !had_colon,
+                "Error: line {line_num}: register PUT takes no body rows"
+            );
+            section.operations.push(Operation::Paste {
+                target: PasteTarget::Range { start, end },
+                register: Some(register),
+            });
+        } else {
+            ensure!(
+                had_colon,
+                "Error: line {line_num}: span PUT without a body must name a register"
+            );
+            *pending = Some(Pending {
+                kind: PendingKind::Put { start, end },
+                rows: Vec::new(),
+                deferred_blanks: 0,
+                line_num,
+            });
+        }
+        return Ok(());
+    }
+    if line.starts_with('+') {
+        bail!(
+            "Error: line {line_num}: payload line has no preceding hunk header; CUT/register/file operations take no body rows"
+        );
+    }
+    bail!(
+        "Error: line {line_num}: unknown hashline operation {line:?}; expected PUT, CUT, REM, or MV"
+    )
+}
+
+fn strip_optional_colon(input: &str) -> (&str, bool) {
+    let trimmed = input.trim_end();
+    trimmed
+        .strip_suffix(':')
+        .map_or((trimmed, false), |value| (value.trim_end(), true))
+}
+
+fn split_register(input: &str, line_num: usize) -> Result<(&str, Option<String>)> {
+    let Some(position) = input.rfind(" @") else {
+        return Ok((input.trim(), None));
+    };
+    let name = input[position + 2..].trim();
+    ensure!(
+        !name.is_empty()
+            && name.len() <= MAX_REGISTER_NAME
+            && name
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-')),
+        "Error: line {line_num}: register names use 1-{MAX_REGISTER_NAME} ASCII letters, digits, `_`, or `-`"
+    );
+    Ok((input[..position].trim(), Some(name.to_string())))
+}
+
+fn put_gap(
+    cursor: Cursor,
+    register: Option<String>,
+    had_colon: bool,
+    line_num: usize,
+    section: &mut Section,
+    pending: &mut Option<Pending>,
+) -> Result<()> {
+    if had_colon {
+        ensure!(
+            register.is_none(),
+            "Error: line {line_num}: register PUT takes no body rows"
+        );
+        *pending = Some(Pending {
+            kind: PendingKind::Insert { cursor },
+            rows: Vec::new(),
+            deferred_blanks: 0,
+            line_num,
+        });
+    } else {
+        section.operations.push(Operation::Paste {
+            target: PasteTarget::Gap(cursor),
+            register,
+        });
+    }
+    Ok(())
+}
+
+fn flush_pending(section: Option<&mut Section>, pending: Pending) -> Result<()> {
+    let section =
+        section.ok_or_else(|| anyhow!("Error: internal hashline parser lost its section"))?;
+    let mut rows = pending.rows;
+    let explicit = rows.iter().any(|row| matches!(row, BodyRow::Explicit(_)));
+    let had_bare_rows = rows.iter().any(|row| matches!(row, BodyRow::Bare(_)));
+    let mut bullet_auto_piped = false;
+    let minus = rows
+        .iter()
+        .filter_map(|row| match row {
+            BodyRow::Minus(value) => Some(value),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if !minus.is_empty() {
+        let all_bullets = minus.iter().all(|row| markdown_bullet(row));
+        let explicit_bullet = rows
+            .iter()
+            .filter_map(|row| match row {
+                BodyRow::Explicit(value) => Some(value),
+                _ => None,
+            })
+            .any(|line| markdown_bullet(line));
+        if all_bullets && (!explicit || explicit_bullet) {
+            bullet_auto_piped = true;
+            section
+                .warnings
+                .push(
+                    "Auto-prefixed bare `- ` bullet row(s) as literal content. `-` rows never remove lines — the range does that; always prefix literal body rows with `+`: `+- item`."
+                        .to_string(),
+                );
+            for row in &mut rows {
+                if let BodyRow::Minus(value) = row {
+                    *row = BodyRow::Bare(value.clone());
+                }
+            }
+        } else if explicit && !all_bullets {
+            rows.retain(|row| !matches!(row, BodyRow::Minus(_)));
+            section.warnings.push(
+                "Ignored unified-diff `-old` row(s); the range already removes old content, so only `+new` rows were kept."
+                    .to_string(),
+            );
+        } else {
+            bail!(
+                "Error: line {}: `-` rows are not valid hashline body rows; use `+- item` for Markdown bullets",
+                pending.line_num
+            );
+        }
+    }
+
+    let bare_indices = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(index, row)| {
+            matches!(row, BodyRow::Bare(value) if !value.trim().is_empty()).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    if !bare_indices.is_empty() {
+        let stripped = bare_indices
+            .iter()
+            .filter_map(|index| match &rows[*index] {
+                BodyRow::Bare(value) => strip_read_prefix(value).map(ToString::to_string),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let all_prefixed = stripped.len() == bare_indices.len();
+        let all_literal_values =
+            all_prefixed && stripped.iter().all(|value| literal_mapping_value(value));
+        if all_prefixed && !all_literal_values {
+            for (index, value) in bare_indices.into_iter().zip(stripped) {
+                rows[index] = BodyRow::Bare(value);
+            }
+        }
+        if had_bare_rows && !bullet_auto_piped {
+            section.warnings.push(
+                "Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."
+                    .to_string(),
+            );
+        }
+    }
+    let body = rows
+        .into_iter()
+        .map(|row| match row {
+            BodyRow::Explicit(value) | BodyRow::Bare(value) | BodyRow::Minus(value) => value,
+            BodyRow::Blank => String::new(),
+        })
+        .collect::<Vec<_>>();
+    match pending.kind {
+        PendingKind::Put { start, end } => {
+            if body.is_empty() {
+                section.warnings.push(
+                    "Interpreted an empty `PUT` body as deletion. Use `CUT N.=M` or `CUT N*` for bodyless deletes."
+                        .to_string(),
+                );
+            }
+            section.operations.push(Operation::Put { start, end, body })
+        }
+        PendingKind::Insert { cursor } => {
+            ensure!(
+                !body.is_empty(),
+                "Error: line {}: PUT insert promises body rows",
+                pending.line_num
+            );
+            section.operations.push(Operation::Insert { cursor, body });
+        }
+    }
+    Ok(())
+}
+
+fn markdown_bullet(line: &str) -> bool {
+    line.trim_start()
+        .strip_prefix("- ")
+        .is_some_and(|rest| !rest.is_empty())
+}
+
+fn strip_read_prefix(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    let colon = trimmed.find(':')?;
+    (colon > 0 && trimmed[..colon].chars().all(|ch| ch.is_ascii_digit()))
+        .then_some(&trimmed[colon + 1..])
+}
+
+fn literal_mapping_value(value: &str) -> bool {
+    let value = value.trim().trim_end_matches(',').trim();
+    (value.len() >= 2
+        && ((value.starts_with('"') && value.ends_with('"'))
+            || (value.starts_with('\'') && value.ends_with('\''))))
+        || value.parse::<f64>().is_ok()
+}
+
+fn parse_range(raw: &str, line_num: usize) -> Result<(usize, usize)> {
+    let raw = raw.trim();
+    let first_end = raw
+        .find(|ch: char| !ch.is_ascii_digit())
+        .unwrap_or(raw.len());
+    let start = parse_line_number(&raw[..first_end], line_num)?;
+    let remainder = &raw[first_end..];
+    let mut separator_end = 0;
+    for (index, ch) in remainder.char_indices() {
+        if ch.is_whitespace() || matches!(ch, '-' | '.' | '=' | '…') {
+            separator_end = index + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    if remainder.is_empty() {
+        return Ok((start, start));
+    }
+    ensure!(
+        separator_end > 0,
+        "Error: line {line_num}: invalid range {raw:?}"
+    );
+    let end = parse_line_number(remainder[separator_end..].trim(), line_num)?;
+    ensure!(
+        start <= end,
+        "Error: line {line_num}: range start {start} is after end {end}"
+    );
+    ensure!(
+        end - start < MAX_RANGE_LINES,
+        "Error: line {line_num}: range expands beyond {MAX_RANGE_LINES} lines"
+    );
+    Ok((start, end))
+}
+
+fn parse_line_number(raw: &str, line_num: usize) -> Result<usize> {
+    let value = raw.parse::<usize>().map_err(|_| {
+        anyhow!("Error: line {line_num}: expected a positive line number, got {raw:?}")
+    })?;
+    ensure!(
+        value > 0,
+        "Error: line {line_num}: line numbers are one-based"
+    );
+    Ok(value)
+}
+
+pub fn anchor_lines(section: &Section) -> BTreeSet<usize> {
+    let mut anchors = BTreeSet::new();
+    for operation in &section.operations {
+        match operation {
+            Operation::Put { start, end, .. }
+            | Operation::Cut { start, end, .. }
+            | Operation::Paste {
+                target: PasteTarget::Range { start, end },
+                ..
+            } => anchors.extend(*start..=*end),
+            Operation::Insert { cursor, .. }
+            | Operation::Paste {
+                target: PasteTarget::Gap(cursor),
+                ..
+            } => match cursor {
+                Cursor::Before(line) | Cursor::After(line) => {
+                    anchors.insert(*line);
+                }
+                Cursor::Head | Cursor::Tail => {}
+            },
+            Operation::Remove | Operation::Move { .. } => {}
+        }
+    }
+    anchors
+}
+
+pub fn is_head_tail_only(section: &Section) -> bool {
+    section.operations.iter().all(|operation| {
+        matches!(
+            operation,
+            Operation::Insert {
+                cursor: Cursor::Head | Cursor::Tail,
+                ..
+            } | Operation::Paste {
+                target: PasteTarget::Gap(Cursor::Head | Cursor::Tail),
+                ..
+            }
+        )
+    })
+}
+
+pub fn remap_anchors(section: &Section, offset: isize) -> Result<Section> {
+    let shift = |line: usize| -> Result<usize> {
+        line.checked_add_signed(offset)
+            .filter(|line| *line > 0)
+            .ok_or_else(|| anyhow!("Error: stale recovery mapped an anchor outside the file"))
+    };
+    let mut section = section.clone();
+    for operation in &mut section.operations {
+        match operation {
+            Operation::Put { start, end, .. }
+            | Operation::Cut { start, end, .. }
+            | Operation::Paste {
+                target: PasteTarget::Range { start, end },
+                ..
+            } => {
+                *start = shift(*start)?;
+                *end = shift(*end)?;
+            }
+            Operation::Insert { cursor, .. }
+            | Operation::Paste {
+                target: PasteTarget::Gap(cursor),
+                ..
+            } => match cursor {
+                Cursor::Before(line) | Cursor::After(line) => *line = shift(*line)?,
+                Cursor::Head | Cursor::Tail => {}
+            },
+            Operation::Remove | Operation::Move { .. } => {}
+        }
+    }
+    Ok(section)
+}
+
+pub fn apply(text: &str, section: &Section, clipboard: &mut Clipboard) -> Result<ApplyResult> {
+    let had_trailing_newline = text.ends_with('\n');
+    let lines = crate::tools::snapshot::split_content_lines(text);
+    let mut deleted = BTreeSet::new();
+    let mut insertions: BTreeMap<usize, Vec<Vec<String>>> = BTreeMap::new();
+    let mut warnings = section.warnings.clone();
+
+    for operation in &section.operations {
+        match operation {
+            Operation::Put { start, end, .. }
+            | Operation::Cut { start, end, .. }
+            | Operation::Paste {
+                target: PasteTarget::Range { start, end },
+                ..
+            } => {
+                validate_range(*start, *end, lines.len(), &section.path)?;
+                ensure_target_free(&mut deleted, *start, *end)?;
+            }
+            _ => {}
+        }
+    }
+    let section_delta = section_delimiter_delta(&lines, section);
+
+    for operation in &section.operations {
+        match operation {
+            Operation::Put { start, end, body } => {
+                let repair = repair_replacement(&lines, *start, *end, body, section_delta)?;
+                for line in repair.keep_lines {
+                    deleted.remove(&line);
+                }
+                warnings.extend(repair.warnings);
+                if !repair.body.is_empty() {
+                    insertions.entry(start - 1).or_default().push(repair.body);
+                }
+            }
+            Operation::Cut {
+                start,
+                end,
+                register,
+            } => {
+                let captured = lines[start - 1..*end].to_vec();
+                if let Some(register) = register {
+                    clipboard.named.insert(register.clone(), captured);
+                } else {
+                    clipboard.anonymous = Some(captured);
+                    clipboard
+                        .pending_anonymous_cuts
+                        .push(format!("CUT {start}.={end}"));
+                }
+            }
+            Operation::Insert { cursor, body } => {
+                let (boundary, shifted) =
+                    insertion_boundary(cursor, body, &lines, &deleted, &section.path)?;
+                if let Some((from, to)) = shifted {
+                    warnings.push(format!(
+                        "shifted PUT > landing from line {from} to structural closer line {to}"
+                    ));
+                }
+                insertions.entry(boundary).or_default().push(body.clone());
+            }
+            Operation::Paste { target, register } => {
+                let body = if let Some(register) = register {
+                    clipboard
+                        .named
+                        .get(register)
+                        .cloned()
+                        .ok_or_else(|| anyhow!("Error: unknown Hashline register @{register}"))?
+                } else {
+                    ensure!(
+                        clipboard.pending_anonymous_cuts.len() <= 1,
+                        "Error: anonymous PUT is ambiguous after multiple CUT operations; name the register"
+                    );
+                    let body = clipboard.anonymous.clone().ok_or_else(|| {
+                        anyhow!(
+                            "Error: anonymous PUT requires a prior unlabeled CUT in this Edit call"
+                        )
+                    })?;
+                    clipboard.pending_anonymous_cuts.clear();
+                    body
+                };
+                match target {
+                    PasteTarget::Gap(cursor) => {
+                        let (boundary, shifted) =
+                            insertion_boundary(cursor, &body, &lines, &deleted, &section.path)?;
+                        if let Some((from, to)) = shifted {
+                            warnings.push(format!(
+                                "shifted register PUT landing from line {from} to {to}"
+                            ));
+                        }
+                        insertions.entry(boundary).or_default().push(body);
+                    }
+                    PasteTarget::Range { start, .. } => {
+                        insertions.entry(start - 1).or_default().push(body);
+                    }
+                }
+            }
+            Operation::Remove | Operation::Move { .. } => {}
+        }
+    }
+
+    let mut output = Vec::new();
+    for boundary in 0..=lines.len() {
+        if let Some(groups) = insertions.get(&boundary) {
+            for group in groups {
+                output.extend(group.iter().cloned());
+            }
+        }
+        if boundary < lines.len() && !deleted.contains(&(boundary + 1)) {
+            output.push(lines[boundary].clone());
+        }
+    }
+    let mut result = output.join("\n");
+    if had_trailing_newline && !result.is_empty() {
+        result.push('\n');
+    }
+    Ok(ApplyResult {
+        text: result,
+        warnings,
+    })
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct DelimiterBalance {
+    paren: isize,
+    bracket: isize,
+    brace: isize,
+}
+
+impl DelimiterBalance {
+    fn add(self, other: Self) -> Self {
+        Self {
+            paren: self.paren + other.paren,
+            bracket: self.bracket + other.bracket,
+            brace: self.brace + other.brace,
+        }
+    }
+
+    fn subtract(self, other: Self) -> Self {
+        Self {
+            paren: self.paren - other.paren,
+            bracket: self.bracket - other.bracket,
+            brace: self.brace - other.brace,
+        }
+    }
+
+    fn is_zero(self) -> bool {
+        self == Self::default()
     }
 }
 
-const BARE_BODY_AUTO_PIPED_WARNING: &str = "body row missing '+' prefix, treated as literal";
+fn section_delimiter_delta(lines: &[String], section: &Section) -> Option<DelimiterBalance> {
+    let mut delta = DelimiterBalance::default();
+    for operation in &section.operations {
+        let contribution = match operation {
+            Operation::Put { start, end, body } => {
+                balance(body).subtract(balance(&lines[start - 1..*end]))
+            }
+            Operation::Cut { start, end, .. } => {
+                DelimiterBalance::default().subtract(balance(&lines[start - 1..*end]))
+            }
+            Operation::Insert { body, .. } => balance(body),
+            Operation::Paste { .. } => return None,
+            Operation::Remove | Operation::Move { .. } => DelimiterBalance::default(),
+        };
+        delta = delta.add(contribution);
+    }
+    Some(delta)
+}
 
-// ── 公开 API ──────────────────────────────────────────────────────────────
+#[derive(Debug)]
+struct ReplacementRepair {
+    body: Vec<String>,
+    keep_lines: Vec<usize>,
+    warnings: Vec<String>,
+}
 
-/// 解析 hashline patch 文本，返回 `ParsedPatch`。
-///
-/// 与旧的 `parse_anchored_patch` 输出类型完全兼容。
-pub(crate) fn parse_patch(input: &str) -> Result<(super::file::ParsedPatch, Vec<String>)> {
-    let lines: Vec<&str> = input.lines().collect();
-    if lines.is_empty() || lines.iter().all(|l| l.trim().is_empty()) {
-        bail!("Error: patch is empty");
+fn repair_replacement(
+    lines: &[String],
+    start: usize,
+    end: usize,
+    body: &[String],
+    section_delta: Option<DelimiterBalance>,
+) -> Result<ReplacementRepair> {
+    let mut body = body.to_vec();
+    let mut warnings = Vec::new();
+    repair_replacement_indentation(lines, start, end, &mut body, &mut warnings);
+
+    let leading_limit = body.len().min(start.saturating_sub(1));
+    let mut leading = 0;
+    for count in 1..=leading_limit {
+        if body[..count] == lines[start - 1 - count..start - 1] {
+            leading = count;
+        }
+    }
+    let trailing_limit = body.len().min(lines.len().saturating_sub(end));
+    let mut trailing = 0;
+    for count in 1..=trailing_limit {
+        if body[body.len() - count..] == lines[end..end + count] {
+            trailing = count;
+        }
+    }
+    if leading > 0 && trailing > 0 && leading + trailing < body.len() {
+        let dropped = balance(&body[..leading]).add(balance(&body[body.len() - trailing..]));
+        let delta = balance(&body).subtract(balance(&lines[start - 1..end]));
+        if dropped.is_zero() || dropped == delta {
+            body = body[leading..body.len() - trailing].to_vec();
+            warnings.push(format!(
+                "Auto-repaired a replacement boundary echo at line {start}: dropped {leading} leading and {trailing} trailing payload line(s) already present outside the range. Issue the payload as the final desired content for the selected range only — never restate unchanged lines bordering the range."
+            ));
+            return Ok(ReplacementRepair {
+                body,
+                keep_lines: Vec::new(),
+                warnings,
+            });
+        }
     }
 
-    let mut executor = Executor::new();
-
-    for line in &lines {
-        let token = Tokenizer::classify_line(line);
-        executor.feed(token)?;
+    let source = &lines[start - 1..end];
+    let delta = balance(&body).subtract(balance(source));
+    if !delta.is_zero() {
+        if trailing > 0 && balance(&body[body.len() - trailing..]) == delta {
+            body.truncate(body.len() - trailing);
+            warnings.push(format!(
+                "Auto-repaired a delimiter-balance mismatch in the replacement at line {start}: dropped {trailing} duplicated trailing payload line(s) already present below the range. Issue the payload as the final desired content only — never restate or omit a closing bracket bordering the range."
+            ));
+            return Ok(ReplacementRepair {
+                body,
+                keep_lines: Vec::new(),
+                warnings,
+            });
+        }
+        if leading > 0 && balance(&body[..leading]) == delta {
+            body.drain(..leading);
+            warnings.push(format!(
+                "Auto-repaired a delimiter-balance mismatch in the replacement at line {start}: dropped {leading} duplicated leading payload line(s) already present above the range. Issue the payload as the final desired content only — never restate or omit a closing bracket bordering the range."
+            ));
+            return Ok(ReplacementRepair {
+                body,
+                keep_lines: Vec::new(),
+                warnings,
+            });
+        }
     }
 
-    executor.end()?;
+    // A neutral one-sided echo on a multi-line rewrite is the common
+    // off-by-one keeper mistake. Reject the short/ambiguous form instead of
+    // silently deleting source lines not represented by the payload.
+    if (leading > 0) ^ (trailing > 0) {
+        let (side, count, echo) = if leading > 0 {
+            ("leading", leading, &body[..leading])
+        } else {
+            ("trailing", trailing, &body[body.len() - trailing..])
+        };
+        let range_len = end - start + 1;
+        if range_len > 1 && balance(echo).is_zero() && count < body.len() {
+            if body.len() < range_len + count {
+                let where_text = if side == "leading" {
+                    "opens by restating"
+                } else {
+                    "ends by restating"
+                };
+                bail!(
+                    "`PUT {start}.={end}:` rejected: the body {where_text} the {count} line(s) just {} the range, but is too short to be the full final content of the widened range — applying it as-is or auto-repairing would delete range line(s) the body never restates. Re-issue with the range covering exactly the lines that change and the body as their complete final content: drop the restated keeper from the body, or widen the range to consume it.",
+                    if side == "leading" { "above" } else { "below" }
+                );
+            }
+            if side == "leading" {
+                body.drain(..count);
+            } else {
+                body.truncate(body.len() - count);
+            }
+            warnings.push(format!(
+                "Auto-repaired a replacement boundary echo at line {start}: dropped {count} {side} payload line(s) identical to the surviving line(s) just {} the range. The range was one line short of the content you retyped — issue the payload as the final content for the selected range only, and widen the range to consume any keeper you restate.",
+                if side == "leading" { "above" } else { "below" }
+            ));
+            return Ok(ReplacementRepair {
+                body,
+                keep_lines: Vec::new(),
+                warnings,
+            });
+        }
+    }
 
-    let path = executor
-        .path
-        .ok_or_else(|| anyhow::anyhow!("Error: patch must begin with @PATH#TAG"))?;
-    let tag = executor
-        .tag
-        .ok_or_else(|| anyhow::anyhow!("Error: patch header must be @PATH#TAG"))?;
+    // When the payload leaves unmatched openers and the selected range ends in
+    // bare structural closers, retain only the suffix needed to rebalance it.
+    let delta = balance(&body).subtract(balance(source));
+    let mut keep_lines = Vec::new();
+    let mut remaining = delta;
+    for line in (start..=end).rev() {
+        let text = &lines[line - 1];
+        if !is_structural_closer(text) {
+            break;
+        }
+        let closer = balance(std::slice::from_ref(text));
+        let next = remaining.subtract(DelimiterBalance {
+            paren: -closer.paren,
+            bracket: -closer.bracket,
+            brace: -closer.brace,
+        });
+        if next.paren.abs() <= remaining.paren.abs()
+            && next.bracket.abs() <= remaining.bracket.abs()
+            && next.brace.abs() <= remaining.brace.abs()
+        {
+            keep_lines.push(line);
+            remaining = next;
+        }
+        if remaining.is_zero() {
+            break;
+        }
+    }
+    let section_can_cover = section_delta.is_some_and(|total| balance_covers(total, delta));
+    if !keep_lines.is_empty() && remaining.is_zero() && section_can_cover {
+        let closer_indent = leading_indent(&lines[keep_lines[0] - 1]);
+        let claims_inside = body
+            .iter()
+            .filter(|line| !line.trim().is_empty())
+            .any(|line| leading_indent(line).len() > closer_indent.len());
+        if !claims_inside {
+            bail!(
+                "`PUT {start}.={end}:` rejected: replacing a structural closer with content at the closer's own indentation is unsafe because whether it belongs before or after the closer is ambiguous"
+            );
+        }
+        keep_lines.sort_unstable();
+        warnings.push(format!(
+            "Auto-repaired a delimiter-balance mismatch in the replacement at line {start}: kept {} structural closing line(s) the range deleted without restating. Issue the payload as the final desired content only — never restate or omit a closing bracket bordering the range.",
+            keep_lines.len()
+        ));
+    } else {
+        keep_lines.clear();
+    }
+    Ok(ReplacementRepair {
+        body,
+        keep_lines,
+        warnings,
+    })
+}
 
-    let parsed = super::file::ParsedPatch {
-        path,
-        tag,
-        hunks: executor.hunks,
+fn balance_covers(available: DelimiterBalance, needed: DelimiterBalance) -> bool {
+    fn covers(available: isize, needed: isize) -> bool {
+        needed == 0 || available.signum() == needed.signum() && available.abs() >= needed.abs()
+    }
+    covers(available.paren, needed.paren)
+        && covers(available.bracket, needed.bracket)
+        && covers(available.brace, needed.brace)
+}
+
+fn repair_replacement_indentation(
+    lines: &[String],
+    start: usize,
+    end: usize,
+    body: &mut [String],
+    warnings: &mut Vec<String>,
+) {
+    if body.len() != end - start + 1 || start <= 1 {
+        return;
+    }
+    let preceding = &lines[start - 2];
+    let source_first = &lines[start - 1];
+    let payload_first = &body[0];
+    let preceding_indent = leading_indent(preceding);
+    if !preceding.trim_end().ends_with('{')
+        || source_first.len() - source_first.trim_start().len() <= preceding_indent.len()
+        || payload_first.len() - payload_first.trim_start().len() > preceding_indent.len()
+    {
+        return;
+    }
+    let mut shift: Option<&str> = None;
+    let mut matches = 0usize;
+    for (source, payload) in lines[start - 1..end].iter().zip(body.iter()) {
+        if source.trim().is_empty() || source.trim_start() != payload.trim_start() {
+            continue;
+        }
+        let source_indent = leading_indent(source);
+        let payload_indent = leading_indent(payload);
+        let Some(candidate) = source_indent.strip_suffix(payload_indent) else {
+            return;
+        };
+        if shift.is_some_and(|current| current != candidate) {
+            return;
+        }
+        shift = Some(candidate);
+        matches += 1;
+    }
+    let Some(shift) = shift else {
+        return;
     };
+    if shift.is_empty() || matches < 2 || matches * 2 <= body.len() {
+        return;
+    }
+    for line in body.iter_mut().filter(|line| !line.trim().is_empty()) {
+        line.insert_str(0, shift);
+    }
+    warnings.push(
+        "Auto-indented a replacement body to match unchanged structural rows in its source range."
+            .to_string(),
+    );
+}
 
-    Ok((parsed, executor.warnings))
+fn balance(lines: &[String]) -> DelimiterBalance {
+    let mut result = DelimiterBalance::default();
+    let mut block_comment = false;
+    let mut quote = None;
+    for line in lines {
+        let chars = line.chars().collect::<Vec<_>>();
+        let mut index = 0usize;
+        while index < chars.len() {
+            let ch = chars[index];
+            let next = chars.get(index + 1).copied();
+            if block_comment {
+                if ch == '*' && next == Some('/') {
+                    block_comment = false;
+                    index += 2;
+                    continue;
+                }
+                index += 1;
+                continue;
+            }
+            if let Some(active) = quote {
+                if ch == '\\' {
+                    index += 2;
+                    continue;
+                }
+                if ch == active {
+                    quote = None;
+                }
+                index += 1;
+                continue;
+            }
+            if ch == '/' && next == Some('/') {
+                break;
+            }
+            if ch == '/' && next == Some('*') {
+                block_comment = true;
+                index += 2;
+                continue;
+            }
+            if matches!(ch, '\'' | '"' | '`') {
+                quote = Some(ch);
+                index += 1;
+                continue;
+            }
+            match ch {
+                '(' => result.paren += 1,
+                ')' => result.paren -= 1,
+                '[' => result.bracket += 1,
+                ']' => result.bracket -= 1,
+                '{' => result.brace += 1,
+                '}' => result.brace -= 1,
+                _ => {}
+            }
+            index += 1;
+        }
+        if quote != Some('`') {
+            quote = None;
+        }
+    }
+    result
+}
+
+fn insertion_boundary(
+    cursor: &Cursor,
+    body: &[String],
+    lines: &[String],
+    targeted: &BTreeSet<usize>,
+    path: &str,
+) -> Result<(usize, Option<(usize, usize)>)> {
+    let literal = cursor_boundary(cursor, lines.len(), path)?;
+    let Cursor::After(anchor) = cursor else {
+        return Ok((literal, None));
+    };
+    let Some(target_indent) = body_target_indent(body) else {
+        return Ok((literal, None));
+    };
+    let anchor_indent = leading_indent(&lines[anchor - 1]);
+    if target_indent.len() >= anchor_indent.len() || !anchor_indent.starts_with(target_indent) {
+        return Ok((literal, None));
+    }
+    let mut landing = *anchor;
+    for line in anchor + 1..=lines.len() {
+        let text = &lines[line - 1];
+        if text.trim().is_empty() {
+            continue;
+        }
+        if !is_structural_closer(text) {
+            break;
+        }
+        let indent = leading_indent(text);
+        if !indent.starts_with(target_indent) || targeted.contains(&line) {
+            return Ok((literal, None));
+        }
+        landing = line;
+        if indent.len() == target_indent.len() {
+            break;
+        }
+    }
+    if landing == *anchor {
+        Ok((literal, None))
+    } else {
+        Ok((landing, Some((*anchor, landing))))
+    }
+}
+
+fn leading_indent(line: &str) -> &str {
+    let length = line.len() - line.trim_start_matches([' ', '\t']).len();
+    &line[..length]
+}
+
+fn body_target_indent(body: &[String]) -> Option<&str> {
+    let mut rows = body
+        .iter()
+        .filter(|line| !line.trim().is_empty() && !is_structural_closer(line));
+    let mut target = leading_indent(rows.next()?);
+    for row in rows {
+        let indent = leading_indent(row);
+        if indent.starts_with(target) {
+            continue;
+        }
+        if target.starts_with(indent) {
+            target = indent;
+        } else {
+            return None;
+        }
+    }
+    Some(target)
+}
+
+fn is_structural_closer(line: &str) -> bool {
+    let trimmed = line.trim();
+    let core = trimmed
+        .strip_suffix(';')
+        .or_else(|| trimmed.strip_suffix(','))
+        .unwrap_or(trimmed);
+    !core.is_empty() && core.chars().all(|ch| matches!(ch, ')' | ']' | '}'))
+}
+
+fn validate_range(start: usize, end: usize, line_count: usize, path: &str) -> Result<()> {
+    ensure!(
+        start > 0 && start <= end && end <= line_count,
+        "Error: range {start}.={end} is outside {path} ({line_count} lines)"
+    );
+    Ok(())
+}
+
+fn ensure_target_free(targeted: &mut BTreeSet<usize>, start: usize, end: usize) -> Result<()> {
+    for line in start..=end {
+        ensure!(
+            targeted.insert(line),
+            "Error: anchor line {line} is already targeted by another hunk"
+        );
+    }
+    Ok(())
+}
+
+fn cursor_boundary(cursor: &Cursor, line_count: usize, path: &str) -> Result<usize> {
+    match cursor {
+        Cursor::Head => Ok(0),
+        Cursor::Tail => Ok(line_count),
+        Cursor::Before(line) => {
+            ensure!(
+                *line > 0 && *line <= line_count,
+                "Error: anchor line {line} is outside {path} ({line_count} lines)"
+            );
+            Ok(line - 1)
+        }
+        Cursor::After(line) => {
+            ensure!(
+                *line > 0 && *line <= line_count,
+                "Error: anchor line {line} is outside {path} ({line_count} lines)"
+            );
+            Ok(*line)
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::file::ParsedPatch;
 
-    fn parse_success(input: &str) -> (ParsedPatch, Vec<String>) {
-        parse_patch(input).unwrap()
-    }
-
-    fn parse_error(input: &str) -> String {
-        parse_patch(input).unwrap_err().to_string()
+    #[test]
+    fn parses_current_put_protocol() {
+        let patch = parse("[a.rs#1A2B]\nPUT 2.=2:\n+B\nPUT >$:\n+c").unwrap();
+        let result = apply("a\nb\n", &patch.sections[0], &mut Clipboard::default()).unwrap();
+        assert_eq!(result.text, "a\nB\nc\n");
     }
 
     #[test]
-    fn replace_single_line() {
-        let (p, w) = parse_success("@a.rs#0A\nreplace 2:\n+two");
-        assert_eq!(p.path, "a.rs");
-        assert_eq!(p.tag, "0A");
-        assert_eq!(p.hunks.len(), 1);
-        assert!(matches!(
-            &p.hunks[0],
-            PatchHunk::Replace {
-                start: 2,
-                end: 2,
-                ..
-            }
-        ));
-        assert!(w.is_empty());
+    fn anonymous_and_named_registers_work() {
+        let patch = parse("[a#AAAA]\nCUT 2.=2 @saved\nPUT <1 @saved").unwrap();
+        let result = apply("a\nb\nc", &patch.sections[0], &mut Clipboard::default()).unwrap();
+        assert_eq!(result.text, "b\na\nc");
     }
 
     #[test]
-    fn replace_range() {
-        let (p, w) = parse_success("@a.rs#0A\nreplace 2..4:\n+new2\n+new3");
-        assert_eq!(p.hunks.len(), 1);
-        assert!(matches!(
-            &p.hunks[0],
-            PatchHunk::Replace {
-                start: 2,
-                end: 4,
-                ..
-            }
-        ));
-        assert!(w.is_empty());
-    }
-
-    #[test]
-    fn delete_single() {
-        let (p, w) =
-            parse_success("@f#FF\nreplace 1:\n+hello\n\ndelete 3..5\n\nreplace 7:\n+world");
-        assert_eq!(p.hunks.len(), 3);
-        assert!(w.is_empty());
-    }
-
-    #[test]
-    fn insert_before_after_head_tail() {
-        let (p, w) = parse_success(
-            "@f#00\n\
-             insert before 1:\n+top\n\
-             insert after 1:\n+after\n\
-             insert head:\n+head\n\
-             insert tail:\n+tail",
+    fn rejects_block_locators() {
+        assert!(
+            parse("[a#AAAA]\nPUT 1*:\n+x")
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported")
         );
-        assert_eq!(p.hunks.len(), 4);
-        assert!(w.is_empty());
-    }
-
-    #[test]
-    fn bare_body_line_accepted_with_warning() {
-        let (p, w) = parse_success("@f#00\nreplace 1:\n| table content");
-        assert_eq!(p.hunks.len(), 1);
-        if let PatchHunk::Replace { body, .. } = &p.hunks[0] {
-            assert_eq!(body[0], "| table content");
-        } else {
-            panic!("expected Replace");
-        }
-        assert!(w.iter().any(|m| m.contains("body row missing")));
-    }
-
-    #[test]
-    fn raw_body_lines_accepted() {
-        let (p, _w) = parse_success("@f#00\nreplace 1..3:\n+a\n| pipe line\n+c\nplain text");
-        assert_eq!(p.hunks.len(), 1);
-        if let PatchHunk::Replace { body, .. } = &p.hunks[0] {
-            assert_eq!(body, &["a", "| pipe line", "c", "plain text"]);
-        } else {
-            panic!("expected Replace");
-        }
-    }
-
-    #[test]
-    fn blank_lines_in_body_skipped() {
-        // +a, + (empty), + (empty), c (raw), +d
-        let (p, w) = parse_success("@f#00\nreplace 1..3:\n+a\n+\n+\nc\n+d");
-        assert_eq!(p.hunks.len(), 1);
-        if let PatchHunk::Replace { body, .. } = &p.hunks[0] {
-            // 两个 `+` 产生两个空字符串，`c` 是 raw body 行
-            assert_eq!(body, &["a", "", "", "c", "d"]);
-        } else {
-            panic!("expected Replace");
-        }
-        // `c` 是 raw body 行，触发警告
-        assert!(w.iter().any(|m| m.contains("body row missing")));
-    }
-
-    #[test]
-    fn payload_without_header_errors() {
-        let err = parse_error("+orphan");
-        assert!(err.contains("no preceding hunk header"));
-    }
-
-    #[test]
-    fn empty_patch_errors() {
-        let err = parse_error("");
-        assert!(err.contains("patch is empty"));
-    }
-
-    #[test]
-    fn missing_header_errors() {
-        let err = parse_error("replace 1:\n+hello");
-        assert!(err.contains("must begin with @PATH#TAG"));
-    }
-
-    #[test]
-    fn delete_takes_no_body() {
-        let err = parse_error("@f#00\ndelete 3\n+garbage");
-        assert!(err.contains("delete does not take body rows"));
-    }
-
-    #[test]
-    fn replace_empty_body_errors() {
-        let err = parse_error("@f#00\nreplace 1:");
-        assert!(err.contains("replace hunk requires at least one body row"));
-    }
-
-    #[test]
-    fn range_reversed_errors() {
-        let err = parse_error("@f#00\nreplace 5..3:\n+body");
-        assert!(err.contains("ends before it starts"));
-    }
-
-    #[test]
-    fn multiple_hunks() {
-        let (p, w) = parse_success(
-            "@f#00\n\
-             replace 1:\n+first\n\
-             delete 3\n\
-             insert tail:\n+tail",
+        assert!(
+            parse("[a#AAAA]\nCUT 1*")
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported")
         );
-        assert_eq!(p.hunks.len(), 3);
-        assert!(w.is_empty());
-    }
-
-    #[test]
-    fn insert_tail_requires_body() {
-        let err = parse_error("@f#00\ninsert tail:");
-        assert!(err.contains("insert hunk requires at least one body row"));
+        assert!(
+            parse("[a#AAAA]\nPUT >1*:\n+x")
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported")
+        );
+        assert!(
+            parse("[a#AAAA]\nPUT >1* @saved")
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported")
+        );
     }
 }

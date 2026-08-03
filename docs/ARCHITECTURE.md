@@ -26,7 +26,7 @@ Mink 是一个 Rust 实现的轻量 AI coding agent，默认面向 DeepSeek / Op
 - 超长工具输出落 session artifact，可通过 `Read artifact://<id>` 恢复
 - `Read` 当前是内置轻量资源 provider，支持本地文件、artifact、skill、rule 和 session introspection；资源协议所有权属于 `ResourceRouter`
 - registered resource 与 capability snapshot 分离：资源读取走 `ResourceRouter`，prompt/skill/rule/context 能力视图走 `CapabilitySnapshot`
-- `Edit` 支持 snapshot anchored patch，降低精确字符串替换失败率
+- `Edit` 在 runtime 启动时解析为互斥的 Hashline 或 Replace schema、提示词和 executor
 - 上下文预算是硬约束，通过摘要压缩和 immutable prefix 尽量保留 prefix cache 命中
 
 ---
@@ -74,8 +74,10 @@ TurnExecutor (agent/turn.rs)
 ┌─────── 工具层 ────────┐
 │ tools/runner.rs       │ ToolExec registry、resolved surface gate、StormBreaker、结果格式化
 │ tools/metadata.rs     │ ApprovalTier、ToolResultKind、ToolMetadata
-│ tools/file.rs         │ Read / Write / Edit、selector、resource、anchored patch
-│ tools/snapshot.rs     │ FileSnapshotStore、行 hash 和 snapshot tag
+│ tools/file.rs         │ Read / Write / 双模式 Edit、selector、resource、prepare/commit
+│ tools/hashline.rs     │ 非 Block grammar、坐标操作与 clipboard apply
+│ tools/replace.rs      │ exact/行窗口 fuzzy 内容匹配、歧义诊断与缩进转换
+│ tools/snapshot.rs     │ Hashline 版本历史、seen-lines、tag、淘汰与路径迁移
 │ tools/search.rs       │ Glob / Grep
 │ tools/vfs.rs          │ Read / Glob / Grep 的同步只读 VFS hook、请求/结果协议和格式化
 │ tools/bash.rs         │ Bash 执行、超时、ANSI 过滤、安全检查、误用拦截
@@ -262,8 +264,10 @@ ToolRunResult
 | `tools/semantic_capabilities.rs` | 工具语义能力 offer、provider binding、scope classifier 和 fingerprint |
 | `tools/runtime_guidance.rs` | 带结构化工具引用的运行时引导消息 |
 | `tools/runner.rs` | `ToolExec` trait、`TOOL_REGISTRY`、resolved surface gate、并发调度、结果截断、artifact spill 和内置控制工具 |
-| `tools/file.rs` | `ReadTool`、`WriteTool`、`EditTool`、selector、resource URL、anchored patch |
-| `tools/snapshot.rs` | 文件 snapshot、tag、行 hash 校验 |
+| `tools/file.rs` | `ReadTool`、`WriteTool`、双模式 `EditTool`、selector、resource URL、prepare/commit |
+| `tools/hashline.rs` | 非 Block tokenizer/parser、原始坐标 apply、剪贴板操作 |
+| `tools/replace.rs` | exact 与归一化行窗口 fuzzy 匹配、歧义诊断、缩进转换 |
+| `tools/snapshot.rs` | Hashline 完整文本版本、seen-lines、xxHash tag、淘汰和路径恢复 |
 | `tools/search.rs` | `GlobTool`、`GrepTool` |
 | `tools/vfs.rs` | `ReadOnlyFileSystem`、`VfsScope`、结构化请求/结果、虚拟路径规范化、请求校验和结果格式化 |
 | `tools/bash.rs` | `BashTool`、危险命令检查、误用拦截 |
@@ -393,7 +397,7 @@ Read / Glob / Grep
 
 VFS 只接管普通路径。`artifact://`、`skill://`、`rule://` 和 `session://` 仍先走资源读取路径。Grep 对 registered resource 直接搜索 handler 返回的文本，不要求暴露底层物理路径。虚拟路径使用 POSIX 分隔符和词法规范化，拒绝越过虚拟根目录。Glob/regex 请求由工具层先校验，后端返回结构化路径或匹配行，`mink-core` 统一输出格式和 100KB 搜索输出保护。请求中的 `max_files` / `max_results` 是后端契约，后端必须自行遵守；核心不提供第二套 VFS 搜索实现。
 
-虚拟文件是只读资源，不创建 anchored Edit snapshot。因此 VFS runtime 不向模型暴露 `Edit`；
+虚拟文件是只读资源，不创建 Hashline snapshot。因此 VFS runtime 不向模型暴露 `Edit`；
 若 `enabled_tools` 显式包含 `Edit`，启动会因缺少本地 editable snapshot provider 而失败。`Write` 仍是
 本地文件操作，不会修改 VFS 内容。具体数据库适配不进入核心依赖；`crates/mink-core/examples/redb_vfs.rs`
 展示了按 `resource_session_id` 分区、惰性范围扫描的 redb 后端。
@@ -524,7 +528,8 @@ Session 目录保存 conversation、events、metadata、summary、stats 和 arti
 - prompt skill index、selected skills、`skill://` 和 `rule://` 必须来自同一 `CapabilitySnapshot`；`ImmutablePrefix` 的依赖 fingerprint 同时包含 capability snapshot、tool surface、provider bindings 和 active prompt workflows。
 - 虚拟 `Read` 永远不生成可编辑 snapshot；VFS surface 隐藏 `Edit`，`Write` 仍只针对本地文件系统。
 - VFS 后端必须使用 `resource_session_id` 隔离数据；`agent_session_id` 只标识具体调用代理。
-- `Edit.patch` 必须校验 snapshot tag 和目标行 hash，stale 时 fail closed。
+- Hashline Edit 必须从 session snapshot 解析 tag；stale 锚点仅在唯一映射且共享偏移时恢复。
+- Replace Edit 默认要求唯一候选；多个高置信度候选必须 fail closed。
 - Display 包装层必须保留详细 tool call/result 协议，不得在委托时丢失调用 ID 或 presentation。
 - TUI 输入 cursor 必须落在 UTF-8 char boundary。
 - TUI 初始化从当前 session 的 Plan/Todo 状态文件建立详情基线，实时 presentation 在该基线上更新。

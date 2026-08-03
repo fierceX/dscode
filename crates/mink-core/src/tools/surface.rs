@@ -22,10 +22,11 @@ pub enum FilesystemBackend {
 pub struct ToolResolutionContext {
     role: AgentRole,
     filesystem_backend: FilesystemBackend,
+    edit_mode: crate::config::EditMode,
 }
 
 impl ToolResolutionContext {
-    pub fn from_runtime(role: AgentRole, _config: &ToolConfig, read_only_fs_present: bool) -> Self {
+    pub fn from_runtime(role: AgentRole, config: &ToolConfig, read_only_fs_present: bool) -> Self {
         Self {
             role,
             filesystem_backend: if read_only_fs_present {
@@ -33,6 +34,7 @@ impl ToolResolutionContext {
             } else {
                 FilesystemBackend::Local
             },
+            edit_mode: config.edit_mode,
         }
     }
 
@@ -42,6 +44,10 @@ impl ToolResolutionContext {
 
     pub fn filesystem_backend(&self) -> FilesystemBackend {
         self.filesystem_backend
+    }
+
+    pub fn edit_mode(&self) -> crate::config::EditMode {
+        self.edit_mode
     }
 }
 
@@ -181,7 +187,7 @@ impl ModelToolSurface {
             .filter(|(_, metadata)| candidates.contains(metadata.name))
             .map(|(tool, metadata)| ModelTool {
                 metadata,
-                schema: tool.schema.clone(),
+                schema: resolved_schema(tool.schema.clone(), metadata.name, config),
             })
             .collect();
         let by_name = ordered
@@ -231,6 +237,91 @@ impl ModelToolSurface {
 
     pub fn fingerprint(&self) -> &str {
         &self.fingerprint
+    }
+}
+
+fn resolved_schema(
+    mut schema: serde_json::Value,
+    name: &str,
+    config: &ToolConfig,
+) -> serde_json::Value {
+    if name == "Edit" {
+        return edit_schema(config);
+    }
+    let description = match (name, config.edit_mode) {
+        ("Read", crate::config::EditMode::Hashline) => Some(
+            "Read a local path or registered resource. Editable local non-raw output uses [PATH#TAG] plus numbered lines; raw output omits the header but still marks only its actual range as seen. Resource/VFS reads stay read-only and never mint tags.",
+        ),
+        ("Read", crate::config::EditMode::Replace) => Some(
+            "Read a local path or registered resource using ordinary numbered output. Resource/VFS reads remain read-only.",
+        ),
+        ("Grep", crate::config::EditMode::Hashline) => Some(
+            "Search local content or registered resources. Editable local results are grouped per file under [PATH#TAG], and only complete displayed match/context lines become seen. Read-only results retain ordinary search formatting.",
+        ),
+        ("Grep", crate::config::EditMode::Replace) => Some(
+            "Search local content or registered resources using ordinary ripgrep-style path:line output.",
+        ),
+        ("Write", crate::config::EditMode::Hashline) => Some(
+            "Create or fully overwrite a local file. A successful editable-size write records a new Hashline version and returns its [PATH#TAG] header without discarding older history.",
+        ),
+        ("Write", crate::config::EditMode::Replace) => Some(
+            "Create or fully overwrite a local file while preserving the configured write-size and result-display protections.",
+        ),
+        _ => None,
+    };
+    if let Some(description) = description {
+        schema["description"] = serde_json::Value::String(description.into());
+    }
+    schema
+}
+
+fn edit_schema(config: &ToolConfig) -> serde_json::Value {
+    match config.edit_mode {
+        crate::config::EditMode::Hashline => serde_json::json!({
+            "name": "Edit",
+            "description": format!("Apply one or more Hashline sections to existing local files. Input starts with [PATH#TAG] and supports PUT/CUT ranges, gap inserts and register pastes, REM, and edit-then-MV. Seen-line enforcement is {}. Syntactic-block locators and legacy path/patch inputs are not supported.", if config.edit_enforce_seen_lines { "enabled" } else { "disabled" }),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "input": {
+                        "type": "string",
+                        "description": "Hashline patch containing one or more [PATH#TAG] sections. Example: [src/lib.rs#A1B2]\nPUT 10.=11:\n+new line"
+                    }
+                },
+                "required": ["input"],
+                "additionalProperties": false
+            }
+        }),
+        crate::config::EditMode::Replace => serde_json::json!({
+            "name": "Edit",
+            "description": format!(
+                "Replace content in one existing local file using ordered old_text/new_text edits. Matching is unique by default; all=true replaces every occurrence. Fuzzy matching is {} at threshold {:.3}.",
+                if config.edit_fuzzy_match { "enabled" } else { "disabled" },
+                config.edit_fuzzy_threshold
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Path to an existing file" },
+                    "edits": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "old_text": { "type": "string" },
+                                "new_text": { "type": "string" },
+                                "all": { "type": "boolean", "default": false }
+                            },
+                            "required": ["old_text", "new_text"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["path", "edits"],
+                "additionalProperties": false
+            }
+        }),
     }
 }
 
@@ -352,6 +443,46 @@ mod tests {
             error.contains("TodoAdvance") && error.contains("TodoRead"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn edit_mode_materializes_one_stable_schema_and_changes_fingerprint() {
+        let hashline_config = ToolConfig::from_config(&Config::default());
+        let first = resolve(&hashline_config, AgentRole::Primary, false).unwrap();
+        let second = resolve(&hashline_config, AgentRole::Primary, false).unwrap();
+        assert_eq!(first.fingerprint(), second.fingerprint());
+        let hashline = &first.get("Edit").unwrap().schema;
+        assert!(hashline.pointer("/input_schema/properties/input").is_some());
+        assert!(hashline.pointer("/input_schema/properties/path").is_none());
+        assert!(
+            first.get("Read").unwrap().schema["description"]
+                .as_str()
+                .unwrap()
+                .contains("[PATH#TAG]")
+        );
+
+        let replace = Config {
+            edit_mode: crate::config::EditMode::Replace,
+            edit_fuzzy_threshold: 0.91,
+            ..Config::default()
+        };
+        let replace = resolve(
+            &ToolConfig::from_config(&replace),
+            AgentRole::Primary,
+            false,
+        )
+        .unwrap();
+        let schema = &replace.get("Edit").unwrap().schema;
+        assert!(schema.pointer("/input_schema/properties/edits").is_some());
+        assert!(schema.pointer("/input_schema/properties/input").is_none());
+        assert!(
+            !replace.get("Read").unwrap().schema["description"]
+                .as_str()
+                .unwrap()
+                .contains("Hashline")
+        );
+        assert_ne!(first.fingerprint(), replace.fingerprint());
+        assert!(schema["description"].as_str().unwrap().contains("0.910"));
     }
 
     #[test]

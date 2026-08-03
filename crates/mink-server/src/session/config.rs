@@ -23,10 +23,7 @@ pub struct ServerConfig {
 impl ServerConfig {
     /// Load configuration from `mink-server.toml` (if present) + environment.
     pub fn load(toml_path: Option<&std::path::Path>) -> anyhow::Result<Self> {
-        let file_cfg = toml_path
-            .map(parse_toml)
-            .transpose()?
-            .unwrap_or_default();
+        let file_cfg = toml_path.map(parse_toml).transpose()?.unwrap_or_default();
 
         let mink_home = env_or("MINK_HOME")
             .map(PathBuf::from)

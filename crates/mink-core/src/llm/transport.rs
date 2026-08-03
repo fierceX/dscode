@@ -40,6 +40,7 @@ pub fn build_openai_body_with_options(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_openai_body_with_options_and_extensions(
     model: &str,
     messages: &[Value],

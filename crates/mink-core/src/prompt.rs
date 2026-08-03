@@ -25,9 +25,18 @@ pub struct Builder {
     pub mission_content: Option<String>,
     pub tool_surface: Arc<ModelToolSurface>,
     pub tool_capabilities: Arc<ResolvedToolCapabilities>,
+    pub edit_mode: crate::config::EditMode,
+    pub edit_fuzzy_match: bool,
+    pub edit_fuzzy_threshold: f64,
+    pub edit_enforce_seen_lines: bool,
 }
 
-pub struct PromptBuildContext;
+pub struct PromptBuildContext {
+    pub edit_mode: crate::config::EditMode,
+    pub edit_fuzzy_match: bool,
+    pub edit_fuzzy_threshold: f64,
+    pub edit_enforce_seen_lines: bool,
+}
 
 impl Builder {
     pub fn build_system_prompt(&self) -> Result<String> {
@@ -45,7 +54,12 @@ impl Builder {
         modules::append_tool_sections(&mut document, &self.tool_surface)?;
         let workflows =
             workflows::PromptWorkflowResolver::builtin().resolve(&self.tool_capabilities)?;
-        let build_context = PromptBuildContext;
+        let build_context = PromptBuildContext {
+            edit_mode: self.edit_mode,
+            edit_fuzzy_match: self.edit_fuzzy_match,
+            edit_fuzzy_threshold: self.edit_fuzzy_threshold,
+            edit_enforce_seen_lines: self.edit_enforce_seen_lines,
+        };
         for spec in workflows.ordered() {
             let rendered = (spec.render)(&build_context, &self.tool_capabilities)?;
             validate_pack(spec, &rendered, &workflows, &self.tool_surface)?;
@@ -119,7 +133,11 @@ mod tests {
     use crate::tools::surface::{AgentRole, ToolResolutionContext};
 
     fn builder_for(names: &[&str]) -> Builder {
-        let mut config = ToolConfig::from_config(&Config::default());
+        builder_for_config(names, Config::default())
+    }
+
+    fn builder_for_config(names: &[&str], base: Config) -> Builder {
+        let mut config = ToolConfig::from_config(&base);
         config.enabled_tools = Some(names.iter().map(|name| (*name).to_string()).collect());
         let resolution = ToolResolutionContext::from_runtime(AgentRole::Primary, &config, false);
         let surface = Arc::new(
@@ -141,7 +159,31 @@ mod tests {
             mission_content: None,
             tool_surface: surface,
             tool_capabilities: capabilities,
+            edit_mode: config.edit_mode,
+            edit_fuzzy_match: config.edit_fuzzy_match,
+            edit_fuzzy_threshold: config.edit_fuzzy_threshold,
+            edit_enforce_seen_lines: config.edit_enforce_seen_lines,
         }
+    }
+
+    #[test]
+    fn edit_workflows_are_mutually_exclusive_and_match_the_schema() {
+        let hashline = builder_for(&["Read", "Edit"])
+            .build_system_prompt()
+            .unwrap();
+        assert!(hashline.contains("PUT N.=M"));
+        assert!(!hashline.contains("old_text"));
+
+        let mut config = Config::default();
+        config.edit_mode = crate::config::EditMode::Replace;
+        config.edit_fuzzy_match = false;
+        config.edit_fuzzy_threshold = 0.87;
+        let replace = builder_for_config(&["Read", "Edit"], config)
+            .build_system_prompt()
+            .unwrap();
+        assert!(replace.contains("old_text"));
+        assert!(replace.contains("disabled with threshold 0.870"));
+        assert!(!replace.contains("[PATH#TAG]"));
     }
 
     #[test]
@@ -183,7 +225,7 @@ mod tests {
         assert!(ids.contains(&"todo-progress"));
         assert!(ids.contains(&"sub-agent-guidance"));
         assert!(ids.contains(&"search-then-inspect"));
-        assert!(ids.contains(&"anchored-edit"));
+        assert!(ids.contains(&"hashline-edit"));
         assert!(ids.contains(&"specialized-provider-routing"));
         assert!(ids.contains(&"specialized-mutation-routing"));
     }
@@ -443,7 +485,7 @@ mod tests {
                     if vfs {
                         assert!(!surface.has("Edit"));
                         assert!(!capabilities.has(
-                            crate::tools::semantic_capabilities::ToolSemanticCapability::AnchoredEdit
+                            crate::tools::semantic_capabilities::ToolSemanticCapability::FileEdit
                         ));
                         assert!(!capabilities.has(
                             crate::tools::semantic_capabilities::ToolSemanticCapability::EditableSnapshotRead

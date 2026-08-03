@@ -288,14 +288,13 @@ fn scan_candidates_for_target(
     target: &ScanTarget,
     policy: &FilePickerPolicy,
 ) -> Vec<FilePickCandidate> {
-    let candidates = scan_candidates_with_prefix(
+    scan_candidates_with_prefix(
         &target.key.root,
         &target.key.display_prefix,
         target.max_depth,
         target.include_hidden,
         policy,
-    );
-    candidates
+    )
 }
 
 fn scan_key_for_query(query: &str, policy: &FilePickerPolicy) -> Option<ScanTarget> {

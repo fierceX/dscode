@@ -398,7 +398,37 @@ pub fn build_tool_call_summary(
 ) -> String {
     let mut label = String::new();
     match name {
-        "Read" | "Write" | "Edit" => label = fields.get("path").cloned().unwrap_or_default(),
+        "Read" | "Write" => label = fields.get("path").cloned().unwrap_or_default(),
+        "Edit" => {
+            if let Some(input) = fields.get("input") {
+                label = match crate::tools::hashline::parse(input) {
+                    Ok(patch) => {
+                        let operations = patch
+                            .sections
+                            .iter()
+                            .map(|section| section.operations.len())
+                            .sum::<usize>();
+                        let paths = patch
+                            .sections
+                            .iter()
+                            .map(|section| section.path.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!(
+                            "{} sections, {operations} ops: {paths}",
+                            patch.sections.len()
+                        )
+                    }
+                    Err(_) => "invalid hashline input".into(),
+                };
+            } else if let Some(path) = fields.get("path") {
+                let edits = fields
+                    .get("edits")
+                    .and_then(|value| serde_json::from_str::<Vec<Value>>(value).ok())
+                    .map_or(0, |values| values.len());
+                label = format!("{path}, {edits} edits");
+            }
+        }
         "Glob" | "Grep" => label = fields.get("pattern").cloned().unwrap_or_default(),
         "Bash" => {
             label = fields
@@ -682,6 +712,22 @@ mod tests {
         let mut f = std::collections::BTreeMap::new();
         f.insert("path".into(), "/tmp/test.txt".into());
         assert!(build_tool_call_summary("Read", &f).contains("test.txt"));
+
+        let hashline = std::collections::BTreeMap::from([(
+            "input".into(),
+            "[src/a.rs#A1B2]\nPUT 1.=1:\n+new\n[src/b.rs#C3D4]\nCUT 2".into(),
+        )]);
+        let summary = build_tool_call_summary("Edit", &hashline);
+        assert_eq!(summary, "Edit(2 sections, 2 ops: src/a.rs, src/b.rs)");
+
+        let replace = std::collections::BTreeMap::from([
+            ("path".into(), "src/a.rs".into()),
+            ("edits".into(), "[{},{}]".into()),
+        ]);
+        assert_eq!(
+            build_tool_call_summary("Edit", &replace),
+            "Edit(src/a.rs, 2 edits)"
+        );
 
         let mut f2 = std::collections::BTreeMap::new();
         f2.insert("command".into(), "echo hello".into());

@@ -41,6 +41,10 @@ impl PrefixManager {
                 mission_content: self.ctx.config.mission_content.clone(),
                 tool_surface: self.ctx.tool_surface.clone(),
                 tool_capabilities: self.ctx.tool_capabilities.clone(),
+                edit_mode: self.ctx.tool_config.edit_mode,
+                edit_fuzzy_match: self.ctx.tool_config.edit_fuzzy_match,
+                edit_fuzzy_threshold: self.ctx.tool_config.edit_fuzzy_threshold,
+                edit_enforce_seen_lines: self.ctx.tool_config.edit_enforce_seen_lines,
             }
             .build_system_prompt()?;
             let tools_json = self.ctx.tool_surface.schemas();

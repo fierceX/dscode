@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import importlib.resources as _resources
 import json
+import math
 import os
 import queue
 import signal
@@ -228,6 +229,10 @@ class SandboxConfig:
     # Tool control
     allow_network: bool = True
     enabled_tools: Optional[list[str]] = None  # 精确工具选择，None=默认工具集
+    edit_mode: str = "hashline"
+    edit_fuzzy_match: bool = True
+    edit_fuzzy_threshold: float = 0.95
+    edit_enforce_seen_lines: bool = False
     skills: list[str] = field(default_factory=list)
     inline_skills: list[InlineSkill] = field(default_factory=list)
     skill_discovery_policy: str = "defaults"
@@ -799,6 +804,14 @@ class AgentSession:
             options["stream_events"] = False
         if self._config.enabled_tools is not None:
             options["enabled_tools"] = self._config.enabled_tools
+        if self._config.edit_mode != "hashline":
+            options["edit_mode"] = self._config.edit_mode
+        if not self._config.edit_fuzzy_match:
+            options["edit_fuzzy_match"] = False
+        if self._config.edit_fuzzy_threshold != 0.95:
+            options["edit_fuzzy_threshold"] = self._config.edit_fuzzy_threshold
+        if self._config.edit_enforce_seen_lines:
+            options["edit_enforce_seen_lines"] = True
         if self._config.skills:
             options["skills"] = self._config.skills
         if self._config.inline_skills:
@@ -860,6 +873,21 @@ class AgentSession:
             raise ValueError("llm_wait_heartbeat must be zero or greater")
         if cfg.session_layout not in ("project", "home", "direct", "isolated"):
             raise ValueError("session_layout must be 'project', 'home', 'direct', or 'isolated'")
+        if cfg.edit_mode not in ("hashline", "replace"):
+            raise ValueError("edit_mode must be 'hashline' or 'replace'")
+        for name, value in {
+            "edit_fuzzy_match": cfg.edit_fuzzy_match,
+            "edit_enforce_seen_lines": cfg.edit_enforce_seen_lines,
+        }.items():
+            if type(value) is not bool:
+                raise ValueError(f"{name} must be a boolean")
+        if (
+            isinstance(cfg.edit_fuzzy_threshold, bool)
+            or not isinstance(cfg.edit_fuzzy_threshold, (int, float))
+            or not math.isfinite(float(cfg.edit_fuzzy_threshold))
+            or not (0.0 <= float(cfg.edit_fuzzy_threshold) <= 1.0)
+        ):
+            raise ValueError("edit_fuzzy_threshold must be a finite number in 0.0..=1.0")
         for skill in cfg.skills:
             self._validate_skill_name(skill, "skill")
         valid_exposures = {"model_discoverable", "model_addressable", "host_only"}
@@ -950,6 +978,10 @@ class AgentSession:
         toml["llm_wait_heartbeat"] = cfg.llm_wait_heartbeat
         toml["max_search_files"] = cfg.max_search_files
         toml["max_search_results"] = cfg.max_search_results
+        toml["edit_mode"] = cfg.edit_mode
+        toml["edit_fuzzy_match"] = cfg.edit_fuzzy_match
+        toml["edit_fuzzy_threshold"] = cfg.edit_fuzzy_threshold
+        toml["edit_enforce_seen_lines"] = cfg.edit_enforce_seen_lines
         # PythonSandbox configuration; activation is controlled by enabled_tools.
         sp = {}
         if cfg.python_sandbox_wasm_path != "cpython-wasi/python.wasm":

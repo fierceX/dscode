@@ -28,6 +28,7 @@ fn resolve_abs(dir: &str, cwd: &Path) -> PathBuf {
 }
 
 /// 在 CPython WASI 沙箱中执行 Python 脚本。
+#[allow(clippy::too_many_arguments)]
 fn execute_in_sandbox(
     script: &str,
     wasm_path: &Path,
@@ -60,14 +61,14 @@ fn execute_in_sandbox(
     let script = format!("import os; os.chdir(r\"{cwd}\")\n{script}", cwd = cwd_str);
 
     // 通过 -c 传递代码
-    let wasm_argv = vec![
+    let wasm_argv = [
         "python.wasm".to_string(),
         "-c".to_string(),
         script.to_string(),
     ];
     builder.args(&wasm_argv.iter().map(|s| s.as_str()).collect::<Vec<_>>());
 
-    builder.env("PWD", &cwd.to_string_lossy().to_string());
+    builder.env("PWD", cwd.to_string_lossy());
 
     // 映射标准库目录到 /usr/local（CPython WASI 查找 stdlib 的位置）
     if stdlib_dir.exists() {
@@ -79,10 +80,10 @@ fn execute_in_sandbox(
     // wasmtime-wasi preview1 首次匹配，子路径必须在父路径之前
     for dir in write_dirs {
         let abs = resolve_abs(dir, &cwd);
-        if abs.exists() || abs.parent().map_or(false, |parent| parent.exists()) {
+        if abs.exists() || abs.parent().is_some_and(|parent| parent.exists()) {
             builder.preopened_dir(
                 &abs,
-                &abs.to_string_lossy(),
+                abs.to_string_lossy(),
                 DirPerms::all(),
                 FilePerms::all(),
             )?;
@@ -91,12 +92,7 @@ fn execute_in_sandbox(
     for dir in read_dirs {
         let abs = resolve_abs(dir, &cwd);
         if abs.exists() {
-            builder.preopened_dir(
-                &abs,
-                &abs.to_string_lossy(),
-                DirPerms::READ,
-                FilePerms::READ,
-            )?;
+            builder.preopened_dir(&abs, abs.to_string_lossy(), DirPerms::READ, FilePerms::READ)?;
         }
     }
     // preopen CWD 到绝对路径（只读），但若 CWD 已在 write_dirs 中则跳过（写权限优先）
@@ -105,12 +101,7 @@ fn execute_in_sandbox(
         abs == cwd
     });
     if !cwd_is_writable {
-        builder.preopened_dir(
-            &cwd,
-            &cwd.to_string_lossy(),
-            DirPerms::READ,
-            FilePerms::READ,
-        )?;
+        builder.preopened_dir(&cwd, cwd.to_string_lossy(), DirPerms::READ, FilePerms::READ)?;
     }
 
     // 包目录
@@ -158,10 +149,10 @@ fn execute_in_sandbox(
         if remaining.is_zero() {
             break None; // timeout
         }
-        if let Some(ref int) = interrupt {
-            if int.load(std::sync::atomic::Ordering::SeqCst) {
-                break None; // cancelled
-            }
+        if let Some(int) = interrupt
+            && int.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            break None; // cancelled
         }
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(r) => break Some(r),
@@ -300,12 +291,12 @@ impl super::runner::ToolExec for PythonSandboxTool {
             }
             content.push_str(&stderr);
         }
-        if let Some(code) = exit_code {
-            if code != 0 {
-                content.push_str(&format!(
-                    "\n\nPython sandbox script exited with code {code}."
-                ));
-            }
+        if let Some(code) = exit_code
+            && code != 0
+        {
+            content.push_str(&format!(
+                "\n\nPython sandbox script exited with code {code}."
+            ));
         }
 
         Ok(super::runner::ToolOutcome {
@@ -506,7 +497,7 @@ print("write OK")"#,
             wasm,
             stdlib,
             &[],
-            &[canon_path.clone()],
+            std::slice::from_ref(&canon_path),
             &[],
             10,
             None,
@@ -588,7 +579,7 @@ print("write OK")"#,
     #[test]
     fn sandbox_write_outside_allowed_dir_rejected() {
         let wasm = Path::new("cpython-wasi/python.wasm");
-        if skip_no_wasm(&wasm) {
+        if skip_no_wasm(wasm) {
             return;
         }
         let stdlib = Path::new("cpython-wasi");
@@ -610,7 +601,7 @@ print("write OK")"#,
     #[test]
     fn sandbox_read_outside_allowed_dir_rejected() {
         let wasm = Path::new("cpython-wasi/python.wasm");
-        if skip_no_wasm(&wasm) {
+        if skip_no_wasm(wasm) {
             return;
         }
         let stdlib = Path::new("cpython-wasi");
@@ -624,7 +615,7 @@ print("write OK")"#,
     #[test]
     fn sandbox_write_relative_chdir_to_allowed_dir() {
         let wasm = Path::new("cpython-wasi/python.wasm");
-        if skip_no_wasm(&wasm) {
+        if skip_no_wasm(wasm) {
             return;
         }
         let stdlib = Path::new("cpython-wasi");
@@ -649,7 +640,7 @@ print("write OK")"#,
     #[test]
     fn sandbox_write_absolute_path_to_allowed_dir() {
         let wasm = Path::new("cpython-wasi/python.wasm");
-        if skip_no_wasm(&wasm) {
+        if skip_no_wasm(wasm) {
             return;
         }
         let stdlib = Path::new("cpython-wasi");
@@ -678,7 +669,7 @@ print("write OK")"#,
     #[test]
     fn sandbox_write_entire_root_with_write_dir_dot() {
         let wasm = Path::new("cpython-wasi/python.wasm");
-        if skip_no_wasm(&wasm) {
+        if skip_no_wasm(wasm) {
             return;
         }
         let stdlib = Path::new("cpython-wasi");
@@ -703,7 +694,7 @@ print("write OK")"#,
     #[test]
     fn sandbox_write_dot_allows_any_project_file() {
         let wasm = Path::new("cpython-wasi/python.wasm");
-        if skip_no_wasm(&wasm) {
+        if skip_no_wasm(wasm) {
             return;
         }
         let stdlib = Path::new("cpython-wasi");
@@ -727,7 +718,7 @@ print("write OK")"#,
     #[test]
     fn sandbox_traversal_outside_allowed_dir_rejected() {
         let wasm = Path::new("cpython-wasi/python.wasm");
-        if skip_no_wasm(&wasm) {
+        if skip_no_wasm(wasm) {
             return;
         }
         let stdlib = Path::new("cpython-wasi");
@@ -749,7 +740,7 @@ print("write OK")"#,
     #[test]
     fn sandbox_write_dir_read_only_rejected() {
         let wasm = Path::new("cpython-wasi/python.wasm");
-        if skip_no_wasm(&wasm) {
+        if skip_no_wasm(wasm) {
             return;
         }
         let stdlib = Path::new("cpython-wasi");
@@ -775,7 +766,7 @@ print("write OK")"#,
     #[test]
     fn sandbox_multiple_write_dirs_all_accessible() {
         let wasm = Path::new("cpython-wasi/python.wasm");
-        if skip_no_wasm(&wasm) {
+        if skip_no_wasm(wasm) {
             return;
         }
         let stdlib = Path::new("cpython-wasi");
@@ -796,7 +787,7 @@ print("write OK")"#,
     #[test]
     fn sandbox_stdout_captured_correctly() {
         let wasm = Path::new("cpython-wasi/python.wasm");
-        if skip_no_wasm(&wasm) {
+        if skip_no_wasm(wasm) {
             return;
         }
         let stdlib = Path::new("cpython-wasi");
@@ -823,7 +814,7 @@ print("write OK")"#,
     #[test]
     fn sandbox_empty_script_fails_gracefully() {
         let wasm = Path::new("cpython-wasi/python.wasm");
-        if skip_no_wasm(&wasm) {
+        if skip_no_wasm(wasm) {
             return;
         }
         let stdlib = Path::new("cpython-wasi");
@@ -836,7 +827,7 @@ print("write OK")"#,
     #[test]
     fn sandbox_exit_code_propagated() {
         let wasm = Path::new("cpython-wasi/python.wasm");
-        if skip_no_wasm(&wasm) {
+        if skip_no_wasm(wasm) {
             return;
         }
         let stdlib = Path::new("cpython-wasi");
@@ -853,7 +844,7 @@ print("write OK")"#,
         .unwrap();
         // proc_exit 退出码提取当前不稳定，接受 None（退出但无法读取码）或 Some(42)
         assert!(
-            code == Some(42) || code == None,
+            code == Some(42) || code.is_none(),
             "unexpected exit code: {code:?}"
         );
     }
@@ -862,7 +853,7 @@ print("write OK")"#,
     #[test]
     fn sandbox_unicode_path_supported() {
         let wasm = Path::new("cpython-wasi/python.wasm");
-        if skip_no_wasm(&wasm) {
+        if skip_no_wasm(wasm) {
             return;
         }
         let stdlib = Path::new("cpython-wasi");
@@ -887,7 +878,7 @@ print("write OK")"#,
     #[test]
     fn sandbox_large_script_executes() {
         let wasm = Path::new("cpython-wasi/python.wasm");
-        if skip_no_wasm(&wasm) {
+        if skip_no_wasm(wasm) {
             return;
         }
         let stdlib = Path::new("cpython-wasi");
@@ -914,7 +905,7 @@ print("write OK")"#,
     #[test]
     fn sandbox_multiple_stdout_writes_combined() {
         let wasm = Path::new("cpython-wasi/python.wasm");
-        if skip_no_wasm(&wasm) {
+        if skip_no_wasm(wasm) {
             return;
         }
         let stdlib = Path::new("cpython-wasi");
@@ -937,7 +928,7 @@ print("write OK")"#,
     #[test]
     fn sandbox_stderr_captured_separately() {
         let wasm = Path::new("cpython-wasi/python.wasm");
-        if skip_no_wasm(&wasm) {
+        if skip_no_wasm(wasm) {
             return;
         }
         let stdlib = Path::new("cpython-wasi");

@@ -1,0 +1,643 @@
+{
+  "upstream": {
+    "repository": "oh-my-pi/oh-my-pi",
+    "commit": "c53b85aaf4f584c86fd17399af6ff0274d798496"
+  },
+  "hashes": [
+    {
+      "id": "hash-empty",
+      "content": "",
+      "expected": "5D05"
+    },
+    {
+      "id": "hash-lf",
+      "content": "alpha\nbeta\n",
+      "expected": "0063"
+    },
+    {
+      "id": "hash-crlf-trailing-space",
+      "content": "alpha  \r\nbeta\t\r\n",
+      "expected": "0063"
+    },
+    {
+      "id": "hash-bom",
+      "content": "﻿alpha\nbeta",
+      "expected": "B07E"
+    },
+    {
+      "id": "hash-unicode",
+      "content": "你好\n🦀 rust\n",
+      "expected": "F34F"
+    }
+  ],
+  "hashline": [
+    {
+      "id": "put-single",
+      "content": "a\nb\nc",
+      "input": "[case.txt#ABCD]\nPUT 2.=2:\n+B",
+      "expected": {
+        "ok": true,
+        "content": "a\nB\nc"
+      }
+    },
+    {
+      "id": "put-range-hyphen-alias",
+      "content": "a\nb\nc\nd",
+      "input": "[case.txt#ABCD]\nPUT 2-3:\n+B\n+C",
+      "expected": {
+        "ok": true,
+        "content": "a\nB\nC\nd"
+      }
+    },
+    {
+      "id": "put-before",
+      "content": "a\nb",
+      "input": "[case.txt#ABCD]\nPUT <2:\n+x",
+      "expected": {
+        "ok": true,
+        "content": "a\nx\nb"
+      }
+    },
+    {
+      "id": "put-after",
+      "content": "a\nb",
+      "input": "[case.txt#ABCD]\nPUT >1:\n+x",
+      "expected": {
+        "ok": true,
+        "content": "a\nx\nb"
+      }
+    },
+    {
+      "id": "put-head",
+      "content": "a\nb",
+      "input": "[case.txt#ABCD]\nPUT <1:\n+x",
+      "expected": {
+        "ok": true,
+        "content": "x\na\nb"
+      }
+    },
+    {
+      "id": "put-tail",
+      "content": "a\nb",
+      "input": "[case.txt#ABCD]\nPUT >$:\n+x",
+      "expected": {
+        "ok": true,
+        "content": "a\nb\nx"
+      }
+    },
+    {
+      "id": "put-empty-line",
+      "content": "a\nb",
+      "input": "[case.txt#ABCD]\nPUT >1:\n+",
+      "expected": {
+        "ok": true,
+        "content": "a\n\nb"
+      }
+    },
+    {
+      "id": "empty-put-deletes",
+      "content": "a\nb\nc",
+      "input": "[case.txt#ABCD]\nPUT 2.=2:",
+      "expected": {
+        "ok": true,
+        "content": "a\nc",
+        "warnings": [
+          "Interpreted an empty `PUT` body as deletion. Use `CUT N.=M` or `CUT N*` for bodyless deletes."
+        ]
+      }
+    },
+    {
+      "id": "cut-single",
+      "content": "a\nb\nc",
+      "input": "[case.txt#ABCD]\nCUT 2.=2",
+      "expected": {
+        "ok": true,
+        "content": "a\nc"
+      }
+    },
+    {
+      "id": "cut-paste-anonymous",
+      "content": "a\nb\nc",
+      "input": "[case.txt#ABCD]\nCUT 2.=2\nPUT >3",
+      "expected": {
+        "ok": true,
+        "content": "a\nc\nb"
+      }
+    },
+    {
+      "id": "cut-paste-named",
+      "content": "a\nb\nc",
+      "input": "[case.txt#ABCD]\nCUT 2.=2 @saved\nPUT <1 @saved",
+      "expected": {
+        "ok": true,
+        "content": "b\na\nc"
+      }
+    },
+    {
+      "id": "named-span-paste",
+      "content": "a\nb\nc\nd",
+      "input": "[case.txt#ABCD]\nCUT 1.=1 @saved\nPUT 3.=4 @saved",
+      "expected": {
+        "ok": true,
+        "content": "b\na"
+      }
+    },
+    {
+      "id": "bare-body-auto-pipe",
+      "content": "a\nb\nc",
+      "input": "[case.txt#ABCD]\nPUT 2.=2:\nplain",
+      "expected": {
+        "ok": true,
+        "content": "a\nplain\nc",
+        "warnings": [
+          "Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."
+        ]
+      }
+    },
+    {
+      "id": "read-prefix-body",
+      "content": "a\nb\nc\nd",
+      "input": "[case.txt#ABCD]\nPUT 2.=3:\n2:B\n3:C",
+      "expected": {
+        "ok": true,
+        "content": "a\nB\nC\nd",
+        "warnings": [
+          "Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."
+        ]
+      }
+    },
+    {
+      "id": "numeric-map-body-preserved",
+      "content": "a\nb\nc",
+      "input": "[case.txt#ABCD]\nPUT 2.=2:\n1: \"one\",\n2: \"two\",",
+      "expected": {
+        "ok": true,
+        "content": "a\n1: \"one\",\n2: \"two\",\nc",
+        "warnings": [
+          "Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."
+        ]
+      }
+    },
+    {
+      "id": "markdown-bullets-auto-pipe",
+      "content": "a\nb\nc",
+      "input": "[case.txt#ABCD]\nPUT 2.=2:\n- one\n  - nested",
+      "expected": {
+        "ok": true,
+        "content": "a\n- one\n  - nested\nc",
+        "warnings": [
+          "Auto-prefixed bare `- ` bullet row(s) as literal content. `-` rows never remove lines — the range does that; always prefix literal body rows with `+`: `+- item`."
+        ]
+      }
+    },
+    {
+      "id": "diff-old-row-ignored",
+      "content": "a\nb\nc",
+      "input": "[case.txt#ABCD]\nPUT 2.=2:\n-b\n+B",
+      "expected": {
+        "ok": true,
+        "content": "a\nB\nc",
+        "warnings": [
+          "Ignored unified-diff `-old` row(s); the range already removes old content, so only `+new` rows were kept."
+        ]
+      }
+    },
+    {
+      "id": "move-after-edit",
+      "content": "a\nb",
+      "input": "[case.txt#ABCD]\nPUT 1.=1:\n+A\nMV moved.txt",
+      "expected": {
+        "ok": true,
+        "content": "A\nb",
+        "file_op": {
+          "kind": "move",
+          "dest": "moved.txt"
+        }
+      }
+    },
+    {
+      "id": "remove-file-op",
+      "content": "a\n",
+      "input": "[case.txt#ABCD]\nREM",
+      "expected": {
+        "ok": true,
+        "content": "a\n",
+        "file_op": {
+          "kind": "rem"
+        }
+      }
+    },
+    {
+      "id": "quoted-header-path",
+      "content": "a",
+      "input": "[\"dir with spaces/case.txt\"#abcd]\nPUT 1.=1:\n+A",
+      "expected": {
+        "ok": true,
+        "content": "A"
+      }
+    },
+    {
+      "id": "overlap-rejected",
+      "content": "a\nb\nc\nd",
+      "input": "[case.txt#ABCD]\nPUT 1.=2:\n+x\nPUT 2.=3:\n+y",
+      "error_contains": "already targeted",
+      "expected": {
+        "ok": false,
+        "error": "line 3: anchor line 2 is already targeted by another hunk on line 1. Issue ONE hunk per range; payload is only the final desired content, never a before/after pair."
+      }
+    },
+    {
+      "id": "empty-insert-rejected",
+      "content": "a",
+      "input": "[case.txt#ABCD]\nPUT >$:",
+      "error_contains": "body",
+      "expected": {
+        "ok": false,
+        "error": "line 1: `PUT <N:` / `PUT >N:` promises body rows and got none. Write `+TEXT` rows, or drop the `:` to paste a register (`PUT >N` = anonymous, `PUT >N @name` = named)."
+      }
+    },
+    {
+      "id": "cut-body-rejected",
+      "content": "a\nb",
+      "input": "[case.txt#ABCD]\nCUT 1.=1\n+x",
+      "error_contains": "no body",
+      "expected": {
+        "ok": false,
+        "error": "line 2: `CUT` deletes (and captures) the named lines and takes no body rows. To write new content, use `PUT N.=M:` with `+TEXT` rows."
+      }
+    },
+    {
+      "id": "reversed-range-rejected",
+      "content": "a\nb",
+      "input": "[case.txt#ABCD]\nPUT 2.=1:\n+x",
+      "error_contains": "end",
+      "expected": {
+        "ok": false,
+        "error": "line 1: Invalid absolute range: start 2, end 1. The value after `.=` is an absolute source line, not a line count or replacement length. For one line use `PUT 2:`. For 1 lines starting at 2, use `PUT 2.=2:`."
+      }
+    },
+    {
+      "id": "unified-diff-rejected",
+      "content": "a",
+      "input": "[case.txt#ABCD]\n@@ -1,1 +1,1 @@\nPUT 1.=1:\n+A",
+      "error_contains": "unified-diff",
+      "expected": {
+        "ok": false,
+        "error": "line 1: unified-diff hunk header (`@@ -N,M +N,M @@`) is not valid in hashline. Use `PUT N.=M:`, `CUT N.=M`, or `PUT <N:`/`PUT >N:` ops."
+      }
+    },
+    {
+      "id": "orphan-payload-rejected",
+      "content": "a",
+      "input": "[case.txt#ABCD]\n+oops",
+      "error_contains": "no preceding",
+      "expected": {
+        "ok": false,
+        "error": "line 1: payload line has no preceding hunk header. Got \"+oops\"."
+      }
+    },
+    {
+      "id": "boundary-auto-indent",
+      "content": "    if (value > 90) {\n      result = error;\n    } else if (value > 70) {\n      result = plain;\n    } else {\n      result = warning;\n    }",
+      "input": "[case.txt#ABCD]\nPUT 2.=6:\n+  result = error;\n+} else if (value > 70) {\n+  result = warning;\n+} else {\n+  result = plain;",
+      "expected": {
+        "ok": true,
+        "content": "    if (value > 90) {\n      result = error;\n    } else if (value > 70) {\n      result = warning;\n    } else {\n      result = plain;\n    }",
+        "warnings": [
+          "Auto-indented a replacement body to match unchanged structural rows in its source range."
+        ]
+      }
+    },
+    {
+      "id": "boundary-intentional-dedent",
+      "content": "    first();\n    second();",
+      "input": "[case.txt#ABCD]\nPUT 1.=2:\n+first();\n+second();",
+      "expected": {
+        "ok": true,
+        "content": "first();\nsecond();"
+      }
+    },
+    {
+      "id": "boundary-duplicate-closer",
+      "content": "it('a', () => {\n\tsetup();\n\trun();\n});\nafter();",
+      "input": "[case.txt#ABCD]\nPUT 2.=3:\n+\tsetup2();\n+\trun2();\n+});",
+      "expected": {
+        "ok": true,
+        "content": "it('a', () => {\n\tsetup2();\n\trun2();\n});\nafter();",
+        "warnings": [
+          "Auto-repaired a delimiter-balance mismatch in the replacement at line 2: dropped 1 duplicated trailing payload line(s) already present below the range. Issue the payload as the final desired content only — never restate or omit a closing bracket bordering the range."
+        ]
+      }
+    },
+    {
+      "id": "boundary-duplicate-opener",
+      "content": "class Foo {\n\t/** doc */\n\tplanRender(\n\t\ta: string[],\n\t\tb: boolean,\n\t): Intent {\n\t\treturn x;\n\t}\n}",
+      "input": "[case.txt#ABCD]\nPUT 4.=6:\n+\tplanRender(\n+\t\ta: string[],\n+\t\tb: boolean,\n+\t\tc: number,\n+\t): Intent {",
+      "expected": {
+        "ok": true,
+        "content": "class Foo {\n\t/** doc */\n\tplanRender(\n\t\ta: string[],\n\t\tb: boolean,\n\t\tc: number,\n\t): Intent {\n\t\treturn x;\n\t}\n}",
+        "warnings": [
+          "Auto-repaired a delimiter-balance mismatch in the replacement at line 4: dropped 1 duplicated leading payload line(s) already present above the range. Issue the payload as the final desired content only — never restate or omit a closing bracket bordering the range."
+        ]
+      }
+    },
+    {
+      "id": "boundary-missing-closer",
+      "content": "const handlers = {\n\ta() {\n\t\treturn 1;\n\t},\n};",
+      "input": "[case.txt#ABCD]\nPUT 5.=5:\n+\tb() {\n+\t\treturn 2;\n+\t},",
+      "expected": {
+        "ok": true,
+        "content": "const handlers = {\n\ta() {\n\t\treturn 1;\n\t},\n\tb() {\n\t\treturn 2;\n\t},\n};",
+        "warnings": [
+          "Auto-repaired a delimiter-balance mismatch in the replacement at line 5: kept 1 structural closing line(s) the range deleted without restating. Issue the payload as the final desired content only — never restate or omit a closing bracket bordering the range."
+        ]
+      }
+    },
+    {
+      "id": "boundary-two-sided-echo",
+      "content": "func _cmd_travel_homeworld():\n\tvar destination = get_homeworld()\n\ttravel_to(destination)\n\tprint_status()",
+      "input": "[case.txt#ABCD]\nPUT 2.=3:\n+func _cmd_travel_homeworld():\n+\tvar destination = find_homeworld()\n+\ttravel_to(destination)\n+\tprint_status()",
+      "expected": {
+        "ok": true,
+        "content": "func _cmd_travel_homeworld():\n\tvar destination = find_homeworld()\n\ttravel_to(destination)\n\tprint_status()",
+        "warnings": [
+          "Auto-repaired a replacement boundary echo at line 2: dropped 1 leading and 1 trailing payload line(s) already present outside the range. Issue the payload as the final desired content for the selected range only — never restate unchanged lines bordering the range."
+        ]
+      }
+    },
+    {
+      "id": "boundary-one-sided-leading",
+      "content": "setup();\na();\nb();\nc();",
+      "input": "[case.txt#ABCD]\nPUT 3.=4:\n+a();\n+B();\n+C();",
+      "expected": {
+        "ok": true,
+        "content": "setup();\na();\nB();\nC();",
+        "warnings": [
+          "Auto-repaired a replacement boundary echo at line 3: dropped 1 leading payload line(s) identical to the surviving line(s) just above the range. The range was one line short of the content you retyped — issue the payload as the final content for the selected range only, and widen the range to consume any keeper you restate."
+        ]
+      }
+    },
+    {
+      "id": "boundary-unsafe-leading-rejected",
+      "content": "{\n    auto* handle = payloadFor<PyThreadHandle>(self);\n    if (!handle)\n        return threadError(globalObject, \"thread not started\");\n    handle->setDone();\n}",
+      "input": "[case.txt#ABCD]\nPUT 3.=4:\n+    auto* handle = payloadFor<PyThreadHandle>(self);\n+    if (!handle || !handle->isStarted())",
+      "error_contains": "rejected",
+      "expected": {
+        "ok": false,
+        "error": "`PUT 3.=4:` rejected: the body opens by restating the 1 line(s) just above the range, but is too short to be the full final content of the widened range — applying it as-is or auto-repairing would delete range line(s) the body never restates. Re-issue with the range covering exactly the lines that change and the body as their complete final content: drop the restated keeper from the body, or widen the range to consume it."
+      }
+    },
+    {
+      "id": "boundary-balance-shifting-echo-preserved",
+      "content": "}\nold();\n}",
+      "input": "[case.txt#ABCD]\nPUT 2:\n+}\n+if (a) {\n+if (b) {\n+x();\n+}",
+      "expected": {
+        "ok": true,
+        "content": "}\n}\nif (a) {\nif (b) {\nx();\n}\n}"
+      }
+    },
+    {
+      "id": "boundary-other-hunk-removes-opener",
+      "content": "if enabled {\n\tText(\"Old\")\n}\n\tText(\"Tail\")",
+      "input": "[case.txt#ABCD]\nCUT 1\nPUT 2.=3:\n+Text(\"New\")",
+      "expected": {
+        "ok": true,
+        "content": "Text(\"New\")\n\tText(\"Tail\")"
+      }
+    },
+    {
+      "id": "boundary-ambiguous-closer-rejected",
+      "content": "        if (!global) {\n            handle->setDone();\n            return;\n        }\n        handle->setIdent(currentIdent());",
+      "input": "[case.txt#ABCD]\nPUT 4:\n+        after();",
+      "error_contains": "ambiguous",
+      "expected": {
+        "ok": false,
+        "error": "`PUT 4.=4:` rejected: the range deletes the closing-delimiter line 4 but the body never restates it, and the body claims no position inside that block (no unmatched opener, indentation not deeper than the closer) — whether the new content belongs before or after the closer is ambiguous. Restate the closer in the body at the intended position, or use `PUT <4:` / `PUT >4:` instead."
+      }
+    }
+  ],
+  "replace": [
+    {
+      "id": "exact-unique",
+      "content": "alpha\nbeta\n",
+      "old_text": "beta",
+      "new_text": "BETA",
+      "all": false,
+      "fuzzy": true,
+      "threshold": 0.95,
+      "expected": {
+        "ok": true,
+        "content": "alpha\nBETA\n",
+        "count": 1
+      }
+    },
+    {
+      "id": "exact-all",
+      "content": "x x x",
+      "old_text": "x",
+      "new_text": "y",
+      "all": true,
+      "fuzzy": true,
+      "threshold": 0.95,
+      "expected": {
+        "ok": true,
+        "content": "y y y",
+        "count": 3
+      }
+    },
+    {
+      "id": "exact-ambiguous",
+      "content": "x x",
+      "old_text": "x",
+      "new_text": "y",
+      "all": false,
+      "fuzzy": true,
+      "threshold": 0.95,
+      "error_contains": "occurrences",
+      "expected": {
+        "ok": false,
+        "error": "Found 2 occurrences:\n\n  1 | x x\n\n  1 | x x\n\nAdd more context lines to disambiguate."
+      }
+    },
+    {
+      "id": "fuzzy-unique",
+      "content": "alpha beta\ngamma delta\n",
+      "old_text": "alpha zeta",
+      "new_text": "changed",
+      "all": false,
+      "fuzzy": true,
+      "threshold": 0.8,
+      "expected": {
+        "ok": true,
+        "content": "changed\ngamma delta\n",
+        "count": 1
+      }
+    },
+    {
+      "id": "fuzzy-disabled",
+      "content": "alpha beta\n",
+      "old_text": "alpha zeta",
+      "new_text": "changed",
+      "all": false,
+      "fuzzy": false,
+      "threshold": 0.8,
+      "error_contains": "could not",
+      "expected": {
+        "ok": false,
+        "error": "Could not find the exact text in fuzzy-disabled.\n\nClosest match (92% similar) at line 1:\n  - alpha zeta\n  + alpha beta\nFuzzy matching is disabled. Enable 'Edit fuzzy match' in settings to accept high-confidence matches."
+      }
+    },
+    {
+      "id": "threshold-one-rejects-prefix",
+      "content": "alpha beta gamma\n",
+      "old_text": "alpha beta\n",
+      "new_text": "changed\n",
+      "all": false,
+      "fuzzy": true,
+      "threshold": 1,
+      "error_contains": "could not",
+      "expected": {
+        "ok": false,
+        "error": "Could not find a close enough match in threshold-one-rejects-prefix.\n\nClosest match (83% similar) at line 1:\n  - alpha beta\n  + alpha beta gamma\nClosest match was below the 100% similarity threshold."
+      }
+    },
+    {
+      "id": "overlapping-all-safe",
+      "content": "x\nx\nx",
+      "old_text": "x \nx ",
+      "new_text": "",
+      "all": true,
+      "fuzzy": true,
+      "threshold": 0.95,
+      "error_contains": "could not",
+      "expected": {
+        "ok": false,
+        "error": "Could not find a close enough match in overlapping-all-safe.\n\nClosest match (100% similar) at line 1:\n  - x \n  + x\nFound 2 high-confidence matches. Provide more context to make it unique."
+      }
+    },
+    {
+      "id": "fuzzy-all-nonoverlap",
+      "content": "alpha zeta\nkeep\nalpha zeta\n",
+      "old_text": "alpha beta",
+      "new_text": "changed",
+      "all": true,
+      "fuzzy": true,
+      "threshold": 0.8,
+      "expected": {
+        "ok": false,
+        "error": "Could not find a close enough match in fuzzy-all-nonoverlap.\n\nClosest match (92% similar) at line 1:\n  - alpha beta\n  + alpha zeta\nFound 2 high-confidence matches. Provide more context to make it unique."
+      }
+    },
+    {
+      "id": "indentation-only-intent",
+      "content": "    x\n",
+      "old_text": "x \n",
+      "new_text": "  x\n",
+      "all": false,
+      "fuzzy": true,
+      "threshold": 0.95,
+      "expected": {
+        "ok": true,
+        "content": "  x\n",
+        "count": 1
+      }
+    },
+    {
+      "id": "tab-to-space-profile",
+      "content": "    foo\n        child\n",
+      "old_text": "\tfoo\n\t\tchild",
+      "new_text": "\tbar\n\t\tchild2",
+      "all": false,
+      "fuzzy": true,
+      "threshold": 0.95,
+      "expected": {
+        "ok": true,
+        "content": "    bar\n        child2\n",
+        "count": 1
+      }
+    },
+    {
+      "id": "uniform-indent-delta",
+      "content": "    foo\n      child\n",
+      "old_text": "foo\n  child",
+      "new_text": "bar\n  child2",
+      "all": false,
+      "fuzzy": true,
+      "threshold": 0.95,
+      "expected": {
+        "ok": true,
+        "content": "    bar\n      child2\n",
+        "count": 1
+      }
+    },
+    {
+      "id": "mixed-indent-preserved",
+      "content": " \tfoo\n",
+      "old_text": "foo",
+      "new_text": "  bar",
+      "all": false,
+      "fuzzy": true,
+      "threshold": 0.8,
+      "expected": {
+        "ok": true,
+        "content": " \t  bar\n",
+        "count": 1
+      }
+    },
+    {
+      "id": "crlf-normalized",
+      "content": "a\r\nb\r\n",
+      "old_text": "b\r\n",
+      "new_text": "B\r\n",
+      "all": false,
+      "fuzzy": true,
+      "threshold": 0.95,
+      "expected": {
+        "ok": true,
+        "content": "a\nB\n",
+        "count": 1
+      }
+    },
+    {
+      "id": "empty-old-rejected",
+      "content": "a",
+      "old_text": "",
+      "new_text": "b",
+      "all": false,
+      "fuzzy": true,
+      "threshold": 0.95,
+      "error_contains": "empty",
+      "expected": {
+        "ok": false,
+        "error": "oldText must not be empty."
+      }
+    },
+    {
+      "id": "no-op-rejected",
+      "content": "a\n",
+      "old_text": "a",
+      "new_text": "a",
+      "all": false,
+      "fuzzy": true,
+      "threshold": 0.95,
+      "error_contains": "no changes",
+      "expected": {
+        "ok": false,
+        "error": "no changes"
+      }
+    },
+    {
+      "id": "unicode-punctuation-fuzzy",
+      "content": "say “hello” now\n",
+      "old_text": "say \"hello\" now",
+      "new_text": "done",
+      "all": false,
+      "fuzzy": true,
+      "threshold": 0.95,
+      "expected": {
+        "ok": false,
+        "error": "Could not find a close enough match in unicode-punctuation-fuzzy.\n\nClosest match (88% similar) at line 1:\n  - say \"hello\" now\n  + say “hello” now\nClosest match was below the 95% similarity threshold."
+      }
+    }
+  ]
+}

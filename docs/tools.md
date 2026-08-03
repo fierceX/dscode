@@ -145,15 +145,16 @@ cargo build --release
 | `path` | string | 文件路径或资源 URL |
 
 - `path` 支持 selector：`file:10-20`、`file:10+5`、`file:raw`、`file:raw:10-20`。
-- 本地非 raw 输出包含 snapshot header 和行号，适合 anchored edit：
+- `hashline` 模式下，本地非 raw 输出包含基于完整文件内容的 snapshot header 和行号：
 
 ```text
-@src/foo.rs#0A3B
+[src/foo.rs#0A3B]
 41:fn target() {
 42:    ...
 ```
 
-- `:raw` 禁用 snapshot header 和行号。
+- `:raw` 禁用 header 和行号，但 Hashline 模式仍把实际读取范围记为 seen-lines。
+- `replace` 模式保持普通行号输出，不生成 Hashline tag。resource/VFS Read 始终只读且不生成 tag。
 - 注入 VFS 后，普通路径读取虚拟文件并显示只读标记，不生成 snapshot；selector 和 `:raw` 语义保持一致。
 - `artifact://<id>` 可读取被截断工具输出，支持同样的行 selector；恢复和 fork 后引用保持稳定。
 - `skill://list` / `skill://list/all` / `skill://<name>` / `skill://<name>/<relative-path>` 可通过当前 `Read` provider 读取可用 skills，列表、诊断视图、正文和 filesystem-backed skill 子资源来自同一 capability snapshot。`skill://all` 是 `skill://list/all` 的兼容别名；built-in/runtime skill 只支持读取正文，不支持子资源。selected skill 正文直接进入 prompt，不依赖此 provider。
@@ -179,46 +180,53 @@ cargo build --release
 
 ## `Edit`
 
-编辑已有文件。仅支持 anchored patch；新建或完整覆盖文件使用 `Write`。
+编辑已有文件。runtime 启动时由 `edit_mode` 固定为一种协议；同一次模型请求只会看到该
+模式的 schema 和提示词。旧 `path + patch`、`@PATH#TAG` 和
+`old_string/new_string` 输入均不兼容。
 
-| 参数 | 类型 | 说明 |
-|---|---|---|
-| `path` | string | 文件路径 |
-| `patch` | string | anchored line patch |
+### Hashline（默认）
 
-- `patch` 第一行必须是最近一次非 raw `Read` 输出中的 `@PATH#TAG` header，或上一次成功 `Edit` 结果返回的新 header。
-- patch 支持 `replace N..M:`、`replace N:`、`delete N..M`、`delete N`、`insert before N:`、`insert after N:`、`insert head:`、`insert tail:`。
-- patch 中的行号来自 snapshot 的原始文件行号；同一次 patch 内多个 hunk 的行号不会因为前面的 hunk 而位移。
-- patch body 行只出现在 `replace` / `insert` header 后，必须以 `+` 开头，且只能写最终新内容；不要写 `-old` 行、原始行或上下文行。
-- patch range 应保持 tight，只覆盖实际变化的行。要修改不连续行时，使用多个 hunk。
-- snapshot 对应一个文件状态；同一文件成功 `Edit` 或 `Write` 后，之前的 snapshot tag 和行号都视为过期。
-- 同一文件如果要修改多个位置，优先在一次 `Edit.patch` 中合并多个 hunk。
-- 成功 `Edit` 会返回新的 `@PATH#TAG`、修改区域附近的行号和 diff，可用于紧接着在该可见区域继续编辑；其他区域应重新 `Read`。
-- snapshot 过期、未知 tag、未覆盖行、no-op 或任何无法完全解释的结果，都应先按工具提示重新 `Read path:N-M`，再用新 header 重试。
-- 不要用 `Edit` 做机械格式化、import 排序、空白清理或纯缩进调整；语义修改后运行项目 formatter。
+唯一参数是 `input`：
 
-示例：
-
-```text
-@src/foo.rs#0A3B
-replace 41..41:
-+    return new_value;
-insert after 55:
-+println!("done");
+```json
+{"input":"[src/foo.rs#0A3B]\nPUT 41:\n+    return new_value;\nPUT >55:\n+println!(\"done\");"}
 ```
 
-反例：
+- section header 为 `[PATH#TAG]`，支持 quoted path 和单次调用中的多个文件。
+- 支持 `PUT N.=M:`（以及 `PUT N:`/`PUT N-M:` 别名）、`PUT <N:`、`PUT >N:`、
+  `PUT <1:`、`PUT >$:`、`CUT N.=M [@register]`、`PUT <N|>N|<1|>$ [@register]`、
+  `PUT N.=M @register`、`REM` 和 `MV DEST`。
+- body 的每一行以 `+` 开头；坐标始终引用 snapshot 的原始行，不因前序操作位移。
+- 匿名 `CUT` 只在当前 Edit 调用内可用；命名寄存器（例如 `@saved`）保存在 session runtime，
+  可跨 section、跨文件、跨 Edit 调用重复读取。
+- snapshot 保存完整规范化文本和 seen-lines；同内容复用版本。上限为 30 个路径、每路径
+  4 个版本、全局 64 MiB。
+- 当前文件发生无关漂移时，所有锚点只有在能唯一映射且共享同一偏移时才恢复；目标已改、
+  删除、拆分、上下文重复或偏移不一致均 fail closed。只有 HEAD/TAIL 操作可在 stale 内容上
+  直接应用并返回 warning。
+- `edit_enforce_seen_lines=true` 时，只允许锚定 Read/Grep 实际完整展示的行。有限错误回显会
+  授权同 tag 直接重试；超长/超宽回显不会更新授权。
+- 相同输入连续三次产生 no-op 时第三次升级为失败。多文件先全部预检，再顺序提交；中途失败
+  会列出已提交、失败和未提交文件，但不宣称跨文件原子性。
+- 明确不支持上游的 `N*` Block locator；Mink 不引入 tree-sitter block resolver。
 
-```text
-# 错误：body 不能包含 -old 或无前缀上下文行
-replace 41..41:
--    old_value()
-+    new_value()
+### Replace
 
-# 错误：为了改第 2 和第 5 行而吞掉 3-4 行
-replace 2..5:
-+...
+```json
+{
+  "path": "src/foo.rs",
+  "edits": [{"old_text": "old()", "new_text": "new()", "all": false}]
+}
 ```
+
+- `old_text` 不得为空；默认要求唯一匹配，歧义时返回候选行和预览；`all: true` 替换全部。
+- edits 按顺序执行，后一个基于前一个结果；后续失败不回滚已经成功提交的 edit。
+- 先执行 exact；没有 exact 时，对与 `old_text` 行数相同的候选窗口做空白/兼容标点归一化、
+  相对缩进建模和字符相似度评分，并按上游 dominant-candidate 规则选取唯一候选。新文本会
+  依照实际命中窗口转换缩进。
+- `edit_fuzzy_match` 控制模糊阶段，`edit_fuzzy_threshold` 默认为 `0.95`。多个高置信度候选
+  始终拒绝，不任意选择第一个；失败诊断包含最近相似度、差异行和有限预览。
+- 不创建不存在的文件，只允许唯一 workspace suffix 路径恢复；保留 BOM、CRLF/LF 和末尾换行。
 
 ## `Bash`
 
@@ -339,7 +347,7 @@ open("/absolute/path/to/project/output/f.txt", "w")  # 绝对路径 ✅
 - 优先用于定位编辑目标。
 - `path` 为空或相对路径时基于当前会话 `cwd` 解析；`glob` 过滤使用 `rg -g` override glob 语义。
 - VFS 模式下 `path` 是虚拟根路径，不与宿主 `cwd` 拼接；regex 和文件 glob 在调用后端前仍由工具层校验。
-- `context` 用于定位目标；需要修改时必须 `Read` 目标范围拿到 `@PATH#TAG` 后使用 anchored `Edit.patch`。
+- `context` 用于定位目标；Hashline 模式下可直接使用每个本地文件结果的 `[PATH#TAG]` 和实际展示行编辑。
 - 输出采用 rg 标准格式：匹配行为 `path:line:content`，上下文行为 `path-line-content`，上下文块之间为 `--`。
 - 未匹配内容时返回空输出；遍历达到上限或跳过不可读路径时，会追加诊断行。
 限制：

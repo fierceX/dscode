@@ -602,8 +602,10 @@ mod tests {
     #[test]
     fn user_task_stop_emits_completion_notification() {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut state = TuiState::default();
-        state.model = "pro".into();
+        let mut state = TuiState {
+            model: "pro".into(),
+            ..TuiState::default()
+        };
         state.input.buf = "do the task".into();
         state.input.cursor = state.input.buf.len();
 
