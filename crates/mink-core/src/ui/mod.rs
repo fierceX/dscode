@@ -77,6 +77,8 @@ pub struct ToolCallDisplay<'a> {
     pub tool_use_id: &'a str,
     pub tool_name: &'a str,
     pub summary: &'a str,
+    /// 完整调用参数（实时流透传给前端结构化渲染；不可得时为 None）
+    pub input: Option<&'a serde_json::Value>,
 }
 
 /// Display abstracts agent output from any concrete terminal implementation.
@@ -120,6 +122,14 @@ pub trait Display: Send + Sync {
         self.render_tool_result_detail(&result.base);
     }
     fn render_stop(&self);
+    /// 带结束原因的 stop（interrupted 等）。默认退化为 render_stop——
+    /// 需要区分中断语义的实现（SDK）覆盖。
+    fn render_stop_with_reason(&self, _reason: &str) {
+        self.render_stop();
+    }
+    /// 信号（信念系统：工具失败/编辑循环检测等）。默认空实现——
+    /// 需要实时信号的实现（SDK）覆盖。
+    fn render_signal(&self, _signal_kind: &str, _severity: f64, _message: &str) {}
     fn render_error(&self, message: &str);
     fn render_retry(&self);
     fn render_info(&self, msg: &str);

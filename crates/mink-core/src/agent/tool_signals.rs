@@ -80,6 +80,11 @@ impl ToolSignalProcessor {
         }
 
         for signal in &result.signals {
+            ctx.display.render_signal(
+                &format!("{:?}", signal.kind),
+                signal.severity,
+                &signal.message,
+            );
             ctx.log_typed_event(crate::events::EventLog::Signal {
                 version: 1,
                 signal_kind: format!("{:?}", signal.kind),

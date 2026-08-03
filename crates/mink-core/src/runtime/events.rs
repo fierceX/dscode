@@ -14,8 +14,11 @@ pub enum AgentEvent {
         content: String,
     },
     ToolCall {
+        id: String,
         name: String,
         summary: String,
+        /// 完整调用参数（实时流透传；无参数事件为 Null）
+        input: serde_json::Value,
     },
     ToolResult {
         tool_name: String,
@@ -24,7 +27,14 @@ pub enum AgentEvent {
         tool_use_id: Option<String>,
         exit_code: Option<i32>,
     },
-    Stop,
+    Signal {
+        signal_kind: String,
+        severity: f64,
+        message: String,
+    },
+    Stop {
+        reason: String,
+    },
     Retry,
     Error {
         message: String,
@@ -155,8 +165,10 @@ impl Display for EventDisplay {
 
     fn render_tool_call(&self, name: &str, summary: &str) {
         self.emit(AgentEvent::ToolCall {
+            id: String::new(),
             name: name.to_string(),
             summary: summary.to_string(),
+            input: serde_json::Value::Null,
         });
         if let Some(delegate) = &self.delegate {
             delegate.render_tool_call(name, summary);
@@ -165,8 +177,10 @@ impl Display for EventDisplay {
 
     fn render_tool_call_detail(&self, call: &ToolCallDisplay<'_>) {
         self.emit(AgentEvent::ToolCall {
+            id: call.tool_use_id.to_string(),
             name: call.tool_name.to_string(),
             summary: call.summary.to_string(),
+            input: call.input.cloned().unwrap_or(serde_json::Value::Null),
         });
         if let Some(delegate) = &self.delegate {
             delegate.render_tool_call_detail(call);
@@ -212,10 +226,26 @@ impl Display for EventDisplay {
         }
     }
 
+    fn render_signal(&self, signal_kind: &str, severity: f64, message: &str) {
+        self.emit(AgentEvent::Signal {
+            signal_kind: signal_kind.to_string(),
+            severity,
+            message: message.to_string(),
+        });
+    }
+
     fn render_stop(&self) {
-        self.emit(AgentEvent::Stop);
+        self.emit(AgentEvent::Stop {
+            reason: "end_turn".to_string(),
+        });
+    }
+
+    fn render_stop_with_reason(&self, reason: &str) {
+        self.emit(AgentEvent::Stop {
+            reason: reason.to_string(),
+        });
         if let Some(delegate) = &self.delegate {
-            delegate.render_stop();
+            delegate.render_stop_with_reason(reason);
         }
     }
 
@@ -419,6 +449,7 @@ mod tests {
             tool_use_id: "call_1",
             tool_name: "TodoAdvance",
             summary: "TodoAdvance(2 transitions @r1)",
+            input: None,
         });
         display.render_tool_result_presented(&PresentedToolResultDisplay {
             base: ToolResultDisplay {
@@ -483,7 +514,7 @@ mod tests {
             "Text"
         );
         assert!(
-            matches!(&events[2], AgentEvent::ToolCall { name, summary } if name == "Bash" && summary == "ls -la"),
+            matches!(&events[2], AgentEvent::ToolCall { name, summary, .. } if name == "Bash" && summary == "ls -la"),
             "ToolCall"
         );
         assert!(
@@ -495,7 +526,7 @@ mod tests {
                 if tool_name == "Read" && tool_use_id.as_deref() == Some("call_2")),
             "ToolResult render_tool_result_detail"
         );
-        assert!(matches!(&events[5], AgentEvent::Stop), "Stop");
+        assert!(matches!(&events[5], AgentEvent::Stop { .. }), "Stop");
         assert!(
             matches!(&events[6], AgentEvent::Error { message } if message == "something broke"),
             "Error"

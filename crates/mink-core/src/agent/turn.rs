@@ -196,6 +196,7 @@ impl TurnExecutor {
         messages: &[serde_json::Value],
         system_prompt: &str,
         tools_json: &[serde_json::Value],
+        current_context_tokens: usize,
     ) -> anyhow::Result<StreamOutput> {
         let mut stream = match self
             .llm
@@ -294,11 +295,21 @@ impl TurnExecutor {
                             tool_use_id: &call.id,
                             tool_name: &call.name,
                             summary: &summary,
+                            input: Some(&call.input_json),
                         });
                     calls.push(call);
                 }
                 Event::Usage(u) => {
-                    self.ctx.log_event(serde_json::json!({"type":"usage","input_tokens":u.input_tokens, "output_tokens":u.output_tokens, "cache_read_input_tokens":u.cache_read_input_tokens, "cache_creation_input_tokens":u.cache_creation_input_tokens, "kind":"agent"}));
+                    self.ctx.log_event(serde_json::json!({
+                        "type":"usage",
+                        "input_tokens":u.input_tokens,
+                        "output_tokens":u.output_tokens,
+                        "cache_read_input_tokens":u.cache_read_input_tokens,
+                        "cache_creation_input_tokens":u.cache_creation_input_tokens,
+                        "context_tokens": current_context_tokens,
+                        "max_context": self.ctx.config.max_context_tokens,
+                        "kind":"agent",
+                    }));
                     usage = Some(u);
                 }
                 Event::UsageUnavailable => {}
@@ -811,6 +822,8 @@ impl TurnExecutor {
 
         let (mut system_prompt, mut tools_json) = self.ensure_prefix()?;
         messages = self.ctx.compaction.active_messages().await?;
+        // 当前请求上下文估计（每轮更新，随 usage 事件广播给前端指标行）
+        let mut current_context_tokens: usize = 0;
 
         while turn < max_turns {
             turn += 1;
@@ -850,11 +863,12 @@ impl TurnExecutor {
                      estimated {estimated_tokens} tokens, limit {input_limit}"
                 );
             }
+            current_context_tokens = estimated_tokens;
 
             // Phase 1: LLM 流式响应
             let stream_output = loop {
                 match self
-                    .stream_llm_response(&request_messages, &system_prompt, &tools_json)
+                    .stream_llm_response(&request_messages, &system_prompt, &tools_json, current_context_tokens)
                     .await
                 {
                     Ok(output) => break output,
@@ -892,7 +906,7 @@ impl TurnExecutor {
             } = stream_output;
 
             if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.load(Ordering::SeqCst) {
-                self.ctx.display.render_stop();
+                self.ctx.display.render_stop_with_reason("interrupted");
                 return Ok((TurnDecision::Interrupted, effects));
             }
 
@@ -1270,7 +1284,7 @@ mod tests {
         ));
         let mut executor = TurnExecutor::new(ctx, llm);
 
-        let error = match executor.stream_llm_response(&[], "", &[]).await {
+        let error = match executor.stream_llm_response(&[], "", &[], 0).await {
             Ok(_) => panic!("overflow after partial output should fail"),
             Err(error) => error,
         };
