@@ -28,6 +28,27 @@ const divider = computed(() => {
   return `${time} · ${proj}`;
 });
 
+// 新 turn 开始（发送消息/重连）：重置跟随状态并滚到底——
+// 用户发送后总是聚焦最新输出（ChatGPT 行为），历史滚动不再抑制
+watch(
+  () => appState.sessionState?.running ?? false,
+  (running, prev) => {
+    if (running && !prev) {
+      userScrolled = false;
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          if (scrollEl.value) scrollEl.value.scrollTop = scrollEl.value.scrollHeight;
+        });
+      });
+    }
+  },
+);
+
+// 思考面板内滚动：非贴底（上滑阅读）→ 停止主跟随；贴底 → 恢复跟随
+const onThinkingScroll = (atBottom: boolean) => {
+  userScrolled = !atBottom;
+};
+
 // 复制消息文本（仅正常消息：user / agent text）
 const copied = ref("");
 const copyText = async (text: string) => {
@@ -43,36 +64,36 @@ const showTopHint = ref(false);
 /** 用户是否主动滚动过（wheel/touch/scrollbar）：主动后停止自动跟随，
  * 滚回底部附近时恢复跟随 */
 let userScrolled = false;
-const NEAR_BOTTOM_PX = 60;
+// 恢复跟随条件：贴底（用户明确"重新滑到最下面则恢复跟随"）
+const NEAR_BOTTOM_PX = 4;
 
-// 新内容/流式更新滚到底；懒加载前插（尾部 key+text 不变）不滚动
-let prevLastKey = -1;
-let prevLastText = "";
+// 新内容/流式更新滚到底；懒加载前插不滚动。
+// 短路判定用「最后一项对象引用」：reducer 全 immutable——
+// 实时追加/合并（text 增长、tool_result 更新）都会产生新对象 → 不短路 → 滚动；
+// 懒加载前插最后一项保持原引用 → 短路 → 不滚动。字段比较（key/text/result）会
+// 遗漏"key 无 seq / 工具卡无 text / result 时机"等场景，引用比较无死角。
+let prevLastItem: unknown;
 watch(
-  () => [
-    items.value.length,
-    items.value[items.value.length - 1]?.kind,
-    (items.value[items.value.length - 1] as { text?: string })?.text,
-    (items.value[items.value.length - 1] as { result?: string })?.result,
-  ],
+  () => [items.value.length, items.value[items.value.length - 1]],
   async () => {
-    const last = items.value[items.value.length - 1] as { key?: number; text?: string } | undefined;
-    const lastKey = last?.key ?? -1;
-    const lastText = last?.text ?? "";
-    if (lastKey === prevLastKey && lastText === prevLastText) return; // 前插：尾部未变
-    prevLastKey = lastKey;
-    prevLastText = lastText;
+    const last = items.value[items.value.length - 1];
+    if (last === prevLastItem) return; // 前插：最后一项引用未变
+    prevLastItem = last;
     await nextTick();
-    // 自动跟随：用户未主动滚动时始终聚焦最新输出；
-    // 用户滚动过后不打扰（除非已滚回底部附近 → 恢复跟随）
-    if (scrollEl.value) {
-      const el = scrollEl.value;
-      if (userScrolled) {
-        if (el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX) userScrolled = false;
-      } else {
-        el.scrollTop = el.scrollHeight;
-      }
-    }
+    // 双 rAF：等 DOM patch 与浏览器布局/动画起始稳定后再计算滚动——
+    // 工具卡（details/动画/懒布局）在 nextTick 时 scrollHeight 可能未包含，
+    // 直接赋值会滚到旧底部（文字能滚、卡片不滚的根因）。
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const el = scrollEl.value;
+        if (!el) return;
+        if (userScrolled) {
+          if (el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX) userScrolled = false;
+        } else {
+          el.scrollTop = el.scrollHeight;
+        }
+      });
+    });
   },
 );
 
@@ -122,7 +143,7 @@ const onScroll = (e: Event) => {
     <div v-if="divider" class="divider">{{ divider }}</div>
     <!-- 单 v-for 按事件顺序渲染（不能按 kind 分组——否则顺序错乱） -->
     <template v-for="(item, i) in items" :key="(item as any).key || `i${i}`">
-      <ThinkingBlock v-if="item.kind === 'thinking' && (item as any).text?.trim()" :item="item" />
+      <ThinkingBlock v-if="item.kind === 'thinking' && (item as any).text?.trim()" :item="item" @inner-scroll="onThinkingScroll" />
       <ToolCard v-else-if="item.kind === 'tool'" :item="item" />
       <div v-else-if="item.kind === 'text'" class="msg agent">
         <span class="av">M</span>
@@ -135,7 +156,6 @@ const onScroll = (e: Event) => {
         </div>
       </div>
       <div v-else-if="item.kind === 'user'" class="msg user">
-        <span class="av">👤</span>
         <div class="msg-content">
           <span class="bubble">{{ item.text }}</span>
           <button v-if="(item as any).text" class="copy-btn" :class="{ done: copied === (item as any).text }" :title="copied === (item as any).text ? '已复制' : '复制'" @click="copyText((item as any).text ?? '')">
@@ -143,6 +163,7 @@ const onScroll = (e: Event) => {
             <span v-else class="ok">✓</span>
           </button>
         </div>
+        <span class="av">👤</span>
       </div>
       <div v-else-if="item.kind === 'error'" class="msg error">{{ item.text }}</div>
       <div v-else-if="item.kind === 'signal'" class="signal" :title="item.text">{{ item.text }}</div>

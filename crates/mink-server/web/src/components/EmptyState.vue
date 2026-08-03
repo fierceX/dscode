@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // 空状态工作台：无会话时展示（hero + 最近会话卡片网格 + 统计条）
-import { computed } from "vue";
+import { computed, onMounted, onUnmounted } from "vue";
 import { fmtK } from "../lib/fmt";
 import { appState, workspaces } from "../lib/store";
 import { openSession } from "../lib/sessionController";
@@ -35,6 +35,25 @@ function statusLabel(s: SessionSummary): string {
 function statusCls(s: SessionSummary): string {
   return `st-${s.status}`;
 }
+
+// 运行中统计实时化：列表 status 由服务端 registry 提供，但前端只加载一次——
+// 首页轮询刷新（10s），使"运行中"计数与真实执行状态一致
+let refreshTimer: ReturnType<typeof setInterval> | null = null;
+const refreshSessions = async () => {
+  try {
+    const resp = await api.listSessions();
+    if (resp.code === 200 && Array.isArray(resp.data)) {
+      appState.sessions = resp.data;
+    }
+  } catch { /* 轮询失败静默，下轮重试 */ }
+};
+onMounted(() => {
+  refreshSessions();
+  refreshTimer = setInterval(refreshSessions, 10_000);
+});
+onUnmounted(() => {
+  if (refreshTimer) clearInterval(refreshTimer);
+});
 
 const onNew = async () => {
   if (!curProj.value) return;
@@ -133,14 +152,15 @@ p { color: var(--text-dim); font-size: 13.5px; margin-bottom: 24px; max-width: 4
 }
 .rc-head .all { font-size: 11.5px; color: var(--blue); cursor: pointer; padding: 2px 8px; border-radius: 6px; }
 .rc-head .all:hover { background: rgba(47, 111, 237, 0.08); }
-.rc-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
-.rrow {
+.rc-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; min-width: 0; }
+.rrow { min-width: 0;
   display: flex; flex-direction: column; gap: 8px;
   padding: 14px 15px; border: 1px solid var(--line); border-radius: 13px;
   cursor: pointer; transition: 0.16s; background: #fff;
 }
 .rrow:hover { border-color: var(--blue); box-shadow: 0 1px 2px rgba(16, 24, 40, 0.05), 0 8px 24px rgba(16, 24, 40, 0.06); transform: translateY(-2px); }
-.rrow .top { display: flex; align-items: center; gap: 10px; }
+.rrow .top { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.rrow .t { min-width: 0; flex: 1; }
 .rrow .ico {
   width: 34px; height: 34px; border-radius: 10px;
   background: linear-gradient(135deg, rgba(79, 140, 255, 0.12), rgba(124, 92, 255, 0.12));

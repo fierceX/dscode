@@ -15,6 +15,7 @@ use tower_http::services::ServeDir;
 mod api;
 mod bridge;
 mod session;
+mod web_assets;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -35,11 +36,19 @@ async fn main() -> Result<()> {
         registry: registry.clone(),
         cwd: cwd.clone(),
     });
-    // Web UI：Svelte 构建产物（web/dist/），由 `npm run build` 生成。
+    // Web UI：默认服务嵌入二进制的前端产物（build.rs 自动构建并 include_str! 嵌入）。
+    // MINK_SERVER_DEV_WEB=1 时回退磁盘 ServeDir（web/dist）——前端开发热迭代场景。
     let web_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("web")
         .join("dist");
-    let app = api::router(state).fallback_service(ServeDir::new(web_dir));
+    let use_embedded = std::env::var("MINK_SERVER_DEV_WEB").is_err()
+        && !crate::web_assets::FILES.is_empty();
+    let app = if use_embedded {
+        use axum::handler::HandlerWithoutStateExt;
+        api::router(state).fallback_service(crate::web_assets::embedded_serve.into_service())
+    } else {
+        api::router(state).fallback_service(ServeDir::new(web_dir))
+    };
 
     let addr = format!("{}:{}", cfg.host, cfg.port);
     let listener = TcpListener::bind(&addr).await?;

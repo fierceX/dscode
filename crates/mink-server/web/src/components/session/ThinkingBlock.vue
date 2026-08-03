@@ -6,6 +6,7 @@ import { renderMarkdown } from "../../lib/markdown";
 import type { ThinkingItem } from "../../lib/types";
 
 const props = defineProps<{ item: ThinkingItem }>();
+const emit = defineEmits<{ (e: "inner-scroll", atBottom: boolean): void }>();
 const html = computed(() => renderMarkdown(props.item?.text ?? ""));
 // 初始值按当前 running：流式新块（running 中创建）默认展开。
 // @toggle 同步用户手动操作；watch(running) 在 running 变化时总是覆盖
@@ -28,12 +29,18 @@ watch(
 const onToggle = (e: Event) => {
   open.value = (e.target as HTMLDetailsElement).open;
 };
+// 面板内滚动：上滑（非贴底）→ 通知 Transcript 停止主跟随；贴底 → 恢复跟随
+const onBodyScroll = (e: Event) => {
+  const el = e.target as HTMLElement;
+  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= 4;
+  emit("inner-scroll", atBottom);
+};
 </script>
 
 <template>
   <details class="thinking-panel" :open="open" @toggle="onToggle">
     <summary>思考过程</summary>
-    <div class="tp-body md-body" v-html="html"></div>
+    <div class="tp-body md-body" v-html="html" @scroll="onBodyScroll"></div>
   </details>
 </template>
 

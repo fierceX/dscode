@@ -320,7 +320,7 @@ function truncate(s: string, max: number): string {
  *  头部行转为结构化渲染，不再作为原始文本显示。
  */
 export interface PatchLine {
-  op: "add" | "del" | "replace" | "insert" | "delete" | "append" | "hunk" | "head" | "context";
+  op: "add" | "del" | "replace" | "insert" | "delete" | "append" | "put" | "cut" | "hunk" | "head" | "context";
   range?: string;
   content: string;
 }
@@ -335,7 +335,8 @@ export function parsePatch(patch: string): ParsedPatch | null {
   const text = String(patch);
   const rows = text.split("\n");
   const head = rows[0] ?? "";
-  const m = head.match(/^@(.+)#([0-9A-Fa-f]+)$/);
+  // 头：新协议 [PATH#TAG]（方括号）或旧协议 @path#tag
+  const m = head.match(/^\[(.+)#([0-9A-Fa-f]+)\]$/) || head.match(/^@(.+)#([0-9A-Fa-f]+)$/);
   const path = m ? m[1] : "";
   const tag = m ? m[2] : "";
   const lines: PatchLine[] = [];
@@ -351,6 +352,10 @@ export function parsePatch(patch: string): ParsedPatch | null {
     if (opMatch) {
       const op = opMatch[1] as PatchLine["op"];
       lines.push({ op, range: line.slice(op.length).trim(), content: "" });
+    } else if (line.startsWith("PUT ") || line.startsWith("CUT ")) {
+      // 新协议指令：PUT N.=M: / PUT >N: / PUT <N: / PUT <1: / PUT >$: / CUT N.=M
+      const [kw, ...rest] = line.split(/\s+/);
+      lines.push({ op: kw === "PUT" ? "put" : "cut", range: rest.join(" ").trim(), content: "" });
     } else if (line.startsWith("+++")) {
       const bm = line.match(/^\+\+\+ (?:b\/)?(.+)$/);
       lines.push({ op: "head", content: `+++ ${bm ? bm[1] : line.slice(3).trim()}` });

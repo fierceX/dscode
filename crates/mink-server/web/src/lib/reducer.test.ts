@@ -325,3 +325,48 @@ describe("fmtK 向上换算（k/M/G）", () => {
     expect(fmtK(1000000)).toBe("1M");
   });
 });
+
+describe("parsePatch 新协议（[PATH#TAG] + PUT/CUT）", () => {
+  it("用户实测：{input: \"[path#tag]\\nPUT N.=M:\\n+行\"}", () => {
+    const p = parsePatch(
+      "[crates/mink-server/src/session/config.rs#8EBC]\nPUT 23.=34:\n+impl ServerConfig {\n+    pub fn load() {}\n+}",
+    );
+    expect(p).not.toBeNull();
+    expect(p!.path).toBe("crates/mink-server/src/session/config.rs");
+    expect(p!.tag).toBe("8EBC");
+    expect(p!.lines[0]).toMatchObject({ op: "put", range: "23.=34:" });
+    expect(p!.lines[1]).toMatchObject({ op: "add", content: "impl ServerConfig {" });
+  });
+
+  it("PUT >N 后插 / PUT <N 前插 / CUT 删除", () => {
+    const p = parsePatch(
+      "[src/a.ts#0A3B]\nPUT >5:\n+  new\nCUT 10.=12\nPUT <1:\n+head",
+    );
+    expect(p!.lines.map((l) => l.op)).toEqual(["put", "add", "cut", "put", "add"]);
+    expect(p!.lines[0].range).toBe(">5:");
+    expect(p!.lines[2].range).toBe("10.=12");
+    expect(p!.lines[3].range).toBe("<1:");
+  });
+
+  it("旧协议 @path#tag + replace 仍兼容", () => {
+    const p = parsePatch("@src/a.rs#0A3B\nreplace 2..2:\n+x");
+    expect(p!.lines[0]).toMatchObject({ op: "replace", range: "2..2:" });
+  });
+});
+
+describe("tool_result 更新同一卡片（滚动触发前置）", () => {
+  it("tool_call append 后 tool_result 更新同一 item 的 result 字段", () => {
+    let s = emptySession("s1", "t");
+    s = reduceEvent(s, ev("tool_call", { name: "Read", id: "c1", input: {} }));
+    const tool = s.items[s.items.length - 1];
+    expect((tool as any).kind).toBe("tool");
+    const keyBefore = (tool as any).key;
+    const textBefore = (tool as any).text;
+    s = reduceEvent(s, ev("tool_result", { tool_use_id: "c1", content: "file content" }));
+    const updated = s.items[s.items.length - 1];
+    // 同一 item：key/text 不变，result 变化（watch 需感知 result）
+    expect((updated as any).key).toBe(keyBefore);
+    expect((updated as any).text ?? "").toBe(textBefore ?? "");
+    expect((updated as any).result).toContain("file content");
+  });
+});

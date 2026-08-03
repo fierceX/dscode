@@ -63,6 +63,8 @@ export default async function globalSetup() {
         ...process.env,
         DEEPSEEK_API_KEY: "sk-fake",
         MINK_HOME: E2E_HOME,
+        // E2E 始终服务磁盘 web/dist 最新产物（嵌入产物随 cargo build，前端改动后未重建会过期）
+        MINK_SERVER_DEV_WEB: "1",
         MINK_SERVER_PORT: String(BACKEND_PORT),
         // 短 turn 超时：sk-fake 请求外网 LLM 不可控——8s 超时兜底产生 turn_error（确定性）
         MINK_SERVER_TURN_TIMEOUT: "8",
