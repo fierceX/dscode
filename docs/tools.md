@@ -58,6 +58,8 @@ handler 拥有，不能把 `skill://`、`rule://` 等协议视为 `Read` 工具�
 - `session://current/messages/all`：读取全部 conversation 摘要。
 - `session://current/history`：读取从完整 `conversation.jsonl` 生成的有损 transcript；省略 thinking 和完整工具结果正文。
 - `session://current/artifacts`：列出当前 session artifacts。
+- `session://current/todo`：读取当前 session Todo 快照（与 TodoRead 同源）。
+- `session://current/plan`：读取当前 session 计划状态与内容（草稿/已确认/无，与 Plan 工具同源）。
 
 这些资源都支持同样的行 selector，例如 `session://current/messages:1-20`。
 

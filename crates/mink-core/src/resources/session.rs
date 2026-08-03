@@ -49,6 +49,9 @@ pub(crate) fn read_session_resource(url: &str, ctx: &ToolContext) -> Result<Stri
         "current/messages/all" => format_session_messages(ctx, usize::MAX),
         "current/history" => format_session_history(ctx),
         "current/artifacts" => format_session_artifacts(ctx),
+        // 透明委托：与 TodoRead / Plan 工具同源读取（只读快照，无引导提示）
+        "current/todo" => format_session_todo(ctx),
+        "current/plan" => format_session_plan(&session_dir(ctx)?),
         _ => bail!("Error: unsupported session resource: {url}"),
     }
 }
@@ -369,6 +372,28 @@ fn format_session_artifacts(ctx: &ToolContext) -> Result<String> {
     Ok(out)
 }
 
+fn format_session_todo(ctx: &ToolContext) -> Result<String> {
+    // 与 TodoRead 完全同源：会话内 todo_store.snapshot() + render_snapshot（同一数据路径）
+    let body = crate::tools::todo::render_snapshot(&ctx.todo_store.snapshot(), true);
+    Ok(format!("# session://current/todo\n{body}"))
+}
+
+fn format_session_plan(dir: &Path) -> Result<String> {
+    let confirmed = read_optional_file(&dir.join("plan.md"))?;
+    let draft = read_optional_file(&dir.join("plan.draft"))?;
+    let mut out = String::from("# session://current/plan\n");
+    if !confirmed.trim().is_empty() {
+        out.push_str("Status: confirmed\n\n");
+        out.push_str(confirmed.trim());
+    } else if !draft.trim().is_empty() {
+        out.push_str("Status: draft\n\n");
+        out.push_str(draft.trim());
+    } else {
+        out.push_str("Status: none");
+    }
+    Ok(out)
+}
+
 fn read_optional_file(path: &Path) -> Result<String> {
     match std::fs::read_to_string(path) {
         Ok(text) => Ok(text),
@@ -472,4 +497,37 @@ fn truncate_for_summary(text: &str) -> String {
         out.push_str("...");
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn read_todo_via_session_resource() -> anyhow::Result<()> {
+        let ctx = crate::regression::test_context_for_agent("session-resource-todo").await?;
+        let tool_ctx = crate::context::ToolContext::from(ctx.as_ref());
+        // 与 TodoRead 同一路径：会话内 store（空 todo）快照格式化
+        let content = format_session_todo(&tool_ctx)?;
+        assert!(content.starts_with("# session://current/todo"));
+        assert!(content.contains("No todo items."));
+        assert!(!content.contains("请使用 TodoRead")); // 透明委托：无引导提示
+        Ok(())
+    }
+
+    #[test]
+    fn read_plan_via_session_resource() {
+        let dir = std::path::Path::new("/tmp/mink-session-resource-test/sess-2");
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+        std::fs::create_dir_all(dir).unwrap();
+        let none = format_session_plan(dir).unwrap();
+        assert!(none.contains("Status: none"));
+        std::fs::write(dir.join("plan.draft"), "Draft plan: step 1").unwrap();
+        let draft = format_session_plan(dir).unwrap();
+        assert!(draft.contains("Status: draft"));
+        std::fs::write(dir.join("plan.md"), "Confirmed plan: final").unwrap();
+        let confirmed = format_session_plan(dir).unwrap();
+        assert!(confirmed.contains("Status: confirmed"));
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    }
 }

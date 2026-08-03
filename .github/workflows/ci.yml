@@ -95,11 +95,15 @@ jobs:
           usesh: true
           mem: 4096
           prepare: |
-            pkg install -y rust llvm
+            pkg install -y rust llvm node npm
           run: |
+            cd crates/mink-server/web && npm ci && cd ../..
+            cargo build --release -p mink-server
             cargo build --release
             mkdir -p dist
             cp target/release/mink dist/mink-freebsd-amd64
+            cp target/release/mink-server dist/mink-server-freebsd-amd64
+            test -s dist/mink-server-freebsd-amd64
 
       # ── Linux / macOS build ──
       - uses: dtolnay/rust-toolchain@stable
@@ -117,21 +121,32 @@ jobs:
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: pip install -q cargo-zigbuild
 
-      - name: Build mink binary
+      - name: Install web deps (embedded frontend)
+        if: '!matrix.freebsd'
+        run: npm ci --prefix crates/mink-server/web
+
+      - name: Build mink + mink-server binaries
         if: '!matrix.freebsd'
         run: |
           mkdir -p dist
           if [ "${{ matrix.target }}" = "x86_64-unknown-linux-musl" ]; then
             cargo zigbuild --release --target x86_64-unknown-linux-musl
+            cargo zigbuild -p mink-server --release --target x86_64-unknown-linux-musl
           else
             cargo build --release --target ${{ matrix.target }}
+            cargo build -p mink-server --release --target ${{ matrix.target }}
           fi
           cp target/${{ matrix.target }}/release/mink dist/mink-${{ matrix.suffix }}
+          cp target/${{ matrix.target }}/release/mink-server dist/mink-server-${{ matrix.suffix }}
+          # 内嵌前端校验：server 二进制大小应显著大于纯 Rust 骨架（> 1MB 视为含 dist）
+          test "$(stat -c%s dist/mink-server-${{ matrix.suffix }} 2>/dev/null || stat -f%z dist/mink-server-${{ matrix.suffix }})" -gt 1000000
 
       - uses: actions/upload-artifact@v4
         with:
           name: mink-${{ matrix.suffix }}
-          path: dist/mink-${{ matrix.suffix }}
+          path: |
+            dist/mink-${{ matrix.suffix }}
+            dist/mink-server-${{ matrix.suffix }}
 
   # ── Build platform wheels ──────────────────────────────────────
   wheels:
@@ -249,7 +264,9 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/bin/mink-*
+          files: |
+            dist/bin/mink-*
+            dist/bin/mink-server-*
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1

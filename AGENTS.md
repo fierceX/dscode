@@ -360,6 +360,7 @@ DecisionEngine.decide()
 - `session://current/messages` / `session://current/messages/all`：conversation 摘要
 - `session://current/history`：从完整 `conversation.jsonl` 生成的有损检索 transcript，可由 Grep 直接搜索；不包含 thinking 和完整工具结果正文
 - `session://current/artifacts`：artifact 列表
+- `session://current/todo`：Todo 快照（与 TodoRead 同源）；`session://current/plan`：计划状态与内容（与 Plan 工具同源）
 
 Hashline 模式下，本地文件非 raw `Read` 输出带 snapshot header：
 

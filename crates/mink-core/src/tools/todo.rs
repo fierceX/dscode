@@ -206,7 +206,7 @@ impl ToolExec for TodoAdvanceTool {
     }
 }
 
-fn render_snapshot(snapshot: &TodoSnapshot, include_completed: bool) -> String {
+pub(crate) fn render_snapshot(snapshot: &TodoSnapshot, include_completed: bool) -> String {
     let (pending, in_progress, completed) = status_counts(snapshot);
     let mut output = format!(
         "<todo-snapshot revision=\"{}\" pending=\"{pending}\" in_progress=\"{in_progress}\" completed=\"{completed}\">",
