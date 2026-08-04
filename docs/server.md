@@ -1,8 +1,6 @@
 # mink-server：Server 与 Web 前端
 
-> 更新日期：2026-08-03
-> 版本：0.3.0｜单二进制 Web 工作区服务器（REST + SSE + 嵌入前端）
-> 源码：`crates/mink-server/`（Rust）+ `crates/mink-server/web/`（Vue 3 + Vite）
+> 更新日期：2026-08-04
 
 ---
 

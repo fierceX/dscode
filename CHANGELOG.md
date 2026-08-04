@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.3.1 (2026-08-04)
+
+### Edit 工具稳定性（修复与改进）
+
+- **Hashline tag 溯源强化**：unknown/stale 错误现在报告当前内容 hash、锚点上下文与明确恢复指引，禁止编造 tag 或跨 session 复用；成功 Edit 返回的 `[PATH#TAG]` header 被记录为可复用来源（`record_edit` / `is_edit_result_tag`），stale 恢复失败时直接提示复用该 header 重试。
+- **Edit 输出完整进入模型上下文**：新 tag、`firstChangedLine` / `linesAdded` / `linesRemoved`、warnings、diff 与 artifact 引用（size-bounded）同时进入 UI 与 conversation，下一轮编辑可直接校准行号与 tag；删除/移动操作的输出同步增强。
+- **软 no-op 升级与原子批处理**：同一 payload 连续 3 次无变更升级为硬错误；批处理中任一 section 为 no-op 时整批不提交。
+- **信号误报修复**：正则错误模式检测仅对命令类工具（`ToolResultKind::Command`）生效，消除 Read/Glob/Grep/Edit 内容中的 `timeout`、`error[E0425]` 等字样产生的虚假 ToolError/CompileError 信号与信念污染。
+- **引导强化**：hashline_edit 工作流 prompt 增加 `<critical>`（Edit 后取新 header、stale 立即重读）与 `<anti-patterns>`（禁止空范围 PUT、禁止改写 keeper 行、禁止编造 tag 等）；Edit 工具描述同步更新。
+- **回归测试**：新增连续编辑、移动、删除、artifact 落盘、mismatch 恢复、no-op 升级与信号 gate 等 10 个用例（Rust 全量 539 通过）。
+
 ## v0.3.0 (2026-08-03)
 
 ### mink-server：Server 与 Web 前端（全新）
