@@ -4,12 +4,23 @@
 // Override with MINK_GIT_HASH (e.g. release pipelines pinning a specific
 // commit); empty when git is unavailable so builds still succeed.
 
+use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
-    println!("cargo:rerun-if-changed=.git/HEAD");
-    println!("cargo:rerun-if-changed=.git/refs/heads/main");
-    println!("cargo:rerun-if-changed=.git/packed-refs");
+    // `.git` lives at the workspace root; absolute paths keep rerun tracking
+    // reliable regardless of the build script's working directory.
+    let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+    let git_dir = manifest.join("../../.git");
+    println!("cargo:rerun-if-changed={}", git_dir.join("HEAD").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        git_dir.join("refs/heads/main").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        git_dir.join("packed-refs").display()
+    );
     println!("cargo:rerun-if-env-changed=MINK_GIT_HASH");
 
     let hash = match std::env::var("MINK_GIT_HASH") {

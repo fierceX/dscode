@@ -44,6 +44,32 @@ fn main() {
     println!("cargo:rerun-if-changed=web/index.html");
     println!("cargo:rerun-if-changed=web/package.json");
 
+    // ── 版本溯源：嵌入 git commit hash（与 mink-cli/build.rs 同一协议）──
+    let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+    let git_dir = manifest.join("../../.git");
+    println!("cargo:rerun-if-changed={}", git_dir.join("HEAD").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        git_dir.join("refs/heads/main").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        git_dir.join("packed-refs").display()
+    );
+    println!("cargo:rerun-if-env-changed=MINK_GIT_HASH");
+    let hash = match env::var("MINK_GIT_HASH") {
+        Ok(value) if !value.trim().is_empty() => value.trim().to_string(),
+        _ => git_short_hash()
+            .map(|hash| {
+                if working_tree_dirty() {
+                    format!("{hash}-dirty")
+                } else {
+                    hash
+                }
+            })
+            .unwrap_or_default(),
+    };
+    println!("cargo:rustc-env=MINK_GIT_HASH={hash}");
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let web_dir = manifest.join("web");
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
@@ -86,4 +112,25 @@ fn main() {
     );
     fs::write(out_dir.join("assets.rs"), asset_rs).expect("write assets.rs");
     println!("[build.rs] embedded {} web assets", entries.len());
+}
+
+fn git_short_hash() -> Option<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!hash.is_empty()).then_some(hash)
+}
+
+/// Dirty = any tracked file changed (untracked build artifacts excluded).
+fn working_tree_dirty() -> bool {
+    Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=no"])
+        .output()
+        .ok()
+        .is_some_and(|output| output.status.success() && !output.stdout.is_empty())
 }

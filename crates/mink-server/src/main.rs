@@ -19,10 +19,19 @@ mod web_assets;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let config_path = std::env::args()
-        .nth(1)
-        .filter(|a| a != "--help" && a != "-h")
-        .map(PathBuf::from);
+    let mut args = std::env::args().skip(1);
+    match args.next().as_deref() {
+        Some("-V") | Some("--version") => {
+            println!("{}", version_line());
+            return Ok(());
+        }
+        Some("-h") | Some("--help") => {
+            print_usage();
+            return Ok(());
+        }
+        _ => {}
+    }
+    let config_path = args.next().map(PathBuf::from);
     let cfg = ServerConfig::load(config_path.as_deref())?;
     validate_runtime_config(&cfg)?;
 
@@ -59,3 +68,34 @@ async fn main() -> Result<()> {
     axum::serve(listener, app).await?;
     Ok(())
 }
+
+fn version_line() -> String {
+    let git_hash = env!("MINK_GIT_HASH");
+    if git_hash.is_empty() {
+        format!("mink-server {}", env!("CARGO_PKG_VERSION"))
+    } else {
+        format!("mink-server {} ({git_hash})", env!("CARGO_PKG_VERSION"))
+    }
+}
+
+fn print_usage() {
+    let program = std::env::args()
+        .next()
+        .and_then(|arg| {
+            std::path::Path::new(&arg)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "mink-server".to_string());
+    println!("{}", version_line());
+    println!();
+    println!("Usage: {program} [CONFIG_PATH]");
+    println!();
+    println!("Options:");
+    println!("  -V, --version       Show version");
+    println!("  -h, --help          Show this help");
+    println!();
+    println!("Config: mink-server.toml path (optional); falls back to ~/.minkrc and environment.");
+    println!("Environment: MINK_HOME, MINK_SERVER_HOST, MINK_SERVER_PORT, MINK_SERVER_MAX_RUNNING");
+}
+
