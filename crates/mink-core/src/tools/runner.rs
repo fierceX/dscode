@@ -455,10 +455,6 @@ fn format_dispatched_result(
         formatted.content
     };
 
-    if call.name == "Edit" && conv_content.is_empty() {
-        conv_content = crate::session::store::first_line(&output).to_string();
-    }
-
     let final_output = if (call.name == "Read" || call.name == "Write") && !is_bash {
         let path_str = call.fields.get("path").map(|s| s.as_str()).unwrap_or("");
         let kind = call.name.as_str();
@@ -469,6 +465,14 @@ fn format_dispatched_result(
     } else {
         output
     };
+
+    // Edit diagnostics are continuation state, not a terminal-only summary:
+    // the next model request needs new tags, changed lines, warnings and diffs.
+    // Use the already size-protected/artifact-spilled output for both success
+    // and failure so conversation and UI cannot diverge or bypass the limit.
+    if call.name == "Edit" {
+        conv_content = final_output.clone();
+    }
 
     // Signals collected later by TurnExecutor (needs shared SignalCollector for EditLoop)
     let signals = Vec::new();

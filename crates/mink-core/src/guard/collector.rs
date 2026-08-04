@@ -142,6 +142,7 @@ impl SignalCollector {
         output: &str,
         exit_code: Option<i32>,
         full_content: &str,
+        scan_error_patterns: bool,
     ) -> Vec<Signal> {
         let mut signals = Vec::new();
 
@@ -171,7 +172,13 @@ impl SignalCollector {
             signals.push(Signal::new(kind, 1.0, tool_name, None, None, first_line));
         }
 
-        if let Some(s) = self.detect_error(tool_name, output) {
+        // 正则模式检测只适用于命令/诊断输出（Bash/Python 等）。
+        // 内容返回型工具（Read/Glob/Grep 等）的输出是文件内容或搜索结果，
+        // 对它们跑编译错误/超时/未找到等模式会产生大量误报
+        // （例如源码里出现 "timeout"、"error[E0425]" 字样）。
+        if scan_error_patterns
+            && let Some(s) = self.detect_error(tool_name, output)
+        {
             signals.push(s);
         }
 
@@ -287,7 +294,7 @@ mod tests {
     #[test]
     fn detects_rust_error() {
         let mut c = SignalCollector::new();
-        let sigs = c.collect("Bash", "error[E0425]: cannot find value", None, "");
+        let sigs = c.collect("Bash", "error[E0425]: cannot find value", None, "", true);
         assert!(
             sigs.iter()
                 .any(|s| matches!(s.kind, SignalKind::CompileError))
@@ -298,8 +305,50 @@ mod tests {
     #[test]
     fn clean_output_no_signals() {
         let mut c = SignalCollector::new();
-        let sigs = c.collect("Read", "everything is fine", None, "");
+        let sigs = c.collect("Read", "everything is fine", None, "", false);
         assert!(sigs.is_empty());
+    }
+
+    #[test]
+    fn content_tool_output_with_timeout_keyword_does_not_emit_pattern_signal() {
+        let mut c = SignalCollector::new();
+        let sigs = c.collect(
+            "Read",
+            "209:        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), self)",
+            None,
+            "",
+            false,
+        );
+        assert!(
+            !sigs.iter().any(|s| matches!(s.kind, SignalKind::ToolError)),
+            "Read output is file content; 'timeout' must not produce a ToolError signal"
+        );
+    }
+
+    #[test]
+    fn command_tool_output_with_timeout_keyword_emits_pattern_signal() {
+        let mut c = SignalCollector::new();
+        let sigs = c.collect("Bash", "Timed out after 60s", None, "", true);
+        assert!(
+            sigs.iter().any(|s| matches!(s.kind, SignalKind::ToolError)),
+            "Bash diagnostics containing 'Timed out' must produce a ToolError signal"
+        );
+    }
+
+    #[test]
+    fn content_tool_output_with_compile_error_keyword_does_not_emit_pattern_signal() {
+        let mut c = SignalCollector::new();
+        let sigs = c.collect(
+            "Read",
+            "\"error[E0425]: cannot find value\" // test fixture string",
+            None,
+            "",
+            false,
+        );
+        assert!(
+            !sigs.iter().any(|s| matches!(s.kind, SignalKind::CompileError)),
+            "Read output is file content; 'error[E0425]' must not produce a CompileError signal"
+        );
     }
 
     #[test]
@@ -309,14 +358,14 @@ mod tests {
             c.call_history.push_back("Edit".into());
         }
         c.call_history.push_back("Read".into());
-        let sigs = c.collect("Edit", "ok", None, "");
+        let sigs = c.collect("Edit", "ok", None, "", false);
         assert!(sigs.iter().any(|s| matches!(s.kind, SignalKind::EditLoop)));
     }
 
     #[test]
     fn detects_tool_failed_via_exit_code() {
         let mut c = SignalCollector::new();
-        let sigs = c.collect("Bash", "output", Some(1), "output");
+        let sigs = c.collect("Bash", "output", Some(1), "output", false);
         assert!(
             sigs.iter()
                 .any(|s| matches!(s.kind, SignalKind::ToolFailed))
@@ -326,7 +375,7 @@ mod tests {
     #[test]
     fn detects_tool_failed_via_error_prefix() {
         let mut c = SignalCollector::new();
-        let sigs = c.collect("Read", "", None, "Error: file not found");
+        let sigs = c.collect("Read", "", None, "Error: file not found", false);
         assert!(
             sigs.iter()
                 .any(|s| matches!(s.kind, SignalKind::ToolFailed))
@@ -341,6 +390,7 @@ mod tests {
             "",
             None,
             "Error: tool execution failed: Error: command blocked by bash safety policy (sudo)",
+            false,
         );
         assert!(
             sigs.iter()
@@ -351,7 +401,7 @@ mod tests {
     #[test]
     fn exit_code_zero_does_not_fail() {
         let mut c = SignalCollector::new();
-        let sigs = c.collect("Bash", "ok", Some(0), "ok");
+        let sigs = c.collect("Bash", "ok", Some(0), "ok", false);
         assert!(
             !sigs
                 .iter()

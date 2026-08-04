@@ -33,6 +33,7 @@ fn collector_rust_error_detected() {
         "error[E0425]: cannot find value",
         None,
         "error[E0425]: cannot find value",
+        true,
     );
     assert!(
         sigs.iter()
@@ -44,7 +45,7 @@ fn collector_rust_error_detected() {
 #[test]
 fn collector_clean_output_ignored() {
     let mut c = SignalCollector::new();
-    let sigs = c.collect("Bash", "everything is fine", None, "everything is fine");
+    let sigs = c.collect("Bash", "everything is fine", None, "everything is fine", true);
     assert!(
         !sigs.iter().any(|s| matches!(s.kind, SignalKind::ToolError)),
         "exit code 0 should not be an error"
@@ -59,6 +60,7 @@ fn collector_tool_error_detected() {
         "error[E0425]: cannot find value `x`",
         None,
         "error[E0425]: cannot find value `x`",
+        true,
     );
     assert!(
         sigs.iter()
@@ -69,7 +71,7 @@ fn collector_tool_error_detected() {
 #[test]
 fn collector_clean_output_no_signals() {
     let mut c = SignalCollector::new();
-    let sigs = c.collect("Read", "everything is fine", None, "everything is fine");
+    let sigs = c.collect("Read", "everything is fine", None, "everything is fine", false);
     assert!(sigs.is_empty(), "clean output should produce no signals");
 }
 
@@ -78,10 +80,10 @@ fn collector_edit_loop_excessive_edits() {
     let mut c = SignalCollector::new();
     // 模拟：窗口=6，5次Edit触发 EditLoop
     for _ in 0..5 {
-        c.collect("Edit", "ok", None, "ok");
+        c.collect("Edit", "ok", None, "ok", false);
     }
-    c.collect("Edit", "ok", None, "ok"); // 第6次 Edit — 窗口内 Edit=6 > 4
-    let sigs = c.collect("Edit", "ok", None, "ok");
+    c.collect("Edit", "ok", None, "ok", false); // 第6次 Edit — 窗口内 Edit=6 > 4
+    let sigs = c.collect("Edit", "ok", None, "ok", false);
     assert!(
         sigs.iter().any(|s| matches!(s.kind, SignalKind::EditLoop)),
         "excessive edits should trigger EditLoop"
@@ -92,9 +94,9 @@ fn collector_edit_loop_excessive_edits() {
 fn collector_edit_diff_alternation_triggers() {
     let mut c = SignalCollector::new();
     for name in &["Edit", "Diff", "Edit", "Diff", "Edit", "Diff"] {
-        c.collect(name, "ok", None, "ok");
+        c.collect(name, "ok", None, "ok", false);
     }
-    let sigs = c.collect("Diff", "ok", None, "ok"); // Edit↔Diff 交替 + 无 Bash/Grep/Read
+    let sigs = c.collect("Diff", "ok", None, "ok", false); // Edit↔Diff 交替 + 无 Bash/Grep/Read
     assert!(
         sigs.iter().any(|s| matches!(s.kind, SignalKind::EditLoop)),
         "edit-diff alternation without reads should trigger EditLoop"
@@ -105,9 +107,9 @@ fn collector_edit_diff_alternation_triggers() {
 fn collector_edit_diff_with_read_does_not_trigger() {
     let mut c = SignalCollector::new();
     for name in &["Edit", "Diff", "Edit", "Grep", "Edit", "Diff"] {
-        c.collect(name, "ok", None, "ok");
+        c.collect(name, "ok", None, "ok", false);
     }
-    let sigs = c.collect("Edit", "ok", None, "ok");
+    let sigs = c.collect("Edit", "ok", None, "ok", false);
     assert!(
         !sigs.iter().any(|s| matches!(s.kind, SignalKind::EditLoop)),
         "edit-diff with Grep should NOT trigger EditLoop"
@@ -123,6 +125,7 @@ fn belief_max_merges_tool_errors() {
         "error[E0308]: type mismatch\nerror[E0425]: cannot find value",
         None,
         "error[E0308]: type mismatch\nerror[E0425]: cannot find value",
+        true,
     );
     assert!(
         sigs.iter()
@@ -271,7 +274,7 @@ fn full_chain_clean_to_injection() {
 
     // 3 clean calls → high belief
     for _ in 0..3 {
-        let sigs = collector.collect("Read", "ok", None, "ok");
+        let sigs = collector.collect("Read", "ok", None, "ok", false);
         belief.observe(&sigs);
     }
     assert!(
@@ -290,6 +293,7 @@ fn full_chain_clean_to_injection() {
             "error[E0425]: cannot find value",
             None,
             "error[E0425]: cannot find value",
+            true,
         );
         belief.observe(&sigs);
     }
@@ -316,11 +320,11 @@ fn full_chain_edit_loop_triggers_belief_drop() {
 
     // Trigger EditLoop with excessive edits
     for _ in 0..5 {
-        let sigs = collector.collect("Edit", "ok", None, "ok");
+        let sigs = collector.collect("Edit", "ok", None, "ok", false);
         belief.observe(&sigs);
     }
     // The next Edit should trigger EditLoop
-    let sigs = collector.collect("Edit", "ok", None, "ok");
+    let sigs = collector.collect("Edit", "ok", None, "ok", false);
     assert!(sigs.iter().any(|s| matches!(s.kind, SignalKind::EditLoop)));
     belief.observe(&sigs);
     assert!(

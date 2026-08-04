@@ -172,6 +172,10 @@ mod tests {
             .build_system_prompt()
             .unwrap();
         assert!(hashline.contains("PUT N.=M"));
+        assert!(hashline.contains("<critical>"));
+        assert!(hashline.contains("<anti-patterns>"));
+        assert!(hashline.contains("Never guess, invent"));
+        assert!(!hashline.contains("N*"));
         assert!(!hashline.contains("old_text"));
 
         let mut config = Config::default();

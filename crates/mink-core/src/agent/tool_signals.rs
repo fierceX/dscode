@@ -56,11 +56,20 @@ impl ToolSignalProcessor {
             return;
         }
 
+        // 正则错误模式只适用于命令/诊断输出（Bash/Python 等 Command 结果）。
+        // 内容返回型工具（Read/Glob/Grep 等 FileRead/Search）的输出是文件内容或
+        // 搜索结果，对其做模式匹配会产生误报（源码中的 "timeout"、"error[E0425]"
+        // 等字样），因此只保留 exit_code 和 "Error:" 前缀检测。
+        let scan_error_patterns = matches!(
+            result.result_kind,
+            crate::tools::metadata::ToolResultKind::Command
+        );
         let new_signals = self.collector.collect(
             &result.tool_name,
             &result.content,
             result.exit_code,
             &result.content,
+            scan_error_patterns,
         );
         result.signals = new_signals;
         self.signals.extend(result.signals.clone());

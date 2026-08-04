@@ -2572,6 +2572,302 @@ async fn hashline_read_edit_and_stale_recovery_flow() -> anyhow::Result<()> {
         "prefix\none\nTWO\n"
     );
     assert!(edited[0].content.contains("uniform +1 line offset"));
+    let new_tag = crate::tools::snapshot::compute_file_tag("prefix\none\nTWO\n");
+    assert!(edited[0].content.contains(&format!("[flow.txt#{new_tag}]")));
+    assert!(edited[0].content.contains("firstChangedLine: 3"));
+    assert!(edited[0].content.contains("Diff:"));
+    assert_eq!(edited[0].conv_content, edited[0].content);
+    Ok(())
+}
+
+#[tokio::test]
+async fn hashline_full_turn_persists_complete_edit_result_and_reuses_new_tag() -> anyhow::Result<()>
+{
+    let h = harness("hashline-turn-result").await?;
+    tokio::fs::write(h.cwd.join("turn.txt"), "one\ntwo\n").await?;
+    let runner = ToolRunner::new(Arc::new(ToolContext::from(h.ctx.as_ref())));
+    runner
+        .execute_all(vec![tool_call(
+            "Read",
+            "seed_turn",
+            json!({"path":"turn.txt"}),
+        )])
+        .await?;
+    let original_tag = crate::tools::snapshot::compute_file_tag("one\ntwo\n");
+    tokio::fs::write(h.cwd.join("turn.txt"), "prefix\none\ntwo\n").await?;
+    let first_text = "prefix\none\nTWO\n";
+    let first_tag = crate::tools::snapshot::compute_file_tag(first_text);
+
+    let llm = Arc::new(MockLlmClient::new(
+        "flash",
+        vec![
+            vec![
+                Ok(Event::ToolCall(tool_call(
+                    "Edit",
+                    "turn_edit_one",
+                    json!({"input":format!("[turn.txt#{original_tag}]\nPUT 2.=2:\n+TWO")}),
+                ))),
+                Ok(Event::Stop(StopEvent {
+                    reason: "tool_use".into(),
+                })),
+            ],
+            vec![
+                Ok(Event::ToolCall(tool_call(
+                    "Edit",
+                    "turn_edit_two",
+                    json!({"input":format!("[turn.txt#{first_tag}]\nPUT 3.=3:\n+THREE")}),
+                ))),
+                Ok(Event::Stop(StopEvent {
+                    reason: "tool_use".into(),
+                })),
+            ],
+            vec![
+                Ok(Event::Text(TextEvent {
+                    content: "done".into(),
+                })),
+                Ok(Event::Stop(StopEvent {
+                    reason: "end_turn".into(),
+                })),
+            ],
+        ],
+    ));
+    let mut executor = TurnExecutor::new(h.ctx.clone(), llm_client_from_mock(llm));
+    executor.execute("edit twice", None).await?;
+
+    assert_eq!(
+        tokio::fs::read_to_string(h.cwd.join("turn.txt")).await?,
+        "prefix\none\nTHREE\n"
+    );
+    let lines = h.ctx.store.lines().await?;
+    let first_result = lines[2]["content"][0]["content"]
+        .as_str()
+        .expect("first Edit result content");
+    assert!(first_result.contains(&format!("[turn.txt#{first_tag}]")));
+    assert!(first_result.contains("firstChangedLine: 3"));
+    assert!(first_result.contains("Diff:"));
+    assert!(first_result.contains("uniform +1 line offset"));
+    let second_result = lines[4]["content"][0]["content"]
+        .as_str()
+        .expect("second Edit result content");
+    assert!(second_result.contains("firstChangedLine: 3"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn hashline_unknown_tag_reports_current_tag() -> anyhow::Result<()> {
+    let h = harness("hashline-unknown-tag").await?;
+    tokio::fs::write(h.cwd.join("u.txt"), "one\n").await?;
+    let runner = ToolRunner::new(Arc::new(ToolContext::from(h.ctx.as_ref())));
+    let result = runner
+        .execute_all(vec![tool_call(
+            "Edit",
+            "edit_unknown",
+            json!({"input":"[u.txt#DEAD]\nPUT 1.=1:\n+TWO"}),
+        )])
+        .await?;
+    assert!(!result[0].success);
+    assert!(
+        result[0]
+            .content
+            .contains("does not belong to this session")
+    );
+    assert!(result[0].content.contains("Do not invent tags"));
+    assert!(result[0].content.contains("must not be used to retry"));
+    assert!(result[0].content.contains("* 1:one"));
+    assert!(!result[0].content.contains("retry with the current tag"));
+
+    let current_tag = crate::tools::snapshot::compute_file_tag("one\n");
+    let retry = runner
+        .execute_all(vec![tool_call(
+            "Edit",
+            "edit_computed_hash",
+            json!({"input":format!("[u.txt#{current_tag}]\nPUT 1.=1:\n+TWO")}),
+        )])
+        .await?;
+    assert!(
+        !retry[0].success,
+        "a diagnostic hash must not authorize Edit"
+    );
+    assert!(retry[0].content.contains("does not belong to this session"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn hashline_noop_softens_twice_then_fails_and_resets() -> anyhow::Result<()> {
+    let h = harness("hashline-noop").await?;
+    tokio::fs::write(h.cwd.join("noop.txt"), "same\n").await?;
+    let runner = ToolRunner::new(Arc::new(ToolContext::from(h.ctx.as_ref())));
+    runner
+        .execute_all(vec![tool_call(
+            "Read",
+            "read_noop",
+            json!({"path":"noop.txt"}),
+        )])
+        .await?;
+    let tag = crate::tools::snapshot::compute_file_tag("same\n");
+    let payload = format!("[noop.txt#{tag}]\nPUT 1.=1:\n+same");
+
+    for (index, expected) in [(1, "soft no-op 1/2"), (2, "soft no-op 2/2")] {
+        let result = runner
+            .execute_all(vec![tool_call(
+                "Edit",
+                &format!("noop_{index}"),
+                json!({"input":payload.clone()}),
+            )])
+            .await?;
+        assert!(result[0].success, "{}", result[0].content);
+        assert!(result[0].content.contains(expected));
+        assert!(result[0].signals.is_empty());
+    }
+    let third = runner
+        .execute_all(vec![tool_call(
+            "Edit",
+            "noop_3",
+            json!({"input":payload.clone()}),
+        )])
+        .await?;
+    assert!(!third[0].success);
+    assert!(third[0].content.contains("will continue to fail"));
+
+    let alternate = runner
+        .execute_all(vec![tool_call(
+            "Edit",
+            "noop_alternate",
+            json!({"input":format!("[noop.txt#{tag}]\nPUT 1:\n+same")}),
+        )])
+        .await?;
+    assert!(alternate[0].success);
+    assert!(alternate[0].content.contains("soft no-op 1/2"));
+
+    let changed = runner
+        .execute_all(vec![tool_call(
+            "Edit",
+            "noop_change",
+            json!({"input":format!("[noop.txt#{tag}]\nPUT 1:\n+changed")}),
+        )])
+        .await?;
+    assert!(changed[0].success, "{}", changed[0].content);
+    let changed_tag = crate::tools::snapshot::compute_file_tag("changed\n");
+    let after_commit = runner
+        .execute_all(vec![tool_call(
+            "Edit",
+            "noop_after_commit",
+            json!({"input":format!("[noop.txt#{changed_tag}]\nPUT 1:\n+changed")}),
+        )])
+        .await?;
+    assert!(after_commit[0].success);
+    assert!(after_commit[0].content.contains("soft no-op 1/2"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn hashline_batch_noop_preflight_prevents_partial_commit() -> anyhow::Result<()> {
+    let h = harness("hashline-batch-noop").await?;
+    tokio::fs::write(h.cwd.join("change.txt"), "old\n").await?;
+    tokio::fs::write(h.cwd.join("same.txt"), "same\n").await?;
+    let runner = ToolRunner::new(Arc::new(ToolContext::from(h.ctx.as_ref())));
+    runner
+        .execute_all(vec![
+            tool_call("Read", "read_change", json!({"path":"change.txt"})),
+            tool_call("Read", "read_same", json!({"path":"same.txt"})),
+        ])
+        .await?;
+    let change_tag = crate::tools::snapshot::compute_file_tag("old\n");
+    let same_tag = crate::tools::snapshot::compute_file_tag("same\n");
+    let result = runner
+        .execute_all(vec![tool_call(
+            "Edit",
+            "batch_noop",
+            json!({"input":format!(
+                "[change.txt#{change_tag}]\nPUT 1:\n+new\n[same.txt#{same_tag}]\nPUT 1:\n+same"
+            )}),
+        )])
+        .await?;
+    assert!(!result[0].success);
+    assert!(result[0].content.contains("no files were committed"));
+    assert_eq!(
+        tokio::fs::read_to_string(h.cwd.join("change.txt")).await?,
+        "old\n"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn oversized_hashline_result_shares_artifact_url_with_model_and_ui() -> anyhow::Result<()> {
+    let h = harness_with_config(
+        "hashline-artifact",
+        false,
+        300,
+        |config| config.tool_result_max_bytes = 500,
+        None,
+    )
+    .await?;
+    let original = (1..=80)
+        .map(|line| format!("old-{line:03}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    tokio::fs::write(h.cwd.join("large.txt"), &original).await?;
+    let runner = ToolRunner::new(Arc::new(ToolContext::from(h.ctx.as_ref())));
+    runner
+        .execute_all(vec![tool_call(
+            "Write",
+            "seed_large",
+            json!({"path":"large.txt", "content":original.clone()}),
+        )])
+        .await?;
+    let tag = crate::tools::snapshot::compute_file_tag(&original);
+    let body = (1..=80)
+        .map(|line| format!("+new-{line:03}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let result = runner
+        .execute_all(vec![tool_call(
+            "Edit",
+            "edit_large",
+            json!({"input":format!("[large.txt#{tag}]\nPUT 1.=80:\n{body}")}),
+        )])
+        .await?;
+    assert!(result[0].success, "{}", result[0].content);
+    assert!(result[0].content.contains("artifact://"));
+    assert_eq!(result[0].conv_content, result[0].content);
+    assert_eq!(result[0].artifacts.len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn hashline_stale_error_reports_current_tag() -> anyhow::Result<()> {
+    let h = harness("hashline-stale-tag").await?;
+    tokio::fs::write(h.cwd.join("conflict.txt"), "one\ntwo\n").await?;
+    let runner = ToolRunner::new(Arc::new(ToolContext::from(h.ctx.as_ref())));
+    runner
+        .execute_all(vec![tool_call(
+            "Read",
+            "read_conflict",
+            json!({"path":"conflict.txt"}),
+        )])
+        .await?;
+    let stale_tag = crate::tools::snapshot::compute_file_tag("one\ntwo\n");
+    tokio::fs::write(h.cwd.join("conflict.txt"), "one\nchanged\n").await?;
+    let result = runner
+        .execute_all(vec![tool_call(
+            "Edit",
+            "edit_stale",
+            json!({"input":format!("[conflict.txt#{stale_tag}]\nPUT 2.=2:\n+TWO")}),
+        )])
+        .await?;
+    assert!(!result[0].success);
+    assert!(
+        result[0]
+            .content
+            .contains("Current content hash (diagnostic)")
+    );
+    assert!(
+        result[0]
+            .content
+            .contains("drifted outside a successful Edit")
+    );
+    assert!(result[0].content.contains("* 2:changed"));
     Ok(())
 }
 
@@ -2602,9 +2898,96 @@ async fn hashline_changed_anchor_fails_closed() -> anyhow::Result<()> {
             .content
             .contains("could not be recovered unambiguously")
     );
+    assert!(
+        result[0]
+            .content
+            .contains("Current content hash (diagnostic)")
+    );
+    assert!(result[0].content.contains("* 2:changed"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn hashline_stale_error_distinguishes_prior_edit_response_tag() -> anyhow::Result<()> {
+    let h = harness("hashline-edit-tag-provenance").await?;
+    tokio::fs::write(h.cwd.join("provenance.txt"), "one\ntwo\n").await?;
+    let runner = ToolRunner::new(Arc::new(ToolContext::from(h.ctx.as_ref())));
+    runner
+        .execute_all(vec![tool_call(
+            "Read",
+            "read_provenance",
+            json!({"path":"provenance.txt"}),
+        )])
+        .await?;
+    let old_tag = crate::tools::snapshot::compute_file_tag("one\ntwo\n");
+    let first = runner
+        .execute_all(vec![tool_call(
+            "Edit",
+            "edit_provenance",
+            json!({"input":format!("[provenance.txt#{old_tag}]\nPUT 2:\n+changed")}),
+        )])
+        .await?;
+    assert!(first[0].success, "{}", first[0].content);
+    let edit_tag = crate::tools::snapshot::compute_file_tag("one\nchanged\n");
+    assert!(
+        first[0]
+            .content
+            .contains(&format!("[provenance.txt#{edit_tag}]"))
+    );
+
+    let stale = runner
+        .execute_all(vec![tool_call(
+            "Edit",
+            "stale_after_edit",
+            json!({"input":format!("[provenance.txt#{old_tag}]\nPUT 2:\n+again")}),
+        )])
+        .await?;
+    assert!(!stale[0].success);
+    assert!(stale[0].content.contains("earlier successful Edit"));
+    assert!(
+        stale[0]
+            .content
+            .contains(&format!("[provenance.txt#{edit_tag}]"))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn hashline_inconsistent_anchor_offsets_fail_closed_with_context() -> anyhow::Result<()> {
+    let h = harness("hashline-inconsistent-offsets").await?;
+    let original = "top\nleft\nmiddle\nright\nbottom\n";
+    tokio::fs::write(h.cwd.join("offsets.txt"), original).await?;
+    let runner = ToolRunner::new(Arc::new(ToolContext::from(h.ctx.as_ref())));
+    runner
+        .execute_all(vec![tool_call(
+            "Read",
+            "read_offsets",
+            json!({"path":"offsets.txt"}),
+        )])
+        .await?;
+    let tag = crate::tools::snapshot::compute_file_tag(original);
+    tokio::fs::write(
+        h.cwd.join("offsets.txt"),
+        "top\nleft\nmiddle\ninserted\nright\nbottom\n",
+    )
+    .await?;
+    let result = runner
+        .execute_all(vec![tool_call(
+            "Edit",
+            "edit_offsets",
+            json!({"input":format!(
+                "[offsets.txt#{tag}]\nPUT 2:\n+LEFT\nPUT 4:\n+RIGHT"
+            )}),
+        )])
+        .await?;
+    assert!(!result[0].success);
+    assert!(result[0].content.contains("inconsistent offset"));
+    assert!(result[0].content.contains("* 2:left"));
+    assert!(result[0].content.contains("* 4:inserted"));
+    assert_eq!(result[0].conv_content, result[0].content);
     assert_eq!(
-        tokio::fs::read_to_string(h.cwd.join("conflict.txt")).await?,
-        "one\nchanged\n"
+        tokio::fs::read_to_string(h.cwd.join("offsets.txt")).await?,
+        "top\nleft\nmiddle\ninserted\nright\nbottom\n"
     );
     Ok(())
 }
@@ -2640,6 +3023,10 @@ async fn hashline_grep_and_cross_file_clipboard_flow() -> anyhow::Result<()> {
         )])
         .await?;
     assert!(result[0].success, "{}", result[0].content);
+    let new_a_tag = crate::tools::snapshot::compute_file_tag("keep\n");
+    let new_b_tag = crate::tools::snapshot::compute_file_tag("needle\ntail\n");
+    assert!(result[0].content.contains(&format!("[a.txt#{new_a_tag}]")));
+    assert!(result[0].content.contains(&format!("[b.txt#{new_b_tag}]")));
     assert_eq!(
         tokio::fs::read_to_string(h.cwd.join("a.txt")).await?,
         "keep\n"
@@ -2709,6 +3096,11 @@ async fn replace_exact_fuzzy_and_all_flow() -> anyhow::Result<()> {
         )])
         .await?;
     assert!(result[0].success, "{}", result[0].content);
+    assert!(result[0].content.contains("firstChangedLine: 1"));
+    assert!(result[0].content.contains("matchStrategy: exact"));
+    assert!(result[0].content.contains("matchCount: 2"));
+    assert!(result[0].content.contains("Diff:"));
+    assert_eq!(result[0].conv_content, result[0].content);
     assert_eq!(
         tokio::fs::read_to_string(h.cwd.join("replace.txt")).await?,
         "ALPHA\nBETA\nALPHA\n"
@@ -2853,11 +3245,47 @@ async fn hashline_move_preflight_and_edit_then_move_are_safe() -> anyhow::Result
         )])
         .await?;
     assert!(moved[0].success, "{}", moved[0].content);
+    let moved_tag = crate::tools::snapshot::compute_file_tag("A\n");
+    assert!(moved[0].content.contains("Edit(a.txt): moved -> moved.txt"));
+    assert!(
+        moved[0]
+            .content
+            .contains(&format!("[moved.txt#{moved_tag}]"))
+    );
+    assert!(moved[0].content.contains("firstChangedLine: 1"));
     assert!(!h.cwd.join("a.txt").exists());
     assert_eq!(
         tokio::fs::read_to_string(h.cwd.join("moved.txt")).await?,
         "A\n"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn hashline_remove_reports_removed_status_and_diff() -> anyhow::Result<()> {
+    let h = harness("hashline-remove-result").await?;
+    tokio::fs::write(h.cwd.join("remove.txt"), "gone\n").await?;
+    let runner = ToolRunner::new(Arc::new(ToolContext::from(h.ctx.as_ref())));
+    runner
+        .execute_all(vec![tool_call(
+            "Read",
+            "read_remove",
+            json!({"path":"remove.txt"}),
+        )])
+        .await?;
+    let tag = crate::tools::snapshot::compute_file_tag("gone\n");
+    let result = runner
+        .execute_all(vec![tool_call(
+            "Edit",
+            "remove_file",
+            json!({"input":format!("[remove.txt#{tag}]\nREM")}),
+        )])
+        .await?;
+    assert!(result[0].success, "{}", result[0].content);
+    assert!(result[0].content.contains("Edit(remove.txt): removed"));
+    assert!(result[0].content.contains("linesRemoved: 1"));
+    assert!(result[0].content.contains("Diff:"));
+    assert!(!h.cwd.join("remove.txt").exists());
     Ok(())
 }
 

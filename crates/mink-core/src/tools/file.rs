@@ -749,12 +749,16 @@ fn execute_hashline_edit(
         let current_tag = crate::tools::snapshot::compute_file_tag(&normalized);
         let authored_anchors = crate::tools::hashline::anchor_lines(authored);
         let versions = store.versions(&canonical, &authored.tag);
-        ensure!(
-            !versions.is_empty(),
-            "Error: snapshot tag #{} for {} is unknown in this session; Read or Grep the target and retry",
-            authored.tag,
-            authored.path
-        );
+        if versions.is_empty() {
+            let context = format_mismatch_anchor_context(&normalized, &authored_anchors);
+            bail!(
+                "Error: snapshot tag #{} for {} is unknown and does not belong to this session. Do not invent tags or reuse a tag from another session.\nCurrent content hash (diagnostic only): #{}. This hash is not an authorized snapshot tag and must not be used to retry.\nUse Read or Grep to obtain a verifiable new [PATH#TAG] header before editing again.{}",
+                authored.tag,
+                authored.path,
+                current_tag,
+                context
+            );
+        }
 
         let mut warnings = Vec::new();
         if let Some(authored_path) = recovered_path {
@@ -796,12 +800,25 @@ fn execute_hashline_edit(
                     recovered.push((section, snapshot, offset));
                 }
             }
-            ensure!(
-                recovered.len() == 1,
-                "Error: stale snapshot #{} for {} could not be recovered unambiguously; an anchor changed, was deleted/split, repeated, or mapped with an inconsistent offset",
-                authored.tag,
-                authored.path
-            );
+            if recovered.len() != 1 {
+                let context = format_mismatch_anchor_context(&normalized, &authored_anchors);
+                let guidance = if store.is_edit_result_tag(&canonical, &current_tag) {
+                    format!(
+                        "The current content matches [{}#{}], a header returned by an earlier successful Edit in this session; that exact response header may be reused directly.",
+                        authored.path, current_tag
+                    )
+                } else {
+                    "The file has drifted outside a successful Edit response. Re-run Read or Grep and use the newly returned header; do not retry with the diagnostic hash below.".to_string()
+                };
+                bail!(
+                    "Error: stale snapshot #{} for {} could not be recovered unambiguously. An anchor changed, was deleted/split, repeated, or mapped with an inconsistent offset.\nCurrent content hash (diagnostic): #{}. {}{}",
+                    authored.tag,
+                    authored.path,
+                    current_tag,
+                    guidance,
+                    context
+                );
+            }
             let (section, snapshot, offset) = recovered.remove(0);
             warnings.push(format!(
                 "recovered stale snapshot #{} with a uniform {offset:+} line offset",
@@ -906,17 +923,26 @@ fn execute_hashline_edit(
             }
             _ => {
                 if updated == normalized {
-                    let count = store.note_noop(&canonical, &args.input);
-                    if count >= 3 {
+                    if patch.sections.len() != 1 {
                         bail!(
-                            "Error: identical hashline input produced no changes three consecutive times for {}",
+                            "Error: Hashline batch preflight found a no-op section for {}; no files were committed. Remove or change the no-op section before retrying.",
                             authored.path
                         );
                     }
-                    bail!(
-                        "Error: hashline input produced no changes for {} (identical no-op count: {count})",
-                        authored.path
-                    );
+                    let count = store.note_noop(&canonical, &args.input);
+                    if count >= 3 {
+                        bail!(
+                            "Error: identical Hashline payload produced no changes three consecutive times for {}. The same payload will continue to fail; change the operation or re-check the file and its anchors before retrying.",
+                            authored.path
+                        );
+                    }
+                    return Ok(tool_outcome(
+                        format!(
+                            "Edit({}): no changes (soft no-op {count}/2)\nNo file or clipboard state was changed. Do not expand the edit range. Confirm whether the intended change is already present and re-check the target anchors before retrying.",
+                            authored.path
+                        ),
+                        String::new(),
+                    ));
                 }
                 let final_text = restore_text_shape(&shape, &updated);
                 ensure!(
@@ -949,16 +975,19 @@ fn execute_hashline_edit(
                 atomic_write(&item.path, &final_text)?;
                 let (diff, added, removed) =
                     inline_diff(&item.display_path, &item.normalized_original, &updated)?;
-                let (start, end) = changed_line_window(&item.normalized_original, &updated);
+                let (first_changed, last_changed) =
+                    changed_line_window(&item.normalized_original, &updated);
                 let lines = crate::tools::snapshot::split_content_lines(&updated);
-                let start = start.saturating_sub(12).max(1);
-                let end = (end + 12).min(lines.len()).max(start.min(lines.len()));
+                let start = first_changed.saturating_sub(12).max(1);
+                let end = (last_changed + 12)
+                    .min(lines.len())
+                    .max(start.min(lines.len()));
                 let visible = if lines.is_empty() {
                     1..1
                 } else {
                     start..end.saturating_add(1)
                 };
-                let snapshot = store.record(&item.path, &updated, visible.clone());
+                let snapshot = store.record_edit(&item.path, &updated, visible.clone());
                 store.reset_noop(&item.path);
                 let body = if lines.is_empty() || start > end {
                     format!("[{}#{}]", item.display_path, snapshot.tag)
@@ -971,22 +1000,28 @@ fn execute_hashline_edit(
                     )
                 };
                 Ok(format!(
-                    "Edit({}) [+{} -{} lines]\n{}{}\n{}",
+                    "Edit({}): updated\n{}\nfirstChangedLine: {}\nlinesAdded: {}\nlinesRemoved: {}{}\nDiff:\n{}",
                     item.display_path,
+                    body,
+                    first_changed,
                     added,
                     removed,
-                    body,
                     format_warnings(&item.warnings),
                     diff
                 ))
             }
             HashlineAction::Remove => {
+                let (diff, added, removed) =
+                    inline_diff(&item.display_path, &item.normalized_original, "")?;
                 std::fs::remove_file(&item.path)?;
                 store.reset_noop(&item.path);
                 Ok(format!(
-                    "Removed {}{}",
+                    "Edit({}): removed\nfirstChangedLine: 1\nlinesAdded: {}\nlinesRemoved: {}{}\nDiff:\n{}",
                     item.display_path,
-                    format_warnings(&item.warnings)
+                    added,
+                    removed,
+                    format_warnings(&item.warnings),
+                    diff
                 ))
             }
             HashlineAction::Move {
@@ -1000,15 +1035,46 @@ fn execute_hashline_edit(
                 move_file_noclobber(&item.path, &destination, replacement)?;
                 store.relocate(&item.path, &destination);
                 let display = display_relative_path(&ctx.cwd, &destination);
-                let snapshot = store.record(&destination, &updated, std::iter::empty());
+                let (diff, added, removed) =
+                    inline_diff(&item.display_path, &item.normalized_original, &updated)?;
+                let changed = (updated != item.normalized_original)
+                    .then(|| changed_line_window(&item.normalized_original, &updated).0);
+                let lines = crate::tools::snapshot::split_content_lines(&updated);
+                let (start, end) = changed.map_or_else(
+                    || (1, lines.len().min(25)),
+                    |line| (line.saturating_sub(12).max(1), (line + 12).min(lines.len())),
+                );
+                let visible = if lines.is_empty() || start > end {
+                    1..1
+                } else {
+                    start..end.saturating_add(1)
+                };
+                let snapshot = store.record_edit(&destination, &updated, visible);
                 store.reset_noop(&destination);
+                let body = if lines.is_empty() || start > end {
+                    format!("[{display}#{}]", snapshot.tag)
+                } else {
+                    format_hashline_read(
+                        &display,
+                        &snapshot.tag,
+                        start,
+                        &lines[start - 1..end].join("\n"),
+                    )
+                };
                 Ok(format!(
-                    "Moved {} -> {}\n[{}#{}]{}",
+                    "Edit({}): moved -> {}\n{}\nfirstChangedLine: {}\nlinesAdded: {}\nlinesRemoved: {}{}\nDiff:\n{}",
                     item.display_path,
                     display,
-                    display,
-                    snapshot.tag,
-                    format_warnings(&item.warnings)
+                    body,
+                    changed.map_or_else(|| "none".to_string(), |line| line.to_string()),
+                    added,
+                    removed,
+                    format_warnings(&item.warnings),
+                    if diff.is_empty() {
+                        "(no content changes; path moved)"
+                    } else {
+                        &diff
+                    }
                 ))
             }
         })();
@@ -1030,12 +1096,7 @@ fn execute_hashline_edit(
         }
     }
     let content = rendered.join("\n\n");
-    let summary = format!(
-        "Hashline Edit committed {} section(s): {}",
-        committed.len(),
-        committed.join(", ")
-    );
-    Ok(tool_outcome(content, summary))
+    Ok(tool_outcome(content, String::new()))
 }
 
 fn hash_equivalent_snapshot_text(left: &str, right: &str) -> bool {
@@ -1164,6 +1225,91 @@ fn changed_line_window(old: &str, new: &str) -> (usize, usize) {
     }
 }
 
+const MISMATCH_CONTEXT_RADIUS: usize = 2;
+const MISMATCH_CONTEXT_MAX_LINES: usize = 40;
+const MISMATCH_CONTEXT_MAX_LINE_BYTES: usize = 500;
+
+fn format_mismatch_anchor_context(content: &str, anchors: &BTreeSet<usize>) -> String {
+    if anchors.is_empty() {
+        return "\nAnchor context: unavailable (the section has no numbered anchors).".to_string();
+    }
+
+    let lines = crate::tools::snapshot::split_content_lines(content);
+    if lines.is_empty() {
+        return "\nAnchor context from current content: (file is empty).".to_string();
+    }
+
+    let mut requested = BTreeSet::new();
+    let mut out_of_range = false;
+    for anchor in anchors {
+        if *anchor == 0 || *anchor > lines.len() {
+            out_of_range = true;
+            continue;
+        }
+        let start = anchor.saturating_sub(MISMATCH_CONTEXT_RADIUS).max(1);
+        let end = anchor
+            .saturating_add(MISMATCH_CONTEXT_RADIUS)
+            .min(lines.len());
+        requested.extend(start..=end);
+    }
+
+    if requested.is_empty() {
+        return format!(
+            "\nAnchor context from current content: unavailable (requested anchors are outside 1..={}).",
+            lines.len()
+        );
+    }
+
+    let total_requested = requested.len();
+    let selected = requested
+        .into_iter()
+        .take(MISMATCH_CONTEXT_MAX_LINES)
+        .collect::<Vec<_>>();
+    let mut truncated = total_requested > selected.len() || out_of_range;
+    let mut rendered = String::from(
+        "\nAnchor context from current content (diagnostic only; this does not mark lines as seen or authorize a tag):",
+    );
+    let mut previous = None;
+    for line_number in selected {
+        if previous.is_some_and(|line| line + 1 != line_number) {
+            rendered.push_str("\n  …");
+        }
+        let source = &lines[line_number - 1];
+        let (text, line_truncated) = utf8_bounded_line(source, MISMATCH_CONTEXT_MAX_LINE_BYTES);
+        truncated |= line_truncated;
+        rendered.push('\n');
+        rendered.push_str(if anchors.contains(&line_number) {
+            "* "
+        } else {
+            "  "
+        });
+        rendered.push_str(&line_number.to_string());
+        rendered.push(':');
+        rendered.push_str(text);
+        if line_truncated {
+            rendered.push_str(" … [line truncated]");
+        }
+        previous = Some(line_number);
+    }
+    if truncated {
+        rendered.push_str(
+            "\n[Anchor context truncated to safety limits; use Read/Grep for complete current context.]",
+        );
+    }
+    rendered
+}
+
+fn utf8_bounded_line(line: &str, max_bytes: usize) -> (&str, bool) {
+    if line.len() <= max_bytes {
+        return (line, false);
+    }
+    let mut end = max_bytes;
+    while end > 0 && !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    (&line[..end], true)
+}
+
 fn display_relative_path(cwd: &Path, path: &Path) -> String {
     path.strip_prefix(cwd)
         .unwrap_or(path)
@@ -1191,7 +1337,6 @@ fn execute_replace_edit(
     let path = resolve_replace_target(&ctx.cwd, &args.path)?;
     let display_path = display_relative_path(&ctx.cwd, &path);
     let mut output = Vec::new();
-    let mut applied = 0usize;
     for (index, edit) in args.edits.iter().enumerate() {
         let original = std::fs::read_to_string(&path)
             .map_err(|error| anyhow!("Error: cannot read {}: {error}", path.display()))?;
@@ -1215,8 +1360,8 @@ fn execute_replace_edit(
             anyhow!(
                 "{}{}",
                 error,
-                if applied > 0 {
-                    format!("\n{applied} earlier edit(s) in this call were already committed")
+                if index > 0 {
+                    format!("\n{index} earlier edit(s) in this call were already committed")
                 } else {
                     String::new()
                 }
@@ -1229,20 +1374,20 @@ fn execute_replace_edit(
         );
         atomic_write(&path, &final_text)?;
         let (diff, added, removed) = inline_diff(&display_path, &normalized, &result.content)?;
+        let first_changed = changed_line_window(&normalized, &result.content).0;
         output.push(format!(
-            "Edit {}.{}: replaced {} occurrence(s) via {} [+{} -{} lines]\n{}",
+            "Edit({}).{}: updated\nfirstChangedLine: {}\nmatchStrategy: {}\nmatchCount: {}\nlinesAdded: {}\nlinesRemoved: {}\nDiff:\n{}",
             display_path,
             index + 1,
-            result.count,
+            first_changed,
             result.strategy,
+            result.count,
             added,
             removed,
             diff
         ));
-        applied += 1;
     }
-    let summary = format!("Replace Edit committed {applied} edit(s) in {display_path}");
-    Ok(tool_outcome(output.join("\n\n"), summary))
+    Ok(tool_outcome(output.join("\n\n"), String::new()))
 }
 
 fn resolve_replace_target(cwd: &Path, authored: &str) -> Result<PathBuf> {
@@ -1318,6 +1463,28 @@ mod tests {
             format_hashline_read("src/a.rs", "A1B2", 4, "a\nb"),
             "[src/a.rs#A1B2]\n4:a\n5:b"
         );
+    }
+
+    #[test]
+    fn mismatch_context_marks_anchors_separates_runs_and_truncates_utf8_safely() {
+        let mut lines = (1..=100)
+            .map(|line| format!("line-{line}"))
+            .collect::<Vec<_>>();
+        lines[49] = "界".repeat(300);
+        let content = lines.join("\n") + "\n";
+        let anchors = (10..=100).step_by(10).collect::<BTreeSet<_>>();
+        let rendered = format_mismatch_anchor_context(&content, &anchors);
+
+        assert!(rendered.contains("* 10:line-10"));
+        assert!(rendered.contains("\n  …\n"));
+        assert!(rendered.contains("[line truncated]"));
+        assert!(rendered.contains("Anchor context truncated to safety limits"));
+        assert!(std::str::from_utf8(rendered.as_bytes()).is_ok());
+        let displayed = rendered
+            .lines()
+            .filter(|line| line.starts_with("* ") || line.starts_with("  ") && line.contains(':'))
+            .count();
+        assert!(displayed <= MISMATCH_CONTEXT_MAX_LINES);
     }
 
     #[test]

@@ -36,6 +36,7 @@ pub struct FileSnapshotStore {
     sequence: u64,
     named_clipboard: BTreeMap<String, Vec<String>>,
     noop_by_path: HashMap<PathBuf, NoopState>,
+    edit_result_tags: HashMap<PathBuf, BTreeSet<String>>,
 }
 
 impl FileSnapshotStore {
@@ -82,6 +83,36 @@ impl FileSnapshotStore {
         self.touch_path(&path);
         self.evict();
         snapshot
+    }
+
+    /// Record content whose tag was returned by a successful Edit result.
+    ///
+    /// This provenance is deliberately narrower than ordinary snapshots from
+    /// Read/Grep/Write: stale recovery may recommend direct tag reuse only for
+    /// a header that the model actually received from an earlier Edit.
+    pub fn record_edit<I>(&mut self, path: &Path, content: &str, visible_lines: I) -> FileSnapshot
+    where
+        I: IntoIterator<Item = usize>,
+    {
+        let path = canonical_snapshot_path(path);
+        let snapshot = self.record(&path, content, visible_lines);
+        let retained = self
+            .by_path
+            .get(&path)
+            .into_iter()
+            .flatten()
+            .map(|version| version.tag.clone())
+            .collect::<BTreeSet<_>>();
+        let tags = self.edit_result_tags.entry(path).or_default();
+        tags.retain(|tag| retained.contains(tag));
+        tags.insert(snapshot.tag.clone());
+        snapshot
+    }
+
+    pub fn is_edit_result_tag(&self, path: &Path, tag: &str) -> bool {
+        self.edit_result_tags
+            .get(&canonical_snapshot_path(path))
+            .is_some_and(|tags| tags.iter().any(|item| item.eq_ignore_ascii_case(tag)))
     }
 
     pub fn versions(&self, path: &Path, tag: &str) -> Vec<FileSnapshot> {
@@ -195,8 +226,14 @@ impl FileSnapshotStore {
         }
         self.path_recency
             .retain(|path| path != &source && path != &destination);
-        self.path_recency.push_back(destination);
+        self.path_recency.push_back(destination.clone());
         self.noop_by_path.remove(&source);
+        if let Some(source_tags) = self.edit_result_tags.remove(&source) {
+            self.edit_result_tags
+                .entry(destination)
+                .or_default()
+                .extend(source_tags);
+        }
         self.total_bytes = self
             .by_path
             .values()
@@ -256,6 +293,7 @@ impl FileSnapshotStore {
                     .saturating_sub(versions.iter().map(|item| item.text.len()).sum());
             }
             self.noop_by_path.remove(&path);
+            self.edit_result_tags.remove(&path);
         }
 
         while self.total_bytes > MAX_SNAPSHOT_BYTES {
@@ -268,6 +306,7 @@ impl FileSnapshotStore {
                     .saturating_sub(versions.iter().map(|item| item.text.len()).sum());
             }
             self.noop_by_path.remove(&path);
+            self.edit_result_tags.remove(&path);
         }
     }
 }

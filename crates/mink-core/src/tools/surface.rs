@@ -279,7 +279,7 @@ fn edit_schema(config: &ToolConfig) -> serde_json::Value {
     match config.edit_mode {
         crate::config::EditMode::Hashline => serde_json::json!({
             "name": "Edit",
-            "description": format!("Apply one or more Hashline sections to existing local files. Input starts with [PATH#TAG] and supports PUT/CUT ranges, gap inserts and register pastes, REM, and edit-then-MV. Seen-line enforcement is {}. Syntactic-block locators and legacy path/patch inputs are not supported.", if config.edit_enforce_seen_lines { "enabled" } else { "disabled" }),
+            "description": format!("Apply Hashline sections to existing local files. Each section starts with [PATH#TAG], where TAG comes from a current-session Read/Grep/Write or successful Edit response. PUT N.=M replaces original snapshot lines, gap PUT inserts, CUT deletes/captures, bodyless @register PUT pastes, REM removes, and MV moves. Literal body lines start with + and are final file content. Every successful content change returns a new tag for the next Edit. Unknown or ambiguous stale tags require a fresh Read/Grep header. Seen-line enforcement is {}. Legacy path/patch inputs and syntactic-block locators are unsupported.", if config.edit_enforce_seen_lines { "enabled" } else { "disabled" }),
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -454,6 +454,17 @@ mod tests {
         let hashline = &first.get("Edit").unwrap().schema;
         assert!(hashline.pointer("/input_schema/properties/input").is_some());
         assert!(hashline.pointer("/input_schema/properties/path").is_none());
+        let edit_desc = hashline
+            .pointer("/description")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        assert!(
+            edit_desc.contains("[PATH#TAG]") && edit_desc.contains("N.=M"),
+            "Edit description must guide tag and range semantics: {edit_desc}"
+        );
+        assert!(edit_desc.contains("returns a new tag"));
+        assert!(edit_desc.contains("fresh Read/Grep header"));
+        assert!(!edit_desc.contains("retry with it directly"));
         assert!(
             first.get("Read").unwrap().schema["description"]
                 .as_str()
