@@ -97,8 +97,12 @@ jobs:
           prepare: |
             pkg install -y rust llvm node npm
           run: |
-            cd crates/mink-server/web && npm ci && cd ../..
-            cargo build --release -p mink-cli -p mink-server
+            set -e
+            cd crates/mink-server/web
+            npm ci
+            cd ../..
+            # --target-dir 显式锁定仓库根 ./target（FreeBSD VM 可能设置 CARGO_TARGET_DIR 重定向产物）
+            cargo build --release -p mink-cli -p mink-server --target-dir ./target
             ls -la target/release/ | grep mink || true
             mkdir -p dist
             cp target/release/mink dist/mink-freebsd-amd64
