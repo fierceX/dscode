@@ -42,6 +42,10 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
             print_usage();
             return Ok(CliExit { code: 0 });
         }
+        Err(e) if e.to_string() == "__VERSION__" => {
+            println!("{}", version_line());
+            return Ok(CliExit { code: 0 });
+        }
         Err(e) => return Err(e),
     };
 
@@ -701,8 +705,9 @@ fn print_usage() {
                 .map(|name| name.to_string_lossy().into_owned())
         })
         .unwrap_or_else(|| "mink".to_string());
-    println!("Usage: {program} [options] [prompt]");
+    println!("{}", version_line());
     println!();
+    println!("Usage: {program} [options] [prompt]");
     println!("Options:");
     println!("  -m, --model MODEL       Model name or alias: flash | pro | any backend model");
     println!("  --api-key KEY           API key (default from env)");
@@ -744,4 +749,12 @@ fn print_usage() {
     println!("  MINK_EDIT_FUZZY_MATCH   Replace fuzzy matching: true | false");
     println!("  MINK_EDIT_FUZZY_THRESHOLD Replace fuzzy threshold, 0.0..=1.0");
     println!("  MINK_EDIT_ENFORCE_SEEN_LINES Hashline seen-line guard: true | false");
+}
+fn version_line() -> String {
+    let git_hash = env!("MINK_GIT_HASH");
+    if git_hash.is_empty() {
+        format!("mink {}", env!("CARGO_PKG_VERSION"))
+    } else {
+        format!("mink {} ({git_hash})", env!("CARGO_PKG_VERSION"))
+    }
 }

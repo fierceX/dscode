@@ -27,3 +27,5 @@ experiments/
 cpython-wasi/
 .minkrc
 sandbox-poc/
+
+node_modules/

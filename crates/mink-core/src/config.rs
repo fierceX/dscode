@@ -563,6 +563,9 @@ pub fn parse_args(args: Vec<String>) -> Result<Config> {
             "-h" | "--help" => {
                 return Err(anyhow!("__HELP__"));
             }
+            "-V" | "--version" => {
+                return Err(anyhow!("__VERSION__"));
+            }
             "--agent-jsonl" => {
                 cfg.agent_jsonl = true;
                 cfg.output_format = OutputFormat::StreamJson;

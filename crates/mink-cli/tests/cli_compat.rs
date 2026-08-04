@@ -17,6 +17,38 @@ fn mink_help_uses_mink_binary_name() {
     assert!(stdout.contains("--tui"));
 }
 
+#[test]
+fn mink_version_reports_cargo_package_version() {
+    let output = Command::new(env!("CARGO_BIN_EXE_mink"))
+        .arg("--version")
+        .output()
+        .expect("run mink --version");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(env!("CARGO_PKG_VERSION")),
+        "mink --version must report the crate version, got: {stdout}"
+    );
+}
+
+#[test]
+fn mink_short_version_flag_matches_long_flag() {
+    let long = Command::new(env!("CARGO_BIN_EXE_mink"))
+        .arg("--version")
+        .output()
+        .expect("run mink --version");
+    let short = Command::new(env!("CARGO_BIN_EXE_mink"))
+        .arg("-V")
+        .output()
+        .expect("run mink -V");
+    assert!(short.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&long.stdout),
+        String::from_utf8_lossy(&short.stdout)
+    );
+}
+
 #[cfg(any(feature = "sdk-bin", feature = "sdk"))]
 #[test]
 fn mink_core_help_uses_mink_core_binary_name() {
