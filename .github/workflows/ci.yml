@@ -157,9 +157,12 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: mink-${{ matrix.suffix }}
-          path: |
-            dist/mink-${{ matrix.suffix }}
-            dist/mink-server-${{ matrix.suffix }}
+          path: dist/mink-${{ matrix.suffix }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mink-server-${{ matrix.suffix }}
+          path: dist/mink-server-${{ matrix.suffix }}
 
   # ── Build platform wheels ──────────────────────────────────────
   wheels:
