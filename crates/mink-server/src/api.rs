@@ -539,9 +539,16 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
-    /// 临时 home + 一个含 3 行 conversation 的会话 + 1 个 artifact
+    /// 临时 home + 一个含 3 行 conversation 的会话 + 1 个 artifact。
+    /// 每个调用使用唯一 home（进程内并行测试共享同一 pid 的固定目录会
+    /// 互相覆盖 artifact/会话文件，造成偶发竞态失败）。
     fn test_router() -> Router {
-        let home = std::env::temp_dir().join(format!("mink-server-itest-{}", std::process::id()));
+        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let home = std::env::temp_dir().join(format!(
+            "mink-server-itest-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        ));
         let sess = home
             .join(".mink")
             .join("projects")
