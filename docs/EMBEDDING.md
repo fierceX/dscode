@@ -21,7 +21,7 @@ Rust 发布包为 `mink-core`，库 crate 名为 `mink`。发布包只包含可�
 
 ```toml
 [dependencies]
-mink = { package = "mink-core", version = "0.3.1", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.3.2", default-features = false, features = ["runtime"] }
 ```
 
 稳定入口：`mink::prelude`、`mink::runtime`、`mink::config`、`mink::sandbox`、
