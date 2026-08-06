@@ -327,16 +327,19 @@ fn unquote_path(path: &str) -> String {
 }
 
 fn is_operation_line(line: &str) -> bool {
-    ["PUT", "CUT", "REM", "MV"]
+    ["PUT", "CUT"]
         .iter()
-        .any(|keyword| keyword_rest(line, keyword).is_some() || line.eq_ignore_ascii_case(keyword))
+        .any(|keyword| keyword_rest_loose(line, keyword).is_some())
+        || ["REM", "MV"].iter().any(|keyword| {
+            keyword_rest(line, keyword).is_some() || line.eq_ignore_ascii_case(keyword)
+        })
         || line.starts_with('[')
         || line.starts_with("@@")
         || line.starts_with("***")
         || line.starts_with("diff --git ")
 }
 
-fn keyword_rest<'a>(line: &'a str, keyword: &str) -> Option<&'a str> {
+fn keyword_rest<'a>(line: &'a str, keyword: &'a str) -> Option<&'a str> {
     let head = line.get(..keyword.len())?;
     (head.eq_ignore_ascii_case(keyword)
         && line
@@ -344,6 +347,22 @@ fn keyword_rest<'a>(line: &'a str, keyword: &str) -> Option<&'a str> {
             .get(keyword.len())
             .is_some_and(u8::is_ascii_whitespace))
     .then(|| line[keyword.len()..].trim_start())
+}
+
+/// Like `keyword_rest`, but also accepts the missing-space shape models
+/// habitually emit (`PUT18.=18:`, `PUT>40:`, `CUT5.=8`). Only locators that
+/// start with a digit or `<`/`>`/`:` are normalized, so ordinary words that
+/// merely begin with the keyword letters are never misread.
+fn keyword_rest_loose<'a>(line: &'a str, keyword: &'a str) -> Option<&'a str> {
+    if let Some(rest) = keyword_rest(line, keyword) {
+        return Some(rest);
+    }
+    let head = line.get(..keyword.len())?;
+    if !head.eq_ignore_ascii_case(keyword) {
+        return None;
+    }
+    let b = line.as_bytes().get(keyword.len()).copied()?;
+    (b.is_ascii_digit() || b == b'>' || b == b'<' || b == b':').then(|| &line[keyword.len()..])
 }
 
 fn parse_operation(
@@ -379,7 +398,12 @@ fn parse_operation(
         });
         return Ok(());
     }
-    if let Some(rest) = keyword_rest(line, "CUT") {
+    if let Some(rest) = keyword_rest_loose(line, "CUT") {
+        if keyword_rest(line, "CUT").is_none() {
+            section
+                .warnings
+                .push("Normalized missing space: `CUT5.` parsed as `CUT 5.`".to_string());
+        }
         let (rest, had_colon) = strip_optional_colon(rest);
         if had_colon {
             section
@@ -395,7 +419,12 @@ fn parse_operation(
         });
         return Ok(());
     }
-    if let Some(rest) = keyword_rest(line, "PUT") {
+    if let Some(rest) = keyword_rest_loose(line, "PUT") {
+        if keyword_rest(line, "PUT").is_none() {
+            section
+                .warnings
+                .push("Normalized missing space: `PUT2.` parsed as `PUT 2.`".to_string());
+        }
         let (rest, had_colon) = strip_optional_colon(rest);
         let (locator, register) = split_register(rest, line_num)?;
         if locator == ">$" {
@@ -1338,6 +1367,32 @@ fn cursor_boundary(cursor: &Cursor, line_count: usize, path: &str) -> Result<usi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalizes_missing_space_locators() {
+        // 模型常写 `PUT18.=18:`（缺空格）——按 `PUT 18.=18:` 归一化并给 warning。
+        let patch = parse("[a.rs#1A2B]\nPUT2.=2:\n+new").unwrap();
+        assert_eq!(patch.sections[0].operations.len(), 1);
+        assert_eq!(patch.sections[0].warnings.len(), 1);
+        assert!(
+            patch.sections[0].warnings[0].contains("Normalized missing space"),
+            "{}",
+            patch.sections[0].warnings[0]
+        );
+        let result = apply("a\nb\nc", &patch.sections[0], &mut Clipboard::default()).unwrap();
+        assert_eq!(result.text, "a\nnew\nc");
+
+        // gap 形态同样归一化：`PUT>40:` / `PUT<1:` / `CUT5.=8`。
+        let patch = parse("[a.rs#1A2B]\nPUT>40:\n+tail").unwrap();
+        assert_eq!(patch.sections[0].operations.len(), 1);
+        let patch = parse("[a.rs#1A2B]\nCUT5.=8").unwrap();
+        assert_eq!(patch.sections[0].operations.len(), 1);
+        assert!(patch.sections[0].warnings[0].contains("Normalized missing space"));
+
+        // 普通单词不会误归一化（PUT 后非定位符开头）。
+        let err = parse("[a.rs#1A2B]\nPUTme 5.=5:\n+x").unwrap_err();
+        assert!(err.to_string().contains("unknown hashline operation"));
+    }
 
     #[test]
     fn parses_current_put_protocol() {

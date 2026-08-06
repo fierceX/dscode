@@ -323,12 +323,27 @@ impl TodoStore {
             );
         }
 
-        validate_transitions(
-            &guard,
-            &transitions.complete,
-            TodoStatus::InProgress,
-            "complete",
-        )?;
+        // P0-3 容错：模型常直接 complete 一个 pending 条目。pending 条目
+        // 自动先激活再完成（不报错），in_progress 正常完成，已完成的
+        // 重复 complete 仍拒绝。
+        let mut complete_ids = Vec::new();
+        let mut auto_activated = Vec::new();
+        for id in &transitions.complete {
+            let status = guard
+                .items
+                .iter()
+                .find(|item| item.id == *id)
+                .map(|item| item.status);
+            match status {
+                Some(TodoStatus::InProgress) => complete_ids.push(id.clone()),
+                Some(TodoStatus::Pending) => auto_activated.push(id.clone()),
+                Some(TodoStatus::Completed) => {
+                    bail!("todo item '{id}' is already completed")
+                }
+                None => unreachable!("unknown todo item already checked above"),
+            }
+        }
+        validate_transitions(&guard, &complete_ids, TodoStatus::InProgress, "complete")?;
         validate_transitions(
             &guard,
             &transitions.activate,
@@ -350,10 +365,12 @@ impl TodoStore {
         validate_snapshot(&next)?;
         persist_snapshot(&self.path, &next)?;
         *guard = next.clone();
+        let mut activated = transitions.activate.clone();
+        activated.extend(auto_activated);
         Ok(TodoTransitionResult {
             snapshot: next,
             completed: transitions.complete,
-            activated: transitions.activate,
+            activated,
             paused: transitions.pause,
             reopened: transitions.reopen,
         })
@@ -581,6 +598,75 @@ mod tests {
         TodoAdd {
             content: content.into(),
         }
+    }
+
+    #[test]
+    fn complete_pending_item_auto_activates() {
+        // P0-3 容错：直接 complete 一个 pending 条目时自动先激活再完成。
+        let (root, store) = store("autoactivate");
+        let result = store
+            .apply_structure(
+                0,
+                TodoChanges {
+                    add: vec![add("first"), add("second")],
+                    ..TodoChanges::default()
+                },
+            )
+            .unwrap();
+        // first 仍 pending；second 先激活再 complete。
+        let transition = store
+            .advance(
+                result.snapshot.revision,
+                TodoTransitions {
+                    complete: vec!["T0001".to_string()],
+                    ..TodoTransitions::default()
+                },
+            )
+            .unwrap();
+        assert!(transition.activated.contains(&"T0001".to_string()));
+        assert!(transition.completed.contains(&"T0001".to_string()));
+        let item = transition
+            .snapshot
+            .items
+            .iter()
+            .find(|item| item.id == "T0001")
+            .unwrap();
+        assert_eq!(item.status, TodoStatus::Completed);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn complete_already_completed_item_still_rejected() {
+        let (root, store) = store("doublecomplete");
+        let result = store
+            .apply_structure(
+                0,
+                TodoChanges {
+                    add: vec![add("first")],
+                    ..TodoChanges::default()
+                },
+            )
+            .unwrap();
+        let r1 = store
+            .advance(
+                result.snapshot.revision,
+                TodoTransitions {
+                    complete: vec!["T0001".to_string()],
+                    ..TodoTransitions::default()
+                },
+            )
+            .unwrap();
+        let err = store
+            .advance(
+                r1.snapshot.revision,
+                TodoTransitions {
+                    complete: vec!["T0001".to_string()],
+                    ..TodoTransitions::default()
+                },
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("already completed"), "{err}");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -844,7 +930,10 @@ mod tests {
             )
             .unwrap_err()
             .to_string();
-        assert!(error.contains("cannot complete"), "{error}");
+        assert!(
+            error.contains("already completed"),
+            "repeated complete must fail closed: {error}"
+        );
         assert_eq!(store.snapshot(), before);
         let _ = std::fs::remove_dir_all(root);
     }

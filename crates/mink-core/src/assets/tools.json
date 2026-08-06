@@ -1,7 +1,7 @@
 [
   {
     "name": "Read",
-    "description": "Read one local or configured virtual-filesystem path or registered lightweight resource. Use multiple calls for multiple targets. Local output is mode-aware: Hashline mode adds a [PATH#TAG] header to non-raw editable files and records the actual raw/non-raw range as seen; Replace mode uses ordinary numbered output. Virtual-filesystem and registered-resource reads are always read-only and never create an editable snapshot. Path selectors select line ranges.\n\nSupported targets include local paths, artifact://<id>, skill:// resources, rule:// resources, and session://current resources. A full result may be truncated; request a narrower selector when exact lines are known. Full reads above the configured limit are answered with a preview; large files require a line-range selector.",
+    "description": "Read one local or configured virtual-filesystem path or registered lightweight resource. Use multiple calls for multiple targets. Local output is mode-aware: Hashline mode adds a [PATH#TAG] header to non-raw editable files and records the actual raw/non-raw range as seen; Replace mode uses ordinary numbered output. Virtual-filesystem and registered-resource reads are always read-only and never create an editable snapshot. Path selectors select line ranges.\n\nSupported targets include local paths, artifact://<id>, skill:// resources, rule:// resources, and session://current resources. A full result may be truncated; request a narrower selector when exact lines are known. Full reads above the configured limit are answered with a preview; large files require a line-range selector.\n\nRead accepts exactly one parameter: `path`. Line ranges go inside the path selector (`path:1-200`, `path:10+5`, `path:raw`); do not invent other parameter names (e.g. `selector`, `path_sel`, `offset`, `limit`).",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -90,7 +90,7 @@
   },
   {
     "name": "Edit",
-    "description": "Apply a hashline edit. The runtime-selected Edit mode replaces this catalog template before exposing it to the model.",
+    "description": "Apply a hashline edit. The runtime-selected Edit mode replaces this catalog template before exposing it to the model.\n\nCommon mistakes: `PUT18.=18:` is parsed as `PUT 18.=18:` (missing space is accepted), but ranges must be start<=end and stay inside the file; unified-diff or apply_patch syntax is never valid.",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -184,7 +184,9 @@
                 "description": "A short, concrete, actionable task description."
               }
             },
-            "required": ["content"],
+            "required": [
+              "content"
+            ],
             "additionalProperties": false
           }
         },
@@ -203,7 +205,10 @@
                 "description": "Replacement task description."
               }
             },
-            "required": ["id", "content"],
+            "required": [
+              "id",
+              "content"
+            ],
             "additionalProperties": false
           }
         },
@@ -215,7 +220,9 @@
           }
         }
       },
-      "required": ["base_revision"],
+      "required": [
+        "base_revision"
+      ],
       "additionalProperties": false
     }
   },
@@ -233,25 +240,35 @@
         "complete": {
           "type": "array",
           "description": "In-progress item IDs whose outcomes have been verified.",
-          "items": {"type": "string"}
+          "items": {
+            "type": "string"
+          }
         },
         "activate": {
           "type": "array",
           "description": "Pending item IDs to make part of the active batch.",
-          "items": {"type": "string"}
+          "items": {
+            "type": "string"
+          }
         },
         "pause": {
           "type": "array",
           "description": "In-progress item IDs to return to pending.",
-          "items": {"type": "string"}
+          "items": {
+            "type": "string"
+          }
         },
         "reopen": {
           "type": "array",
           "description": "Completed item IDs to return to pending.",
-          "items": {"type": "string"}
+          "items": {
+            "type": "string"
+          }
         }
       },
-      "required": ["base_revision"],
+      "required": [
+        "base_revision"
+      ],
       "additionalProperties": false
     }
   },
@@ -274,7 +291,7 @@
   },
   {
     "name": "PlanConfirm",
-    "description": "Confirm and lock in the current plan draft. Call this ONLY when the user explicitly confirms the plan. Do NOT call this during drafting or when the user requests changes \u2014 only on explicit confirmation.",
+    "description": "Confirm and lock in the current plan draft. Call this ONLY when the user explicitly confirms the plan. Do NOT call this during drafting or when the user requests changes — only on explicit confirmation.",
     "input_schema": {
       "type": "object",
       "properties": {},
@@ -309,7 +326,9 @@
           "description": "Set to true to inherit parent session context (conversation history, plan, skills). Default is false for a fresh independent session."
         }
       },
-      "required": ["prompt"],
+      "required": [
+        "prompt"
+      ],
       "additionalProperties": false
     }
   },
