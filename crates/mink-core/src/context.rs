@@ -20,8 +20,8 @@ use crate::ui::{Display, SubAgentStreamSink};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -106,6 +106,9 @@ pub struct ToolContext {
     pub home: PathBuf,
     pub store: Arc<ConversationStore>,
     pub artifacts: Arc<ArtifactManager>,
+    pub read_memo: Arc<Mutex<crate::tools::read_memo::ReadMemo>>,
+    pub memo_epoch: Arc<AtomicU64>,
+    pub memo_mutation: Arc<AtomicU64>,
     pub snapshots: Arc<Mutex<FileSnapshotStore>>,
     pub plan_store: Arc<PlanStore>,
     pub todo_store: Arc<TodoStore>,
@@ -127,6 +130,9 @@ impl From<&AgentSharedContext> for ToolContext {
             home: ctx.home.clone(),
             store: ctx.store.clone(),
             artifacts: ctx.artifacts.clone(),
+            read_memo: ctx.read_memo.clone(),
+            memo_epoch: ctx.memo_epoch.clone(),
+            memo_mutation: ctx.memo_mutation.clone(),
             snapshots: ctx.snapshots.clone(),
             plan_store: Arc::new(PlanStore::new(
                 ctx.plan_path.clone(),
@@ -146,6 +152,99 @@ impl From<&AgentSharedContext> for ToolContext {
     }
 }
 
+impl ToolContext {
+    /// When the file is byte-identical and an earlier read covers the requested
+    /// range, return a short behavioral "reuse that content" response. This is
+    /// engine-internal: it never references token budgets or memo mechanics.
+    pub fn memo_hit(
+        &self,
+        path: &Path,
+        raw: bool,
+        start_line: Option<usize>,
+        end_line: Option<usize>,
+    ) -> Option<String> {
+        let meta = std::fs::metadata(path).ok()?;
+        let mtime = meta.modified().ok()?;
+        let epoch = self.memo_epoch.load(Ordering::SeqCst);
+        let mutation = self.memo_mutation.load(Ordering::SeqCst);
+        let hit = self
+            .read_memo
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .hit(
+                path,
+                meta.len(),
+                mtime,
+                raw,
+                epoch,
+                mutation,
+                start_line,
+                end_line,
+            );
+        if !hit {
+            return None;
+        }
+        let display = display_tool_path(&self.cwd, path);
+        let tag = self
+            .snapshots
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .latest_tag(path);
+        let mut out = format!(
+            "Read({display}): unchanged, no edits since. Reuse that content. If the file changed or you need a different range, read again with a selector."
+        );
+        if let Some(tag) = tag {
+            out.push_str(&format!(
+                " Current snapshot: [{display}#{tag}]. Use that header for edits."
+            ));
+        }
+        Some(out)
+    }
+
+    /// Record a local read so a later identical request can be short-circuited.
+    pub fn memo_record(
+        &self,
+        path: &Path,
+        raw: bool,
+        start_line: Option<usize>,
+        end_line: Option<usize>,
+    ) {
+        let Ok(meta) = std::fs::metadata(path) else {
+            return;
+        };
+        let Ok(mtime) = meta.modified() else {
+            return;
+        };
+        let epoch = self.memo_epoch.load(Ordering::SeqCst);
+        let mutation = self.memo_mutation.load(Ordering::SeqCst);
+        self.read_memo
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .record(
+                path,
+                meta.len(),
+                mtime,
+                raw,
+                start_line,
+                end_line,
+                epoch,
+                mutation,
+            );
+    }
+
+    /// Invalidate every memo of this agent after a successful Write/Edit.
+    pub fn bump_mutation(&self) {
+        self.memo_mutation.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+fn display_tool_path(cwd: &Path, path: &Path) -> String {
+    let relative = path.strip_prefix(cwd).unwrap_or(path);
+    relative
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/")
+}
+
 /// AgentSharedContext holds all shared resources accessible by every component.
 pub struct AgentSharedContext {
     pub config: Config,
@@ -157,6 +256,9 @@ pub struct AgentSharedContext {
     pub store: Arc<ConversationStore>,
     pub artifacts: Arc<ArtifactManager>,
     pub todo_store: Arc<TodoStore>,
+    pub read_memo: Arc<Mutex<crate::tools::read_memo::ReadMemo>>,
+    pub memo_epoch: Arc<AtomicU64>,
+    pub memo_mutation: Arc<AtomicU64>,
     pub snapshots: Arc<Mutex<FileSnapshotStore>>,
     pub stats: Arc<StatsTracker>,
     pub usage: Arc<UsageJournal>,

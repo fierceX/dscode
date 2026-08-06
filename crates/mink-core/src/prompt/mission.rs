@@ -3,6 +3,7 @@ use anyhow::{Result, bail};
 use std::collections::BTreeSet;
 
 const CORE_OVERRIDE_ALLOWLIST: &[&str] = &[
+    "system-conventions",
     "agent-identity",
     "environment",
     "execution-codes",

@@ -1,0 +1,48 @@
+{
+  "name": "big-file",
+  "source": "生产轨迹分析：2094 行 / 154707 字节的方案文件整读报 'file too large'，全库 89 次，且同 session 后续仍重复尝试",
+  "setup": {
+    "files": {
+      "方案.md": "{{BIG_FILE}}"
+    },
+    "config": {
+      "tool_result_max_bytes": 100000
+    }
+  },
+  "steps": [
+    {
+      "tool": "Read",
+      "input": {
+        "path": "方案.md"
+      }
+    },
+    {
+      "tool": "Read",
+      "input": {
+        "path": "方案.md:1-10"
+      }
+    }
+  ],
+  "asserts": [
+    {
+      "after_step": 0,
+      "success": true,
+      "contains": "file too large"
+    },
+    {
+      "after_step": 0,
+      "success": true,
+      "contains": "154707"
+    },
+    {
+      "after_step": 0,
+      "success": true,
+      "contains": "start-end"
+    },
+    {
+      "after_step": 1,
+      "success": true,
+      "contains": "1:"
+    }
+  ]
+}

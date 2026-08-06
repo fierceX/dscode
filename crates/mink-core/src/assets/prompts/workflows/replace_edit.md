@@ -16,3 +16,11 @@ old-to-actual indentation delta is uniform; explicit indentation-only rewrites a
 Failures report occurrence previews or the closest similarity and first differing line. This mode does
 not use snapshot tags or Hashline syntax. Legacy `patch`, `old_string/new_string`, and Hashline `input`
 parameters are unsupported.
+
+<critical>
+- Read the exact target range before editing.
+- Build old_text from current content.
+- Add context until repeated text becomes unique.
+- Batch independent edits into one edits array.
+- Later failures preserve earlier committed edits.
+</critical>

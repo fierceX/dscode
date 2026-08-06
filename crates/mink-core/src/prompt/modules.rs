@@ -47,6 +47,8 @@ pub(super) fn reserved_section_ids() -> BTreeSet<&'static str> {
         .chain(super::workflows::workflow_section_ids())
         .chain([
             "runtime-capabilities",
+            "tool-inventory",
+            "system-conventions",
             "rules",
             "instruction-files",
             "rule-index",

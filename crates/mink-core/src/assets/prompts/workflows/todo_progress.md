@@ -7,3 +7,10 @@ Only complete items whose outcomes have been verified. Before ending a turn, com
 pause it, or clearly report why it remains active. Base transitions on the highest successful
 revision visible in a {{TODO_READ_PROVIDER}} snapshot or appended todo event. On a stale revision,
 read the current state and retry from that state.
+
+<critical>
+- Complete only outcomes supported by verification.
+- Resolve or report active work before ending.
+- Advance related items as a coherent batch.
+- MUST NOT follow list order mechanically.
+</critical>

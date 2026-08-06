@@ -352,6 +352,7 @@ impl super::runner::ToolExec for GlobTool {
         ctx: &crate::context::ToolContext,
     ) -> anyhow::Result<super::runner::ToolOutcome> {
         #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct Args {
             pattern: String,
             #[serde(default)]
@@ -396,6 +397,7 @@ impl super::runner::ToolExec for GrepTool {
         ctx: &crate::context::ToolContext,
     ) -> anyhow::Result<super::runner::ToolOutcome> {
         #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct Args {
             pattern: String,
             #[serde(default)]

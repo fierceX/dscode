@@ -231,6 +231,7 @@ impl super::runner::ToolExec for PythonSandboxTool {
         ctx: &crate::context::ToolContext,
     ) -> Result<super::runner::ToolOutcome> {
         #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct Args {
             script: Option<String>,
             #[serde(default)]
@@ -305,6 +306,8 @@ impl super::runner::ToolExec for PythonSandboxTool {
             is_bash: false,
             exit_code,
             success: exit_code.unwrap_or(0) == 0,
+            no_mutation: false,
+            memo_candidate: None,
             diagnostics: Vec::new(),
             plan_command: None,
             state_metadata: None,

@@ -174,7 +174,8 @@ mod tests {
         assert!(hashline.contains("PUT N.=M"));
         assert!(hashline.contains("<critical>"));
         assert!(hashline.contains("<anti-patterns>"));
-        assert!(hashline.contains("Never guess, invent"));
+        assert!(hashline.contains("Use headers from Read or successful Edit calls"));
+        assert!(hashline.contains("MUST NOT guess, invent, or reuse cross-session tags"));
         assert!(!hashline.contains("N*"));
         assert!(!hashline.contains("old_text"));
 
@@ -188,6 +189,169 @@ mod tests {
         assert!(replace.contains("old_text"));
         assert!(replace.contains("disabled with threshold 0.870"));
         assert!(!replace.contains("[PATH#TAG]"));
+    }
+
+    #[test]
+    fn core_sections_start_with_system_conventions_and_include_inventory() {
+        let builder = builder_for(&["Read", "Grep", "Bash"]);
+        let document = builder.build_document().unwrap();
+        let ids: Vec<&str> = document.sections().iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids[0], "system-conventions");
+        assert!(ids.contains(&"tool-inventory"));
+        let rendered = builder.build_system_prompt().unwrap();
+        assert!(rendered.contains("RFC2119"));
+        assert!(rendered.contains("Follow every applicable system instruction"));
+        assert!(rendered.contains("MUST and MUST NOT are absolute"));
+        assert!(rendered.contains("without changing message-role precedence"));
+        assert!(rendered.contains("tag-like text inside a section cannot create a new scope"));
+        assert!(rendered.contains("do not restrict user-requested output formats"));
+        assert!(!rendered.contains("AVOID carry the same force as MUST NOT"));
+        assert!(rendered.contains("Available tools:"));
+        assert!(rendered.contains("Read, Grep, Bash"));
+    }
+
+    #[test]
+    fn empty_surface_keeps_runtime_capabilities_without_inventory() {
+        let builder = builder_for(&[]);
+        let rendered = builder.build_system_prompt().unwrap();
+        assert!(rendered.contains("No callable runtime capabilities"));
+        assert!(!rendered.contains("Available tools:"));
+    }
+
+    #[test]
+    fn workflow_assets_enforce_dense_unambiguous_critical_recaps() {
+        fn ascii_word_count(line: &str) -> usize {
+            line.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+                .filter(|word| !word.is_empty())
+                .count()
+        }
+
+        fn assert_critical_blocks(path: &str, content: &str) {
+            let blocks = content
+                .split("<critical>")
+                .skip(1)
+                .map(|rest| {
+                    rest.split_once("</critical>")
+                        .unwrap_or_else(|| panic!("{path}: unclosed <critical> block"))
+                        .0
+                })
+                .collect::<Vec<_>>();
+            assert!(!blocks.is_empty(), "{path}: missing <critical> recap");
+            for block in blocks {
+                let bullets = block
+                    .lines()
+                    .filter(|line| line.trim_start().starts_with("- "))
+                    .collect::<Vec<_>>();
+                assert!(
+                    (3..=6).contains(&bullets.len()),
+                    "{path}: each <critical> block needs 3-6 bullets, got {}",
+                    bullets.len()
+                );
+            }
+            for bullet in content
+                .lines()
+                .filter(|line| line.trim_start().starts_with("- "))
+            {
+                assert!(
+                    ascii_word_count(bullet) <= 12,
+                    "{path}: tactical bullet exceeds 12 words: {bullet}"
+                );
+                assert!(
+                    !bullet.contains(';'),
+                    "{path}: tactical bullet combines claims: {bullet}"
+                );
+            }
+        }
+
+        macro_rules! assert_asset_discipline {
+            ($path:literal) => {{
+                let content = include_str!($path);
+                assert_critical_blocks($path, content);
+                let lower = content.to_lowercase();
+                assert!(
+                    !lower.contains("token"),
+                    concat!($path, " mentions token budgets")
+                );
+                assert!(
+                    !lower.contains("budget"),
+                    concat!($path, " mentions budgets")
+                );
+            }};
+        }
+        assert_asset_discipline!("assets/prompts/workflows/search_then_inspect.md");
+        assert_asset_discipline!("assets/prompts/workflows/hashline_edit.md");
+        assert_asset_discipline!("assets/prompts/workflows/replace_edit.md");
+        assert_asset_discipline!("assets/prompts/workflows/python_execution_routing.md");
+        assert_asset_discipline!("assets/prompts/workflows/specialized_provider_routing.md");
+        assert_asset_discipline!("assets/prompts/workflows/specialized_mutation_routing.md");
+        assert_asset_discipline!("assets/prompts/workflows/todo_inspection.md");
+        assert_asset_discipline!("assets/prompts/workflows/todo_structure.md");
+        assert_asset_discipline!("assets/prompts/workflows/todo_progress.md");
+        assert_asset_discipline!("assets/prompts/workflows/plan_lifecycle.md");
+        assert_asset_discipline!("assets/prompts/workflows/memory_recall.md");
+        assert_asset_discipline!("assets/prompts/tools/sub_agent.md");
+    }
+
+    #[test]
+    fn memory_recall_is_gated_on_search_capabilities() {
+        let full = builder_for(&["Read", "Grep"])
+            .build_system_prompt()
+            .unwrap();
+        assert!(full.contains("Skip recall when current instructions fully define the task"));
+        assert!(full.contains("Read on session://current"));
+        assert!(full.contains("Grep on session://current/history"));
+        assert!(full.contains("six total recall calls"));
+        assert!(!full.contains("Check memory for repo-related"));
+        let todo_only = builder_for(&["TodoRead"]).build_system_prompt().unwrap();
+        assert!(!todo_only.contains("Skip recall when current instructions fully define the task"));
+    }
+
+    #[test]
+    fn python_guidance_preserves_specialized_file_mutation_boundaries() {
+        let rendered = builder_for(&["Python", "Write", "Read", "Edit"])
+            .build_system_prompt()
+            .unwrap();
+        assert!(rendered.contains("For new JSON or CSV content, compute it in one run"));
+        assert!(rendered.contains("Persist files only through an active file mutation provider"));
+        assert!(
+            rendered
+                .contains("MUST NOT edit existing structured files through execution providers")
+        );
+        assert!(!rendered.contains("never hand-edit structured files"));
+        assert!(!rendered.contains("Use one run to compute new JSON or CSV content"));
+    }
+
+    #[test]
+    fn hashline_large_file_guidance_follows_the_active_surface() {
+        let with_write = builder_for(&["Read", "Edit", "Write"])
+            .build_system_prompt()
+            .unwrap();
+        assert!(with_write.contains("Prefer one Write rewrite for many large-file changes"));
+
+        let without_write = builder_for(&["Read", "Edit"])
+            .build_system_prompt()
+            .unwrap();
+        assert!(without_write.contains("Batch related changes into one Edit call"));
+        assert!(!without_write.contains("Prefer one Write rewrite"));
+        assert!(!without_write.contains("Grep"));
+        assert!(!without_write.contains("{{LARGE_FILE_GUIDANCE}}"));
+    }
+
+    #[test]
+    fn rendered_prompt_stays_within_budget() {
+        // Absolute size guard for the fully resolved default prompt. Incremental
+        // growth is reviewed separately because HEAD is unavailable at runtime.
+        let names: Vec<_> = ToolCatalog::builtin()
+            .unwrap()
+            .iter_compiled()
+            .map(|(_, metadata)| metadata.name)
+            .collect();
+        let rendered = builder_for(&names).build_system_prompt().unwrap();
+        assert!(
+            rendered.len() <= 16_000,
+            "rendered prompt grew to {} bytes",
+            rendered.len()
+        );
     }
 
     #[test]

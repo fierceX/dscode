@@ -6,3 +6,9 @@ does not change task status.
 Pass that revision as `base_revision`. Do not guess IDs or revisions. If a write reports a stale revision, call {{TODO_READ_PROVIDER}} and
 recompute the intended update. Keep task descriptions concise, concrete, and independently
 verifiable.
+
+<critical>
+- Base updates on the highest successful revision.
+- Re-read and recompute after stale revision errors.
+- MUST NOT guess stable IDs or revisions.
+</critical>

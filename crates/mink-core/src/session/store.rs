@@ -58,6 +58,14 @@ impl ConversationStore {
             .await
     }
 
+    /// Append an engine-injected user-role message (todo reminders, signal
+    /// recovery guidance, ...). The `internal` flag lets compaction and other
+    /// consumers distinguish runtime injections from real user constraints
+    /// without maintaining a string-prefix denylist.
+    pub async fn add_runtime_user(&self, content: &str) -> Result<()> {
+        self.append_line(&json!({"role":"user","content":content,"internal":true}))
+            .await
+    }
     pub async fn add_assistant(
         &self,
         text: &str,

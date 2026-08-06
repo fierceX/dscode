@@ -1,6 +1,6 @@
 # 使用手册
 
-> 更新日期：2026-08-03
+> 更新日期：2026-08-06
 
 本文面向终端用户，覆盖 CLI 交互模式、配置参数、沙箱、session、计划、压缩、工具、技能和
 常见工作流。Rust 库 / Python SDK 嵌入见 [嵌入与 SDK 使用](EMBEDDING.md)；机器协议
@@ -631,8 +631,8 @@ MISSION.md 使用行首一级标题（`# section-id`）分段。section 分三�
 
 | 类型 | section ID | 行为 |
 |------|------------|------|
-| 可覆盖 core | `agent-identity`、`environment`、`execution-codes`、`belief-awareness`、`output-language` | 替换同名 core |
-| runtime-reserved | 工具 prompt、workflow、`runtime-capabilities`、`rules`、`instruction-files`、`rule-index`、`skill-index`、`selected-skills`、`current-plan` 等 | 启动时 fail fast |
+| 可覆盖 core | `system-conventions`、`agent-identity`、`environment`、`execution-codes`、`belief-awareness`、`output-language` | 替换同名 core |
+| runtime-reserved | 工具 prompt、workflow、`runtime-capabilities`、`tool-inventory`、`rules`、`instruction-files`、`rule-index`、`skill-index`、`selected-skills`、`current-plan` 等 | 启动时 fail fast |
 | 普通自定义 | 不属于以上两类的唯一 ID | 作为 `mission:<section-id>` 原样追加 |
 
 ```markdown

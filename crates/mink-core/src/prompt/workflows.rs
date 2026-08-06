@@ -202,6 +202,14 @@ static WORKFLOWS: &[PromptWorkflowSpec] = &[
         priority: 100,
         render: render_plan_lifecycle,
     },
+    PromptWorkflowSpec {
+        id: "memory-recall",
+        tag: "memory-recall",
+        requires: WorkflowRequirement::All(SEARCH_FACTS),
+        exclusive_group: None,
+        priority: 90,
+        render: render_memory_recall,
+    },
 ];
 
 static BUILTIN: LazyLock<PromptWorkflowResolver> =
@@ -403,6 +411,23 @@ fn render_search_then_inspect(
     })
 }
 
+fn render_memory_recall(
+    _: &PromptBuildContext,
+    tools: &ResolvedToolCapabilities,
+) -> Result<RenderedPromptPack> {
+    let search = tools.primary_provider(ContentSearch).unwrap();
+    let read = tools.primary_provider(PathRead).unwrap();
+    Ok(RenderedPromptPack {
+        content: include_str!("../assets/prompts/workflows/memory_recall.md")
+            .replace("{{SEARCH_PROVIDER}}", search.tool)
+            .replace("{{READ_PROVIDER}}", read.tool)
+            .trim()
+            .into(),
+        referenced_tools: [search.tool, read.tool].into_iter().collect(),
+        consumed_facts: SEARCH_FACTS.iter().copied().collect(),
+    })
+}
+
 fn render_hashline_edit(
     context: &PromptBuildContext,
     tools: &ResolvedToolCapabilities,
@@ -432,9 +457,20 @@ fn render_hashline_edit(
         consumed_facts.insert(ToolCapability(ContentSearch));
     }
     if let Some(write) = tools.primary_provider(FileOverwrite) {
-        content.push_str(&format!("\nA successful {} returns a new hashline header while older versions remain available for safe stale recovery.", write.tool));
+        content = content.replace(
+            "{{LARGE_FILE_GUIDANCE}}",
+            &format!(
+                "- Prefer one {} rewrite for many large-file changes.",
+                write.tool
+            ),
+        );
         referenced_tools.insert(write.tool);
         consumed_facts.insert(ToolCapability(FileOverwrite));
+    } else {
+        content = content.replace(
+            "{{LARGE_FILE_GUIDANCE}}",
+            &format!("- Batch related changes into one {} call.", edit.tool),
+        );
     }
     Ok(RenderedPromptPack {
         content: content.trim().into(),

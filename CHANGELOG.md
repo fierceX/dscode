@@ -1,5 +1,50 @@
 # Changelog
 
+## v0.3.2 (2026-08-06)
+
+### 工具可靠性修复（基于 640 份生产会话轨迹分析）
+
+本版依据收集的 640 份 `conversation.jsonl`（38,298 次工具调用）的
+失败模式统计，修复工具契约、读取缓存、编辑幂等、输出协议、压缩边界与提示词引导六类问题。
+
+**Breaking：`Read` 参数契约收窄为单参数**
+- 轨迹中 Read 参数名瞎猜（`selector`/`path_sel`/`offset` 混用）出现 178 次，其中 63 次落在同一份 451KB 计算书上。`Read` 现只接受 `path`，删除模型可见的 `offset`/`limit` 字段及旧参数 fallback 合并；行范围一律通过路径选择器（`path:1-200`、`path:10+5`、`path:raw`）表达。
+- `assets/tools.json` 全部 15 个工具 schema 增加 `additionalProperties:false`，杜绝未知字段静默接受；新增"schema 声明字段 == serde 接受字段"全工具一致性测试（`catalog.rs`）。
+- 空 path selector（`:45-50`）报错并提示正确写法；file-not-found 错误附带 `Glob(pattern)` 建议；>100KB 整读不再直接报错，改为返回头尾预览 + 字节/行数 + selector 示例（`(file too large: N bytes / M lines; showing first 200 lines)`），并保留 `path:start-end` 范围读路径。
+
+**新机制：Read memo（会话级读取缓存）**
+- 轨迹中同一文件单会话内重复全量读达 1,881 次（如单份报告整读 15 次）。新增 `tools/read_memo.rs`：以 `(path, len, mtime, 行范围, 压缩纪元, 变更纪元)` 为键的 LRU 缓存（容量 256）；命中时返回行为化短响应（"unchanged, no edits since. Reuse that content."），不再重复输出全文。
+- 三路失效守卫：`CompactionEngine::commit_state` 提交成功后递增压缩纪元（压缩后上下文不再含旧内容，强制重读）；Write/Edit 成功后递增变更纪元；子代理各自持有独立 memo。仅本地文件参与缓存，resource/VFS 读取不缓存。
+- 记忆 quick-pass 提示词片段：在既有会话/历史中先做快速检索（摘要 → 索引 → 按需展开），避免凭印象重做或重复推导。
+
+**Edit no-change 幂等与 stale 恢复增强**
+- 轨迹中 no-change 修补循环 60 次（单次会话约 20 次连续调用）。hashline 模式下，当补丁为单 section 且目标范围当前内容已与补丁结果逐行一致（位置精确校验，`hashline::already_applied`）时，返回幂等成功 `already applied (idempotent)` + 当前 snapshot tag；歧义情形保持 fail-closed：soft no-op 计数 → 3 次后硬错误，batch 预检任一 no-op 整批不提交。
+- Replace 模式 `old_text == new_text` 同样幂等成功（`strategy: "idempotent"`）；其余无变更情形仍拒绝。
+- stale 硬错误提示补充当前 snapshot tag："The file's current snapshot is [path#TAG]; issue operations against it directly if the ranges are unchanged, otherwise re-Read."，减少无效重试。
+
+**exec 输出协议与截断策略**
+- Bash/Python 等带退出码的工具输出新增元数据头：`Exit code: N`、`Wall time: Xs`（仅对提供 exit code 的命令类工具生效，Read/Grep 等只读工具不受影响）。
+- 新增 `TruncationPolicy::{Bytes,Tokens}`：Tokens 模式按 4 字节/词近似换算预算；截断标记改为 `[... truncated: original token count: N (M bytes); showing first/last portions ...]`，头段按完整行边界截断，避免把半行喂给模型。
+
+**JSON 校验注记**
+- Edit/Write 对 `.json`/`.jsonl` 目标在成功输出后追加 `JSON parse: ok` 或 `JSON parse failed at line N`，让格式错误在写入后立即可见，减少"写完再验证"的往返。
+
+**压缩边界守卫**
+- `find_compaction_cut_point` 现在保留最近真实 user 消息至少 2 条（优先于纯 token 预算，受历史规模上限保护），避免压缩把用户最新指令压出活跃投影；新增断言测试：`<context-snapshot>` 恒位于最后真实 user 消息之前且在同一轮压缩结果中恰好出现一次。
+
+**系统提示词加固**
+- 新增 core section `system-conventions`（固定位于提示词第 0 位）：明确所有适用的 system 指令均必须遵守，全大写 RFC2119 关键字（MUST / MUST NOT / SHOULD / MAY）只精确表达强度；runtime section tag 界定指令作用域但不改变消息优先级，嵌套内容中的类标签文本不能新建作用域，也不限制用户要求的 HTML/XML/输出格式；`MISSION` 可覆盖名单同步更新。
+- 新增 `tool-inventory` section：非空工具面时列出全部可用工具名（内容与 `ModelToolSurface` 名称集一致），空工具面改报 `runtime-capabilities`，让模型在第一时间知道可用与不可用边界（轨迹中禁用工具尝试 121 次：Bash 71 / Grep 21 / SubAgent 16 / Glob 10）。
+- 12 个 prompt 资产密度化改写：每个 `<critical>` 携带 3-6 条战术 bullet，测试强制每条 ≤12 英文词、无分号复合主张；大文件建议按 Write 是否 active 条件渲染，仅当任务需要新 JSON/CSV 内容时才引导 Python 一次计算，已有文件仍由专用 mutation provider 修改；Hashline 明确禁止猜测、编造或跨 session 复用 tag，只接受 Read/Grep/成功 Edit 返回的 header；路径不确定先搜索，子代理路径来自分配范围，失败前必须改变脚本或方法。
+- 新增 `memory-recall` workflow：仅在 ContentSearch + PathRead 可用且先前上下文可能改变答案时回溯；按 `session://current` → 搜索 `session://current/history` → 读取命中范围渐进披露，未命中或达到六次调用即停止。
+
+**轨迹样本回归**
+- 新增 `tests/fixtures/traces/`：5 个代表性场景 fixture（同文件重复读、参数瞎猜、no-change 死循环、禁用工具、大文件整读）+ fixture 驱动回归测试（`regression::trace_fixtures_regress_behaviors`），每条断言对应轨迹高频失败模式的行为口径；渲染提示词体积守卫（≤16KB）。
+- fixture 直接从 `data/task_workspaces/review/` 真实轨迹提炼（640 份 conversation.jsonl / 38,298 次调用）：参数形状、报错口径与文件尺寸取自原始记录——如 `1b777dd7` 的 compliance_report.md 整读 15 次、`018022d0` 的 `path_selector` 瞎猜（全库 178 次）、`376dbfb8` 的 no-change 循环 6+ 次（全库 60 次）、`ls -la` 禁用报错（全库 356 次）、`0b3d46c0` 的 154707 字节方案.md 整读报错（全库 89 次）；断言全部对应修复后行为（memo 命中 / unknown field 指明字段 / 幂等成功 / blocked / 预览+selector）。
+
+**边界加固（提交前多轮独立审查后合并）**：stale 错误不再把旧 tag 称为 current snapshot（明确 "cannot be reused，请重新 Read"）；失败的 Read 不写 memo、memo 判定基于最终 composed 输出且区分 raw/non-raw（截断/spill 的内容永不产生"复用"命中）；`.jsonl` 按行校验、多 section 与 MV 目标逐一校验；Replace `old==new` 仅目标存在时幂等（缺失保持 fail-closed、fuzzy 候选不改写文件）；幂等与 soft no-op 不写盘、不 bump mutation epoch（memo 保持有效）；截断 tail 受字节预算约束（单超长行不绕过 `tool_result_max_bytes`）；PlanConfirm/PlanClear/SubAgent 补 `deny_unknown_fields` 并新增全工具运行时拒绝测试；SubAgent 失败不再标记 spawn（非法调用不会启动子代理）；压缩守卫排除 todo reminder/final reminder/sync 与 signal recovery 注入消息（`internal`/`_mink` 元数据 + 字符串前缀双保险）；大文件预览补尾部 5 行（本地与 VFS 一致）；symlink 测试改用当前协议。新增 9 个回归用例。
+
+**测试**：Rust 全量 583 通过（新增 44 用例：catalog schema 契约与运行时拒绝、Read 契约/预览/建议、memo 单测与集成、压缩守卫（含内部消息排除）、截断策略、幂等、JSON 注记、exec 头、SubAgent 契约、prompt 顺序/密度/门控、轨迹 fixture、外部审查回归）；`cargo fmt --check`、`cargo clippy --all-targets`、TUI 92 用例与 feature-matrix 全部通过。
 ## v0.3.1 (2026-08-04)
 
 ### Edit 工具稳定性（修复与改进）
@@ -22,6 +67,11 @@
 ### Edit 工具协议重构（Breaking）
 
 - 输入协议从 `@path#tag + replace/insert/delete/append` 迁移至 `[PATH#TAG] + PUT/CUT/REM/MV`：单 `input` 参数、指令语义单一（替换/插入/删除/移动）、fail-closed（过期 tag 明确拒绝并提示重读）、structural-closer 安全保护，旧格式不再兼容。
+
+### 其他变更
+
+- **`--version` 与 git hash provenance**：`mink --version` 与 `mink-server --version` 现在输出语义化版本号与构建 git hash（工作区有未提交改动时附 `-dirty` 标记），便于定位二进制来源（`crates/mink-cli/build.rs`、`crates/mink-server/build.rs`）。
+
 
 ### 测试
 

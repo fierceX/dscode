@@ -1,6 +1,6 @@
 # Agents Guide
 
-> 更新日期：2026-07-30
+> 更新日期：2026-08-06
 
 [TOC]
 
@@ -466,6 +466,12 @@ fail closed。
 - `Read` 本地非 raw 输出会记录 snapshot；raw 或 immutable resource 不生成可编辑 snapshot
 - registered resource URL 先于 VFS 处理；未知 URL-like scheme 必须 fail closed
 - Grep 可搜索 registered resource 文本；resource path 不接受 selector/glob，返回行号用于后续 Read selector
+- `Read` 模型可见参数只含 `path`（行范围用路径选择器）；全工具 schema 声明字段必须与 serde 接受字段一致且 `additionalProperties:false`（catalog 一致性测试强制）
+- Read memo 命中必须同时满足 len/mtime 一致、epoch 一致、mutation_epoch 一致与范围覆盖；任何压缩提交成功后必须 bump epoch，任何 Write/Edit 成功后必须 bump mutation；子代理 memo 相互独立，仅本地文件
+- `tool-inventory` section 内容必须与当前 `ModelToolSurface` 名称集一致；空 surface 才使用 `runtime-capabilities`
+- prompt 资产写作纪律：所有适用的 system 指令均必须遵守；RFC2119 只精确定义 system prompt 内全大写关键字的强度，不重解释用户/rule/skill 普通措辞或输出标记；每个 `<critical>` 必须有 3-6 条战术 bullet，每条 ≤12 英文词且只表达一个主张；示例/规范形态置尾、禁 token/budget 措辞、不写引擎内部机制，测试必须执行这些约束
+- 压缩 cut point 必须保留最近真实 user 消息（≥2 条，优先于纯 token 预算）
+- Edit no-change 幂等成功仅当"位置精确且最终状态可验证一致"（`hashline::already_applied`）；任何歧义必须退回 soft no-op → 3 次硬错误的 fail-closed 路径
 - prompt skill index、selected skills、`skill://` 和 `rule://` 必须来自同一 `CapabilitySnapshot`
 - selected skill 正文不依赖资源读取 provider；skill index 和子资源访问由已解析的 `ResourceRead` provider 与 `ResourceRouter` handler 共同提供
 - MISSION 只能覆盖 allowlisted core；runtime-owned section fail fast，普通自定义规则不得使用 reserved 的 `# rules`

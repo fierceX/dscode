@@ -59,6 +59,40 @@ pub struct Section {
     pub warnings: Vec<String>,
 }
 
+/// True when applying `operations` to `text` would not change it because the
+/// requested final content is already present at the exact target positions.
+/// Used to turn an explainable no-op into an idempotent success; anything
+/// ambiguous returns false so callers keep failing closed.
+pub fn already_applied(text: &str, operations: &[Operation]) -> bool {
+    let lines = crate::tools::snapshot::split_content_lines(text);
+    let matches = |start0: usize, body: &[String]| -> bool {
+        if body.len() > lines.len().saturating_sub(start0) {
+            return false;
+        }
+        body.iter()
+            .zip(lines[start0..start0 + body.len()].iter())
+            .all(|(wanted, actual)| wanted == actual)
+    };
+    operations.iter().all(|operation| match operation {
+        Operation::Put { start, end, body } => {
+            if *start < 1 || *end < *start || *end > lines.len() {
+                return false;
+            }
+            matches(start - 1, body)
+        }
+        Operation::Insert { cursor, body } => match cursor {
+            Cursor::Head => matches(0, body),
+            Cursor::Tail => {
+                let start0 = lines.len().saturating_sub(body.len());
+                matches(start0, body)
+            }
+            Cursor::Before(n) => matches(n.saturating_sub(1), body),
+            Cursor::After(n) => matches(*n, body),
+        },
+        _ => false,
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Patch {
     pub sections: Vec<Section>,

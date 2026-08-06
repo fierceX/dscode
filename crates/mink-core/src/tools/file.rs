@@ -10,27 +10,95 @@ use std::path::{Component, Path, PathBuf};
 /// Threshold for switching to streaming read (bytes).
 const STREAM_READ_THRESHOLD: u64 = 1_048_576; // 1MB
 
-fn ensure_full_read_within_limit(
-    path: &Path,
-    offset: Option<usize>,
-    limit: Option<usize>,
-    max_bytes: usize,
-) -> Result<()> {
-    if offset.is_some() || limit.is_some() {
-        return Ok(());
+const FULL_READ_PREVIEW_LINES: usize = 200;
+
+fn file_not_found_suggestion(path: &Path) -> String {
+    let pattern = path
+        .parent()
+        .map(|parent| format!("{}/*", parent.display()))
+        .unwrap_or_else(|| "*".to_string());
+    format!(
+        "Error: file not found or unreadable: {}. Use Glob(pattern='{pattern}') to discover existing files.",
+        path.display()
+    )
+}
+
+/// Read up to `max_lines` lines from the file head. Returns the lines and,
+/// when the whole file was read, the exact line count (None otherwise).
+fn read_head_lines(path: &Path, max_lines: usize) -> Result<(Vec<String>, Option<usize>)> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(path)
+        .map_err(|error| anyhow!("Error: cannot read {}: {error}", path.display()))?;
+    let mut lines = Vec::with_capacity(max_lines + 1);
+    for line in std::io::BufReader::new(file).lines() {
+        let line =
+            line.map_err(|error| anyhow!("Error: cannot read {}: {error}", path.display()))?;
+        lines.push(line);
+        if lines.len() > max_lines {
+            lines.pop();
+            return Ok((lines, None));
+        }
     }
-    let meta = std::fs::metadata(path)
-        .map_err(|_| anyhow!("Error: file not found or unreadable: {}", path.display()))?;
-    if meta.len() as u128 > max_bytes as u128 {
-        bail!(
-            "Error: file too large for full Read ({} bytes > {} bytes): {}. Use a line selector such as '{}:1-200' or pass offset/limit.",
-            meta.len(),
-            max_bytes,
-            path.display(),
-            path.display()
-        );
+    let total = lines.len();
+    Ok((lines, Some(total)))
+}
+
+/// Read the last `max_lines` lines of a file (for the tail portion of an
+/// oversized-read preview).
+fn read_tail_lines(path: &Path, max_lines: usize) -> Result<Vec<String>> {
+    use std::io::{Seek as _, SeekFrom};
+    let meta = std::fs::metadata(path)?;
+    let window = 8192usize.min(meta.len() as usize);
+    let mut file = std::fs::File::open(path)?;
+    file.seek(SeekFrom::End(-(window as i64)))?;
+    let mut text = String::new();
+    std::io::BufReader::new(file).read_to_string(&mut text)?;
+    let mut lines = text.lines().rev().take(max_lines).collect::<Vec<_>>();
+    lines.reverse();
+    Ok(lines.into_iter().map(str::to_string).collect())
+}
+
+/// Format the tail block of a preview: absolute line numbers when the exact
+/// total is known, `…` prefixes otherwise.
+fn format_preview_tail(tail: &[String], total: Option<usize>) -> String {
+    if tail.is_empty() {
+        return String::new();
     }
-    Ok(())
+    let mut out = String::from("\n...\n");
+    let base = total.map(|total| total.saturating_sub(tail.len()));
+    for (index, line) in tail.iter().enumerate() {
+        match base {
+            Some(base) => out.push_str(&format!("{}:{line}\n", base + index + 1)),
+            None => out.push_str(&format!("…:{line}\n")),
+        }
+    }
+    out
+}
+/// When a full read would exceed the byte limit, return a preview response
+/// (size, line count, head lines, tail lines, selector example); Ok(None)
+/// means the file fits within the limit and should be read normally.
+fn full_read_preview(path: &Path, max_bytes: usize) -> Result<Option<String>> {
+    let meta = std::fs::metadata(path).map_err(|_| anyhow!(file_not_found_suggestion(path)))?;
+    if meta.len() as u128 <= max_bytes as u128 {
+        return Ok(None);
+    }
+    let (head, exact_total) = read_head_lines(path, FULL_READ_PREVIEW_LINES)?;
+    let total_desc = match exact_total {
+        Some(total) => format!("{total} lines"),
+        None => format!("more than {FULL_READ_PREVIEW_LINES} lines"),
+    };
+    let mut out = format!(
+        "(file too large: {} bytes / {total_desc}; showing first {FULL_READ_PREVIEW_LINES} lines)\n",
+        meta.len()
+    );
+    out.push_str(&format_numbered_read(1, &head.join("\n")));
+    let tail = read_tail_lines(path, 5)?;
+    out.push_str(&format_preview_tail(&tail, exact_total));
+    out.push_str(&format!(
+        "[Full file exceeds the read limit ({max_bytes} bytes). Use 'path:start-end' to read a line range, e.g. '{}:1-{FULL_READ_PREVIEW_LINES}'.]",
+        path.display()
+    ));
+    Ok(Some(out))
 }
 
 pub fn read(path: &str, offset: Option<usize>, limit: Option<usize>) -> Result<String> {
@@ -39,8 +107,8 @@ pub fn read(path: &str, offset: Option<usize>, limit: Option<usize>) -> Result<S
     }
 
     // Fast path: small file or full read — use read_to_string directly.
-    let meta = std::fs::metadata(path)
-        .map_err(|_| anyhow!("Error: file not found or unreadable: {path}"))?;
+    let meta =
+        std::fs::metadata(path).map_err(|_| anyhow!(file_not_found_suggestion(Path::new(path))))?;
 
     if meta.len() < STREAM_READ_THRESHOLD || (offset.is_none() && limit.is_none()) {
         // Small file: existing fast path
@@ -312,24 +380,15 @@ impl super::runner::ToolExec for ReadTool {
         #[serde(deny_unknown_fields)]
         struct Args {
             path: String,
-            offset: Option<usize>,
-            limit: Option<usize>,
         }
         let args: Args = serde_json::from_value(input.clone())?;
-        let mut selection = split_read_path_selection(&args.path)?;
+        let selection = split_read_path_selection(&args.path)?;
         let filesystem_backend = if ctx.read_only_fs.is_some() {
             FilesystemBackend::ReadOnlyVfs
         } else {
             FilesystemBackend::Local
         };
         let target_class = classify_read_target(input, &ctx.resource_router, filesystem_backend)?;
-        // Prefer path selector range, fall back to JSON offset/limit
-        if selection.offset.is_none() && args.offset.is_some() {
-            selection.offset = args.offset;
-        }
-        if selection.limit.is_none() && args.limit.is_some() {
-            selection.limit = args.limit;
-        }
         if target_class == ReadTargetClass::RegisteredResource {
             let resource = ctx.resource_router.resolve(&selection, ctx)?;
             let text = select_text_lines(&resource.content, selection.offset, selection.limit);
@@ -349,13 +408,47 @@ impl super::runner::ToolExec for ReadTool {
                 && selection.limit.is_none()
                 && result.total_bytes > ctx.tool_config.tool_result_max_bytes
             {
-                bail!(
-                    "Error: file too large for full Read ({} bytes > {} bytes): {}. Use a line selector such as '{}:1-200' or pass offset/limit.",
-                    result.total_bytes,
+                let shown = result.content.lines().take(FULL_READ_PREVIEW_LINES).count();
+                let total_desc = if result.total_lines > 0 {
+                    format!("{} lines", result.total_lines)
+                } else {
+                    format!("more than {} lines", FULL_READ_PREVIEW_LINES)
+                };
+                let mut preview = format!(
+                    "(file too large: {} bytes / {total_desc}; showing first {shown} lines)\n",
+                    result.total_bytes
+                );
+                for (idx, line) in result
+                    .content
+                    .lines()
+                    .take(FULL_READ_PREVIEW_LINES)
+                    .enumerate()
+                {
+                    preview.push_str(&format!("{}:{}\n", idx + 1, line));
+                }
+                // Tail portion from the backend content (only when the content
+                // actually exceeds the head window, so small results do not
+                // duplicate their own head).
+                let all_lines = result.content.lines().collect::<Vec<_>>();
+                if all_lines.len() > FULL_READ_PREVIEW_LINES {
+                    let tail = all_lines
+                        .into_iter()
+                        .rev()
+                        .take(5)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect::<Vec<_>>();
+                    let tail_owned = tail.into_iter().map(str::to_string).collect::<Vec<_>>();
+                    preview.push_str(&format_preview_tail(&tail_owned, None));
+                }
+                preview.push_str(&format!(
+                    "[Full file exceeds the read limit ({} bytes). Use 'path:start-end' to read a line range, e.g. '{}:1-{}'.]",
                     ctx.tool_config.tool_result_max_bytes,
                     selection.path,
-                    selection.path
-                );
+                    FULL_READ_PREVIEW_LINES
+                ));
+                return Ok(super::runner::ToolOutcome::text(preview));
             }
             if selection.raw {
                 return Ok(super::runner::ToolOutcome::text(result.content));
@@ -366,14 +459,24 @@ impl super::runner::ToolExec for ReadTool {
                 &result.content,
             )));
         }
-
         let path = resolve_tool_path(&ctx.cwd, &selection.path)?;
-        ensure_full_read_within_limit(
+        if selection.offset.is_none()
+            && selection.limit.is_none()
+            && let Some(preview) = full_read_preview(&path, ctx.tool_config.tool_result_max_bytes)?
+        {
+            return Ok(super::runner::ToolOutcome::text(preview));
+        }
+        if let Some(cached) = ctx.memo_hit(
             &path,
+            selection.raw,
             selection.offset,
-            selection.limit,
-            ctx.tool_config.tool_result_max_bytes,
-        )?;
+            selection
+                .offset
+                .zip(selection.limit)
+                .map(|(start, count)| start + count.saturating_sub(1)),
+        ) {
+            return Ok(super::runner::ToolOutcome::text(cached));
+        }
         let start_line = selection.offset.unwrap_or(1);
         let editable_limit = 4 * 1024 * 1024usize;
         let full_text = if ctx.tool_config.edit_mode == crate::config::EditMode::Hashline
@@ -399,19 +502,37 @@ impl super::runner::ToolExec for ReadTool {
         )?;
         let visible_count = crate::tools::snapshot::split_content_lines(&content).len();
         if selection.raw {
+            // Size-guard raw output in every mode (Replace or beyond the
+            // editable limit has no full_text snapshot path): a raw read whose
+            // output would be truncated must not seed the memo.
+            ensure!(
+                content.len() <= ctx.tool_config.tool_result_max_bytes,
+                "Error: selected Read output is too large ({} bytes > {} bytes); request a narrower line range",
+                content.len(),
+                ctx.tool_config.tool_result_max_bytes
+            );
             if let Some(full_text) = &full_text {
-                ensure!(
-                    content.len() <= ctx.tool_config.tool_result_max_bytes,
-                    "Error: selected Hashline Read output is too large ({} bytes > {} bytes); request a narrower line range",
-                    content.len(),
-                    ctx.tool_config.tool_result_max_bytes
-                );
                 ctx.snapshots
                     .lock()
                     .unwrap_or_else(|error| error.into_inner())
                     .record(&path, full_text, start_line..start_line + visible_count);
             }
-            return Ok(super::runner::ToolOutcome::text(content));
+            // Offer the memo candidate; the runner records it only when the
+            // final composed output (raw content plus its summary line) fits
+            // the budget, so a later hit can never ask the model to "reuse"
+            // truncated content. Raw reads stay under the raw flag and never
+            // satisfy non-raw requests.
+            let mut outcome = super::runner::ToolOutcome::text(content);
+            outcome.memo_candidate = Some(super::runner::MemoCandidate {
+                path: path.clone(),
+                raw: true,
+                start_line: selection.offset,
+                end_line: selection
+                    .offset
+                    .map(|start| start + visible_count.saturating_sub(1))
+                    .filter(|_| visible_count > 0),
+            });
+            return Ok(outcome);
         }
         let rendered = match full_text {
             Some(full_text) => {
@@ -433,7 +554,21 @@ impl super::runner::ToolExec for ReadTool {
             }
             None => format_numbered_read(start_line, &content),
         };
-        Ok(super::runner::ToolOutcome::text(rendered))
+        // Offer the memo candidate; the runner records it only when the final
+        // composed output (rendered content plus its summary line) fits the
+        // budget, so a later hit can never ask the model to "reuse" content
+        // that was truncated or spilled at the runner layer.
+        let mut outcome = super::runner::ToolOutcome::text(rendered);
+        outcome.memo_candidate = Some(super::runner::MemoCandidate {
+            path: path.clone(),
+            raw: false,
+            start_line: selection.offset,
+            end_line: selection
+                .offset
+                .map(|start| start + visible_count.saturating_sub(1))
+                .filter(|_| visible_count > 0),
+        });
+        Ok(outcome)
     }
 }
 
@@ -454,6 +589,7 @@ impl super::runner::ToolExec for WriteTool {
         ctx: &crate::context::ToolContext,
     ) -> anyhow::Result<super::runner::ToolOutcome> {
         #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct Args {
             path: String,
             content: String,
@@ -808,7 +944,19 @@ fn execute_hashline_edit(
                         authored.path, current_tag
                     )
                 } else {
-                    "The file has drifted outside a successful Edit response. Re-run Read or Grep and use the newly returned header; do not retry with the diagnostic hash below.".to_string()
+                    let current_hint = store
+                        .latest_tag(&canonical)
+                        .filter(|tag| !tag.eq_ignore_ascii_case(&current_tag))
+                        .map(|tag| {
+                            format!(
+                                "\nThe last known snapshot [{}#{tag}] predates the current content (the file drifted after that snapshot) and cannot be reused; editing against it would fail again. Re-Read the file and use the newly returned header.",
+                                authored.path
+                            )
+                        })
+                        .unwrap_or_default();
+                    format!(
+                        "The file has drifted outside a successful Edit response. Re-run Read or Grep and use the newly returned header; do not retry with the diagnostic hash below.{current_hint}"
+                    )
                 };
                 bail!(
                     "Error: stale snapshot #{} for {} could not be recovered unambiguously. An anchor changed, was deleted/split, repeated, or mapped with an inconsistent offset.\nCurrent content hash (diagnostic): #{}. {}{}",
@@ -929,6 +1077,25 @@ fn execute_hashline_edit(
                             authored.path
                         );
                     }
+                    // P0-D: explainable no-op — the requested final content is
+                    // already present at the exact target positions.
+                    if crate::tools::hashline::already_applied(
+                        &normalized,
+                        &patch.sections[0].operations,
+                    ) {
+                        // Idempotent success writes nothing: keep the
+                        // mutation epoch untouched so read memos stay valid
+                        // (mirrors the Replace-mode idempotent path).
+                        let mut outcome = tool_outcome(
+                            format!(
+                                "Edit({}): already applied (idempotent)\nThe requested final content is already present; no change was made.",
+                                authored.path
+                            ),
+                            String::new(),
+                        );
+                        outcome.no_mutation = true;
+                        return Ok(outcome);
+                    }
                     let count = store.note_noop(&canonical, &args.input);
                     if count >= 3 {
                         bail!(
@@ -936,13 +1103,17 @@ fn execute_hashline_edit(
                             authored.path
                         );
                     }
-                    return Ok(tool_outcome(
+                    // Soft no-op writes nothing either: only the no-op
+                    // counter changes, never the mutation epoch.
+                    let mut outcome = tool_outcome(
                         format!(
                             "Edit({}): no changes (soft no-op {count}/2)\nNo file or clipboard state was changed. Do not expand the edit range. Confirm whether the intended change is already present and re-check the target anchors before retrying.",
                             authored.path
                         ),
                         String::new(),
-                    ));
+                    );
+                    outcome.no_mutation = true;
+                    return Ok(outcome);
                 }
                 let final_text = restore_text_shape(&shape, &updated);
                 ensure!(
@@ -1337,6 +1508,7 @@ fn execute_replace_edit(
     let path = resolve_replace_target(&ctx.cwd, &args.path)?;
     let display_path = display_relative_path(&ctx.cwd, &path);
     let mut output = Vec::new();
+    let mut wrote = false;
     for (index, edit) in args.edits.iter().enumerate() {
         let original = std::fs::read_to_string(&path)
             .map_err(|error| anyhow!("Error: cannot read {}: {error}", path.display()))?;
@@ -1367,12 +1539,24 @@ fn execute_replace_edit(
                 }
             )
         })?;
+        // Idempotent edits change nothing on disk: skip the write, the diff
+        // and the mutation-epoch bump so mtime/inode stay stable and read
+        // memos remain valid.
+        if result.strategy == "idempotent" {
+            output.push(format!(
+                "Edit({}).{}: already applied (idempotent)\nThe requested final content is already present; no change was made.",
+                display_path,
+                index + 1
+            ));
+            continue;
+        }
         let final_text = restore_text_shape(&shape, &result.content);
         ensure!(
             final_text.len() <= ctx.tool_config.file_write_max_bytes,
             "Error: edited file would exceed file_write_max_bytes"
         );
         atomic_write(&path, &final_text)?;
+        wrote = true;
         let (diff, added, removed) = inline_diff(&display_path, &normalized, &result.content)?;
         let first_changed = changed_line_window(&normalized, &result.content).0;
         output.push(format!(
@@ -1387,7 +1571,9 @@ fn execute_replace_edit(
             diff
         ));
     }
-    Ok(tool_outcome(output.join("\n\n"), String::new()))
+    let mut outcome = tool_outcome(output.join("\n\n"), String::new());
+    outcome.no_mutation = !wrote;
+    Ok(outcome)
 }
 
 fn resolve_replace_target(cwd: &Path, authored: &str) -> Result<PathBuf> {
@@ -1438,6 +1624,8 @@ fn tool_outcome(content: String, conversation_content: String) -> super::runner:
         is_bash: false,
         exit_code: None,
         success: true,
+        no_mutation: false,
+        memo_candidate: None,
         diagnostics: Vec::new(),
         plan_command: None,
         state_metadata: None,

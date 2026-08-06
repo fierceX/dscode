@@ -176,9 +176,7 @@ impl SignalCollector {
         // 内容返回型工具（Read/Glob/Grep 等）的输出是文件内容或搜索结果，
         // 对它们跑编译错误/超时/未找到等模式会产生大量误报
         // （例如源码里出现 "timeout"、"error[E0425]" 字样）。
-        if scan_error_patterns
-            && let Some(s) = self.detect_error(tool_name, output)
-        {
+        if scan_error_patterns && let Some(s) = self.detect_error(tool_name, output) {
             signals.push(s);
         }
 
@@ -346,7 +344,9 @@ mod tests {
             false,
         );
         assert!(
-            !sigs.iter().any(|s| matches!(s.kind, SignalKind::CompileError)),
+            !sigs
+                .iter()
+                .any(|s| matches!(s.kind, SignalKind::CompileError)),
             "Read output is file content; 'error[E0425]' must not produce a CompileError signal"
         );
     }

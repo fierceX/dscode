@@ -628,7 +628,7 @@ impl TurnExecutor {
         };
         self.ctx
             .store
-            .add_user(&format!(
+            .add_runtime_user(&format!(
                 "<todo-progress-reminder>Active todo work has continued across several successful operations without a progress transition. Reassess the active batch and call {provider} if any item should be completed, paused, or otherwise advanced.</todo-progress-reminder>"
             ))
             .await?;
@@ -722,7 +722,7 @@ impl TurnExecutor {
                 {
                     self.ctx
                         .store
-                        .add_user(&format!(
+                        .add_runtime_user(&format!(
                             "<todo-final-reminder>Todo items remain in_progress. Before finishing, call {provider} to complete verified work or pause work that is no longer active. If the work is blocked and should remain active, state that explicitly.</todo-final-reminder>"
                         ))
                         .await?;
@@ -774,7 +774,7 @@ impl TurnExecutor {
                         .render_info(&format!("Injecting hint (belief {:.2}){}", b, recent));
                     let guidance = self.recovery_policy.render(&directive);
                     guidance.validate(&self.ctx.tool_surface)?;
-                    self.ctx.store.add_user(&guidance.content).await?;
+                    self.ctx.store.add_runtime_user(&guidance.content).await?;
                     self.signal_recovery_guard = true;
                 }
                 crate::agent::decision::Decision::Abort => {

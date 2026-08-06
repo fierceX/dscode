@@ -6,7 +6,7 @@ pub mod assets {
 pub use assets::FILES;
 
 use axum::body::Body;
-use axum::http::{header, Response, StatusCode};
+use axum::http::{Response, StatusCode, header};
 use axum::response::IntoResponse;
 
 fn content_type(path: &str) -> &'static str {
@@ -43,16 +43,19 @@ fn lookup(path: &str) -> Option<&'static str> {
 /// SPA fallback 服务：命中静态资源返回内容，否则返回 index.html（前端路由）。
 pub async fn embedded_serve(uri: axum::http::Uri) -> Response<Body> {
     let path = uri.path().trim_start_matches('/');
-    let candidate = if path.is_empty() {
-        "index.html"
-    } else {
-        path
-    };
+    let candidate = if path.is_empty() { "index.html" } else { path };
     if let Some(content) = lookup(candidate) {
         return Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, content_type(candidate))
-            .header(header::CACHE_CONTROL, if candidate == "index.html" { "no-cache" } else { "public, max-age=31536000, immutable" })
+            .header(
+                header::CACHE_CONTROL,
+                if candidate == "index.html" {
+                    "no-cache"
+                } else {
+                    "public, max-age=31536000, immutable"
+                },
+            )
             .body(Body::from(content.to_string()))
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
     }

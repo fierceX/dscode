@@ -40,7 +40,9 @@ pub fn split_read_path_selection(input: &str) -> Result<ReadPathSelection> {
     }
 
     if path.is_empty() {
-        bail!("Error: no path provided");
+        bail!(
+            "Error: no path provided; a line selector must be appended to a path (e.g. 'a.md:45-50')"
+        );
     }
 
     Ok(ReadPathSelection {

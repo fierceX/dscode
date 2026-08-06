@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -35,6 +36,7 @@ pub struct CompactionEngine {
     cancel: crate::cancel::CancellationToken,
     state: RwLock<std::result::Result<CompactionState, String>>,
     compact_lock: tokio::sync::Mutex<()>,
+    memo_epoch: Arc<AtomicU64>,
 }
 
 impl CompactionEngine {
@@ -68,7 +70,15 @@ impl CompactionEngine {
             cancel,
             state: RwLock::new(state),
             compact_lock: tokio::sync::Mutex::new(()),
+            memo_epoch: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Shared epoch counter for read memos: any committed compaction invalidates
+    /// all in-session read memos (the model's context no longer holds the
+    /// previously read content, so "reuse" responses would be misleading).
+    pub fn memo_epoch(&self) -> Arc<AtomicU64> {
+        self.memo_epoch.clone()
     }
 
     pub fn current_summary(&self) -> Result<Option<String>> {
@@ -185,6 +195,7 @@ impl CompactionEngine {
             .map_err(|_| anyhow::anyhow!("context state lock poisoned"))? = Ok(state.clone());
         self.store.prune_cache_before(state.active_start).await;
         let _ = tokio::fs::write(&self.summary_path, format!("{}\n", state.summary)).await;
+        self.memo_epoch.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
@@ -403,6 +414,10 @@ fn estimate_messages_tokens(messages: &[Value]) -> usize {
         .fold(0, |total, tokens| total.saturating_add(tokens))
 }
 
+/// Minimum number of real user messages that must survive a compaction in the
+/// active tail (preferred over the pure token budget, bounded by history size).
+const COMPACTION_MIN_TAIL_USER_MESSAGES: usize = 2;
+
 fn find_compaction_cut_point(messages: &[Value], tail_target: usize) -> usize {
     if messages.len() < 2 {
         return 0;
@@ -416,10 +431,66 @@ fn find_compaction_cut_point(messages: &[Value], tail_target: usize) -> usize {
             break;
         }
     }
-    (1..=candidate)
+    let safe = (1..=candidate)
         .rev()
         .find(|&index| is_safe_context_start(&messages[index]))
-        .unwrap_or(0)
+        .unwrap_or(0);
+
+    // Keep at least COMPACTION_MIN_TAIL_USER_MESSAGES real user messages in the
+    // tail so user constraints do not silently fall behind the cut point.
+    let total_users = messages.iter().filter(|m| is_real_user_message(m)).count();
+    if total_users < COMPACTION_MIN_TAIL_USER_MESSAGES {
+        return safe;
+    }
+    let mut cut = safe;
+    let mut users_seen = messages[cut..]
+        .iter()
+        .filter(|m| is_real_user_message(m))
+        .count();
+    while users_seen < COMPACTION_MIN_TAIL_USER_MESSAGES && cut > 0 {
+        cut -= 1;
+        if is_real_user_message(&messages[cut]) {
+            users_seen += 1;
+        }
+    }
+    if cut == 0 {
+        // Not enough history to satisfy the guard; keep the token-based cut.
+        return safe;
+    }
+    while cut < messages.len() && !is_safe_context_start(&messages[cut]) {
+        cut += 1;
+    }
+    cut
+}
+
+/// Engine-injected user-role messages that must not count as real user
+/// constraints for the compaction guard. The primary signal is the `internal`
+/// (or `_mink`) metadata flag set by `add_runtime_user` / todo sync; the
+/// string markers below remain as a defensive fallback for historical or
+/// third-party messages that predate the flag.
+const RUNTIME_INJECTED_MARKERS: &[&str] = &[
+    "<todo-progress-reminder>",
+    "<todo-final-reminder>",
+    "<todo-sync",
+    "[System note:",
+];
+
+fn is_real_user_message(message: &Value) -> bool {
+    if message.get("role").and_then(Value::as_str) != Some("user") {
+        return false;
+    }
+    if message.get("internal").and_then(Value::as_bool) == Some(true) {
+        return false;
+    }
+    if message.get("_mink").is_some() {
+        return false;
+    }
+    let Some(content) = message.get("content").and_then(Value::as_str) else {
+        return false;
+    };
+    !RUNTIME_INJECTED_MARKERS
+        .iter()
+        .any(|marker| content.starts_with(marker))
 }
 
 fn is_safe_context_start(message: &Value) -> bool {
@@ -591,6 +662,83 @@ mod tests {
         ];
         let cut = find_compaction_cut_point(&messages, 10);
         assert!(cut > 0);
+        assert_eq!(messages[cut]["role"], "assistant");
+    }
+
+    #[test]
+    fn cut_point_keeps_recent_user_messages_over_token_budget() {
+        let mut messages = Vec::new();
+        for turn in 0..3 {
+            messages.push(json!({"role":"user","content":format!("user {turn}")}));
+            messages.push(json!({"role":"assistant","content":[{"type":"tool_use","id":format!("t{turn}"),"name":"Read","input":{"path":"a"}}]}));
+            messages.push(json!({"role":"user","content":[{"type":"tool_result","tool_use_id":format!("t{turn}"),"content":"x".repeat(2000)}]}));
+        }
+        let cut = find_compaction_cut_point(&messages, 100);
+        assert!(cut > 0, "expected a compaction boundary");
+        let users_in_tail = messages[cut..]
+            .iter()
+            .filter(|m| is_real_user_message(m))
+            .count();
+        assert!(
+            users_in_tail >= COMPACTION_MIN_TAIL_USER_MESSAGES,
+            "cut={cut} retained {users_in_tail} user messages"
+        );
+        assert!(is_safe_context_start(&messages[cut]));
+    }
+
+    #[test]
+    fn cut_point_ignores_runtime_injected_user_messages() {
+        // 引擎注入的 user-role 消息（todo progress/final reminder、todo
+        // sync、signal recovery，以及带 internal 标记的消息）不得计入
+        // "真实 user 消息"：否则同轮多个内部消息会让守卫保留它们却裁掉
+        // 上一条真实用户约束。
+        let mut messages = Vec::new();
+        messages.push(json!({"role":"user","content":"head constraint"}));
+        messages.push(json!({"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Read","input":{"path":"a"}}]}));
+        messages.push(json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"x".repeat(3000)}]}));
+        // Injected messages in the middle of the history: string-prefix
+        // markers, the final-reminder marker, and the metadata flag path.
+        messages.push(json!({"role":"user","content":"<todo-progress-reminder>reassess the active batch</todo-progress-reminder>"}));
+        messages.push(
+            json!({"role":"user","content":"<todo-sync revision=\"3\">projection</todo-sync>"}),
+        );
+        messages.push(json!({"role":"user","content":"[System note: belief 0.5 is below the recovery threshold. Enter SIGNAL_RECOVERY mode.]"}));
+        messages.push(json!({"role":"user","content":"<todo-final-reminder>finish verified work or pause</todo-final-reminder>"}));
+        messages.push(json!({"role":"user","content":"plain injected text","internal":true}));
+        // Two real constraints near the tail, after the injected messages.
+        messages.push(json!({"role":"user","content":"latest constraint A"}));
+        messages.push(json!({"role":"assistant","content":[{"type":"tool_use","id":"t2","name":"Read","input":{"path":"b"}}]}));
+        messages.push(json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"t2","content":"y".repeat(200)}]}));
+        messages.push(json!({"role":"user","content":"latest constraint B"}));
+        messages.push(json!({"role":"assistant","content":[{"type":"tool_use","id":"t3","name":"Read","input":{"path":"c"}}]}));
+        messages.push(json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"t3","content":"z".repeat(3000)}]}));
+
+        let real_users_total = messages.iter().filter(|m| is_real_user_message(m)).count();
+        assert_eq!(
+            real_users_total, 3,
+            "injected messages must not count as real users"
+        );
+        let cut = find_compaction_cut_point(&messages, 800);
+        assert!(cut > 0, "expected a compaction boundary");
+        let users_in_tail = messages[cut..]
+            .iter()
+            .filter(|m| is_real_user_message(m))
+            .count();
+        assert!(
+            users_in_tail >= COMPACTION_MIN_TAIL_USER_MESSAGES,
+            "cut={cut} retained {users_in_tail} real user messages"
+        );
+        assert!(is_safe_context_start(&messages[cut]));
+    }
+
+    #[test]
+    fn cut_point_with_few_users_keeps_token_based_boundary() {
+        let messages = vec![
+            json!({"role":"user","content":"fix it"}),
+            json!({"role":"assistant","content":[{"type":"tool_use","id":"a","name":"Read","input":{"path":"a"}}]}),
+            json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":"x".repeat(2000)}]}),
+        ];
+        let cut = find_compaction_cut_point(&messages, 100);
         assert_eq!(messages[cut]["role"], "assistant");
     }
 
@@ -781,8 +929,41 @@ mod tests {
         assert!(second_state.active_start > first_state.active_start);
         assert_eq!(ctx.store.lines().await?, full_history);
         let projected = ctx.compaction.active_messages().await?;
-        assert_eq!(projected[0]["role"], "system");
         assert!(projected.len() < full_history.len());
+        assert_eq!(projected[0]["role"], "system");
+        assert!(
+            projected[0]["content"]
+                .as_str()
+                .is_some_and(|c| c.contains("<context-snapshot>"))
+        );
+        // B2(a): system fragments (context snapshot) stay before the last real user message.
+        let last_user = projected
+            .iter()
+            .rposition(|m| {
+                m.get("role").and_then(Value::as_str) == Some("user")
+                    && m.get("content").is_some_and(Value::is_string)
+            })
+            .expect("compacted projection keeps a real user message");
+        for (index, message) in projected.iter().enumerate() {
+            if index > last_user {
+                assert_ne!(
+                    message.get("role").and_then(Value::as_str),
+                    Some("system"),
+                    "system fragment appears after the last user message"
+                );
+            }
+        }
+        // B2(b): the context snapshot is present exactly once.
+        let snapshots = projected
+            .iter()
+            .filter(|m| {
+                m.get("role").and_then(Value::as_str) == Some("system")
+                    && m.get("content")
+                        .and_then(Value::as_str)
+                        .is_some_and(|c| c.contains("<context-snapshot>"))
+            })
+            .count();
+        assert_eq!(snapshots, 1, "context snapshot must appear exactly once");
 
         let guard = backend.requests.lock().unwrap();
         assert_eq!(guard.len(), 2);

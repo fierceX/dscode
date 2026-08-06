@@ -4,3 +4,10 @@ suggestions, objections, and implicit change requests—as revision feedback: sa
 revised draft before responding, then ask for confirmation again. If the user explicitly cancels or
 abandons planning, call {{DRAFT_PROVIDER}} with empty content. Only explicit confirmation permits
 {{CONFIRM_PROVIDER}}. When the confirmed work is complete, use {{CLEAR_PROVIDER}} to clear it.
+
+<critical>
+- Treat non-confirming plan replies as revision feedback.
+- Save the complete revision before responding.
+- Confirm only after explicit user confirmation.
+- Clear only after all confirmed work is complete.
+</critical>

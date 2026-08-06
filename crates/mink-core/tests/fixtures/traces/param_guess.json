@@ -1,0 +1,50 @@
+{
+  "name": "param-guess",
+  "source": "生产轨迹分析：Read 传入 path_selector 报 unknown field；全库参数名瞎猜 178 次（path_selector/path2/selector/selectors/path_selectors/path_sel/pathSelector/path_range）",
+  "setup": {
+    "files": {
+      "commonsense_report.md": "{{REPORT_FILE}}"
+    },
+    "config": {}
+  },
+  "steps": [
+    {
+      "tool": "Read",
+      "input": {
+        "path": "commonsense_report.md",
+        "path_selector": ":160-186"
+      }
+    },
+    {
+      "tool": "Read",
+      "input": {
+        "path": "commonsense_report.md",
+        "limit": 67,
+        "offset": 955
+      }
+    },
+    {
+      "tool": "Read",
+      "input": {
+        "path": "commonsense_report.md:160-186"
+      }
+    }
+  ],
+  "asserts": [
+    {
+      "after_step": 0,
+      "success": false,
+      "contains": "unknown field `path_selector`"
+    },
+    {
+      "after_step": 1,
+      "success": false,
+      "contains": "unknown field"
+    },
+    {
+      "after_step": 2,
+      "success": true,
+      "contains": "160:"
+    }
+  ]
+}

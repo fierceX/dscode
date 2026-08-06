@@ -171,24 +171,24 @@ mod tests {
     }
 }
 
-    #[test]
-    fn user_minkrc_model_is_default_when_no_env() {
-        // read_user_minkrc 读 $HOME/.minkrc——临时 HOME + 临时 .minkrc
-        let home = std::env::var_os("HOME");
-        let rc_path = std::path::Path::new("/tmp/mink-rc-test").join(".minkrc");
-        std::fs::create_dir_all("/tmp/mink-rc-test").unwrap();
-        std::fs::write(&rc_path, "model = \"deepseek-v4\"\n").unwrap();
-        unsafe { std::env::set_var("HOME", "/tmp/mink-rc-test") };
-        unsafe { std::env::remove_var("MODEL") };
-        let cfg = ServerConfig::load(None).unwrap();
-        assert_eq!(cfg.model, "deepseek-v4");
-        // 环境变量优先级高于 .minkrc
-        unsafe { std::env::set_var("MODEL", "env-model") };
-        let cfg = ServerConfig::load(None).unwrap();
-        assert_eq!(cfg.model, "env-model");
-        unsafe { std::env::remove_var("MODEL") };
-        if let Some(home) = home {
-            unsafe { std::env::set_var("HOME", home) };
-        }
-        let _ = std::fs::remove_dir_all("/tmp/mink-rc-test");
+#[test]
+fn user_minkrc_model_is_default_when_no_env() {
+    // read_user_minkrc 读 $HOME/.minkrc——临时 HOME + 临时 .minkrc
+    let home = std::env::var_os("HOME");
+    let rc_path = std::path::Path::new("/tmp/mink-rc-test").join(".minkrc");
+    std::fs::create_dir_all("/tmp/mink-rc-test").unwrap();
+    std::fs::write(&rc_path, "model = \"deepseek-v4\"\n").unwrap();
+    unsafe { std::env::set_var("HOME", "/tmp/mink-rc-test") };
+    unsafe { std::env::remove_var("MODEL") };
+    let cfg = ServerConfig::load(None).unwrap();
+    assert_eq!(cfg.model, "deepseek-v4");
+    // 环境变量优先级高于 .minkrc
+    unsafe { std::env::set_var("MODEL", "env-model") };
+    let cfg = ServerConfig::load(None).unwrap();
+    assert_eq!(cfg.model, "env-model");
+    unsafe { std::env::remove_var("MODEL") };
+    if let Some(home) = home {
+        unsafe { std::env::set_var("HOME", home) };
     }
+    let _ = std::fs::remove_dir_all("/tmp/mink-rc-test");
+}

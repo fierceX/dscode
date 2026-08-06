@@ -19,12 +19,30 @@ use crate::protocol::ToolCallEvent;
 use crate::ui::{ArtifactDisplay, ToolPresentation};
 
 #[derive(Debug)]
+/// A read whose memo entry should be recorded by the runner *after* the
+/// complete composed output (including the summary line) is known to fit the
+/// budget. The executor cannot know the final size, so it only offers the
+/// candidate; the runner decides.
+pub struct MemoCandidate {
+    pub path: std::path::PathBuf,
+    pub raw: bool,
+    pub start_line: Option<usize>,
+    pub end_line: Option<usize>,
+}
+
+#[derive(Debug)]
 pub struct ToolOutcome {
     pub content: String,
     pub conversation_content: String,
     pub is_bash: bool,
     pub exit_code: Option<i32>,
     pub success: bool,
+    /// True when the call changed nothing on disk (e.g. an idempotent edit);
+    /// used to skip mutation-epoch bumps so read memos stay valid.
+    pub no_mutation: bool,
+    /// Set by Read when a successful read may be memoized; the runner records
+    /// it only when the final composed output fits `tool_result_max_bytes`.
+    pub memo_candidate: Option<MemoCandidate>,
     pub diagnostics: Vec<String>,
     pub plan_command: Option<PlanCommand>,
     pub state_metadata: Option<serde_json::Value>,
@@ -39,6 +57,8 @@ impl ToolOutcome {
             is_bash: false,
             exit_code: None,
             success: true,
+            no_mutation: false,
+            memo_candidate: None,
             diagnostics: Vec::new(),
             plan_command: None,
             state_metadata: None,
@@ -153,6 +173,9 @@ struct RawToolResult {
     is_bash: bool,
     conv_content: String,
     exit_code: Option<i32>,
+    wall_ms: Option<u128>,
+    no_mutation: bool,
+    memo_candidate: Option<MemoCandidate>,
     spawns_sub_agent: bool,
     success: bool,
     diagnostics: Vec<String>,
@@ -356,12 +379,16 @@ fn dispatch_tool(
 ) -> RawToolResult {
     if let Some(t) = tool_fn {
         let metadata = t.metadata();
+        let started = std::time::Instant::now();
         match t.execute(&call.input_json, ctx) {
             Ok(outcome) => RawToolResult {
                 output: Ok(outcome.content),
                 is_bash: outcome.is_bash,
                 conv_content: outcome.conversation_content,
                 exit_code: outcome.exit_code,
+                wall_ms: Some(started.elapsed().as_millis()),
+                no_mutation: outcome.no_mutation,
+                memo_candidate: outcome.memo_candidate,
                 spawns_sub_agent: metadata.spawns_sub_agent,
                 success: outcome.success,
                 diagnostics: outcome.diagnostics,
@@ -375,7 +402,13 @@ fn dispatch_tool(
                 is_bash: false,
                 conv_content: String::new(),
                 exit_code: None,
-                spawns_sub_agent: metadata.spawns_sub_agent,
+                wall_ms: None,
+                no_mutation: false,
+                memo_candidate: None,
+                // A failed execute must never mark the call as spawning a
+                // sub-agent: the coordinator would launch a child with raw
+                // fields even though the executor rejected the input.
+                spawns_sub_agent: false,
                 success: false,
                 diagnostics: Vec::new(),
                 plan_command: None,
@@ -390,6 +423,9 @@ fn dispatch_tool(
             is_bash: false,
             conv_content: String::new(),
             exit_code: None,
+            wall_ms: None,
+            no_mutation: false,
+            memo_candidate: None,
             spawns_sub_agent: false,
             success: false,
             diagnostics: Vec::new(),
@@ -411,6 +447,9 @@ fn format_dispatched_result(
         is_bash,
         mut conv_content,
         exit_code,
+        wall_ms,
+        no_mutation,
+        memo_candidate,
         spawns_sub_agent,
         success,
         diagnostics,
@@ -433,37 +472,76 @@ fn format_dispatched_result(
             output.push_str(&diagnostic);
         }
     }
-
+    // P0-B: exec metadata header (Exit code / Wall time) for command tools.
+    if let Some(code) = exit_code {
+        let mut header = format!("Exit code: {code}\n");
+        if let Some(ms) = wall_ms {
+            header.push_str(&format!("Wall time: {:.1}s\n", ms as f64 / 1000.0));
+        }
+        output = format!("{header}{output}");
+    }
+    // Compose the complete pre-truncation output first: exec header (already
+    // in `output`), Read/Write summary line, and the JSON validity note. The
+    // whole thing then goes through the unified formatter so truncation and
+    // artifact spill can never be bypassed by later appends.
+    let summary = if (call.name == "Read" || call.name == "Write") && !is_bash {
+        let path_str = call.fields.get("path").map(|s| s.as_str()).unwrap_or("");
+        let kind = call.name.as_str();
+        let summary_path = resolve_summary_path(&ctx.cwd, path_str);
+        Some(file_tool_result_summary_sync(
+            kind,
+            path_str,
+            &summary_path.display().to_string(),
+        ))
+    } else {
+        None
+    };
+    // A5: structured-file validity note for JSON/JSONL targets, so the model
+    // notices immediately when an edit or write broke JSON syntax.
+    let json_note = if success && (call.name == "Edit" || call.name == "Write") {
+        json_validity_note(ctx, call)
+    } else {
+        None
+    };
+    let mut composed = output;
+    if let Some(summary) = summary {
+        composed = format!("{summary}\n{composed}");
+    }
+    if let Some(note) = json_note {
+        composed.push_str(&note);
+    }
+    // Record the read memo only when the *final* composed output (content +
+    // summary line + JSON note) fits the budget, so a later hit can never ask
+    // the model to reuse content that was truncated or spilled.
+    if let Some(candidate) = memo_candidate
+        && composed.len() <= ctx.tool_config.tool_result_max_bytes
+    {
+        ctx.memo_record(
+            &candidate.path,
+            candidate.raw,
+            candidate.start_line,
+            candidate.end_line,
+        );
+    }
     let needs_finalization = plan_command.is_some() || spawns_sub_agent;
     let formatted = if needs_finalization {
         FormattedToolOutput {
-            content: output,
+            content: composed,
             artifacts: Vec::new(),
         }
     } else {
         format_tool_result_with_artifact(
             &call.name,
-            &output,
+            &composed,
             ctx.tool_config.tool_result_max_bytes,
             ctx,
         )
     };
 
-    let output = if is_bash {
+    let final_output = if is_bash {
         filter_bash_noise(&formatted.content)
     } else {
         formatted.content
-    };
-
-    let final_output = if (call.name == "Read" || call.name == "Write") && !is_bash {
-        let path_str = call.fields.get("path").map(|s| s.as_str()).unwrap_or("");
-        let kind = call.name.as_str();
-        let summary_path = resolve_summary_path(&ctx.cwd, path_str);
-        let summary =
-            file_tool_result_summary_sync(kind, path_str, &summary_path.display().to_string());
-        format!("{}\n{}", summary, output)
-    } else {
-        output
     };
 
     // Edit diagnostics are continuation state, not a terminal-only summary:
@@ -473,21 +551,27 @@ fn format_dispatched_result(
     if call.name == "Edit" {
         conv_content = final_output.clone();
     }
+    // A successful Write/Edit invalidates read memos: changed files must be
+    // re-read before they are used again (engine-internal; no prompt impact).
+    if (call.name == "Edit" || call.name == "Write") && success && !no_mutation {
+        ctx.bump_mutation();
+    }
 
     // Signals collected later by TurnExecutor (needs shared SignalCollector for EditLoop)
     let signals = Vec::new();
 
-    let sub_agent_prompt = if spawns_sub_agent {
+    let sub_agent_prompt = if spawns_sub_agent && success {
         call.fields.get("prompt").cloned()
     } else {
         None
     };
-    let sub_agent_description = if spawns_sub_agent {
+    let sub_agent_description = if spawns_sub_agent && success {
         call.fields.get("description").cloned()
     } else {
         None
     };
     let sub_agent_fork = spawns_sub_agent
+        && success
         && call
             .fields
             .get("fork")
@@ -510,10 +594,113 @@ fn format_dispatched_result(
         presentation,
         artifacts: formatted.artifacts,
         signals,
+
         plan_command,
         needs_finalization,
         state_metadata,
     }
+}
+fn hashline_target_paths(input: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    for line in input.lines() {
+        let trimmed = line.trim_start();
+        if let Some(stripped) = trimmed.strip_prefix('[') {
+            if let Some(path) = stripped
+                .split('#')
+                .next()
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+            {
+                paths.push(path.to_string());
+            }
+        } else if trimmed.starts_with("MV") && trimmed[2..].starts_with(char::is_whitespace) {
+            // A moved file lands at the destination: validate the target so
+            // `MV source.json -> destination.json` is still covered.
+            let destination = trimmed[2..].trim();
+            let destination = destination
+                .strip_prefix(['\'', '"'])
+                .and_then(|rest| rest.strip_suffix(['\'', '"']))
+                .unwrap_or(destination);
+            if !destination.is_empty() {
+                paths.push(destination.to_string());
+            }
+        }
+    }
+    paths
+}
+
+/// Parse check for one JSON-ish file. `.jsonl` is validated line by line
+/// (each line is an independent JSON value); `.json` is validated as a whole.
+/// Returns Ok(()) or Err(line_number).
+fn json_parse_check(path: &Path, content: &str) -> std::result::Result<(), usize> {
+    if path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".jsonl"))
+    {
+        for (index, line) in content.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if serde_json::from_str::<serde_json::Value>(line).is_err() {
+                return Err(index + 1);
+            }
+        }
+        Ok(())
+    } else {
+        match serde_json::from_str::<serde_json::Value>(content) {
+            Ok(_) => Ok(()),
+            Err(error) => Err(error.line()),
+        }
+    }
+}
+
+/// For a successful Edit/Write on `.json`/`.jsonl` targets, verify every
+/// touched file parses and return short note lines (or None when not
+/// applicable). Edit inputs may contain several `[path#TAG]` sections and MV
+/// destinations; each JSON target is checked. The note is capped so a large
+/// batch cannot push the result past the configured limit.
+fn json_validity_note(ctx: &ToolContext, call: &ToolCallEvent) -> Option<String> {
+    let paths: Vec<String> = if let Some(path) = call.fields.get("path") {
+        vec![path.clone()]
+    } else {
+        call.fields
+            .get("input")
+            .map(|input| hashline_target_paths(input.as_str()))
+            .unwrap_or_default()
+    };
+    let mut notes = Vec::new();
+    for path_str in paths {
+        if !(path_str.ends_with(".json") || path_str.ends_with(".jsonl")) {
+            continue;
+        }
+        let path = resolve_summary_path(&ctx.cwd, &path_str);
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        match json_parse_check(&path, &content) {
+            Ok(()) => notes.push(format!("JSON parse: ok ({path_str})")),
+            Err(line) => notes.push(format!("JSON parse failed at line {line} ({path_str})")),
+        }
+    }
+    if notes.is_empty() {
+        return None;
+    }
+    let joined = notes.join("\n");
+    // Keep the note within the result budget: many-file batches collapse to
+    // one summary line instead of pushing the output past the limit.
+    let note = if joined.len() <= ctx.tool_config.tool_result_max_bytes / 4 {
+        format!("\n{joined}")
+    } else {
+        let ok_count = notes
+            .iter()
+            .filter(|n| n.starts_with("JSON parse: ok"))
+            .count();
+        let failed_count = notes.len() - ok_count;
+        format!("\nJSON parse: {ok_count} ok, {failed_count} failed")
+    };
+    Some(note)
 }
 
 fn requires_sequential_execution(metadata: Option<ToolMetadata>) -> bool {
@@ -591,13 +778,20 @@ impl ToolExec for SubAgentTool {
         _ctx: &ToolContext,
     ) -> anyhow::Result<ToolOutcome> {
         #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct Args {
             prompt: String,
+            description: Option<String>,
+            fork: Option<bool>,
         }
         let args: Args = serde_json::from_value(input.clone())?;
         if args.prompt.trim().is_empty() {
             bail!("Error: sub-agent prompt is required");
         }
+        // Description/fork are declared in the schema; accept them so valid
+        // calls are not rejected by the runtime contract.
+        let _ = args.description;
+        let _ = args.fork;
         Ok(ToolOutcome::text(String::new()))
     }
 }
@@ -635,25 +829,91 @@ fn line_count(s: &[u8]) -> usize {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TruncationPolicy {
+    Bytes(usize),
+    Tokens(usize),
+}
+
+impl TruncationPolicy {
+    /// Approximate byte budget. Tokens use a 4-bytes-per-token estimate so the
+    /// policy composes with the rest of mink's explicit token budgets.
+    fn byte_budget(&self) -> usize {
+        match *self {
+            Self::Bytes(bytes) => bytes,
+            Self::Tokens(tokens) => tokens.saturating_mul(4),
+        }
+    }
+}
+
+/// Approximate token count (bytes / 4). Used only for truncation markers.
+pub fn approx_token_count(s: &str) -> usize {
+    s.len().div_ceil(4)
+}
+
 pub fn format_tool_result(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    format_tool_result_policy(s, TruncationPolicy::Bytes(max))
+}
+
+pub fn format_tool_result_policy(s: &str, policy: TruncationPolicy) -> String {
+    let budget = policy.byte_budget();
+    if s.len() <= budget {
         return s.to_string();
     }
     let size = s.len();
+    let tokens = approx_token_count(s);
     let marker = format!(
-        "\n\n[... truncated: showing first/last portions of {} bytes ...]\n\n",
+        "\n\n[... truncated: original token count: {tokens} ({} bytes); showing first/last portions ...]\n\n",
         size
     );
-    let tail_lines = 5;
-    let tail_text = last_n_lines(s, tail_lines);
+    // The tail is byte-budgeted as well: a few short lines or a char-safe
+    // suffix of a single over-long line, never the whole original output.
+    let tail_text = tail_within_budget(s, budget / 4);
     let marker_len = marker.len() + 20;
     let tail_len = tail_text.len();
-    let mut head_len = max.saturating_sub(marker_len + tail_len);
-    if head_len == 0 {
-        head_len = max / 2;
+    let head_len = budget.saturating_sub(marker_len + tail_len);
+    let mut head_text = utf8_prefix_by_bytes(s, head_len);
+    // Cut at a complete line boundary so the model never sees a half line.
+    if let Some(boundary) = head_text.rfind('\n') {
+        head_text = &head_text[..boundary + 1];
     }
-    let head_text = utf8_prefix_by_bytes(s, head_len);
     format!("{head_text}{marker}{tail_text}")
+}
+
+/// Last whole lines of `s` within `max_bytes`; a single over-long line
+/// degrades to a char-boundary byte suffix so the tail never exceeds the
+/// budget and never duplicates the whole output.
+fn tail_within_budget(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut start = s.len();
+    let mut used = 0usize;
+    for (idx, ch) in s.char_indices().rev() {
+        if ch == '\n' {
+            let segment_len = start - (idx + 1);
+            if used + segment_len > max_bytes {
+                break;
+            }
+            used += segment_len;
+            start = idx + 1;
+        }
+    }
+    // Nothing fit (single line longer than the budget, or no newline):
+    // fall back to a char-boundary byte suffix of the output.
+    if s.len() - start > max_bytes || start == s.len() {
+        let mut cut = s.len();
+        let mut len = 0usize;
+        for (idx, ch) in s.char_indices().rev() {
+            if len + ch.len_utf8() > max_bytes {
+                break;
+            }
+            len += ch.len_utf8();
+            cut = idx;
+        }
+        start = cut;
+    }
+    &s[start..]
 }
 
 struct FormattedToolOutput {
@@ -694,19 +954,36 @@ fn format_tool_result_with_artifact(
     }
 }
 
-fn last_n_lines(s: &str, n: usize) -> &str {
-    let mut count = 0;
-    for (i, ch) in s.char_indices().rev() {
-        if ch == '\n' {
-            count += 1;
-            if count >= n {
-                return &s[i + ch.len_utf8()..];
-            }
-        }
-    }
-    s
+#[test]
+fn format_tool_result_policy_token_mode_and_line_boundaries() {
+    let s = "line0\n".repeat(500);
+    let by_tokens = format_tool_result_policy(&s, TruncationPolicy::Tokens(25));
+    assert!(by_tokens.len() <= 25 * 4 + 100);
+    assert!(by_tokens.contains("original token count"));
+    let head = by_tokens.split("[... truncated").next().unwrap();
+    assert!(
+        head.is_empty() || head.ends_with("\n\n"),
+        "head must end at a line boundary: {head:?}"
+    );
+    let by_bytes = format_tool_result(&s, 100);
+    assert!(by_bytes.contains("original token count"));
 }
 
+#[test]
+fn truncation_single_overlong_line_stays_within_budget() {
+    // 外部审查 #5：少于 5 个换行的输出此前会把整个原文当作 tail，
+    // 单超长行导致结果超过预算。现在 head/tail 都受字节预算约束。
+    let single_line = format!("{}\n", "x".repeat(10_000));
+    let result = format_tool_result(&single_line, 100);
+    assert!(
+        result.len() <= 100 + 100,
+        "truncated output {} bytes exceeds budget",
+        result.len()
+    );
+    let no_newline = "y".repeat(8_000);
+    let result = format_tool_result(&no_newline, 100);
+    assert!(result.len() <= 100 + 100, "{} bytes", result.len());
+}
 fn utf8_prefix_by_bytes(s: &str, max_bytes: usize) -> &str {
     if max_bytes >= s.len() {
         return s;

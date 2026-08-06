@@ -1,6 +1,6 @@
 # 内置工具
 
-> 更新日期：2026-07-30
+> 更新日期：2026-08-06
 
 本文是 Mink 内置工具的协议参考，面向需要理解工具参数、执行模型、结果通道、资源 URL、
 审批和构建裁剪的使用者与开发者。终端使用与配置见 [使用手册](USAGE.md)；Rust/Python
@@ -162,7 +162,9 @@ cargo build --release
 - `skill://list` / `skill://list/all` / `skill://<name>` / `skill://<name>/<relative-path>` 可通过当前 `Read` provider 读取可用 skills，列表、诊断视图、正文和 filesystem-backed skill 子资源来自同一 capability snapshot。`skill://all` 是 `skill://list/all` 的兼容别名；built-in/runtime skill 只支持读取正文，不支持子资源。selected skill 正文直接进入 prompt，不依赖此 provider。
 - `rule://list` / `rule://<name>` 可读取可用 rules。
 - `session://current`、`session://current/stats`、`session://current/messages`、`session://current/history`、`session://current/artifacts` 可读取当前 session 状态。
-- 默认可读整文件，但大文件会受到工具结果上限保护。
+- 默认可读整文件，但大文件超过工具结果上限时返回头尾预览 + 行数 + selector 示例（不再纯报错）。
+- 会话内重复读取同一未变更文件返回 "unchanged, no edits since. Reuse that content." 短响应（Read memo，本地文件）；Write/Edit 成功后失效，压缩后强制重读。
+- 参数只接受 `path`（行范围用路径选择器）；未知字段被拒绝。
 - 搜索具体内容时优先用 `Grep`，定位后再用 `Read` path selector 读取目标范围。
 - UI 展示会额外加 `Read(path) [lines, bytes]` 摘要。
 

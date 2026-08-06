@@ -950,6 +950,9 @@ mod tests {
             store,
             artifacts,
             todo_store,
+            read_memo: Arc::new(Mutex::new(crate::tools::read_memo::ReadMemo::new())),
+            memo_epoch: compaction.memo_epoch(),
+            memo_mutation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             snapshots: Arc::new(Mutex::new(
                 crate::tools::snapshot::FileSnapshotStore::default(),
             )),

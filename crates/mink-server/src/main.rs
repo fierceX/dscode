@@ -50,8 +50,8 @@ async fn main() -> Result<()> {
     let web_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("web")
         .join("dist");
-    let use_embedded = std::env::var("MINK_SERVER_DEV_WEB").is_err()
-        && !crate::web_assets::FILES.is_empty();
+    let use_embedded =
+        std::env::var("MINK_SERVER_DEV_WEB").is_err() && !crate::web_assets::FILES.is_empty();
     let app = if use_embedded {
         use axum::handler::HandlerWithoutStateExt;
         api::router(state).fallback_service(crate::web_assets::embedded_serve.into_service())
@@ -98,4 +98,3 @@ fn print_usage() {
     println!("Config: mink-server.toml path (optional); falls back to ~/.minkrc and environment.");
     println!("Environment: MINK_HOME, MINK_SERVER_HOST, MINK_SERVER_PORT, MINK_SERVER_MAX_RUNNING");
 }
-

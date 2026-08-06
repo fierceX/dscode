@@ -115,6 +115,15 @@ impl FileSnapshotStore {
             .is_some_and(|tags| tags.iter().any(|item| item.eq_ignore_ascii_case(tag)))
     }
 
+    /// Tag of the most recent snapshot for a path, when one exists.
+    pub fn latest_tag(&self, path: &Path) -> Option<String> {
+        let path = canonical_snapshot_path(path);
+        self.by_path
+            .get(&path)?
+            .front()
+            .map(|snapshot| snapshot.tag.clone())
+    }
+
     pub fn versions(&self, path: &Path, tag: &str) -> Vec<FileSnapshot> {
         let path = canonical_snapshot_path(path);
         self.by_path

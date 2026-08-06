@@ -82,7 +82,10 @@ fn main() {
         .map(|s| s.success())
         .unwrap_or(false);
     if !npm_ok {
-        eprintln!("[build.rs] warning: `npm run build` failed in {}; embedded web UI will be empty (runtime falls back to disk ServeDir)", web_dir.display());
+        eprintln!(
+            "[build.rs] warning: `npm run build` failed in {}; embedded web UI will be empty (runtime falls back to disk ServeDir)",
+            web_dir.display()
+        );
     }
 
     // 2. 复制 dist → OUT_DIR/assets（include_str! 需要编译期路径）

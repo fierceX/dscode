@@ -1,0 +1,65 @@
+{
+  "name": "no-change-loop",
+  "source": "生产轨迹分析：对同一行反复 insert/replace 同一条文 6+ 次、每次 tag 都变化，全库 no-change 60 次",
+  "setup": {
+    "files": {
+      "compliance_report.md": "{{REPORT_FILE}}"
+    },
+    "config": {}
+  },
+  "steps": [
+    {
+      "tool": "Read",
+      "input": {
+        "path": "compliance_report.md"
+      }
+    },
+    {
+      "tool": "Edit",
+      "input": {
+        "input": "{{PATCH_BODY}}"
+      }
+    },
+    {
+      "tool": "Read",
+      "input": {
+        "path": "compliance_report.md"
+      }
+    },
+    {
+      "tool": "Edit",
+      "input": {
+        "input": "{{PATCH_BODY}}"
+      }
+    },
+    {
+      "tool": "Read",
+      "input": {
+        "path": "compliance_report.md"
+      }
+    },
+    {
+      "tool": "Edit",
+      "input": {
+        "input": "{{PATCH_BODY}}"
+      }
+    }
+  ],
+  "asserts": [
+    {
+      "after_step": 1,
+      "success": true,
+      "contains": "updated"
+    },
+    {
+      "after_step": 3,
+      "success": true,
+      "contains": "already applied (idempotent)"
+    },
+    {
+      "after_step": 5,
+      "success": true,
+      "contains": "already applied (idempotent)"
+    }
+  ]
+}

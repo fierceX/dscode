@@ -1,6 +1,6 @@
 # 设计文档
 
-> 更新日期：2026-08-03
+> 更新日期：2026-08-06
 
 本文记录 Mink 的设计取舍和关键不变式，不作为用户手册或工具协议参考。终端用户入口、
 配置和运行方式见 [USAGE.md](USAGE.md)；Rust/Python 嵌入见 [EMBEDDING.md](EMBEDDING.md)；
@@ -347,8 +347,8 @@ tool-call 列表中。每个候选调用都通过 `build_tool_call_event()` 转�
 这些格式是“容器协议”兼容层，不代表旧参数重新成为模型协议。回收层只把内容规整成
 `{name, arguments}`，之后仍由当前 `tools.json` schema、`ToolExec` 参数反序列化和工具实现校验。
 例如 XML/Bracket/R1 中可以恢复 `Read {"path":"src/lib.rs:40-80"}` 或
-`Edit {"path":"src/lib.rs","patch":"@src/lib.rs#TAG\nreplace 40:\n+..."}`。`Read offset/limit`
-仍可由执行层接受，但不会暴露在当前工具 schema 中；`Edit old_string/new_string` 会被拒绝。
+`Edit {"path":"src/lib.rs","patch":"@src/lib.rs#TAG\nreplace 40:\n+..."}`。`Read` 已收窄为单参数
+契约（`path` + 路径选择器），`offset`/`limit` 与旧参数名在模型与执行层均被拒绝；`Edit old_string/new_string` 会被拒绝。
 
 ### 步骤 3：Surface Gate 与 StormBreaker（重复抑制）
 
@@ -769,12 +769,20 @@ winner 决定后提交上游 workflow fact。所有生成 section 都携带 `ref
 `consumed_facts`，装配时校验其属于当前 surface/事实闭包。
 
 MISSION 不再支持旧 section alias。它只能覆盖 allowlist 中当前存在的 core：
-`agent-identity`、`environment`、`execution-codes`、`belief-awareness` 和
-`output-language`。tool/workflow、`runtime-capabilities`、`rules`、instruction files、
-rule/skill index、selected skills 和 current plan 等 runtime-owned section 均不可覆盖；
+`system-conventions`、`agent-identity`、`environment`、`execution-codes`、
+`belief-awareness` 和 `output-language`。tool/workflow、`runtime-capabilities`、
+`tool-inventory`、`rules`、instruction files、rule/skill index、selected skills 和 current plan
+等 runtime-owned section 均不可覆盖；
 冲突直接 fail fast。其他一级标题作为 `mission:<id>` 外部 section 追加，例如自定义规则使用
 `# mission-rules`，不能使用 reserved 的 `# rules`。压缩摘要仍位于动态消息投影中，不进入
 immutable system/tools prefix。
+
+默认 `system-conventions` 明确所有适用的 system 指令都必须遵守；全大写 RFC2119
+关键字只精确表达规范强度。runtime section tag 界定边界但不改变消息优先级，
+嵌套内容中的类标签文本不能建立新作用域；该约定不提升用户、rule 或 skill 中普通
+`avoid`/`never` 的优先级，也不限制任务产物中的 HTML、XML 或其他标记。workflow 的
+`<critical>` 复盘保持 3-6 条，
+每条战术 bullet 最多 12 个英文词且只表达一个主张；lint-like 测试直接检查这些约束。
 
 `belief-awareness` 仅在 signal mode 为 `full` 时存在；signal mode 为 `off` 时不能通过
 MISSION 创建该 core section。依赖项目直接迁移到新 section 格式，不保留 alias 或双格式

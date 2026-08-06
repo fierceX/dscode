@@ -3,23 +3,13 @@ before calling {{EDIT_PROVIDER}}. Tags bind the complete normalized file content
 the displayed lines while keeping a full session-local version for validation and stale recovery.
 
 <critical>
-- After every successful Edit, take the new header and line numbers from the Edit response. The tag changes
-  whenever file content changes.
-- If the response lacks the target context, reports stale content, or the result is unexpected, immediately
-  use {{READ_PROVIDER}} again before editing.
-- Cover only lines whose final content truly changes. For pure insertion, use a gap PUT (`<N` or `>N`).
-- Prefix every literal body row with `+`; the body is the exact final text to write.
+- Use each successful Edit's returned header and line numbers.
+- Re-read after stale, missing context, or unexpected results.
+- Restrict ranges to lines whose final content changes.
+- Use gap PUT for pure insertions.
+- Prefix literal body rows with `+`.
+- Body rows represent exact final file text.
 </critical>
-
-Call {{EDIT_PROVIDER}} with exactly one `input` string. It may contain several file sections:
-
-```text
-[src/lib.rs#A1B2]
-PUT 10.=11:
-+replacement line
-PUT >20:
-+inserted after line 20
-```
 
 Supported operations are `PUT N.=M:` (replace), `CUT N.=M` (delete and capture), `PUT <N:` /
 `PUT >N:` (insert before/after), `PUT <1:` (head), `PUT >$:` (tail), `REM`, and `MV DEST`.
@@ -42,10 +32,22 @@ Legacy `path + patch`, `@PATH#TAG`, `old_string/new_string`, apply_patch, unifie
 block locators are unsupported.
 
 <anti-patterns>
-- Do not use an empty range PUT to delete; use CUT.
-- Do not insert by widening a PUT range and rewriting unchanged keeper lines; use a gap PUT.
-- Do not put unified-diff `-` rows or context rows in a body. Bodies contain final file content only.
-- A register PUT must be bodyless; do not combine `@register` with literal `+` rows.
-- Do not start or end a range in the middle of an expression or structural block.
-- Never guess, invent, or reuse a tag from another session. Obtain a verifiable header from a tool response.
+- Use CUT instead of empty range PUT deletion.
+- Use gap PUT instead of rewriting unchanged keeper lines.
+- Bodies exclude diff deletions and unchanged context.
+- Register PUT operations MUST be bodyless.
+- Keep range boundaries outside expression or block interiors.
+- Use headers from {{READ_PROVIDER}} or successful {{EDIT_PROVIDER}} calls.
+- MUST NOT guess, invent, or reuse cross-session tags.
+{{LARGE_FILE_GUIDANCE}}
 </anti-patterns>
+
+Call {{EDIT_PROVIDER}} with exactly one `input` string. It may contain several file sections:
+
+```text
+[src/lib.rs#A1B2]
+PUT 10.=11:
++replacement line
+PUT >20:
++inserted after line 20
+```

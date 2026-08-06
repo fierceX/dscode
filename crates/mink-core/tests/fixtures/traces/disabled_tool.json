@@ -1,0 +1,40 @@
+{
+  "name": "disabled-tool",
+  "source": "生产轨迹分析：全库 Bash 调用 71 次，其中 356 次结果为 'Tool Bash is disabled by configuration.'",
+  "setup": {
+    "files": {
+      "a.md": "line 1\n"
+    },
+    "config": {
+      "enabled_tools": [
+        "Read"
+      ]
+    }
+  },
+  "steps": [
+    {
+      "tool": "Bash",
+      "input": {
+        "command": "ls -la"
+      }
+    },
+    {
+      "tool": "Bash",
+      "input": {
+        "command": "ls -la"
+      }
+    }
+  ],
+  "asserts": [
+    {
+      "after_step": 0,
+      "success": false,
+      "contains": "unavailable"
+    },
+    {
+      "after_step": 1,
+      "success": false,
+      "contains": "unavailable"
+    }
+  ]
+}

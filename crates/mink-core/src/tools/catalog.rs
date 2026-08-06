@@ -174,6 +174,66 @@ mod tests {
             crate::tools::runner::tool_registry().len()
         );
     }
+    #[test]
+    fn schemas_declare_exactly_the_runtime_accepted_fields() {
+        const CONTRACT: &[(&str, &[&str])] = &[
+            ("Read", &["path"]),
+            ("Glob", &["pattern", "path"]),
+            ("Grep", &["pattern", "path", "glob", "context"]),
+            ("Write", &["path", "content"]),
+            ("Edit", &["input"]),
+            ("Bash", &["command", "timeout"]),
+            ("Python", &["script", "script_file", "timeout"]),
+            ("TodoRead", &["include_completed"]),
+            ("TodoWrite", &["base_revision", "add", "update", "remove"]),
+            (
+                "TodoAdvance",
+                &["base_revision", "complete", "activate", "pause", "reopen"],
+            ),
+            ("PlanDraft", &["content"]),
+            ("PlanConfirm", &[]),
+            ("PlanClear", &[]),
+            ("SubAgent", &["prompt", "description", "fork"]),
+            ("PythonSandbox", &["script", "script_file", "timeout"]),
+        ];
+        let catalog = ToolCatalog::builtin().unwrap();
+        let mut covered = BTreeSet::new();
+        for (name, fields) in CONTRACT {
+            covered.insert(*name);
+            let tool = catalog
+                .get(name)
+                .unwrap_or_else(|| panic!("schema for '{name}' missing from catalog"));
+            let schema = &tool.schema["input_schema"];
+            assert_eq!(
+                schema.get("type").and_then(serde_json::Value::as_str),
+                Some("object"),
+                "{name} input schema must be an object"
+            );
+            assert_eq!(
+                schema.get("additionalProperties"),
+                Some(&serde_json::json!(false)),
+                "{name} schema must reject unknown fields (additionalProperties: false)"
+            );
+            let declared: BTreeSet<&str> = schema["properties"]
+                .as_object()
+                .expect("properties object")
+                .keys()
+                .map(String::as_str)
+                .collect();
+            let expected: BTreeSet<&str> = fields.iter().copied().collect();
+            assert_eq!(
+                declared, expected,
+                "{name} schema properties drift from the runtime contract"
+            );
+        }
+        for (tool, _) in catalog.iter_compiled() {
+            assert!(
+                covered.contains(tool.name.as_str()),
+                "no contract entry for compiled tool '{}'",
+                tool.name
+            );
+        }
+    }
 
     #[test]
     fn configured_names_fail_fast() {

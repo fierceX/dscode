@@ -5,3 +5,9 @@ review. Omit it for trivial single-step or purely informational requests.
 the current revision or full backlog is unknown, after a stale-revision error, or when the active
 projection says pending work exists but no batch is active. The highest successful revision visible
 in the conversation is current; do not reconstruct the list from older events.
+
+<critical>
+- Inspect todos before non-trivial work when backlog is unknown.
+- Trust only the highest successful revision.
+- MUST NOT reconstruct state from older events.
+</critical>

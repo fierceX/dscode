@@ -25,13 +25,15 @@ fn main() {
 
     let hash = match std::env::var("MINK_GIT_HASH") {
         Ok(value) if !value.trim().is_empty() => value.trim().to_string(),
-        _ => git_short_hash().map(|hash| {
-            if working_tree_dirty() {
-                format!("{hash}-dirty")
-            } else {
-                hash
-            }
-        }).unwrap_or_default(),
+        _ => git_short_hash()
+            .map(|hash| {
+                if working_tree_dirty() {
+                    format!("{hash}-dirty")
+                } else {
+                    hash
+                }
+            })
+            .unwrap_or_default(),
     };
 
     println!("cargo:rustc-env=MINK_GIT_HASH={hash}");

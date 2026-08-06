@@ -620,10 +620,10 @@
       "all": false,
       "fuzzy": true,
       "threshold": 0.95,
-      "error_contains": "no changes",
       "expected": {
-        "ok": false,
-        "error": "no changes"
+        "ok": true,
+        "content": "a\n",
+        "count": 0
       }
     },
     {

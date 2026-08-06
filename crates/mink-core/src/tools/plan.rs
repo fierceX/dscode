@@ -80,11 +80,11 @@ impl ToolExec for PlanConfirmTool {
         .internal()
     }
 
-    fn execute(
-        &self,
-        _input: &serde_json::Value,
-        ctx: &ToolContext,
-    ) -> anyhow::Result<ToolOutcome> {
+    fn execute(&self, input: &serde_json::Value, ctx: &ToolContext) -> anyhow::Result<ToolOutcome> {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Args {}
+        let _: Args = serde_json::from_value(input.clone())?;
         let content = ctx.plan_store.confirm()?;
         let mut outcome = ToolOutcome::plan(PlanCommand::Confirm, "Plan confirmed and locked in.");
         outcome.presentation = Some(ToolPresentation::Plan(PlanDisplay {
@@ -108,11 +108,11 @@ impl ToolExec for PlanClearTool {
         .internal()
     }
 
-    fn execute(
-        &self,
-        _input: &serde_json::Value,
-        ctx: &ToolContext,
-    ) -> anyhow::Result<ToolOutcome> {
+    fn execute(&self, input: &serde_json::Value, ctx: &ToolContext) -> anyhow::Result<ToolOutcome> {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Args {}
+        let _: Args = serde_json::from_value(input.clone())?;
         ctx.plan_store.clear()?;
         let mut outcome = ToolOutcome::plan(PlanCommand::Clear, "Plan cleared.");
         outcome.presentation = Some(ToolPresentation::Plan(PlanDisplay {

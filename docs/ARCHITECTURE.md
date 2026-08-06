@@ -1,6 +1,6 @@
 # 架构说明
 
-> 更新日期：2026-08-03
+> 更新日期：2026-08-06
 
 本文描述 Mink 当前代码结构、模块职责和运行时数据流。终端用户命令、配置和工作流见
 [USAGE.md](USAGE.md)；Rust/Python 嵌入见 [EMBEDDING.md](EMBEDDING.md)；机器协议见
@@ -335,9 +335,10 @@ Core sections
   -> render
 ```
 
-MISSION 只能覆盖 `agent-identity`、`environment`、`execution-codes`、
+MISSION 只能覆盖 `system-conventions`、`agent-identity`、`environment`、`execution-codes`、
 `belief-awareness` 和 `output-language` 中当前实际存在的 core section。工具 prompt、
-workflow、`runtime-capabilities`、`rules`、instruction files、索引、selected skills 和
+workflow、`runtime-capabilities`、`tool-inventory`（非空 surface 时自动生成的工具清单）、
+`rules`、instruction files、索引、selected skills 和
 `current-plan` 属于 runtime-reserved section；普通自定义一级标题作为外部 section 追加。
 runtime-reserved section 冲突会在启动时 fail fast，不保留旧 alias。
 

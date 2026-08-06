@@ -45,7 +45,13 @@ fn collector_rust_error_detected() {
 #[test]
 fn collector_clean_output_ignored() {
     let mut c = SignalCollector::new();
-    let sigs = c.collect("Bash", "everything is fine", None, "everything is fine", true);
+    let sigs = c.collect(
+        "Bash",
+        "everything is fine",
+        None,
+        "everything is fine",
+        true,
+    );
     assert!(
         !sigs.iter().any(|s| matches!(s.kind, SignalKind::ToolError)),
         "exit code 0 should not be an error"
@@ -71,7 +77,13 @@ fn collector_tool_error_detected() {
 #[test]
 fn collector_clean_output_no_signals() {
     let mut c = SignalCollector::new();
-    let sigs = c.collect("Read", "everything is fine", None, "everything is fine", false);
+    let sigs = c.collect(
+        "Read",
+        "everything is fine",
+        None,
+        "everything is fine",
+        false,
+    );
     assert!(sigs.is_empty(), "clean output should produce no signals");
 }
 

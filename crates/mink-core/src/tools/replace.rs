@@ -64,10 +64,16 @@ pub fn replace_text(
         let exact = exact_matches(content, old_text, &[]);
         if !exact.is_empty() {
             let result = content.replace(old_text, new_text);
-            ensure!(
-                result != content,
-                "Error: edit to {path} resulted in no changes"
-            );
+            if result == content {
+                if old_text == new_text {
+                    return Ok(ReplaceResult {
+                        content: result,
+                        count: 0,
+                        strategy: "idempotent",
+                    });
+                }
+                bail!("Error: edit to {path} resulted in no changes");
+            }
             return Ok(ReplaceResult {
                 content: result,
                 count: exact.len(),
@@ -75,8 +81,22 @@ pub fn replace_text(
             });
         }
 
-        // Match against the immutable source. Excluded ranges prevent both
-        // overlap and replacement text from becoming a later candidate.
+        // `old == new` with no exact match: succeed idempotently only when a
+        // fuzzy candidate actually exists (the file holds a near-identical
+        // text and the edit must not normalize it); with no candidate at all
+        // the call keeps failing closed instead of faking a successful update.
+        if old_text == new_text {
+            let probe = find_match(content, old_text, allow_fuzzy, threshold, &[]);
+            if probe.matched.is_some() {
+                return Ok(ReplaceResult {
+                    content: content.to_string(),
+                    count: 0,
+                    strategy: "idempotent",
+                });
+            }
+        }
+
+        // Fuzzy all-replace path (old != new): replace every near candidate.
         let mut replacements: Vec<(Match, String)> = Vec::new();
         loop {
             let excluded = replacements
@@ -110,9 +130,16 @@ pub fn replace_text(
         }
         result.push_str(&content[source_index..]);
         ensure!(
-            result != content,
+            result != content || old_text == new_text,
             "Error: edit to {path} resulted in no changes"
         );
+        if result == content {
+            return Ok(ReplaceResult {
+                content: result,
+                count: 0,
+                strategy: "idempotent",
+            });
+        }
         return Ok(ReplaceResult {
             content: result,
             count: replacements.len(),
@@ -139,6 +166,15 @@ pub fn replace_text(
             threshold
         ));
     };
+    // Single-target `old == new`: the target exists (matched above) and the
+    // edit is a no-op by definition — never rewrite the file.
+    if old_text == new_text {
+        return Ok(ReplaceResult {
+            content: content.to_string(),
+            count: 0,
+            strategy: "idempotent",
+        });
+    }
     let actual = &content[matched.start..matched.end];
     let replacement = adjust_indentation(old_text, actual, new_text);
     let mut result = String::with_capacity(content.len() - actual.len() + replacement.len());
@@ -146,9 +182,16 @@ pub fn replace_text(
     result.push_str(&replacement);
     result.push_str(&content[matched.end..]);
     ensure!(
-        result != content,
+        result != content || old_text == new_text,
         "Error: edit to {path} resulted in no changes"
     );
+    if result == content {
+        return Ok(ReplaceResult {
+            content: result,
+            count: 0,
+            strategy: "idempotent",
+        });
+    }
     Ok(ReplaceResult {
         content: result,
         count: 1,
@@ -745,6 +788,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn replace_with_identical_text_is_idempotent() {
+        let result = replace_text("a\nb\n", "b", "b", false, false, 0.95, "x.md").unwrap();
+        assert_eq!(result.strategy, "idempotent");
+        assert_eq!(result.content, "a\nb\n");
+        assert_eq!(result.count, 0);
+    }
+
+    #[test]
+    fn replace_all_with_identical_text_is_idempotent() {
+        let result = replace_text("a\nb\nb\n", "b", "b", true, false, 0.95, "x.md").unwrap();
+        assert_eq!(result.strategy, "idempotent");
+        assert_eq!(result.content, "a\nb\nb\n");
+    }
+
+    #[test]
     fn exact_ambiguity_is_rejected_and_all_replaces_every_match() {
         let error = replace_text("x x", "x", "y", false, true, 0.95, "a").unwrap_err();
         assert!(error.to_string().contains("2 occurrences"));
@@ -777,6 +835,34 @@ mod tests {
     fn indentation_only_rewrite_is_preserved() {
         let result = replace_text("    x\n", "x \n", "  x\n", false, true, 0.95, "a").unwrap();
         assert_eq!(result.content, "  x\n");
+    }
+
+    #[test]
+    fn identical_text_when_target_missing_still_fails_closed() {
+        // 目标文本完全不存在时，`old == new` 不得伪装成成功更新：
+        // 保持 fail-closed（match_error），与文档声明的保守行为一致。
+        let error = replace_text("hello\n", "absent", "absent", false, false, 0.95, "x.md")
+            .expect_err("missing target with old==new must fail closed");
+        assert!(error.to_string().contains("Could not find"), "{error:#}");
+    }
+
+    #[test]
+    fn identical_text_fuzzy_candidate_is_idempotent_without_rewriting() {
+        // old 与 actual 仅差一个字符：无 exact 命中，但有高相似 fuzzy 候选。
+        // old == new 时幂等成功且不得把候选改写/规范化。
+        let content = "alpha betta gamma\n";
+        let result = replace_text(
+            content,
+            "alpha beta gamma",
+            "alpha beta gamma",
+            false,
+            true,
+            0.9,
+            "x.md",
+        )
+        .unwrap();
+        assert_eq!(result.strategy, "idempotent");
+        assert_eq!(result.content, content);
     }
 
     #[test]
