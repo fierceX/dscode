@@ -6,7 +6,7 @@ the displayed lines while keeping a full session-local version for validation an
 - Use each successful Edit's returned header and line numbers.
 - Re-read after stale, missing context, or unexpected results.
 - Restrict ranges to lines whose final content changes.
-- Use gap PUT for pure insertions.
+- Use 'start'..'end' anchors when line numbers are uncertain.
 - Prefix literal body rows with `+`.
 - Body rows represent exact final file text.
 </critical>
@@ -15,6 +15,13 @@ Supported operations are `PUT N.=M:` (replace), `CUT N.=M` (delete and capture),
 `PUT >N:` (insert before/after), `PUT <1:` (head), `PUT >$:` (tail), `REM`, and `MV DEST`.
 Single lines use `N.=N`. Prefix every literal body row with `+`; `++text` writes a line beginning
 with `+`.
+
+Range endpoints may be anchor line texts instead of line numbers:
+`PUT 'start line text'..'end line text':` replaces the lines between the two matching lines
+(inclusive), and `CUT 'start'..'end':` deletes them. Anchors are matched after trimming, must be
+unique, and come from the current {{READ_PROVIDER}} output — copy the line text exactly. Short lines
+such as `}` or `)` are rarely unique; use a longer line (a signature or a distinctive statement) as
+the anchor instead.
 
 Move text with registers: `CUT 5.=9 @fn` captures named register `fn`, and bodyless
 `PUT >40 @fn` pastes it. Named registers persist across Edit calls. An unlabeled `CUT` followed by a
@@ -38,6 +45,8 @@ block locators are unsupported.
 - Register PUT operations MUST be bodyless.
 - Keep range boundaries outside expression or block interiors.
 - Use headers from {{READ_PROVIDER}} or successful {{EDIT_PROVIDER}} calls.
+- MUST NOT guess line numbers when anchor text is available.
+- MUST NOT use non-unique anchor text.
 - MUST NOT guess, invent, or reuse cross-session tags.
 {{LARGE_FILE_GUIDANCE}}
 </anti-patterns>
@@ -50,4 +59,14 @@ PUT 10.=11:
 +replacement line
 PUT >20:
 +inserted after line 20
+```
+
+Anchor range example (boundaries by line text, not line numbers):
+
+```text
+[src/lib.rs#A1B2]
+PUT 'pub fn run('..'   }':
++pub fn run() {
++    new_body();
++}
 ```

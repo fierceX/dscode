@@ -90,7 +90,7 @@
   },
   {
     "name": "Edit",
-    "description": "Apply a hashline edit. The runtime-selected Edit mode replaces this catalog template before exposing it to the model.\n\nCommon mistakes: `PUT18.=18:` is parsed as `PUT 18.=18:` (missing space is accepted), but ranges must be start<=end and stay inside the file; unified-diff or apply_patch syntax is never valid.",
+    "description": "Apply a hashline edit. The runtime-selected Edit mode replaces this catalog template before exposing it to the model.\n\nCommon mistakes: `PUT18.=18:` is parsed as `PUT 18.=18:` (missing space is accepted), but ranges must be start<=end and stay inside the file; unified-diff or apply_patch syntax is never valid.\n\nRange endpoints may be anchor line texts: `PUT 'start'..'end':` or `CUT 'start'..'end':` locate boundaries by unique trimmed line text (from the latest Read output) instead of line numbers; anchors must match exactly one line.",
     "input_schema": {
       "type": "object",
       "properties": {

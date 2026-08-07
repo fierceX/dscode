@@ -19,22 +19,33 @@ pub enum Cursor {
     After(usize),
 }
 
+/// A range endpoint: a 1-based line number, or an anchor line text matched
+/// (trimmed, exact) against the file. Anchor locators (`'start'..'end'`) let
+/// the model name the boundary lines instead of computing line numbers, so
+/// off-by-one range errors become impossible and failures are always visible
+/// (anchor not found / not unique) instead of silent corruption.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RangeBound {
+    Line(usize),
+    Anchor(String),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PasteTarget {
     Gap(Cursor),
-    Range { start: usize, end: usize },
+    Range { start: RangeBound, end: RangeBound },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Operation {
     Put {
-        start: usize,
-        end: usize,
+        start: RangeBound,
+        end: RangeBound,
         body: Vec<String>,
     },
     Cut {
-        start: usize,
-        end: usize,
+        start: RangeBound,
+        end: RangeBound,
         register: Option<String>,
     },
     Insert {
@@ -75,7 +86,13 @@ pub fn already_applied(text: &str, operations: &[Operation]) -> bool {
     };
     operations.iter().all(|operation| match operation {
         Operation::Put { start, end, body } => {
-            if *start < 1 || *end < *start || *end > lines.len() {
+            let (Ok(start), Ok(end)) = (
+                resolve_bound(&lines, start, ""),
+                resolve_bound(&lines, end, ""),
+            ) else {
+                return false;
+            };
+            if start < 1 || end < start || end > lines.len() {
                 return false;
             }
             matches(start - 1, body)
@@ -126,7 +143,7 @@ pub struct ApplyResult {
 
 #[derive(Debug, Clone)]
 enum PendingKind {
-    Put { start: usize, end: usize },
+    Put { start: RangeBound, end: RangeBound },
     Insert { cursor: Cursor },
 }
 
@@ -411,7 +428,7 @@ fn parse_operation(
                 .push("Ignored trailing `:` on CUT; CUT takes no body rows.".to_string());
         }
         let (locator, register) = split_register(rest, line_num)?;
-        let (start, end) = parse_range(locator, line_num)?;
+        let (start, end) = parse_locator_range(locator, line_num)?;
         section.operations.push(Operation::Cut {
             start,
             end,
@@ -457,7 +474,7 @@ fn parse_operation(
                 pending,
             );
         }
-        let (start, end) = parse_range(locator, line_num)?;
+        let (start, end) = parse_locator_range(locator, line_num)?;
         if let Some(register) = register {
             ensure!(
                 !had_colon,
@@ -489,6 +506,76 @@ fn parse_operation(
     bail!(
         "Error: line {line_num}: unknown hashline operation {line:?}; expected PUT, CUT, REM, or MV"
     )
+}
+
+/// Parse an anchor locator: `'start line text'..'end line text'` (single or
+/// double quotes). Anchors are matched trimmed and exact against file lines at
+/// apply time, and must be unique.
+fn parse_anchor_range(raw: &str, line_num: usize) -> Result<(RangeBound, RangeBound)> {
+    let raw = raw.trim();
+    let parse_one = |part: &str| -> Result<String> {
+        let part = part.trim();
+        let Some(quote) = part.chars().next().filter(|c| *c == '\'' || *c == '"') else {
+            bail!("Error: line {line_num}: anchor locator must start with ' or \" (got {part:?})");
+        };
+        let inner = part[quote.len_utf8()..]
+            .split_once(quote)
+            .map(|(inner, _)| inner)
+            .ok_or_else(|| {
+                anyhow!("Error: line {line_num}: unterminated anchor locator {part:?}")
+            })?;
+        ensure!(
+            !inner.trim().is_empty(),
+            "Error: line {line_num}: anchor locator must not be empty"
+        );
+        Ok(inner.to_string())
+    };
+    let Some((start_part, end_part)) = raw.split_once("..") else {
+        bail!("Error: line {line_num}: anchor locator must be 'start'..'end' (got {raw:?})");
+    };
+    ensure!(
+        !end_part.trim().contains(".."),
+        "Error: line {line_num}: anchor locator has more than one '..' separator"
+    );
+    Ok((
+        RangeBound::Anchor(parse_one(start_part)?),
+        RangeBound::Anchor(parse_one(end_part)?),
+    ))
+}
+
+/// Line-number locator (`40.=60`) or anchor locator (`'start'..'end'`).
+fn parse_locator_range(raw: &str, line_num: usize) -> Result<(RangeBound, RangeBound)> {
+    if raw.trim_start().starts_with('\'') || raw.trim_start().starts_with('"') {
+        parse_anchor_range(raw, line_num)
+    } else {
+        parse_range(raw, line_num)
+    }
+}
+
+/// Resolve a range bound against the file's lines (1-based). Anchor text is
+/// matched trimmed and exact; zero matches is an error with a re-Read hint,
+/// multiple matches is an error asking for a longer, unique line.
+fn resolve_bound(lines: &[String], bound: &RangeBound, path: &str) -> Result<usize> {
+    match bound {
+        RangeBound::Line(line) => Ok(*line),
+        RangeBound::Anchor(text) => {
+            let matches: Vec<usize> = lines
+                .iter()
+                .enumerate()
+                .filter(|(_, line)| line.trim() == text.trim())
+                .map(|(index, _)| index + 1)
+                .collect();
+            match matches.len() {
+                0 => bail!(
+                    "Error: anchor line not found in {path}: {text:?}; re-Read the file and copy the exact line text"
+                ),
+                1 => Ok(matches[0]),
+                n => bail!(
+                    "Error: anchor line is not unique in {path} ({n} matches): {text:?}; use a longer line that appears exactly once"
+                ),
+            }
+        }
+    }
 }
 
 fn strip_optional_colon(input: &str) -> (&str, bool) {
@@ -672,7 +759,7 @@ fn literal_mapping_value(value: &str) -> bool {
         || value.parse::<f64>().is_ok()
 }
 
-fn parse_range(raw: &str, line_num: usize) -> Result<(usize, usize)> {
+fn parse_range(raw: &str, line_num: usize) -> Result<(RangeBound, RangeBound)> {
     let raw = raw.trim();
     let first_end = raw
         .find(|ch: char| !ch.is_ascii_digit())
@@ -688,7 +775,7 @@ fn parse_range(raw: &str, line_num: usize) -> Result<(usize, usize)> {
         }
     }
     if remainder.is_empty() {
-        return Ok((start, start));
+        return Ok((RangeBound::Line(start), RangeBound::Line(start)));
     }
     ensure!(
         separator_end > 0,
@@ -703,7 +790,7 @@ fn parse_range(raw: &str, line_num: usize) -> Result<(usize, usize)> {
         end - start < MAX_RANGE_LINES,
         "Error: line {line_num}: range expands beyond {MAX_RANGE_LINES} lines"
     );
-    Ok((start, end))
+    Ok((RangeBound::Line(start), RangeBound::Line(end)))
 }
 
 fn parse_line_number(raw: &str, line_num: usize) -> Result<usize> {
@@ -726,7 +813,11 @@ pub fn anchor_lines(section: &Section) -> BTreeSet<usize> {
             | Operation::Paste {
                 target: PasteTarget::Range { start, end },
                 ..
-            } => anchors.extend(*start..=*end),
+            } => {
+                if let (RangeBound::Line(start), RangeBound::Line(end)) = (start, end) {
+                    anchors.extend(*start..=*end);
+                }
+            }
             Operation::Insert { cursor, .. }
             | Operation::Paste {
                 target: PasteTarget::Gap(cursor),
@@ -773,8 +864,12 @@ pub fn remap_anchors(section: &Section, offset: isize) -> Result<Section> {
                 target: PasteTarget::Range { start, end },
                 ..
             } => {
-                *start = shift(*start)?;
-                *end = shift(*end)?;
+                if let RangeBound::Line(line) = start {
+                    *start = RangeBound::Line(shift(*line)?);
+                }
+                if let RangeBound::Line(line) = end {
+                    *end = RangeBound::Line(shift(*line)?);
+                }
             }
             Operation::Insert { cursor, .. }
             | Operation::Paste {
@@ -805,8 +900,14 @@ pub fn apply(text: &str, section: &Section, clipboard: &mut Clipboard) -> Result
                 target: PasteTarget::Range { start, end },
                 ..
             } => {
-                validate_range(*start, *end, lines.len(), &section.path)?;
-                ensure_target_free(&mut deleted, *start, *end)?;
+                let start = resolve_bound(&lines, start, &section.path)?;
+                let end = resolve_bound(&lines, end, &section.path)?;
+                ensure!(
+                    start <= end,
+                    "Error: anchor range start line {start} is after end line {end}"
+                );
+                validate_range(start, end, lines.len(), &section.path)?;
+                ensure_target_free(&mut deleted, start, end)?;
             }
             _ => {}
         }
@@ -816,7 +917,9 @@ pub fn apply(text: &str, section: &Section, clipboard: &mut Clipboard) -> Result
     for operation in &section.operations {
         match operation {
             Operation::Put { start, end, body } => {
-                let repair = repair_replacement(&lines, *start, *end, body, section_delta)?;
+                let start = resolve_bound(&lines, start, &section.path)?;
+                let end = resolve_bound(&lines, end, &section.path)?;
+                let repair = repair_replacement(&lines, start, end, body, section_delta)?;
                 for line in repair.keep_lines {
                     deleted.remove(&line);
                 }
@@ -830,7 +933,9 @@ pub fn apply(text: &str, section: &Section, clipboard: &mut Clipboard) -> Result
                 end,
                 register,
             } => {
-                let captured = lines[start - 1..*end].to_vec();
+                let start = resolve_bound(&lines, start, &section.path)?;
+                let end = resolve_bound(&lines, end, &section.path)?;
+                let captured = lines[start - 1..end].to_vec();
                 if let Some(register) = register {
                     clipboard.named.insert(register.clone(), captured);
                 } else {
@@ -851,6 +956,13 @@ pub fn apply(text: &str, section: &Section, clipboard: &mut Clipboard) -> Result
                 insertions.entry(boundary).or_default().push(body.clone());
             }
             Operation::Paste { target, register } => {
+                let (start, _end) = match target {
+                    PasteTarget::Range { start, end } => (
+                        resolve_bound(&lines, start, &section.path)?,
+                        resolve_bound(&lines, end, &section.path)?,
+                    ),
+                    PasteTarget::Gap(_) => (0, 0),
+                };
                 let body = if let Some(register) = register {
                     clipboard
                         .named
@@ -881,7 +993,7 @@ pub fn apply(text: &str, section: &Section, clipboard: &mut Clipboard) -> Result
                         }
                         insertions.entry(boundary).or_default().push(body);
                     }
-                    PasteTarget::Range { start, .. } => {
+                    PasteTarget::Range { .. } => {
                         insertions.entry(start - 1).or_default().push(body);
                     }
                 }
@@ -945,10 +1057,22 @@ fn section_delimiter_delta(lines: &[String], section: &Section) -> Option<Delimi
     for operation in &section.operations {
         let contribution = match operation {
             Operation::Put { start, end, body } => {
-                balance(body).subtract(balance(&lines[start - 1..*end]))
+                let (Ok(start), Ok(end)) = (
+                    resolve_bound(lines, start, &section.path),
+                    resolve_bound(lines, end, &section.path),
+                ) else {
+                    return None;
+                };
+                balance(body).subtract(balance(&lines[start - 1..end]))
             }
             Operation::Cut { start, end, .. } => {
-                DelimiterBalance::default().subtract(balance(&lines[start - 1..*end]))
+                let (Ok(start), Ok(end)) = (
+                    resolve_bound(lines, start, &section.path),
+                    resolve_bound(lines, end, &section.path),
+                ) else {
+                    return None;
+                };
+                DelimiterBalance::default().subtract(balance(&lines[start - 1..end]))
             }
             Operation::Insert { body, .. } => balance(body),
             Operation::Paste { .. } => return None,
@@ -1367,6 +1491,93 @@ fn cursor_boundary(cursor: &Cursor, line_count: usize, path: &str) -> Result<usi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn anchor_locator_cut_deletes_between_anchors() {
+        // 'start'..'end' 锚点：范围由行文本定位（含两端），模型不给行号。
+        let patch = parse("[a.rs#1A2B]\nCUT 'alpha'..'omega':").unwrap();
+        let result = apply(
+            "alpha\nbeta\ngamma\nomega\nzeta\n",
+            &patch.sections[0],
+            &mut Clipboard::default(),
+        )
+        .unwrap();
+        assert_eq!(result.text, "zeta\n");
+    }
+
+    #[test]
+    fn anchor_locator_put_replaces_between_anchors() {
+        let patch = parse("[a.rs#1A2B]\nPUT 'fn foo('..'}':\n+new body").unwrap();
+        let text = "fn foo(\n    old();\n}\nfn bar() {}\n";
+        let result = apply(text, &patch.sections[0], &mut Clipboard::default()).unwrap();
+        assert_eq!(result.text, "new body\nfn bar() {}\n");
+    }
+
+    #[test]
+    fn anchor_locator_single_line_and_trim_matching() {
+        // start == end 锚点行 → 单行操作；行首空白被 trim 后匹配。
+        let patch = parse("[a.rs#1A2B]\nPUT 'beta'..'beta':\n+x").unwrap();
+        let result = apply(
+            "alpha\n  beta\ngamma\n",
+            &patch.sections[0],
+            &mut Clipboard::default(),
+        )
+        .unwrap();
+        assert_eq!(result.text, "alpha\nx\ngamma\n");
+    }
+
+    #[test]
+    fn anchor_locator_double_quotes_and_register() {
+        let patch = parse("[a.rs#1A2B]\nCUT \"alpha\"..\"omega\" @saved\nPUT >$ @saved").unwrap();
+        let result = apply(
+            "alpha\nbeta\nomega\n",
+            &patch.sections[0],
+            &mut Clipboard::default(),
+        )
+        .unwrap();
+        assert_eq!(result.text, "alpha\nbeta\nomega\n");
+    }
+
+    #[test]
+    fn anchor_locator_missing_or_ambiguous_anchor_fails_visibly() {
+        // 0 匹配：可诊断错误（不是静默 ±1）。
+        let patch = parse("[a.rs#1A2B]\nCUT 'nope'..'omega':").unwrap();
+        let err = apply(
+            "alpha\nomega\n",
+            &patch.sections[0],
+            &mut Clipboard::default(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("anchor line not found"), "{err}");
+        // 多匹配（`}` 不唯一）：要求更长锚点。
+        let patch = parse("[a.rs#1A2B]\nCUT '}'..'omega':").unwrap();
+        let err = apply(
+            "fn a() {\n    a_body();\n}\nfn b() {\n    b_body();\n}\nomega\n",
+            &patch.sections[0],
+            &mut Clipboard::default(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("not unique"), "{err}");
+    }
+
+    #[test]
+    fn anchor_locator_reversed_range_fails() {
+        let patch = parse("[a.rs#1A2B]\nCUT 'omega'..'alpha':").unwrap();
+        let err = apply(
+            "alpha\nomega\n",
+            &patch.sections[0],
+            &mut Clipboard::default(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("after end"), "{err}");
+    }
+
+    #[test]
+    fn anchor_locator_idempotent_already_applied() {
+        let patch = parse("[a.rs#1A2B]\nPUT 'beta'..'beta':\n+beta").unwrap();
+        let text = "alpha\nbeta\ngamma\n";
+        assert!(already_applied(text, &patch.sections[0].operations));
+    }
 
     #[test]
     fn normalizes_missing_space_locators() {
