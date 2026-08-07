@@ -5,8 +5,8 @@ the displayed lines while keeping a full session-local version for validation an
 <critical>
 - Use each successful Edit's returned header and line numbers.
 - Re-read after stale, missing context, or unexpected results.
-- Restrict ranges to lines whose final content changes.
-- Use 'start'..'end' anchors when line numbers are uncertain.
+- Use line numbers for small precise ranges.
+- Use 'start'..'end' anchors for wide or structural ranges.
 - Prefix literal body rows with `+`.
 - Body rows represent exact final file text.
 </critical>
@@ -16,12 +16,14 @@ Supported operations are `PUT N.=M:` (replace), `CUT N.=M` (delete and capture),
 Single lines use `N.=N`. Prefix every literal body row with `+`; `++text` writes a line beginning
 with `+`.
 
-Range endpoints may be anchor line texts instead of line numbers:
-`PUT 'start line text'..'end line text':` replaces the lines between the two matching lines
-(inclusive), and `CUT 'start'..'end':` deletes them. Anchors are matched after trimming, must be
-unique, and come from the current {{READ_PROVIDER}} output — copy the line text exactly. Short lines
-such as `}` or `)` are rarely unique; use a longer line (a signature or a distinctive statement) as
-the anchor instead.
+Anchor locators name a range by its first and last line: give the exact text of both lines
+(from the latest {{READ_PROVIDER}} output), and the tool operates on everything between them —
+no line math, no off-by-one. `PUT 'start'..'end':` replaces the range (inclusive) and
+`CUT 'start'..'end':` deletes it. Line numbers (`40.=60`) stay the right tool for small,
+already-known ranges; anchors win for wide ranges and structural boundaries (function bodies,
+blocks ending in `}` or `)`). Anchors are matched after trimming and must be unique: short lines
+such as `}` or `)` are rarely unique — use a longer line (a signature or a distinctive statement)
+instead.
 
 Move text with registers: `CUT 5.=9 @fn` captures named register `fn`, and bodyless
 `PUT >40 @fn` pastes it. Named registers persist across Edit calls. An unlabeled `CUT` followed by a
@@ -61,12 +63,18 @@ PUT >20:
 +inserted after line 20
 ```
 
-Anchor range example (boundaries by line text, not line numbers):
+Same change, two locators — line numbers for a small known range, anchors for a wide or
+structural range:
 
 ```text
 [src/lib.rs#A1B2]
+PUT 2.=4:
++    new_body();
++    finish();
+
 PUT 'pub fn run('..'   }':
 +pub fn run() {
 +    new_body();
++    finish();
 +}
 ```
