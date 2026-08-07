@@ -43,7 +43,12 @@ pub(crate) fn render(f: &mut Frame, state: &mut TuiState, mode: TuiMode) {
             let cursor = state.input.clamped_cursor();
             let lines_before = split_at_visual_width(&state.input.buf[..cursor], inner_w);
             let cursor_row = lines_before.len().saturating_sub(1);
-            let content_lines = vis_lines.len().clamp(1, 5);
+            // 输入框正文最大行数受视口高度约束：正文行 + 2 行边框之外，
+            // 布局还需要至少 1 行内容区和 1 行状态栏。主视图入口保证
+            // `area.height >= 5`，因此小视口（inline 最小 8 行）下不会把
+            // 输入框压缩到越界，导致最后一行被裁剪、光标落到边框上。
+            let max_content_lines = usize::from(area.height).saturating_sub(4).clamp(1, 5);
+            let content_lines = vis_lines.len().clamp(1, max_content_lines);
             state.input.scroll_row = clamp_input_scroll(
                 vis_lines.len(),
                 cursor_row,

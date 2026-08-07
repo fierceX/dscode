@@ -238,6 +238,9 @@ impl Display for EventDisplay {
         self.emit(AgentEvent::Stop {
             reason: "end_turn".to_string(),
         });
+        if let Some(delegate) = &self.delegate {
+            delegate.render_stop();
+        }
     }
 
     fn render_stop_with_reason(&self, reason: &str) {
@@ -395,6 +398,35 @@ mod tests {
         fn render_clear_line(&self) {}
     }
 
+    #[derive(Default)]
+    struct StopRecordingDisplay {
+        stop_count: Mutex<usize>,
+    }
+
+    impl Display for StopRecordingDisplay {
+        fn render_thinking(&self, _content: &str) {}
+        fn render_text(&self, _content: &str) {}
+        fn render_tool_call(&self, _name: &str, _summary: &str) {}
+        fn render_tool_result(&self, _tool_name: &str, _content_preview: &str) {}
+        fn render_stop(&self) {
+            *self.stop_count.lock().unwrap() += 1;
+        }
+        fn render_error(&self, _message: &str) {}
+        fn render_retry(&self) {}
+        fn render_info(&self, _msg: &str) {}
+        fn render_title_update(&self, _model: &str, _stats: &StatsSnapshot) {}
+        fn render_sub_agent_status(
+            &self,
+            _session_id: &str,
+            _status: &str,
+            _in_tokens: u64,
+            _out_tokens: u64,
+        ) {
+        }
+        fn render_prompt(&self) {}
+        fn render_clear_line(&self) {}
+    }
+
     #[test]
     fn event_display_maps_display_calls() {
         let sink = Arc::new(RecordingSink::default());
@@ -473,6 +505,26 @@ mod tests {
             delegate.presentation.lock().unwrap().as_ref(),
             Some(&presentation)
         );
+    }
+
+    /// Regression: `render_stop` must be forwarded to the delegate display.
+    /// The TUI relies on this signal to finalize the streaming transcript;
+    /// swallowing it leaves the previous turn's stream open, so the next
+    /// user input is rendered before the completed answer.
+    #[test]
+    fn event_display_forwards_render_stop_to_delegate() {
+        let sink = Arc::new(RecordingSink::default());
+        let delegate = Arc::new(StopRecordingDisplay::default());
+        let display = EventDisplay::new(Some(sink.clone()), Some(delegate.clone()));
+
+        display.render_stop();
+
+        assert_eq!(*delegate.stop_count.lock().unwrap(), 1);
+        let events = sink.events.lock().unwrap();
+        assert!(matches!(
+            &events[0],
+            AgentEvent::Stop { reason } if reason == "end_turn"
+        ));
     }
 
     /// Verify every Display method maps to the correct AgentEvent variant.

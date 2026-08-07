@@ -97,9 +97,21 @@ fn run_inline_tui(
     sandbox: &SandboxConfig,
 ) -> anyhow::Result<()> {
     let inline_height = preferred_inline_height();
-    let mut terminal = ratatui::init_with_options(ratatui::TerminalOptions {
-        viewport: ratatui::Viewport::Inline(inline_height),
-    });
+    // ratatui 的 Inline viewport 初始化依赖光标位置查询（DSR `\x1b[6n`）。
+    // 部分终端（dumb terminal、某些 SSH/multiplexer 环境）不响应该查询，
+    // 直接 `init_with_options` 会在 `try_init_with_options` 失败时 panic。
+    // 这里改用可失败的初始化，失败时降级为全屏 TUI，保证交互可用。
+    let (mut terminal, effective_mode) =
+        match ratatui::try_init_with_options(ratatui::TerminalOptions {
+            viewport: ratatui::Viewport::Inline(inline_height),
+        }) {
+            Ok(terminal) => (terminal, TuiMode::Inline),
+            Err(error) => {
+                eprintln!("Inline TUI unavailable ({error}); falling back to fullscreen TUI.");
+                crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture,)?;
+                (ratatui::init(), TuiMode::Full)
+            }
+        };
     crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste,)?;
     struct RestoreGuard;
     impl Drop for RestoreGuard {
@@ -119,7 +131,7 @@ fn run_inline_tui(
         sig_rx,
         orch_tx,
         TuiLoopConfig {
-            mode: TuiMode::Inline,
+            mode: effective_mode,
             session,
             interrupt,
             initial_model,
@@ -2273,6 +2285,72 @@ mod tests {
         ));
         assert_eq!(state.input.buf, "");
         assert_eq!(state.input.cursor, 0);
+    }
+
+    #[test]
+    fn small_viewport_input_box_keeps_cursor_inside_and_border_intact() {
+        // Regression: on an 8-row viewport (inline minimum) a 5-line input
+        // must not squeeze the input block — the last line was clipped and
+        // the cursor landed on the bottom border.
+        let mut state = TuiState::default();
+        state.input.buf = "line1\nline2\nline3\nline4\nline5".into();
+        state.input.cursor = state.input.buf.len();
+
+        use ratatui::backend::Backend;
+        let backend = TestBackend::new(80, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| render(f, &mut state, TuiMode::Full))
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        // Layout for 8 rows: content row0, input block rows1..6, status row7.
+        assert_eq!(buf.cell((0, 1)).unwrap().symbol(), "┌");
+        assert_eq!(buf.cell((0, 6)).unwrap().symbol(), "└");
+        // The last input line must be visible inside the box (row5), not
+        // clipped or overwriting the bottom border (row6).
+        let last_row: String = (1..6)
+            .map(|x| buf.cell((x, 5)).unwrap().symbol().to_string())
+            .collect();
+        assert_eq!(last_row, "line5");
+        assert!(matches!(buf.cell((1, 6)).unwrap().symbol(), "─" | "━"));
+        let cur = terminal.backend_mut().get_cursor_position().unwrap();
+        // Cursor must sit on the last inner row (5), never on the border (6).
+        assert_eq!(cur.y, 5);
+    }
+
+    #[test]
+    fn new_user_input_is_appended_after_the_open_stream() {
+        // Regression: submitting a new message while the previous turn's
+        // stream is still open must not let the late finalize (Stop) insert
+        // the old answer after the new user input.
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = TuiState::default();
+
+        state.apply(&TuiSignal::Text("previous answer".into()));
+        assert!(state.streaming);
+
+        state.input.buf = "next question".into();
+        state.input.cursor = state.input.buf.len();
+        assert!(!handle_event(
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &mut state,
+            &tx,
+        ));
+
+        assert!(!state.streaming);
+        let texts: Vec<&str> = state.lines.iter().map(|item| item.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec!["previous answer", "> next question"],
+            "the user input echo must follow the already displayed stream content"
+        );
+
+        // A late Stop must not move the previous answer behind the new input.
+        state.apply(&TuiSignal::Stop);
+        let texts: Vec<&str> = state.lines.iter().map(|item| item.text.as_str()).collect();
+        assert_eq!(texts, vec!["previous answer", "> next question"]);
+        assert_eq!(state.work_state, WorkState::Idle);
     }
 
     fn line_text(line: &Line<'static>) -> String {

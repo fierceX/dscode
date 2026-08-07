@@ -452,6 +452,9 @@ fn handle_enter(
     }
     state.input.history.push(input.clone());
     state.input.history_idx = None;
+    // 提交新输入前先封口上一轮未结束的流式内容，保证用户输入始终显示在
+    // 已展示内容之后，避免被后续到达的 finalize 插入到错误位置。
+    state.finalize_stream();
     state.push_line(TranscriptItem::new(
         format!("> {input}"),
         TranscriptKind::Info,
