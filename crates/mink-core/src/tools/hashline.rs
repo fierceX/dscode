@@ -394,13 +394,6 @@ fn parse_operation(
     if line.starts_with("***") || line.starts_with("diff --git ") {
         bail!("Error: line {line_num}: apply_patch/unified-diff syntax is not valid in hashline");
     }
-    if line.contains('*')
-        && (keyword_rest(line, "PUT").is_some() || keyword_rest(line, "CUT").is_some())
-    {
-        bail!(
-            "Error: line {line_num}: Block hashline operations using `*` are unsupported in Mink"
-        );
-    }
     if line.eq_ignore_ascii_case("REM") {
         section.operations.push(Operation::Remove);
         return Ok(());
@@ -1573,6 +1566,26 @@ mod tests {
     }
 
     #[test]
+    fn anchor_text_with_star_is_not_block_locator() {
+        // 锚点文本里的 `*`（如乘法表达式）是普通内容，不是 Block locator。
+        let patch =
+            parse("[a.rs#1A2B]\nPUT 'exprs = [\"3 + 4 * 2\"]'..'next':\n+replaced").unwrap();
+        let text = "exprs = [\"3 + 4 * 2\"]\nnext\ntail\n";
+        let result = apply(text, &patch.sections[0], &mut Clipboard::default()).unwrap();
+        assert_eq!(result.text, "replaced\ntail\n");
+    }
+
+    #[test]
+    fn line_number_block_locator_still_rejected_naturally() {
+        // `5*`（Block locator）不是合法语法，被 invalid-range 自然拒绝。
+        let err = parse("[a.rs#1A2B]\nPUT 5*:\n+x").unwrap_err();
+        assert!(
+            err.to_string().contains("invalid range"),
+            "expected natural rejection, got: {err}"
+        );
+    }
+
+    #[test]
     fn anchor_locator_idempotent_already_applied() {
         let patch = parse("[a.rs#1A2B]\nPUT 'beta'..'beta':\n+beta").unwrap();
         let text = "alpha\nbeta\ngamma\n";
@@ -1621,29 +1634,33 @@ mod tests {
 
     #[test]
     fn rejects_block_locators() {
+        // Block locators are not supported and need no dedicated guard: the
+        // `*` is not a valid range separator, so parsing rejects them as
+        // invalid ranges (and quoted anchor text with `*` still works).
         assert!(
             parse("[a#AAAA]\nPUT 1*:\n+x")
                 .unwrap_err()
                 .to_string()
-                .contains("unsupported")
+                .contains("invalid range")
         );
         assert!(
             parse("[a#AAAA]\nCUT 1*")
                 .unwrap_err()
                 .to_string()
-                .contains("unsupported")
+                .contains("invalid range")
         );
+        // `>1*` 是 gap locator，`*` 不是合法行号——按行号解析自然拒绝。
         assert!(
             parse("[a#AAAA]\nPUT >1*:\n+x")
                 .unwrap_err()
                 .to_string()
-                .contains("unsupported")
+                .contains("positive line number")
         );
         assert!(
             parse("[a#AAAA]\nPUT >1* @saved")
                 .unwrap_err()
                 .to_string()
-                .contains("unsupported")
+                .contains("positive line number")
         );
     }
 }
