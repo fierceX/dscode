@@ -1,6 +1,6 @@
 # 内置工具
 
-> 更新日期：2026-08-06
+> 更新日期：2026-08-10
 
 本文是 Mink 内置工具的协议参考，面向需要理解工具参数、执行模型、结果通道、资源 URL、
 审批和构建裁剪的使用者与开发者。终端使用与配置见 [使用手册](USAGE.md)；Rust/Python
@@ -200,6 +200,10 @@ cargo build --release
 - 支持 `PUT N.=M:`（以及 `PUT N:`/`PUT N-M:` 别名）、`PUT <N:`、`PUT >N:`、
   `PUT <1:`、`PUT >$:`、`CUT N.=M [@register]`、`PUT <N|>N|<1|>$ [@register]`、
   `PUT N.=M @register`、`REM` 和 `MV DEST`。
+- 范围端点可改用**行文本锚点**：`PUT 'start line text'..'end line text':` /
+  `CUT 'start'..'end':`（单/双引号）。锚点按 trim 后精确匹配文件行且必须唯一；
+  范围边界由行文本匹配决定（消除行号 ±1 行静默错误），0 匹配与多匹配均为可诊断
+  错误并保持 fail-closed。锚点文本内的 `*` 等符号按普通字符解析。
 - body 的每一行以 `+` 开头；坐标始终引用 snapshot 的原始行，不因前序操作位移。
 - 匿名 `CUT` 只在当前 Edit 调用内可用；命名寄存器（例如 `@saved`）保存在 session runtime，
   可跨 section、跨文件、跨 Edit 调用重复读取。
@@ -212,7 +216,8 @@ cargo build --release
   授权同 tag 直接重试；超长/超宽回显不会更新授权。
 - 相同输入连续三次产生 no-op 时第三次升级为失败。多文件先全部预检，再顺序提交；中途失败
   会列出已提交、失败和未提交文件，但不宣称跨文件原子性。
-- 明确不支持上游的 `N*` Block locator；Mink 不引入 tree-sitter block resolver。
+- 明确不支持上游的 `N*` Block locator（非合法语法，按行号解析自然拒绝）；
+  Mink 不引入 tree-sitter block resolver。
 
 ### Replace
 

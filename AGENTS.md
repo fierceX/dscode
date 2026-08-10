@@ -1,6 +1,6 @@
 # Agents Guide
 
-> 更新日期：2026-08-06
+> 更新日期：2026-08-10
 
 [TOC]
 
@@ -157,7 +157,7 @@ TurnExecutor (agent/turn.rs)
 │ tools/todo.rs         │ TodoRead / TodoWrite / TodoAdvance 与追加式状态事件
 │ tools/metadata.rs     │ approval tier、结果类型、副作用等工具元数据
 │ tools/file.rs         │ Read/Write/双模式 Edit + selector/resource/prepare/commit
-│ tools/hashline.rs     │ 非 Block Hashline grammar 和原始坐标 apply
+│ tools/hashline.rs     │ 非 Block Hashline grammar、行号/文本锚点坐标 apply
 │ tools/replace.rs      │ Replace exact/行窗口 fuzzy 匹配、歧义诊断和缩进转换
 │ tools/snapshot.rs     │ Hashline 版本历史、seen-lines、tag 和淘汰
 │ tools/search.rs       │ Glob/Grep
@@ -330,7 +330,7 @@ DecisionEngine.decide()
 | `tools/runner.rs` | ToolExec registry、resolved surface gate、批量分发、结果格式化、artifact spill、SubAgent tool |
 | `tools/todo.rs` | `TodoRead` / `TodoWrite` / `TodoAdvance`，revision 校验、增量事件和物化投影 |
 | `tools/file.rs` | Read/Write/双模式 Edit、path selector、resource URL、prepare/commit |
-| `tools/hashline.rs` | 非 Block parser、坐标操作和剪贴板 apply |
+| `tools/hashline.rs` | 非 Block parser、行号/文本锚点坐标操作和剪贴板 apply |
 | `tools/replace.rs` | exact/行窗口 fuzzy 匹配、歧义诊断和缩进转换 |
 | `tools/snapshot.rs` | FileSnapshotStore、版本历史、seen-lines、tag 和路径迁移 |
 | `tools/search.rs` | Glob/Grep |
@@ -372,8 +372,9 @@ Hashline 模式下，本地文件非 raw `Read` 输出带 snapshot header：
 
 `Edit` 在 runtime 启动时固定为 `hashline` 或 `replace`。Hashline 只接受带
 `[PATH#TAG]` section 的 `input`；Replace 只接受 `path + edits[{old_text,new_text,all}]`。
-旧 `path + patch` / `@PATH#TAG` 协议不兼容。`N*` Block locator 明确拒绝，Mink 不提供
-tree-sitter block resolver。
+旧 `path + patch` / `@PATH#TAG` 协议不兼容。`N*` Block locator 不支持（非合法语法，
+按行号解析自然拒绝），Mink 不提供 tree-sitter block resolver；范围端点可用行文本
+锚点 `PUT 'start'..'end':` / `CUT 'start'..'end':`（trim 后精确匹配、必须唯一）。
 
 Hashline 保留 session 内历史版本并只在全部锚点能唯一映射、共享一致偏移时恢复 stale
 内容；Replace 默认要求唯一候选。歧义、目标冲突、越权路径和无法解释的 no-op 都必须

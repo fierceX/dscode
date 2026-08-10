@@ -1,6 +1,6 @@
 # 设计文档
 
-> 更新日期：2026-08-06
+> 更新日期：2026-08-10
 
 本文记录 Mink 的设计取舍和关键不变式，不作为用户手册或工具协议参考。终端用户入口、
 配置和运行方式见 [USAGE.md](USAGE.md)；Rust/Python 嵌入见 [EMBEDDING.md](EMBEDDING.md)；
@@ -861,7 +861,7 @@ Rust 发布包名为 `mink-core`，库 crate 名为 `mink`。`mink-core` 发布�
 实现；终端二进制和 UI 实现由 workspace 中的 `mink-cli` 包持有。服务端依赖时推荐只启用嵌入式 runtime：
 
 ```toml
-mink = { package = "mink-core", version = "0.3.2", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.3.3", default-features = false, features = ["runtime"] }
 ```
 
 `mink::runtime` / `mink::prelude` 解决这些问题：**同一套 OrchActor / TurnExecutor / ToolRunner 核心，但无进程边界**。

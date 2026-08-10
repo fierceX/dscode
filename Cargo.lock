@@ -788,7 +788,7 @@ dependencies = [
 
 [[package]]
 name = "deltae"
-version = "0.3.2"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5729f5117e208430e437df2f4843f5e5952997175992d1414f94c57d61e270b4"
 
@@ -1962,7 +1962,7 @@ checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 
 [[package]]
 name = "mink-cli"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -1978,7 +1978,7 @@ dependencies = [
 
 [[package]]
 name = "mink-core"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2009,7 +2009,7 @@ dependencies = [
 
 [[package]]
 name = "mink-server"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2644,7 +2644,7 @@ dependencies = [
 
 [[package]]
 name = "ratatui-widgets"
-version = "0.3.2"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "66e3d19bcc9130ca376277d93b60767ff121ace3be06f5f95f81dd68956407d1"
 dependencies = [

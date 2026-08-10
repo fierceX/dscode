@@ -1,6 +1,6 @@
 # 架构说明
 
-> 更新日期：2026-08-06
+> 更新日期：2026-08-10
 
 本文描述 Mink 当前代码结构、模块职责和运行时数据流。终端用户命令、配置和工作流见
 [USAGE.md](USAGE.md)；Rust/Python 嵌入见 [EMBEDDING.md](EMBEDDING.md)；机器协议见
@@ -75,7 +75,7 @@ TurnExecutor (agent/turn.rs)
 │ tools/runner.rs       │ ToolExec registry、resolved surface gate、StormBreaker、结果格式化
 │ tools/metadata.rs     │ ApprovalTier、ToolResultKind、ToolMetadata
 │ tools/file.rs         │ Read / Write / 双模式 Edit、selector、resource、prepare/commit
-│ tools/hashline.rs     │ 非 Block grammar、坐标操作与 clipboard apply
+│ tools/hashline.rs     │ 非 Block grammar、行号/文本锚点坐标与 clipboard apply
 │ tools/replace.rs      │ exact/行窗口 fuzzy 内容匹配、歧义诊断与缩进转换
 │ tools/snapshot.rs     │ Hashline 版本历史、seen-lines、tag、淘汰与路径迁移
 │ tools/search.rs       │ Glob / Grep
@@ -278,7 +278,7 @@ ToolRunResult
 | `tools/runtime_guidance.rs` | 带结构化工具引用的运行时引导消息 |
 | `tools/runner.rs` | `ToolExec` trait、`TOOL_REGISTRY`、resolved surface gate、并发调度、结果截断、artifact spill 和内置控制工具 |
 | `tools/file.rs` | `ReadTool`、`WriteTool`、双模式 `EditTool`、selector、resource URL、prepare/commit |
-| `tools/hashline.rs` | 非 Block tokenizer/parser、原始坐标 apply、剪贴板操作 |
+| `tools/hashline.rs` | 非 Block tokenizer/parser、行号/文本锚点坐标 apply、剪贴板操作 |
 | `tools/replace.rs` | exact 与归一化行窗口 fuzzy 匹配、歧义诊断、缩进转换 |
 | `tools/snapshot.rs` | Hashline 完整文本版本、seen-lines、xxHash tag、淘汰和路径恢复 |
 | `tools/search.rs` | `GlobTool`、`GrepTool` |

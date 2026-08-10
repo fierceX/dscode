@@ -1,5 +1,40 @@
 # Changelog
 
+## v0.3.3 (2026-08-06)
+
+### hashline 文本锚点范围定位与编辑协议容错
+
+**新机制：文本锚点范围定位（`'start'..'end'`）**
+- `PUT`/`CUT` 的范围端点可以是行文本锚点（`PUT 'fn foo('..'}':`、`CUT 'start'..'end':`），
+  按 trim 后精确匹配文件行并在 apply 时解析为行号——范围边界由行文本唯一匹配决定，
+  消除行号协议固有的 ±1 行/丢括号**静默**错误：锚点 0 匹配（要求重读并复制行文本）与
+  多匹配（要求使用唯一长行）都是可见可诊断错误，整个 Edit fail-closed、文件原封不动。
+- 与既有机制完全复用：幂等（`already_applied`）、stale 恢复（锚点不参与行号平移）、
+  结构保护（delimiter delta）、batch 预检、`@register` 剪贴板与 `MV` 共存。
+- 协议引导：hashline 工作流资产 critical/正文/anti-patterns/示例同步（含唯一性约束、
+  "行号不确定时用锚点"、示例置尾）；Edit 工具描述补充锚点说明。
+
+**行为修复**
+- **缺空格归一化**：`PUT18.=18:` / `PUT>40:` / `CUT5.=8` 按带空格解析并输出 warning
+  （仅数字/`<`/`>`/`:` 开头归一化，普通单词不误判）。
+- **锚点文本中的 `*` 不再误拒绝**：移除 Block locator 专门拦截——`N*` 本就不是合法
+  语法，由行号解析自然拒绝（invalid range / expected a positive line number）；
+  引号内锚点文本（如 `exprs = ["3 + 4 * 2"]`）按普通字符解析。
+- **Read/Edit 工具描述强化**：Read 明确"只接受 path 参数、行范围写进路径选择器、
+  禁止发明其他参数名"；Edit 补充常见错误反例（缺空格可解析、范围必须 start<=end
+  且不越界、unified-diff/apply_patch 语法永不合法）。
+- **TodoAdvance 容错**：直接 complete pending 条目自动先激活再完成（结果在
+  activated 中体现）；重复 complete 已完成的条目仍 fail-closed。
+
+**测试与稳定性**
+- mink-server API 测试隔离：`test_router` 每次调用使用唯一临时 home（进程内并行
+  测试共享固定目录导致的 artifact 竞态失败消除）。
+- `cargo test -p mink-core` **596 passed** / 5 ignored（+12 用例：锚点定位
+  CUT/PUT/单行/trim/双引号+register/0 匹配/多匹配/倒置/幂等、缺空格归一化、
+  锚点含 `*`、行号 `5*` 自然拒绝、todo 自动激活与重复 complete 拒绝）；
+  server 8、clippy 0 警告。
+
+
 ## v0.3.2 (2026-08-06)
 
 ### 工具可靠性修复（基于 640 份生产会话轨迹分析）
