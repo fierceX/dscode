@@ -29,3 +29,6 @@ cpython-wasi/
 sandbox-poc/
 
 node_modules/
+data/
+test-results/
+playwright-report/

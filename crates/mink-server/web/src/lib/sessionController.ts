@@ -1,4 +1,4 @@
-// 会话打开/关闭编排：先连接 SSE，再原地用 conversation 权威对账。
+// 会话打开/关闭编排：SSE 只承载增量事件，conversation 是断线后的权威恢复源。
 
 import { api } from "./api";
 import type { SessionSummary } from "./api";
@@ -9,10 +9,12 @@ import { emptySession, type RawEvent, type SessionState } from "./types";
 import { SseClient } from "./sse";
 
 let openToken = 0;
-let reconcileToken = 0;
-let reloadPromise: Promise<void> | null = null;
+let recoveryRevision = 0;
+let reloadWorker: Promise<void> | null = null;
+let reconcileWorker: Promise<void> | null = null;
 let liveGeneration = 0;
-let reloadBuffer: RawEvent[] | null = null;
+let connected = false;
+let activeAttempt: { revision: number; events: RawEvent[] } | null = null;
 let recoveryFinal: RawEvent | null = null;
 
 const POLL_MS = 500;
@@ -34,14 +36,20 @@ function setDesynced(summary: SessionSummary, token: number): void {
   }
 }
 
+function invalidateRecovery(summary: SessionSummary, token: number): number {
+  const revision = ++recoveryRevision;
+  activeAttempt = null;
+  setDesynced(summary, token);
+  return revision;
+}
+
 function outcomeError(raw: RawEvent): boolean {
   if (raw.type !== "turn_final" || typeof raw.outcome !== "object" || raw.outcome === null) return false;
   return typeof (raw.outcome as Record<string, unknown>).error === "string";
 }
 
 function applyLive(raw: RawEvent): void {
-  if (!appState.sessionState) return;
-  appState.sessionState = reduceEvent(appState.sessionState, raw);
+  if (appState.sessionState) appState.sessionState = reduceEvent(appState.sessionState, raw);
 }
 
 function seedState(summary: SessionSummary): SessionState {
@@ -58,9 +66,7 @@ function seedState(summary: SessionSummary): SessionState {
 function reduceConversation(summary: SessionSummary, rows: Record<string, unknown>[]): SessionState {
   let state = seedState(summary);
   for (const row of rows) {
-    for (const event of conversationToEvents(row)) {
-      state = reduceEvent(state, event);
-    }
+    for (const event of conversationToEvents(row)) state = reduceEvent(state, event);
   }
   state.running = false;
   state.workState = "idle";
@@ -79,11 +85,13 @@ async function loadConversation(summary: SessionSummary): Promise<Record<string,
 
 export async function openSession(summary: SessionSummary): Promise<void> {
   const token = ++openToken;
-  ++reconcileToken;
-  reloadPromise = null;
-  reloadBuffer = null;
+  ++recoveryRevision;
+  reloadWorker = null;
+  reconcileWorker = null;
+  activeAttempt = null;
   recoveryFinal = null;
   liveGeneration = 0;
+  connected = false;
 
   detachSession();
   attachSession(summary);
@@ -99,11 +107,15 @@ export async function openSession(summary: SessionSummary): Promise<void> {
   let client: SseClient;
   const recover = () => {
     if (!isCurrent(summary, token)) return;
-    setDesynced(summary, token);
+    connected = false;
+    invalidateRecovery(summary, token);
     client.reconnect();
   };
   const onOpen = () => {
-    if (isCurrent(summary, token)) void authoritativeReload(summary, token);
+    if (!isCurrent(summary, token)) return;
+    connected = true;
+    invalidateRecovery(summary, token);
+    scheduleReload(summary, token);
   };
   client = new SseClient(
     summary.id,
@@ -114,14 +126,14 @@ export async function openSession(summary: SessionSummary): Promise<void> {
         return;
       }
       if (LIFECYCLE_EVENTS.has(raw.type)) liveGeneration++;
-      if (reloadBuffer) reloadBuffer.push(raw);
+      activeAttempt?.events.push(raw);
       applyLive(raw);
       if (outcomeError(raw)) {
         recoveryFinal = raw;
-        setDesynced(summary, token);
+        invalidateRecovery(summary, token);
       }
       if (raw.type === "turn_final" && appState.sessionState?.desynced) {
-        void authoritativeReload(summary, token);
+        scheduleReload(summary, token);
       }
     },
     recover,
@@ -132,67 +144,84 @@ export async function openSession(summary: SessionSummary): Promise<void> {
   client.connect();
 }
 
-async function authoritativeReload(summary: SessionSummary, token: number): Promise<void> {
-  if (!isCurrent(summary, token)) return;
-  if (reloadPromise) return reloadPromise;
-  reloadPromise = (async () => {
+function scheduleReload(summary: SessionSummary, token: number): void {
+  if (!isCurrent(summary, token) || !connected || reloadWorker) return;
+  reloadWorker = runReloadWorker(summary, token).finally(() => {
+    reloadWorker = null;
+    if (isCurrent(summary, token) && connected && appState.sessionState?.desynced && !reconcileWorker) {
+      queueMicrotask(() => scheduleReload(summary, token));
+    }
+  });
+}
+
+async function runReloadWorker(summary: SessionSummary, token: number): Promise<void> {
+  while (isCurrent(summary, token) && connected) {
+    const revision = recoveryRevision;
     setDesynced(summary, token);
     const before = await api.getSession(summary.id, summary.project_key).catch(() => null);
-    if (!isCurrent(summary, token)) return;
+    if (!isCurrent(summary, token) || !connected) return;
+    if (revision !== recoveryRevision) continue;
     if (before?.code !== 200 || !before.data || before.data.running) {
-      void reconcileSession(summary, token);
+      scheduleReconcile(summary, token);
       return;
     }
 
     const generation = liveGeneration;
-    const buffer: RawEvent[] = [];
-    reloadBuffer = buffer;
+    const attempt = { revision, events: [] as RawEvent[] };
+    activeAttempt = attempt;
     const conversation = await loadConversation(summary);
     const after = await api.getSession(summary.id, summary.project_key).catch(() => null);
-    if (!isCurrent(summary, token)) return;
-    reloadBuffer = null;
+    if (activeAttempt === attempt) activeAttempt = null;
+    if (!isCurrent(summary, token) || !connected) return;
 
-    const stable = before.data.running === false
+    const stable = revision === recoveryRevision
+      && attempt.revision === recoveryRevision
+      && before.data.running === false
       && after?.code === 200
       && after.data?.running === false
       && generation === liveGeneration
-      && !buffer.some((event) => LIFECYCLE_EVENTS.has(event.type));
+      && !attempt.events.some((event) => LIFECYCLE_EVENTS.has(event.type));
     if (!conversation || !stable) {
-      void reconcileSession(summary, token);
+      if (revision !== recoveryRevision) continue;
+      scheduleReconcile(summary, token);
       return;
     }
 
     let state = reduceConversation(summary, conversation);
-    for (const event of buffer) state = reduceEvent(state, event);
-    if (recoveryFinal && !buffer.includes(recoveryFinal)) state = reduceEvent(state, recoveryFinal);
+    for (const event of attempt.events) state = reduceEvent(state, event);
+    if (recoveryFinal && !attempt.events.includes(recoveryFinal)) state = reduceEvent(state, recoveryFinal);
     state.desynced = false;
     appState.sessionState = state;
     recoveryFinal = null;
-  })().finally(() => {
-    reloadBuffer = null;
-    reloadPromise = null;
-  });
-  return reloadPromise;
+    return;
+  }
 }
 
-async function reconcileSession(summary: SessionSummary, expectedOpenToken: number): Promise<void> {
-  const token = ++reconcileToken;
-  while (token === reconcileToken && isCurrent(summary, expectedOpenToken)) {
-    const detail = await api.getSession(summary.id, summary.project_key).catch(() => null);
-    if (token !== reconcileToken || !isCurrent(summary, expectedOpenToken)) return;
-    if (detail?.code === 200 && detail.data?.running === false) {
-      await authoritativeReload(summary, expectedOpenToken);
-      return;
+function scheduleReconcile(summary: SessionSummary, token: number): void {
+  if (reconcileWorker || !isCurrent(summary, token)) return;
+  reconcileWorker = (async () => {
+    while (isCurrent(summary, token)) {
+      const detail = await api.getSession(summary.id, summary.project_key).catch(() => null);
+      if (!isCurrent(summary, token)) return;
+      if (detail?.code === 200 && detail.data?.running === false) {
+        invalidateRecovery(summary, token);
+        return;
+      }
+      await delay(POLL_MS);
     }
-    await delay(POLL_MS);
-  }
+  })().finally(() => {
+    reconcileWorker = null;
+    if (isCurrent(summary, token) && connected) scheduleReload(summary, token);
+  });
 }
 
 export function closeSessionView(): void {
   ++openToken;
-  ++reconcileToken;
-  reloadPromise = null;
-  reloadBuffer = null;
+  ++recoveryRevision;
+  connected = false;
+  reloadWorker = null;
+  reconcileWorker = null;
+  activeAttempt = null;
   recoveryFinal = null;
   detachSession();
 }

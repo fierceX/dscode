@@ -34,6 +34,7 @@ pub struct CompactionEngine {
     session_id: String,
     display: Arc<dyn Display>,
     cancel: crate::cancel::CancellationToken,
+    interrupt: Arc<AtomicBool>,
     state: RwLock<std::result::Result<CompactionState, String>>,
     compact_lock: tokio::sync::Mutex<()>,
     memo_epoch: Arc<AtomicU64>,
@@ -52,6 +53,7 @@ impl CompactionEngine {
         session_id: String,
         display: Arc<dyn Display>,
         cancel: crate::cancel::CancellationToken,
+        interrupt: Arc<AtomicBool>,
         llm_backend: Arc<dyn LlmBackend>,
     ) -> Result<Self> {
         let state_path = summary_path.with_file_name("context-state.json");
@@ -78,6 +80,7 @@ impl CompactionEngine {
             session_id,
             display,
             cancel,
+            interrupt,
             state: RwLock::new(Ok(state)),
             compact_lock: tokio::sync::Mutex::new(()),
             memo_epoch: Arc::new(AtomicU64::new(0)),
@@ -169,6 +172,9 @@ impl CompactionEngine {
                 target,
             )
             .await?;
+        if self.interrupt.load(Ordering::SeqCst) {
+            bail!("compaction interrupted");
+        }
 
         self.validate_conversation_messages(kept, target.model)?;
         let next = CompactionState {
@@ -266,6 +272,38 @@ impl CompactionEngine {
         previous_summary: Option<&str>,
         target: LlmModelTarget<'_>,
     ) -> Result<String> {
+        let request_cancel = self.cancel.linked_child_token();
+        let watcher_cancel = request_cancel.clone();
+        let interrupt = self.interrupt.clone();
+        let watcher = tokio::spawn(async move {
+            loop {
+                if interrupt.load(Ordering::SeqCst) {
+                    watcher_cancel.cancel();
+                    return;
+                }
+                tokio::select! {
+                    _ = watcher_cancel.cancelled() => return,
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
+                }
+            }
+        });
+        let result = self
+            .run_summary_call_with_cancel(dropped, previous_summary, target, request_cancel)
+            .await;
+        watcher.abort();
+        if self.interrupt.load(Ordering::SeqCst) {
+            bail!("compaction interrupted");
+        }
+        result
+    }
+
+    async fn run_summary_call_with_cancel(
+        &self,
+        dropped: &[Value],
+        previous_summary: Option<&str>,
+        target: LlmModelTarget<'_>,
+        request_cancel: crate::cancel::CancellationToken,
+    ) -> Result<String> {
         let previous = serde_json::to_string(&previous_summary)?;
         let instruction = format!(
             "Merge the conversation turns above with the previous context snapshot below.\n\
@@ -308,24 +346,25 @@ impl CompactionEngine {
                 .scope(UsageKind::Compaction, self.session_id.clone()),
             target.model.to_string(),
         );
-        let response = match self
-            .llm_backend
-            .stream(LlmRequest {
-                purpose: LlmPurpose::Compaction,
-                model: target.model.to_string(),
-                model_alias: target.alias.map(str::to_string),
-                api_url: self.api_url.clone(),
-                api_key: self.api_key.clone(),
-                system_prompt,
-                messages,
-                tools: Vec::new(),
-                max_tokens: compaction_max_output_tokens(&self.config),
-                cancel: self.cancel.clone(),
-                verbose: self.config.verbose,
-                display: self.display.clone(),
-            })
-            .await
-        {
+        let request = self.llm_backend.stream(LlmRequest {
+            purpose: LlmPurpose::Compaction,
+            model: target.model.to_string(),
+            model_alias: target.alias.map(str::to_string),
+            api_url: self.api_url.clone(),
+            api_key: self.api_key.clone(),
+            system_prompt,
+            messages,
+            tools: Vec::new(),
+            max_tokens: compaction_max_output_tokens(&self.config),
+            cancel: request_cancel.clone(),
+            verbose: self.config.verbose,
+            display: self.display.clone(),
+        });
+        tokio::pin!(request);
+        let response = match tokio::select! {
+            response = &mut request => response,
+            _ = request_cancel.cancelled() => bail!("compaction interrupted"),
+        } {
             Ok(response) => response,
             Err(error) => {
                 let attempts = crate::llm::client::request_failure_attempt_count(&error);
@@ -344,7 +383,12 @@ impl CompactionEngine {
         let mut output = String::new();
         let mut stop_reason = String::new();
         let mut last_error = String::new();
-        while let Some(event) = stream.next().await {
+        loop {
+            let event = tokio::select! {
+                event = stream.next() => event,
+                _ = request_cancel.cancelled() => bail!("compaction interrupted"),
+            };
+            let Some(event) = event else { break };
             match event? {
                 Event::Text(TextEvent { content }) => output.push_str(&content),
                 Event::Usage(usage) => {
@@ -566,6 +610,25 @@ mod tests {
     #[derive(Default)]
     struct CapturingSummaryBackend {
         requests: Mutex<Vec<CapturedSummaryRequest>>,
+    }
+
+    struct PendingSummaryBackend;
+
+    #[async_trait::async_trait]
+    impl LlmBackend for PendingSummaryBackend {
+        fn name(&self) -> &str {
+            "pending-summary"
+        }
+
+        async fn stream(
+            &self,
+            _request: LlmRequest,
+        ) -> Result<crate::llm::client::LlmResponseStream> {
+            Ok(crate::llm::client::LlmResponseStream {
+                events: Box::pin(futures::stream::pending()),
+                attempt_count: 1,
+            })
+        }
     }
 
     #[async_trait::async_trait]
@@ -813,6 +876,7 @@ mod tests {
             ctx.config.session_id.clone(),
             ctx.display.clone(),
             ctx.cancel.clone(),
+            ctx.interrupt.clone(),
             summary_backend(),
         )?;
 
@@ -865,6 +929,46 @@ mod tests {
                 .with_file_name("context-state.json")
                 .with_extension("json.tmp")
                 .exists()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn compaction_interrupts_pending_summary_without_committing() -> anyhow::Result<()> {
+        let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+            "compact-interrupt",
+            |config| {
+                config.max_context_tokens = 64_000;
+                config.context_reserve_tokens = 8_000;
+                config.context_compact_tail_tokens = 1;
+            },
+            Arc::new(PendingSummaryBackend),
+        )
+        .await?;
+        for index in 0..3 {
+            ctx.store
+                .add_user(&format!("request {index}: {}", "x".repeat(2_000)))
+                .await?;
+            ctx.store
+                .add_assistant(&format!("progress {index}: {}", "y".repeat(2_000)), "", &[])
+                .await?;
+        }
+        let compaction = ctx.compaction.clone();
+        let task = tokio::spawn(async move {
+            compaction
+                .evaluate_and_compact("manual", 0, LlmModelTarget::new("flash", None))
+                .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        ctx.interrupt.store(true, Ordering::SeqCst);
+        let error = tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await??
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("compaction interrupted"), "{error}");
+        assert_eq!(
+            load_state(&ctx.summary_path.with_file_name("context-state.json"))?.active_start,
+            0
         );
         Ok(())
     }

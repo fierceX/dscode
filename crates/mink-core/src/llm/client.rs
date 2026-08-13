@@ -934,6 +934,7 @@ mod tests {
             "client".into(),
             Arc::new(TestDisplay::new()),
             CancellationToken::new(),
+            Arc::new(AtomicBool::new(false)),
             llm_backend.clone(),
         )?);
         let tool_config = ToolConfig::from_config(&cfg);

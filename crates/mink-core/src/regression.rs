@@ -310,6 +310,8 @@ async fn harness_with_config(
     let llm_backend = llm_backend.unwrap_or_else(|| {
         Arc::new(crate::llm::client::OpenAiCompatibleBackend::deepseek_defaults())
     });
+    let cancel = crate::cancel::CancellationToken::new();
+    let interrupt = Arc::new(AtomicBool::new(false));
     let compaction = Arc::new(CompactionEngine::new(
         store.clone(),
         spaths.summary.clone(),
@@ -319,7 +321,8 @@ async fn harness_with_config(
         usage.clone(),
         cfg.session_id.clone(),
         display.clone(),
-        crate::cancel::CancellationToken::new(),
+        cancel.clone(),
+        interrupt.clone(),
         llm_backend.clone(),
     )?);
     let tool_config = ToolConfig::from_config(&cfg);
@@ -345,7 +348,7 @@ async fn harness_with_config(
         stats,
         usage,
         compaction,
-        cancel: crate::cancel::CancellationToken::new(),
+        cancel,
         display: display.clone(),
         sub_stream_tx: None,
         read_only_fs: None,
@@ -366,7 +369,7 @@ async fn harness_with_config(
         plan_draft_path: spaths.plan_draft,
         immutable_prefix: Mutex::new(None),
         is_sub_agent,
-        interrupt: Arc::new(AtomicBool::new(false)),
+        interrupt,
         event_log_warned: AtomicBool::new(false),
     });
     Ok(TestHarness { ctx, cwd, display })

@@ -36,6 +36,15 @@ struct RuntimeState {
     active_turn_id: Option<String>,
     turn_task: Option<JoinHandle<Result<()>>>,
     last_idle: Instant,
+    forced_terminal: Option<ForcedTerminal>,
+}
+
+struct ForcedTerminal {
+    reason: String,
+    saw_stop: bool,
+    saw_final: bool,
+    turn_id: String,
+    session: Box<SessionInfo>,
 }
 
 pub struct SessionRuntime {
@@ -55,6 +64,7 @@ impl SessionRuntime {
                 active_turn_id: None,
                 turn_task: None,
                 last_idle: Instant::now(),
+                forced_terminal: None,
             })),
             event_tx,
             stream_sequence: Arc::new(AtomicU64::new(1)),
@@ -127,6 +137,13 @@ impl SessionRuntime {
                 } => {
                     let runtime = {
                         let mut state = shared.lock().unwrap_or_else(|e| e.into_inner());
+                        state.forced_terminal = Some(ForcedTerminal {
+                            reason: reason.clone(),
+                            saw_stop,
+                            saw_final,
+                            turn_id,
+                            session,
+                        });
                         state.phase = RuntimePhase::Closing;
                         state.runtime.take()
                     };
@@ -140,24 +157,12 @@ impl SessionRuntime {
                     } else {
                         None
                     };
-                    {
-                        let mut state = shared.lock().unwrap_or_else(|e| e.into_inner());
-                        // If runtime was already taken, an external shutdown owns
-                        // it and must be the only publisher of Closed.
-                        if owns_runtime_shutdown {
-                            state.phase = RuntimePhase::Closed;
-                        }
-                        state.active_turn_id = None;
-                    }
                     if owns_runtime_shutdown {
-                        publish_forced_timeout_final(
+                        finalize_shutdown(
+                            &shared,
                             &tx,
                             &stream_sequence,
-                            &turn_id,
-                            &session,
-                            &reason,
-                            saw_stop,
-                            saw_final,
+                            shutdown_error.as_deref(),
                         );
                     }
                     match shutdown_error {
@@ -233,9 +238,16 @@ impl SessionRuntime {
                 }
             }
         }
-        if let Some(runtime) = runtime
-            && let Err(error) = runtime.shutdown().await
-        {
+        let shutdown_error = if let Some(runtime) = runtime {
+            runtime
+                .shutdown()
+                .await
+                .err()
+                .map(|error| error.to_string())
+        } else {
+            None
+        };
+        if let Some(error) = &shutdown_error {
             errors.push(format!("runtime shutdown failed: {error}"));
         }
         if let Some(mut handle) = task {
@@ -251,14 +263,49 @@ impl SessionRuntime {
                 }
             }
         }
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.phase = RuntimePhase::Closed;
+        finalize_shutdown(
+            &self.state,
+            &self.event_tx,
+            &self.stream_sequence,
+            shutdown_error.as_deref(),
+        );
         if errors.is_empty() {
             Ok(())
         } else {
             Err(anyhow!(errors.join("; ")))
         }
     }
+}
+
+fn finalize_shutdown(
+    state: &Arc<Mutex<RuntimeState>>,
+    tx: &broadcast::Sender<String>,
+    stream_sequence: &AtomicU64,
+    shutdown_error: Option<&str>,
+) {
+    let terminal = {
+        let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+        state.phase = RuntimePhase::Closed;
+        state.active_turn_id = None;
+        state.forced_terminal.take()
+    };
+    let Some(terminal) = terminal else { return };
+    let error = match shutdown_error {
+        Some(shutdown_error) => format!(
+            "{}; forced runtime shutdown failed: {shutdown_error}",
+            terminal.reason
+        ),
+        None => terminal.reason,
+    };
+    publish_forced_timeout_final(
+        tx,
+        stream_sequence,
+        &terminal.turn_id,
+        &terminal.session,
+        &error,
+        terminal.saw_stop,
+        terminal.saw_final,
+    );
 }
 
 fn record_turn_join(
@@ -416,5 +463,66 @@ fn publish_forced_timeout_final(
             })
             .to_string(),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session_info() -> SessionInfo {
+        let path = std::path::PathBuf::from("/tmp/mink-server-runtime-test");
+        SessionInfo {
+            session_id: "session".into(),
+            session_ref: "session".into(),
+            is_new: false,
+            home: path.clone(),
+            cwd: path.clone(),
+            events_path: path.join("events.jsonl"),
+            conversation_path: path.join("conversation.jsonl"),
+            artifacts_dir: path.join("artifacts"),
+            summary_path: path.join("summary.md"),
+            usage_path: path.join("usage.jsonl"),
+            plan_path: path.join("plan.md"),
+            plan_draft_path: path.join("plan.draft"),
+            todos_path: path.join("todos.json"),
+        }
+    }
+
+    #[test]
+    fn forced_terminal_is_published_once_after_closed() {
+        let (tx, mut rx) = broadcast::channel(8);
+        let sequence = AtomicU64::new(1);
+        let state = Arc::new(Mutex::new(RuntimeState {
+            runtime: None,
+            phase: RuntimePhase::Closing,
+            active_turn_id: Some("turn".into()),
+            turn_task: None,
+            last_idle: Instant::now(),
+            forced_terminal: Some(ForcedTerminal {
+                reason: "turn timed out".into(),
+                saw_stop: false,
+                saw_final: false,
+                turn_id: "turn".into(),
+                session: Box::new(session_info()),
+            }),
+        }));
+
+        finalize_shutdown(&state, &tx, &sequence, Some("shutdown error"));
+        assert_eq!(state.lock().unwrap().phase, RuntimePhase::Closed);
+        let stop: serde_json::Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+        let final_event: serde_json::Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+        assert_eq!(stop["type"], "stop");
+        assert_eq!(final_event["type"], "turn_final");
+        assert_eq!(final_event["outcome"]["status"], "failed");
+        assert!(
+            final_event["outcome"]["error"]
+                .as_str()
+                .unwrap()
+                .contains("shutdown error")
+        );
+
+        finalize_shutdown(&state, &tx, &sequence, None);
+        assert!(rx.try_recv().is_err());
     }
 }

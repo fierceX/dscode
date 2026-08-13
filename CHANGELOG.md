@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.4.0 (2026-08-13)
+
+### Runtime 所有权、统一事件与异步工具扩展
+
+- Rust SDK 以 `AgentRuntime::start(AgentOptions)` 作为唯一公开构建入口；并发 turn、压缩和模型切换在 runtime 忙时立即返回带活动 turn ID 的 `RuntimeError::Busy`。
+- 每轮使用独立 `TurnId`、有序事件 envelope 和完整 `TurnOutcome`；stream 的取消与 Drop 都等待核心清理后释放 permit。
+- 新增稳定异步 `AgentTool` 扩展 API；custom/builtin 工具共用 surface、审批、执行顺序、artifact 和 mutation memo 失效语义。
+- session project key 改为可读前缀加 canonical cwd 哈希，采用旧/新目录双读、新目录写入；歧义恢复 fail-closed。
+- server 使用显式 runtime 生命周期、graceful shutdown、idle reaper、SSE gap 对账和 project-aware API；PythonSandbox timeout/cancel 使用 Wasmtime epoch interruption 并等待执行线程退出。
+- 权威 session 状态改用加强的原子替换与损坏检测；版本升级到 0.4.0。
+
+迁移：将 `start_with_options()` 改为 `start()`，将 `try_stream_turn()` 改为返回 `Result` 的 `stream_turn()`，并通过 `AgentEvent.kind` 匹配 `AgentEventKind`。
+
 ## v0.3.3 (2026-08-06)
 
 ### hashline 文本锚点范围定位与编辑协议容错

@@ -357,13 +357,37 @@ async fn execute_custom(
 ) -> Result<ToolRunResult> {
     let definition = &tool.definition;
     let started = std::time::Instant::now();
-    let result = tool
-        .executor
-        .execute(
-            call.input_json.clone(),
-            crate::runtime::ToolExecutionContext::new(ctx.cwd.clone(), ctx.interrupt.clone()),
-        )
-        .await;
+    let timeout_secs = if ctx.tool_config.tool_timeout_secs > 0 {
+        ctx.tool_config.tool_timeout_secs.clamp(5, 600) as u64
+    } else {
+        600
+    };
+    let execution = tool.executor.execute(
+        call.input_json.clone(),
+        crate::runtime::ToolExecutionContext::new(ctx.cwd.clone(), ctx.interrupt.clone()),
+    );
+    tokio::pin!(execution);
+    let deadline = tokio::time::sleep(std::time::Duration::from_secs(timeout_secs));
+    tokio::pin!(deadline);
+    let result = loop {
+        tokio::select! {
+            result = &mut execution => break result,
+            _ = &mut deadline => {
+                break Err(crate::runtime::ToolError::new(format!(
+                    "custom tool {} timed out after {timeout_secs}s",
+                    definition.name
+                )));
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {
+                if ctx.interrupt.load(std::sync::atomic::Ordering::SeqCst) {
+                    break Err(crate::runtime::ToolError::new(format!(
+                        "custom tool {} interrupted",
+                        definition.name
+                    )));
+                }
+            }
+        }
+    };
     let raw = match result {
         Ok(output) => RawToolResult {
             output: Ok(output.content),
@@ -386,7 +410,7 @@ async fn execute_custom(
             is_bash: false,
             conv_content: String::new(),
             exit_code: None,
-            wall_ms: None,
+            wall_ms: Some(started.elapsed().as_millis()),
             no_mutation: false,
             memo_candidate: None,
             spawns_sub_agent: false,

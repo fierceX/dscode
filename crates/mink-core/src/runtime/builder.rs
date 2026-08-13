@@ -1563,6 +1563,39 @@ mod tests {
         calls: std::sync::Mutex<u32>,
     }
 
+    struct InterruptibleCompactionBackend;
+
+    #[async_trait::async_trait]
+    impl crate::llm::client::LlmBackend for InterruptibleCompactionBackend {
+        fn name(&self) -> &str {
+            "interruptible-compaction"
+        }
+
+        async fn stream(
+            &self,
+            request: crate::runtime::LlmRequest,
+        ) -> anyhow::Result<crate::runtime::LlmResponseStream> {
+            if matches!(request.purpose, crate::runtime::LlmPurpose::Compaction) {
+                return Ok(crate::runtime::LlmResponseStream {
+                    events: Box::pin(futures::stream::pending()),
+                    attempt_count: 1,
+                });
+            }
+            use crate::protocol::{Event, StopEvent, TextEvent};
+            Ok(crate::runtime::LlmResponseStream {
+                events: Box::pin(futures::stream::iter(vec![
+                    Ok(Event::Text(TextEvent {
+                        content: "after compact interrupt".into(),
+                    })),
+                    Ok(Event::Stop(StopEvent {
+                        reason: "end_turn".into(),
+                    })),
+                ])),
+                attempt_count: 1,
+            })
+        }
+    }
+
     #[async_trait::async_trait]
     impl crate::llm::client::LlmBackend for InterruptTestMockLlmClient {
         fn name(&self) -> &str {
@@ -1646,6 +1679,59 @@ mod tests {
         let outcome2 = runtime.run_turn("recovery turn").await.unwrap();
         assert_eq!(outcome2.status, crate::agent::orchestrator::TurnStatus::Ok);
 
+        runtime.shutdown().await.unwrap();
+        let _ = tokio::fs::remove_dir_all(home).await;
+        let _ = tokio::fs::remove_dir_all(cwd).await;
+    }
+
+    #[tokio::test]
+    async fn interrupt_manual_compaction_releases_gate_for_next_turn() {
+        let home = unique_temp_dir("compact-interrupt-home");
+        let cwd = unique_temp_dir("compact-interrupt-cwd");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+        let cfg = Config {
+            model: "flash".into(),
+            api_key: "test-key".into(),
+            max_context_tokens: 64_000,
+            context_reserve_tokens: 8_000,
+            context_compact_tail_tokens: 1,
+            ..Config::default()
+        };
+        let runtime = build_runtime(
+            AgentRuntimeConfig::from_config(cfg, home.clone(), cwd.clone())
+                .with_llm_backend(Arc::new(InterruptibleCompactionBackend)),
+        )
+        .await
+        .unwrap();
+        for index in 0..3 {
+            runtime
+                .ctx
+                .store
+                .add_user(&format!("request {index}: {}", "x".repeat(2_000)))
+                .await
+                .unwrap();
+            runtime
+                .ctx
+                .store
+                .add_assistant(&format!("progress {index}: {}", "y".repeat(2_000)), "", &[])
+                .await
+                .unwrap();
+        }
+        let handle = runtime.handle();
+        let compact_handle = handle.clone();
+        let compact = tokio::spawn(async move { compact_handle.compact().await });
+        tokio::time::sleep(tokio::time::Duration::from_millis(40)).await;
+        handle.interrupt_current_turn();
+        let error = tokio::time::timeout(tokio::time::Duration::from_secs(2), compact)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("compaction interrupted"), "{error}");
+
+        let outcome = runtime.run_turn("still works").await.unwrap();
+        assert_eq!(outcome.status, crate::agent::orchestrator::TurnStatus::Ok);
         runtime.shutdown().await.unwrap();
         let _ = tokio::fs::remove_dir_all(home).await;
         let _ = tokio::fs::remove_dir_all(cwd).await;
@@ -1777,6 +1863,29 @@ mod tests {
     }
 
     struct CancellableTool;
+
+    struct NonCooperativeTool;
+
+    #[async_trait::async_trait]
+    impl AgentTool for NonCooperativeTool {
+        fn definition(&self) -> ToolDefinition {
+            let mut definition = ToolDefinition::new(
+                "NonCooperative",
+                "Never completes or checks cancellation",
+                serde_json::json!({"type":"object","properties":{},"additionalProperties":false}),
+            );
+            definition.execution = ToolExecutionMode::Sequential;
+            definition
+        }
+
+        async fn execute(
+            &self,
+            _input: serde_json::Value,
+            _ctx: ToolExecutionContext,
+        ) -> Result<ToolOutput, ToolError> {
+            futures::future::pending().await
+        }
+    }
 
     #[async_trait::async_trait]
     impl AgentTool for CancellableTool {
@@ -2014,6 +2123,105 @@ mod tests {
             outcome.status,
             crate::agent::orchestrator::TurnStatus::Interrupted
         );
+
+        runtime.shutdown().await.unwrap();
+        let _ = tokio::fs::remove_dir_all(home).await;
+        let _ = tokio::fs::remove_dir_all(cwd).await;
+    }
+
+    #[tokio::test]
+    async fn non_cooperative_custom_tool_is_dropped_on_interrupt() {
+        let home = unique_temp_dir("custom-non-cooperative-home");
+        let cwd = unique_temp_dir("custom-non-cooperative-cwd");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+        let mut config =
+            runtime_config_with_mock(&home, &cwd, mock_llm_single_tool("NonCooperative"));
+        config.custom_tools.push(Arc::new(NonCooperativeTool));
+        let runtime = build_runtime(config).await.unwrap();
+
+        let stream = runtime.stream_turn("wait").unwrap();
+        tokio::time::sleep(tokio::time::Duration::from_millis(40)).await;
+        stream.cancel();
+        let outcome = tokio::time::timeout(tokio::time::Duration::from_secs(2), stream.outcome())
+            .await
+            .expect("non-cooperative custom tool was not dropped")
+            .unwrap();
+        assert_eq!(
+            outcome.status,
+            crate::agent::orchestrator::TurnStatus::Interrupted
+        );
+
+        runtime.shutdown().await.unwrap();
+        let _ = tokio::fs::remove_dir_all(home).await;
+        let _ = tokio::fs::remove_dir_all(cwd).await;
+    }
+
+    #[tokio::test]
+    async fn custom_tool_timeout_is_local_and_next_turn_still_runs() {
+        let home = unique_temp_dir("custom-timeout-home");
+        let cwd = unique_temp_dir("custom-timeout-cwd");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+        let mut config = runtime_config_with_mock(
+            &home,
+            &cwd,
+            crate::llm::mock::MockLlmClient::new(
+                "flash",
+                vec![
+                    vec![
+                        Ok(crate::protocol::Event::ToolCall(
+                            crate::protocol::ToolCallEvent {
+                                name: "NonCooperative".into(),
+                                id: "call-timeout".into(),
+                                input_json: serde_json::json!({}),
+                                fields: Default::default(),
+                                order: Vec::new(),
+                            },
+                        )),
+                        Ok(crate::protocol::Event::Stop(crate::protocol::StopEvent {
+                            reason: "tool_use".into(),
+                        })),
+                    ],
+                    vec![
+                        Ok(crate::protocol::Event::Text(crate::protocol::TextEvent {
+                            content: "recovered from tool timeout".into(),
+                        })),
+                        Ok(crate::protocol::Event::Stop(crate::protocol::StopEvent {
+                            reason: "end_turn".into(),
+                        })),
+                    ],
+                    vec![
+                        Ok(crate::protocol::Event::Text(crate::protocol::TextEvent {
+                            content: "next turn".into(),
+                        })),
+                        Ok(crate::protocol::Event::Stop(crate::protocol::StopEvent {
+                            reason: "end_turn".into(),
+                        })),
+                    ],
+                ],
+            ),
+        );
+        config.config.tool_timeout_secs = 5;
+        config.custom_tools.push(Arc::new(NonCooperativeTool));
+        let runtime = build_runtime(config).await.unwrap();
+
+        let mut stream = runtime.stream_turn("timeout tool").unwrap();
+        let mut timeout_result = None;
+        while let Some(event) = stream.recv().await {
+            if let crate::runtime::AgentEventKind::ToolResult {
+                content, success, ..
+            } = event.kind
+            {
+                timeout_result = Some((content, success));
+            }
+        }
+        let timed_out = stream.outcome().await.unwrap();
+        assert_eq!(timed_out.status, crate::agent::orchestrator::TurnStatus::Ok);
+        let (content, success) = timeout_result.expect("timeout tool result");
+        assert!(!success);
+        assert!(content.contains("timed out after 5s"), "{content}");
+        let next = runtime.run_turn("next").await.unwrap();
+        assert_eq!(next.status, crate::agent::orchestrator::TurnStatus::Ok);
+        assert_eq!(next.text, "next turn");
 
         runtime.shutdown().await.unwrap();
         let _ = tokio::fs::remove_dir_all(home).await;

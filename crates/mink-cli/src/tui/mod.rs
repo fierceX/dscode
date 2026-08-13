@@ -683,6 +683,23 @@ mod tests {
     }
 
     #[test]
+    fn compact_error_then_stop_is_visible_and_restores_input() {
+        let mut state = TuiState {
+            work_state: WorkState::Compacting,
+            ..TuiState::default()
+        };
+        state.apply(&TuiSignal::Error(
+            "Compact failed: compaction interrupted".into(),
+        ));
+        state.apply(&TuiSignal::Stop);
+
+        assert_eq!(state.work_state, WorkState::Idle);
+        assert!(state.lines.iter().any(|line| {
+            line.kind == TranscriptKind::Error && line.text.contains("compaction interrupted")
+        }));
+    }
+
+    #[test]
     fn duplicate_sub_agent_output_does_not_drift_active_state() {
         let mut state = TuiState::default();
         state.apply(&TuiSignal::SubAgentStatus {

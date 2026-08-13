@@ -13,7 +13,7 @@ axum.workspace = true
 futures.workspace = true
 http-body-util.workspace = true
 http-body.workspace = true
-libc.workspace = true
+fs2.workspace = true
 mink = { package = "mink-core", path = "../mink-core", default-features = false, features = ["runtime"] }
 serde.workspace = true
 serde_json.workspace = true

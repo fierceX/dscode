@@ -1,10 +1,8 @@
 //! Session registry: scans the mink home, manages the active runtime map,
 //! and owns the `session.lock` mutual-exclusion protocol.
 //!
-//! The lock is advisory: the TUI does not take locks, so a lock file only
-//! proves the server itself (or a previous server process) holds the session.
-//! Opening refuses a live lock held by a running process; stale locks are
-//! reclaimed by dead-pid or timestamp detection.
+//! The lock is advisory: the TUI does not take locks. The stable lock file is
+//! retained permanently; an open, exclusively locked file handle owns lease.
 
 use crate::session::runtime::SessionRuntime;
 use anyhow::{Result, anyhow};
@@ -13,14 +11,13 @@ use mink::session::metadata::SessionMetadata;
 use mink::session::usage::UsageRecord;
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
 const LOCK_FILE: &str = "session.lock";
-const LOCK_STALE_SECS: u64 = 300;
 
 #[derive(Debug)]
 pub enum RegistryError {
@@ -141,7 +138,7 @@ fn summarize_usage(dir: &Path) -> Result<(u64, u64, u64, u64, u64)> {
 
 struct ActiveSession {
     runtime: Arc<SessionRuntime>,
-    lock_path: PathBuf,
+    _lease: Arc<SessionLease>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -288,20 +285,20 @@ impl Registry {
         .await?
         {
             let session_locator = locator_from_dir(&record.path, &record.id);
-            let operation_lock = self.operation_lock(&session_locator);
-            let _operation = operation_lock.lock().await;
             let mut summary = summary_from_metadata(
                 Some(record.metadata),
                 Some(record.modified),
                 &record.path,
                 summarize_usage(&record.path)?,
             );
-            if let Some(active) = self.active.lock().unwrap().get(&session_locator) {
-                summary.status = if active.runtime.running() {
-                    "running"
-                } else {
-                    "active"
-                };
+            if let Some(status) = self.active_status(&session_locator) {
+                summary.status = status;
+                return Ok(summary);
+            }
+            let operation_lock = self.operation_lock(&session_locator);
+            let _operation = operation_lock.lock().await;
+            if let Some(status) = self.active_status(&session_locator) {
+                summary.status = status;
             }
             return Ok(summary);
         }
@@ -366,7 +363,7 @@ impl Registry {
         let _operation = operation_lock.lock().await;
         // 锁内只做“决定”，所有 .await 都在锁外（std MutexGuard 是 !Send，
         // 且词法层面“可能被后续分支使用”会让 future 非 Send）。
-        let closed_lock = {
+        {
             let mut active = self.active.lock().unwrap();
             match active.get(&locator).map(|session| session.runtime.phase()) {
                 Some(crate::session::runtime::RuntimePhase::Idle)
@@ -378,25 +375,17 @@ impl Registry {
                     )));
                 }
                 Some(crate::session::runtime::RuntimePhase::Closed) => {
-                    active.remove(&locator).map(|session| session.lock_path)
+                    active.remove(&locator);
                 }
-                None => None,
+                None => {}
             }
-        };
-        if let Some(lock_path) = closed_lock {
-            fs::remove_file(&lock_path).map_err(|error| {
-                RegistryError::Internal(anyhow!(
-                    "failed to release closed runtime lock {}: {error}",
-                    lock_path.display()
-                ))
-            })?;
         }
         if !dir.is_dir() {
             return Err(RegistryError::NotFound(format!("session {id} not found")));
         }
-        let lock_path = dir.join(LOCK_FILE);
-        let mut lease =
-            SessionLease::acquire(lock_path.clone()).map_err(RegistryError::from_lease)?;
+        let lease = Arc::new(
+            SessionLease::acquire(dir.join(LOCK_FILE)).map_err(RegistryError::from_lease)?,
+        );
         // 使用 session 自身的 cwd（跨工作区打开的关键：UseOrCreate 需要在
         // 正确的 project 布局下解析，而不是服务启动目录）。
         let session_cwd = session_cwd_from_dir(&dir).map_err(RegistryError::Internal)?;
@@ -423,11 +412,10 @@ impl Registry {
                 locator,
                 ActiveSession {
                     runtime: Arc::new(runtime),
-                    lock_path,
+                    _lease: lease,
                 },
             );
         }
-        lease.disarm();
         Ok(())
     }
 
@@ -554,25 +542,16 @@ impl Registry {
         };
         let operation_lock = self.operation_lock(&locator);
         let _operation = operation_lock.lock().await;
-        let (runtime, lock_path) = {
+        let runtime = {
             let active = self.active.lock().unwrap();
             let session = active
                 .get(&locator)
                 .ok_or_else(|| RegistryError::NotFound(format!("session {id} is not open")))?;
-            (session.runtime.clone(), session.lock_path.clone())
+            session.runtime.clone()
         };
         let shutdown_result = runtime.shutdown().await;
         self.active.lock().unwrap().remove(&locator);
-        let release_result = std::fs::remove_file(&lock_path)
-            .map_err(|error| anyhow!("failed to release lock {}: {error}", lock_path.display()));
-        match (shutdown_result, release_result) {
-            (Ok(()), Ok(())) => Ok(()),
-            (Err(error), Ok(())) => Err(RegistryError::Internal(error)),
-            (Ok(()), Err(error)) => Err(RegistryError::Internal(error)),
-            (Err(shutdown), Err(release)) => Err(RegistryError::Internal(anyhow!(
-                "runtime shutdown failed: {shutdown:#}; lock release also failed: {release:#}"
-            ))),
-        }
+        shutdown_result.map_err(RegistryError::Internal)
     }
 
     fn operation_lock(&self, locator: &SessionLocator) -> Arc<tokio::sync::Mutex<()>> {
@@ -597,6 +576,21 @@ impl Registry {
         lock
     }
 
+    fn active_status(&self, locator: &SessionLocator) -> Option<&'static str> {
+        let mut active = self.active.lock().unwrap();
+        match active.get(locator).map(|session| session.runtime.phase()) {
+            Some(crate::session::runtime::RuntimePhase::Running)
+            | Some(crate::session::runtime::RuntimePhase::Cancelling)
+            | Some(crate::session::runtime::RuntimePhase::Closing) => Some("running"),
+            Some(crate::session::runtime::RuntimePhase::Idle) => Some("active"),
+            Some(crate::session::runtime::RuntimePhase::Closed) => {
+                active.remove(locator);
+                None
+            }
+            None => None,
+        }
+    }
+
     pub async fn delete(&self, id: &str, project: Option<&str>) -> RegistryResult<()> {
         self.delete_inner(id, project).await
     }
@@ -611,17 +605,11 @@ impl Registry {
                 .lock()
                 .unwrap()
                 .get(&locator)
-                .map(|session| (session.runtime.clone(), session.lock_path.clone()))
+                .map(|session| session.runtime.clone())
         };
-        if let Some((runtime, lock_path)) = active_session {
+        if let Some(runtime) = active_session {
             runtime.shutdown().await.map_err(RegistryError::Internal)?;
             self.active.lock().unwrap().remove(&locator);
-            fs::remove_file(&lock_path).map_err(|error| {
-                RegistryError::Internal(anyhow!(
-                    "failed to release lock {}: {error}",
-                    lock_path.display()
-                ))
-            })?;
         }
         if !dir.is_dir() {
             return Err(RegistryError::NotFound(format!("session {id} not found")));
@@ -882,52 +870,38 @@ fn scan_all_sessions(home: &Path) -> Result<Vec<ScannedSession>> {
     Ok(out)
 }
 
-fn write_lock(path: &Path) -> Result<()> {
-    let text = format!(
-        "{{\"pid\":{},\"taken_at\":{}}}",
-        std::process::id(),
-        now_secs()
-    );
-    use std::io::Write;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map_err(|e| anyhow!("failed to acquire lock {}: {e}", path.display()))?;
-    file.write_all(text.as_bytes())?;
-    file.sync_all()?;
-    Ok(())
-}
-
 struct SessionLease {
-    path: PathBuf,
-    armed: bool,
+    _file: File,
 }
 
 impl SessionLease {
     fn acquire(path: PathBuf) -> Result<Self> {
-        if path.exists() {
-            if !lock_is_stale(&path) {
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|error| anyhow!("failed to open lock {}: {error}", path.display()))?;
+        if let Err(error) = fs2::FileExt::try_lock_exclusive(&file) {
+            if error.kind() == std::io::ErrorKind::WouldBlock {
                 anyhow::bail!("session is locked by another process");
             }
-            std::fs::remove_file(&path).map_err(|error| {
-                anyhow!("failed to reclaim stale lock {}: {error}", path.display())
-            })?;
+            return Err(anyhow!(
+                "failed to acquire lock {}: {error}",
+                path.display()
+            ));
         }
-        write_lock(&path)?;
-        Ok(Self { path, armed: true })
-    }
-
-    fn disarm(&mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for SessionLease {
-    fn drop(&mut self) {
-        if self.armed {
-            let _ = std::fs::remove_file(&self.path);
-        }
+        let text = format!(
+            "{{\"pid\":{},\"taken_at\":{}}}",
+            std::process::id(),
+            now_secs()
+        );
+        file.set_len(0)?;
+        file.rewind()?;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()?;
+        Ok(Self { _file: file })
     }
 }
 
@@ -936,57 +910,6 @@ fn now_secs() -> u64 {
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
-}
-
-/// Check whether a lock file is stale and reclaimable.
-/// A lock is stale when its process is gone, or when it is older than
-/// LOCK_STALE_SECS (covers crashes that leave the file behind).
-pub fn lock_is_stale(path: &Path) -> bool {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return true;
-    };
-    if let Some(pid) = parse_pid(&text) {
-        if pid != 0 && pid_alive(pid) {
-            return false;
-        }
-        return true;
-    }
-    // Unparseable: fall back to the file timestamp.
-    let Ok(meta) = std::fs::metadata(path) else {
-        return true;
-    };
-    let Ok(modified) = meta.modified() else {
-        return true;
-    };
-    modified
-        .elapsed()
-        .map(|d| d > Duration::from_secs(LOCK_STALE_SECS))
-        .unwrap_or(true)
-}
-
-fn parse_pid(text: &str) -> Option<u32> {
-    serde_json::from_str::<serde_json::Value>(text)
-        .ok()
-        .and_then(|v| v.get("pid").and_then(|p| p.as_u64()))
-        .map(|p| p as u32)
-}
-
-fn pid_alive(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        // u32 values above i32::MAX wrap to negative pids (kill(-1) means
-        // "all processes"); treat them as non-existent.
-        let pid_i = pid as i32;
-        if pid_i < 0 {
-            return false;
-        }
-        unsafe { libc::kill(pid_i, 0) == 0 }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        true
-    }
 }
 
 #[cfg(test)]
@@ -1005,16 +928,16 @@ mod tests {
     }
 
     #[test]
-    fn lock_parse_and_stale_detection() {
-        let dir =
-            std::env::temp_dir().join(format!("mink-server-lock-test-{}", std::process::id()));
+    fn lease_is_exclusive_reusable_and_ignores_stale_file_contents() {
+        let dir = unique_temp_dir("lease");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(LOCK_FILE);
-        // Dead pid is never alive in practice.
-        std::fs::write(&path, format!("{{\"pid\":{}, \"taken_at\":0}}", u32::MAX)).unwrap();
-        assert!(lock_is_stale(&path), "dead pid should be stale");
-        std::fs::write(&path, format!("{{\"pid\":{}}}", std::process::id())).unwrap();
-        assert!(!lock_is_stale(&path), "own live pid should not be stale");
+        std::fs::write(&path, "").unwrap();
+        let lease = SessionLease::acquire(path.clone()).unwrap();
+        assert!(SessionLease::acquire(path.clone()).is_err());
+        drop(lease);
+        SessionLease::acquire(path.clone()).unwrap();
+        assert!(path.is_file());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1051,7 +974,8 @@ mod tests {
             .close(&created.id, Some(&created.project_key))
             .await
             .unwrap();
-        assert!(!session_dir.join(LOCK_FILE).exists());
+        assert!(session_dir.join(LOCK_FILE).exists());
+        SessionLease::acquire(session_dir.join(LOCK_FILE)).unwrap();
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -26,6 +26,7 @@ grep-printer = "0.3"
 grep-regex = "0.1"
 grep-searcher = "0.1"
 libc = "0.2"
+fs2 = "0.4"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "socks", "stream", "query", "form"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

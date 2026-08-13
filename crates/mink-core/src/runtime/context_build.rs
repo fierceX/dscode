@@ -118,6 +118,7 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
         params.session_id.clone(),
         params.display.clone(),
         params.cancel.clone(),
+        params.interrupt.clone(),
         params.llm_backend.clone(),
     )?);
 
