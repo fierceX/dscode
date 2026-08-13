@@ -317,12 +317,13 @@ fn state_change_outcome(
     outcome
 }
 
-fn todo_read_provider(ctx: &ToolContext) -> &'static str {
+fn todo_read_provider(ctx: &ToolContext) -> &str {
     use crate::tools::semantic_capabilities::ToolSemanticCapability::TodoInspect;
     ctx.tool_capabilities
         .primary_provider(TodoInspect)
         .expect("todo mutation tools require a resolved TodoInspect provider")
         .tool
+        .as_str()
 }
 
 fn status_counts(snapshot: &TodoSnapshot) -> (usize, usize, usize) {

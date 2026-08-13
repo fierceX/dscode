@@ -6,17 +6,19 @@ import { api } from "../../lib/api";
 const input = ref("");
 const busy = ref(false);
 const errorHint = ref("");
+let localInputSequence = 0;
 const running = computed(() => appState.sessionState?.running ?? false);
+const desynced = computed(() => appState.sessionState?.desynced ?? false);
 
 const send = async () => {
   const text = input.value.trim();
   const id = appState.sessionState?.sessionId;
-  if (!text || !id || busy.value || running.value) return;
+  if (!text || !id || busy.value || running.value || desynced.value) return;
   busy.value = true;
   errorHint.value = "";
   input.value = "";
   try {
-    const resp = await api.sendTurn(id, text);
+    const resp = await api.sendTurn(id, text, appState.currentProjectKey ?? undefined);
     if (resp.code !== 200) {
       const hint = resp.message.includes("too many running")
         ? "其他会话正在运行，请等待或先中断/关闭它们"
@@ -28,7 +30,7 @@ const send = async () => {
       return;
     }
     // 本地立即追加用户消息（广播流不含 user_input——刷新后由 conversation 提供）
-    applyEvent({ type: "user_input", content: text });
+    applyEvent({ type: "user_input", content: text, seq: -(++localInputSequence) });
     if (appState.sessionState) appState.sessionState.running = true;
   } catch (e) {
     errorHint.value = `发送失败: ${String(e)}`;
@@ -40,7 +42,7 @@ const send = async () => {
 const interrupt = async () => {
   const id = appState.sessionState?.sessionId;
   if (!id) return;
-  try { await api.interrupt(id); } catch (e) { errorHint.value = `中断失败: ${String(e)}`; }
+  try { await api.interrupt(id, appState.currentProjectKey ?? undefined); } catch (e) { errorHint.value = `中断失败: ${String(e)}`; }
 };
 const onKeydown = (e: KeyboardEvent) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
@@ -52,12 +54,12 @@ const onKeydown = (e: KeyboardEvent) => {
   <div class="input-bar">
     <div v-if="errorHint" class="error-hint" role="alert">{{ errorHint }}</div>
     <textarea
-      v-model="input" rows="1" :disabled="running"
+      v-model="input" rows="1" :disabled="running || desynced"
       placeholder="输入消息，Enter 发送，Shift+Enter 换行，Ctrl+Enter 中断"
       @keydown="onKeydown"
     ></textarea>
     <button v-if="running" class="danger" @click="interrupt">中断</button>
-    <button class="primary" :disabled="busy || running || !input.trim()" @click="send">发送</button>
+    <button class="primary" :disabled="busy || running || desynced || !input.trim()" @click="send">发送</button>
   </div>
 </template>
 

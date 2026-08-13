@@ -344,9 +344,10 @@ mod tests {
         let names: Vec<_> = ToolCatalog::builtin()
             .unwrap()
             .iter_compiled()
-            .map(|(_, metadata)| metadata.name)
+            .map(|(_, metadata)| metadata.name.to_string())
             .collect();
-        let rendered = builder_for(&names).build_system_prompt().unwrap();
+        let refs = names.iter().map(String::as_str).collect::<Vec<_>>();
+        let rendered = builder_for(&refs).build_system_prompt().unwrap();
         assert!(
             rendered.len() <= 16_000,
             "rendered prompt grew to {} bytes",
@@ -580,14 +581,15 @@ mod tests {
         let names: Vec<_> = ToolCatalog::builtin()
             .unwrap()
             .iter_compiled()
-            .map(|(_, metadata)| metadata.name)
+            .map(|(_, metadata)| metadata.name.to_string())
             .collect();
-        let document = builder_for(&names).build_document().unwrap();
+        let refs = names.iter().map(String::as_str).collect::<Vec<_>>();
+        let document = builder_for(&refs).build_document().unwrap();
         for section in document.generated_sections() {
             for name in &names {
                 if contains_canonical_name(&section.content, name) {
                     assert!(
-                        section.referenced_tools.contains(name),
+                        section.referenced_tools.contains(name.as_str()),
                         "generated section '{}' embeds undeclared tool '{}'",
                         section.id,
                         name
@@ -602,7 +604,7 @@ mod tests {
         let catalog = ToolCatalog::builtin().unwrap();
         let names: Vec<_> = catalog
             .iter_compiled()
-            .map(|(_, metadata)| metadata.name)
+            .map(|(_, metadata)| metadata.name.to_string())
             .collect();
         for role in [AgentRole::Primary, AgentRole::SubAgent] {
             for vfs in [false, true] {
@@ -625,12 +627,12 @@ mod tests {
                         .resolve(&surface, &resolution)
                         .unwrap();
                     for (_, binding) in capabilities.iter() {
-                        assert!(surface.has(binding.primary.tool));
+                        assert!(surface.has(&binding.primary.tool));
                         assert!(
                             binding
                                 .alternatives
                                 .iter()
-                                .all(|provider| surface.has(provider.tool))
+                                .all(|provider| surface.has(&provider.tool))
                         );
                         if binding.primary.tier
                             == crate::tools::semantic_capabilities::ProviderTier::Fallback

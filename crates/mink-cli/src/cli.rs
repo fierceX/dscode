@@ -1,11 +1,10 @@
-use crate::agent::orchestrator::OrchCmd;
-use crate::cancel::CancellationToken;
 use crate::config::{
     apply_config_file, apply_provider_defaults, parse_args, validate_runtime_config,
 };
 use crate::runtime::{
-    AgentRuntimeConfig, TurnOutcome, apply_sdk_request_options, exit_code_from_turn,
-    final_from_outcome, runtime_skills_from_sdk_request, skill_discovery_policy_from_sdk_request,
+    AgentOptions, AgentRuntime, AgentRuntimeHandle, RuntimeResult, TurnOutcome,
+    apply_sdk_request_options, exit_code_from_turn, final_from_outcome,
+    runtime_skills_from_sdk_request, skill_discovery_policy_from_sdk_request,
 };
 use crate::sdk_protocol::{
     PROTOCOL_VERSION, SdkRequest, emit_failed_parse, parse_agent_jsonl_request,
@@ -18,10 +17,62 @@ use anyhow::Result;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-#[cfg(feature = "repl")]
-use std::sync::atomic::Ordering;
 use tokio::sync::{mpsc, oneshot};
+
+pub(crate) enum RuntimeCmd {
+    Run {
+        input: String,
+        done: Option<oneshot::Sender<RuntimeResult<TurnOutcome>>>,
+    },
+    Compact,
+    SetModel(String),
+    #[cfg_attr(not(feature = "tui"), allow(dead_code))]
+    Interrupt,
+}
+
+fn start_runtime_broker(
+    handle: AgentRuntimeHandle,
+    display: Arc<dyn Display>,
+) -> mpsc::UnboundedSender<RuntimeCmd> {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (work_tx, mut work_rx) = mpsc::unbounded_channel();
+    let work_handle = handle.clone();
+    tokio::spawn(async move {
+        while let Some(command) = work_rx.recv().await {
+            let result = match command {
+                RuntimeCmd::Run { input, done } => {
+                    let result = work_handle.run_turn(input).await;
+                    if let Err(error) = &result {
+                        display.render_error(&error.to_string());
+                    }
+                    if let Some(done) = done {
+                        let _ = done.send(result);
+                    }
+                    continue;
+                }
+                RuntimeCmd::Compact => work_handle.compact().await.map(|_| ()),
+                RuntimeCmd::SetModel(model) => work_handle.set_model(model).await,
+                RuntimeCmd::Interrupt => unreachable!("interrupts bypass the work queue"),
+            };
+            if let Err(error) = result {
+                display.render_error(&error.to_string());
+            }
+        }
+    });
+    tokio::spawn(async move {
+        while let Some(command) = rx.recv().await {
+            match command {
+                RuntimeCmd::Interrupt => handle.interrupt_current_turn(),
+                command => {
+                    if work_tx.send(command).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    tx
+}
 
 pub struct CliExit {
     pub code: i32,
@@ -169,26 +220,31 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
     #[cfg(not(feature = "tui"))]
     let sub_stream_tx: Option<Arc<dyn SubAgentStreamSink>> = None;
 
-    let mut runtime_config =
-        AgentRuntimeConfig::from_config(cfg.clone(), home.clone(), cwd.clone())
-            .with_display(display.clone())
-            .with_first_prompt(prompt_for_title);
+    let mut runtime_options = AgentOptions::from_config(cfg.clone(), home.clone(), cwd.clone())
+        .with_project_scoped_sessions()
+        .with_display(display.clone());
+    if let Some(prompt) = prompt_for_title {
+        runtime_options = runtime_options.with_first_prompt(prompt);
+    }
     if let Some(layout) = sdk_request
         .as_ref()
         .and_then(|request| request.options.session_layout)
     {
-        runtime_config = runtime_config.with_session_layout(layout);
+        runtime_options = runtime_options.with_session_layout(layout);
     }
     if let Some(request) = sdk_request.as_ref() {
-        runtime_config.runtime_skills = runtime_skills_from_sdk_request(request);
+        for skill in runtime_skills_from_sdk_request(request) {
+            runtime_options = runtime_options.with_runtime_skill(skill);
+        }
         if let Some(policy) = skill_discovery_policy_from_sdk_request(request) {
-            runtime_config.skill_discovery_policy = policy;
+            runtime_options = runtime_options.with_skill_discovery_policy(policy);
         }
     }
     if let Some(sub_stream_tx) = sub_stream_tx {
-        runtime_config = runtime_config.with_sub_stream_tx(sub_stream_tx);
+        runtime_options = runtime_options.with_sub_stream_tx(sub_stream_tx);
     }
-    let runtime = crate::runtime::AgentRuntime::start(runtime_config).await?;
+    let runtime = AgentRuntime::start(runtime_options).await?;
+    let runtime_handle = runtime.handle();
     let session = runtime.session_info().clone();
 
     let mut process_exit_code = 0i32;
@@ -201,8 +257,7 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
     } else if cfg.tui_mode.enabled() {
         #[cfg(feature = "tui")]
         {
-            let cmd_tx = runtime.command_sender();
-            let interrupt = runtime.interrupt_flag();
+            let cmd_tx = start_runtime_broker(runtime_handle.clone(), display.clone());
             if let Some((_, signal_rx)) = tui_tx {
                 let model_label = crate::config::resolve_model_label(&cfg.model);
                 if let Err(e) = crate::tui::run_tui(
@@ -210,7 +265,6 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
                     signal_rx,
                     cmd_tx.clone(),
                     &session,
-                    Some(interrupt.clone()),
                     &model_label,
                     &cfg.sandbox,
                 ) {
@@ -221,14 +275,12 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
         #[cfg(not(feature = "tui"))]
         anyhow::bail!("this mink binary was built without the `tui` feature");
     } else if is_interactive {
-        let cmd_tx = runtime.command_sender();
-        let cancel = runtime.cancel_token();
-        let interrupt = runtime.interrupt_flag();
+        let cmd_tx = start_runtime_broker(runtime_handle.clone(), display.clone());
         display.render_info("mink interactive mode (type 'exit' or Ctrl+D to quit)");
         if !session.is_new {
             replay_last_turns(&session.events_path);
         }
-        run_interactive(cmd_tx, cancel.clone(), interrupt.clone(), &home).await?;
+        run_interactive(cmd_tx, &home).await?;
     } else if !cfg.prompt.is_empty() {
         let outcome = runtime.run_turn(cfg.prompt.clone()).await?;
         emit_stream_json_final_if_needed(&cfg, &outcome);
@@ -380,13 +432,7 @@ fn skill_source_label(skill: &crate::capabilities::LoadedSkill) -> &'static str 
     }
 }
 
-async fn run_interactive(
-    cmd_tx: mpsc::UnboundedSender<OrchCmd>,
-    cancel: CancellationToken,
-    interrupt: Arc<AtomicBool>,
-    home: &Path,
-) -> Result<()> {
-    let cancel_clone = cancel.clone();
+async fn run_interactive(cmd_tx: mpsc::UnboundedSender<RuntimeCmd>, home: &Path) -> Result<()> {
     #[cfg(feature = "repl")]
     let history_path = home.join(".mink/history");
     #[cfg(not(feature = "repl"))]
@@ -401,7 +447,7 @@ async fn run_interactive(
                 Ok(r) => r,
                 Err(_) => {
                     eprintln!("Failed to initialize readline. Running in simple mode.");
-                    simple_stdin_loop(&cmd_tx, &cancel_clone);
+                    simple_stdin_loop(&cmd_tx);
                     return;
                 }
             };
@@ -414,7 +460,7 @@ async fn run_interactive(
                     Ok(s) => s.trim_end().to_string(),
                     Err(rustyline::error::ReadlineError::Eof) => break,
                     Err(rustyline::error::ReadlineError::Interrupted) => {
-                        interrupt.store(true, Ordering::SeqCst);
+                        let _ = cmd_tx.send(RuntimeCmd::Interrupt);
                         continue;
                     }
                     Err(_) => break,
@@ -440,16 +486,17 @@ async fn run_interactive(
                     continue;
                 }
                 if line == "/compact" {
-                    let (done_tx, done_rx) = oneshot::channel();
-                    if cmd_tx.send(OrchCmd::Compact { done: done_tx }).is_err() {
+                    if cmd_tx.send(RuntimeCmd::Compact).is_err() {
                         break;
                     }
-                    let _ = done_rx.blocking_recv();
                     continue;
                 }
                 if line == "/flash" || line == "/pro" {
                     let model = line.trim_start_matches('/');
-                    if cmd_tx.send(OrchCmd::SetModel(model.to_string())).is_err() {
+                    if cmd_tx
+                        .send(RuntimeCmd::SetModel(model.to_string()))
+                        .is_err()
+                    {
                         break;
                     }
                     continue;
@@ -457,7 +504,9 @@ async fn run_interactive(
                 if let Some(model) = line.strip_prefix("/model ") {
                     let model = model.trim();
                     if !model.is_empty()
-                        && cmd_tx.send(OrchCmd::SetModel(model.to_string())).is_err()
+                        && cmd_tx
+                            .send(RuntimeCmd::SetModel(model.to_string()))
+                            .is_err()
                     {
                         break;
                     }
@@ -466,16 +515,13 @@ async fn run_interactive(
                 if line == "exit" || line == "quit" {
                     break;
                 }
-                if cancel_clone.is_cancelled() {
-                    break;
-                }
                 let _ = rl.add_history_entry(&line);
                 let _ = rl.save_history(&history_file);
                 let (done_tx, done_rx) = tokio::sync::oneshot::channel();
                 if cmd_tx
-                    .send(OrchCmd::UserInput {
+                    .send(RuntimeCmd::Run {
                         input: line,
-                        done: done_tx,
+                        done: Some(done_tx),
                     })
                     .is_err()
                 {
@@ -484,9 +530,6 @@ async fn run_interactive(
                 // 轮询等待完成，同时检查中断标志
                 let mut done_rx = done_rx;
                 loop {
-                    if interrupt.load(Ordering::SeqCst) {
-                        break;
-                    }
                     match done_rx.try_recv() {
                         Ok(_) | Err(tokio::sync::oneshot::error::TryRecvError::Closed) => break,
                         Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
@@ -499,9 +542,8 @@ async fn run_interactive(
         }
         #[cfg(not(feature = "repl"))]
         {
-            let _ = interrupt;
             eprintln!("Readline support is disabled; running in simple stdin mode.");
-            simple_stdin_loop(&cmd_tx, &cancel_clone);
+            simple_stdin_loop(&cmd_tx);
         }
     })
     .await?;
@@ -509,7 +551,7 @@ async fn run_interactive(
     Ok(())
 }
 
-fn simple_stdin_loop(cmd_tx: &mpsc::UnboundedSender<OrchCmd>, cancel: &CancellationToken) {
+fn simple_stdin_loop(cmd_tx: &mpsc::UnboundedSender<RuntimeCmd>) {
     use std::io::BufRead;
     let stdin = std::io::stdin();
     for line in stdin.lock().lines() {
@@ -527,16 +569,14 @@ fn simple_stdin_loop(cmd_tx: &mpsc::UnboundedSender<OrchCmd>, cancel: &Cancellat
             } else if line == "/skills" {
                 list_skills();
             } else if line == "/compact" {
-                let (done_tx, done_rx) = oneshot::channel();
-                let _ = cmd_tx.send(OrchCmd::Compact { done: done_tx });
-                let _ = done_rx.blocking_recv();
+                let _ = cmd_tx.send(RuntimeCmd::Compact);
             } else if line == "/flash" || line == "/pro" {
                 let model = line.trim_start_matches('/');
-                let _ = cmd_tx.send(OrchCmd::SetModel(model.to_string()));
+                let _ = cmd_tx.send(RuntimeCmd::SetModel(model.to_string()));
             } else if let Some(model) = line.strip_prefix("/model ") {
                 let model = model.trim();
                 if !model.is_empty() {
-                    let _ = cmd_tx.send(OrchCmd::SetModel(model.to_string()));
+                    let _ = cmd_tx.send(RuntimeCmd::SetModel(model.to_string()));
                 }
             }
             continue;
@@ -544,14 +584,11 @@ fn simple_stdin_loop(cmd_tx: &mpsc::UnboundedSender<OrchCmd>, cancel: &Cancellat
         if line == "exit" || line == "quit" {
             break;
         }
-        if cancel.is_cancelled() {
-            break;
-        }
         let (done_tx, done_rx) = oneshot::channel();
         if cmd_tx
-            .send(OrchCmd::UserInput {
+            .send(RuntimeCmd::Run {
                 input: line,
-                done: done_tx,
+                done: Some(done_tx),
             })
             .is_err()
         {

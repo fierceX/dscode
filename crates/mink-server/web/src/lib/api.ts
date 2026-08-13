@@ -7,6 +7,8 @@ export interface ApiResponse<T = unknown> {
 }
 
 export interface SessionSummary {
+  project_key: string;
+  corrupt: boolean;
   id: string;
   alias: string | null;
   title: string | null;
@@ -48,44 +50,50 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ name, cwd }),
     }),
-  getSession: (id: string) =>
+  getSession: (id: string, project?: string) =>
     request<{ id: string; open: boolean; running: boolean }>(
-      `/api/sessions/${encodeURIComponent(id)}`,
+      sessionUrl(id, "", project),
     ),
-  openSession: (id: string) =>
-    request(`/api/sessions/${encodeURIComponent(id)}/open`, { method: "POST" }),
-  deleteSession: (id: string) =>
-    request(`/api/sessions/${encodeURIComponent(id)}`, { method: "DELETE" }),
-  sendTurn: (id: string, input: string) =>
-    request(`/api/sessions/${encodeURIComponent(id)}/turn`, {
+  openSession: (id: string, project?: string) =>
+    request(sessionUrl(id, "/open", project), { method: "POST" }),
+  deleteSession: (id: string, project?: string) =>
+    request(sessionUrl(id, "", project), { method: "DELETE" }),
+  sendTurn: (id: string, input: string, project?: string) =>
+    request(sessionUrl(id, "/turn", project), {
       method: "POST",
       body: JSON.stringify({ input }),
     }),
-  interrupt: (id: string) =>
-    request(`/api/sessions/${encodeURIComponent(id)}/interrupt`, { method: "POST" }),
+  interrupt: (id: string, project?: string) =>
+    request(sessionUrl(id, "/interrupt", project), { method: "POST" }),
   /** conversation.jsonl 完整轮次分页（历史展示主源） */
-  conversation: (id: string, opts: { limit?: number; tail?: boolean; beforeSeq?: number } = {}) => {
+  conversation: (id: string, opts: { limit?: number; tail?: boolean; beforeSeq?: number; project?: string } = {}) => {
     const params = new URLSearchParams({ limit: String(opts.limit ?? 20) });
+    if (opts.project) params.set("project", opts.project);
     if (opts.tail) params.set("tail", "true");
     if (opts.beforeSeq) params.set("before_seq", String(opts.beforeSeq));
     return request<unknown[]>(`/api/sessions/${encodeURIComponent(id)}/conversation?${params}`);
   },
-  plan: (id: string) =>
+  plan: (id: string, project?: string) =>
     request<{ plan: string | null; draft: string | null }>(
-      `/api/sessions/${encodeURIComponent(id)}/plan`,
+      sessionUrl(id, "/plan", project),
     ),
-  todo: (id: string) =>
-    request<{ todos: unknown }>(`/api/sessions/${encodeURIComponent(id)}/todo`),
-  artifacts: (id: string) =>
+  todo: (id: string, project?: string) =>
+    request<{ todos: unknown }>(sessionUrl(id, "/todo", project)),
+  artifacts: (id: string, project?: string) =>
     request<{ artifacts: { id: string; tool?: string }[] }>(
-      `/api/sessions/${encodeURIComponent(id)}/artifacts`,
+      sessionUrl(id, "/artifacts", project),
     ),
-  artifact: (id: string, name: string) =>
+  artifact: (id: string, name: string, project?: string) =>
     request<{ name: string; content: string }>(
-      `/api/sessions/${encodeURIComponent(id)}/artifacts/${encodeURIComponent(name)}`,
+      sessionUrl(id, `/artifacts/${encodeURIComponent(name)}`, project),
     ),
-  files: (id: string, path: string, raw = false) =>
+  files: (id: string, path: string, raw = false, project?: string) =>
     request<{ items?: FileItem[]; content?: string; path?: string }>(
-      `/api/sessions/${encodeURIComponent(id)}/files?path=${encodeURIComponent(path)}${raw ? "&raw=true" : ""}`,
+      `${sessionUrl(id, "/files", project)}${project ? "&" : "?"}path=${encodeURIComponent(path)}${raw ? "&raw=true" : ""}`,
     ),
 };
+
+export function sessionUrl(id: string, suffix = "", project?: string): string {
+  const base = `/api/sessions/${encodeURIComponent(id)}${suffix}`;
+  return project ? `${base}?project=${encodeURIComponent(project)}` : base;
+}

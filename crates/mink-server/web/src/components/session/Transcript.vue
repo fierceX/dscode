@@ -15,7 +15,7 @@ const items = computed(() => appState.sessionState?.items ?? []);
 const divider = computed(() => {
   const state = appState.sessionState;
   if (!state || items.value.length === 0) return null;
-  const summary = appState.sessions.find((s) => s.id === state.sessionId);
+  const summary = appState.sessions.find((s) => s.id === state.sessionId && s.project_key === appState.currentProjectKey);
   if (!summary) return null;
   const d = new Date(summary.updated_at);
   const now = new Date();
@@ -102,13 +102,14 @@ const loadOlder = async () => {
   if (loadingOlder.value || !hasOlder.value) return;
   const state = appState.sessionState;
   if (!state || state.items.length === 0) return;
-  const firstKey = (state.items[0] as { key?: number }).key ?? 0;
+  const firstKey = state.items[0].key ?? 0;
+  if (typeof firstKey !== "number") { hasOlder.value = false; return; }
   const firstRow = Math.floor(firstKey / 100); // conversation 行号（key=行号*100+子序号）
   if (firstRow <= 1) { hasOlder.value = false; showTopHint.value = true; return; }
   loadingOlder.value = true;
   const before = scrollEl.value?.scrollHeight ?? 0;
   try {
-    const resp = await api.conversation(state.sessionId, { limit: 20, beforeSeq: firstRow });
+    const resp = await api.conversation(state.sessionId, { limit: 20, beforeSeq: firstRow, project: appState.currentProjectKey ?? undefined });
     if (resp.code === 200 && Array.isArray(resp.data) && resp.data.length > 0) {
       const converted = (resp.data as Record<string, unknown>[]).flatMap(conversationToEvents);
       prependOlder(converted as never);
@@ -145,6 +146,10 @@ const onScroll = (e: Event) => {
     <template v-for="(item, i) in items" :key="(item as any).key || `i${i}`">
       <ThinkingBlock v-if="item.kind === 'thinking' && (item as any).text?.trim()" :item="item" @inner-scroll="onThinkingScroll" />
       <ToolCard v-else-if="item.kind === 'tool'" :item="item" />
+      <div v-else-if="item.kind === 'sub_agent'" class="msg system sub-agent">
+        子代理 {{ item.sessionId.slice(0, 8) }} · {{ item.status }} · I {{ item.inTokens }} / O {{ item.outTokens }}
+        <span v-if="item.text"> — {{ item.text }}</span>
+      </div>
       <div v-else-if="item.kind === 'text'" class="msg agent">
         <span class="av">M</span>
         <div class="msg-content">

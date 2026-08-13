@@ -68,14 +68,18 @@ pub(super) fn append_core_sections(builder: &Builder, document: &mut PromptDocum
             "No callable runtime capabilities are available in this session.",
         )?;
     } else {
-        let names: Vec<&'static str> = builder.tool_surface.names().collect();
+        let names: Vec<String> = builder
+            .tool_surface
+            .names()
+            .map(ToString::to_string)
+            .collect();
         document.push(PromptSection {
             id: "tool-inventory".into(),
             tag: "tool-inventory".into(),
             origin: PromptSectionOrigin::Workflow,
             content: format!("Available tools: {}", names.join(", ")),
             name: None,
-            referenced_tools: names.iter().copied().collect(),
+            referenced_tools: names.iter().cloned().collect(),
             consumed_facts: BTreeSet::new(),
         })?;
     }

@@ -29,32 +29,33 @@ fn resolve_abs(dir: &str, cwd: &Path) -> PathBuf {
 
 /// 在 CPython WASI 沙箱中执行 Python 脚本。
 #[allow(clippy::too_many_arguments)]
-fn execute_in_sandbox(
+fn execute_in_sandbox_at(
     script: &str,
     wasm_path: &Path,
     stdlib_dir: &Path,
     read_dirs: &[String],
     write_dirs: &[String],
     package_dirs: &[String],
+    cwd: &Path,
+    max_output: usize,
     timeout_secs: u64,
     interrupt: Option<&AtomicBool>,
 ) -> Result<(String, String, Option<i32>)> {
     let wasm_bytes =
         std::fs::read(wasm_path).map_err(|e| anyhow::anyhow!("读取 python.wasm 失败: {e}"))?;
 
-    let engine_config = Config::new();
+    let mut engine_config = Config::new();
+    engine_config.epoch_interruption(true);
     let engine = Engine::new(&engine_config)?;
     let module = Module::new(&engine, &wasm_bytes)?;
 
     // ── WASI 上下文 ──
-    let max_output: usize = 100_000; // 最大捕获字节数，与 tool_result_max_bytes 一致
     let stdout_pipe = MemoryOutputPipe::new(max_output);
     let stderr_pipe = MemoryOutputPipe::new(max_output);
     let mut builder = WasiCtxBuilder::new();
     builder
         .stdout(stdout_pipe.clone())
         .stderr(stderr_pipe.clone());
-    let cwd = std::env::current_dir()?;
 
     // 注入 os.chdir，使 Python 相对路径解析指向项目根
     let cwd_str = cwd.to_string_lossy();
@@ -79,7 +80,7 @@ fn execute_in_sandbox(
     // 顺序：写目录（读写）→ 读目录（只读）→ CWD（只读）
     // wasmtime-wasi preview1 首次匹配，子路径必须在父路径之前
     for dir in write_dirs {
-        let abs = resolve_abs(dir, &cwd);
+        let abs = resolve_abs(dir, cwd);
         if abs.exists() || abs.parent().is_some_and(|parent| parent.exists()) {
             builder.preopened_dir(
                 &abs,
@@ -90,18 +91,18 @@ fn execute_in_sandbox(
         }
     }
     for dir in read_dirs {
-        let abs = resolve_abs(dir, &cwd);
+        let abs = resolve_abs(dir, cwd);
         if abs.exists() {
             builder.preopened_dir(&abs, abs.to_string_lossy(), DirPerms::READ, FilePerms::READ)?;
         }
     }
     // preopen CWD 到绝对路径（只读），但若 CWD 已在 write_dirs 中则跳过（写权限优先）
     let cwd_is_writable = write_dirs.iter().any(|d| {
-        let abs = resolve_abs(d, &cwd);
+        let abs = resolve_abs(d, cwd);
         abs == cwd
     });
     if !cwd_is_writable {
-        builder.preopened_dir(&cwd, cwd.to_string_lossy(), DirPerms::READ, FilePerms::READ)?;
+        builder.preopened_dir(cwd, cwd.to_string_lossy(), DirPerms::READ, FilePerms::READ)?;
     }
 
     // 包目录
@@ -128,6 +129,7 @@ fn execute_in_sandbox(
     // ── 执行 ──
     let wasi = builder.build_p1();
     let mut store = Store::new(&engine, wasi);
+    store.set_epoch_deadline(1);
     let mut linker: Linker<WasiP1Ctx> = Linker::new(&engine);
     p1::add_to_linker_sync(&mut linker, |ctx| ctx)?;
 
@@ -138,36 +140,48 @@ fn execute_in_sandbox(
     use std::sync::mpsc;
     let (tx, rx) = mpsc::channel();
     // 将 store 移入线程，线程负责执行并发送结果
-    let _handle = std::thread::spawn(move || {
+    let handle = std::thread::spawn(move || {
         let result = start.call(&mut store, ());
         let _ = tx.send(result);
     });
 
     let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
+    enum StopCause {
+        Timeout,
+        Cancelled,
+        Disconnected,
+    }
     let result = loop {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
-            break None; // timeout
+            break Err(StopCause::Timeout);
         }
         if let Some(int) = interrupt
             && int.load(std::sync::atomic::Ordering::SeqCst)
         {
-            break None; // cancelled
+            break Err(StopCause::Cancelled);
         }
         match rx.recv_timeout(Duration::from_millis(200)) {
-            Ok(r) => break Some(r),
+            Ok(r) => break Ok(r),
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(mpsc::RecvTimeoutError::Disconnected) => break None,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break Err(StopCause::Disconnected),
         }
     };
+
+    if result.is_err() {
+        engine.increment_epoch();
+    }
+    handle
+        .join()
+        .map_err(|_| anyhow::anyhow!("Python sandbox execution thread panicked"))?;
 
     // 读取输出
     let stdout = String::from_utf8_lossy(&stdout_pipe.contents()).to_string();
     let stderr = String::from_utf8_lossy(&stderr_pipe.contents()).to_string();
 
     match result {
-        Some(Ok(())) => Ok((stdout, stderr, Some(0))),
-        Some(Err(trap)) => {
+        Ok(Ok(())) => Ok((stdout, stderr, Some(0))),
+        Ok(Err(trap)) => {
             let msg = trap.to_string();
             if msg.contains("proc_exit") {
                 let code = msg
@@ -176,7 +190,7 @@ fn execute_in_sandbox(
                     .and_then(|s| s.split(')').next())
                     .and_then(|s| s.parse::<i32>().ok());
                 Ok((stdout, stderr, code))
-            } else if msg.contains("fuel") && msg.contains("exhausted") {
+            } else if msg.contains("epoch") || msg.contains("interrupt") {
                 let timed_out_msg = format!(
                     "[... Python sandbox timed out after {} seconds ...]",
                     timeout_secs
@@ -194,11 +208,21 @@ fn execute_in_sandbox(
                 Ok((stdout, stderr, Some(1)))
             }
         }
-        None => {
-            let cancelled_msg = format!(
-                "[... Python sandbox cancelled after {} seconds ...]",
-                timeout_secs
-            );
+        Err(cause) => {
+            let (code, cancelled_msg) = match cause {
+                StopCause::Timeout => (
+                    124,
+                    format!("[... Python sandbox timed out after {timeout_secs} seconds ...]"),
+                ),
+                StopCause::Cancelled => (
+                    130,
+                    "[... Python sandbox cancelled by user ...]".to_string(),
+                ),
+                StopCause::Disconnected => (
+                    1,
+                    "[... Python sandbox execution channel disconnected ...]".to_string(),
+                ),
+            };
             Ok((
                 stdout,
                 if stderr.is_empty() {
@@ -206,10 +230,36 @@ fn execute_in_sandbox(
                 } else {
                     format!("{stderr}\n{cancelled_msg}")
                 },
-                Some(124),
+                Some(code),
             ))
         }
     }
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn execute_in_sandbox(
+    script: &str,
+    wasm_path: &Path,
+    stdlib_dir: &Path,
+    read_dirs: &[String],
+    write_dirs: &[String],
+    package_dirs: &[String],
+    timeout_secs: u64,
+    interrupt: Option<&AtomicBool>,
+) -> Result<(String, String, Option<i32>)> {
+    execute_in_sandbox_at(
+        script,
+        wasm_path,
+        stdlib_dir,
+        read_dirs,
+        write_dirs,
+        package_dirs,
+        &std::env::current_dir()?,
+        100_000,
+        timeout_secs,
+        interrupt,
+    )
 }
 
 pub struct PythonSandboxTool;
@@ -223,6 +273,7 @@ impl super::runner::ToolExec for PythonSandboxTool {
             super::metadata::ToolResultKind::Command,
         )
         .storm_exempt()
+        .mutating()
     }
 
     fn execute(
@@ -274,13 +325,15 @@ impl super::runner::ToolExec for PythonSandboxTool {
 
         let stdlib_dir = Path::new(&sp_cfg.stdlib_dir);
 
-        let (stdout, stderr, exit_code) = execute_in_sandbox(
+        let (stdout, stderr, exit_code) = execute_in_sandbox_at(
             &script,
             wasm_path,
             stdlib_dir,
             &sp_cfg.read_dirs,
             &sp_cfg.write_dirs,
             &sp_cfg.package_dirs,
+            &ctx.cwd,
+            ctx.tool_config.tool_result_max_bytes,
             timeout,
             Some(ctx.interrupt.as_ref()),
         )?;
@@ -319,6 +372,56 @@ impl super::runner::ToolExec for PythonSandboxTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn synthetic_infinite_loop_wasm(path: &Path) {
+        // (module (func (export "_start") (loop br 0)))
+        const WASM: &[u8] = &[
+            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+            0x03, 0x02, 0x01, 0x00, 0x07, 0x0a, 0x01, 0x06, b'_', b's', b't', b'a', b'r', b't',
+            0x00, 0x00, 0x0a, 0x09, 0x01, 0x07, 0x00, 0x03, 0x40, 0x0c, 0x00, 0x0b, 0x0b,
+        ];
+        std::fs::write(path, WASM).unwrap();
+    }
+
+    #[test]
+    fn synthetic_wasm_timeout_and_cancel_terminate_execution() {
+        let dir = std::env::temp_dir().join(format!(
+            "mink-sandbox-synthetic-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wasm = dir.join("loop.wasm");
+        synthetic_infinite_loop_wasm(&wasm);
+
+        let started = std::time::Instant::now();
+        let (_, timeout_error, timeout_code) =
+            execute_in_sandbox_at("", &wasm, &dir, &[], &[], &[], &dir, 1024, 1, None).unwrap();
+        assert_eq!(timeout_code, Some(124));
+        assert!(timeout_error.contains("timed out"));
+        assert!(started.elapsed() < Duration::from_secs(3));
+
+        let interrupt = AtomicBool::new(true);
+        let (_, cancel_error, cancel_code) = execute_in_sandbox_at(
+            "",
+            &wasm,
+            &dir,
+            &[],
+            &[],
+            &[],
+            &dir,
+            1024,
+            10,
+            Some(&interrupt),
+        )
+        .unwrap();
+        assert_eq!(cancel_code, Some(130));
+        assert!(cancel_error.contains("cancelled"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[cfg_attr(not(feature = "slow-tests"), ignore)]
     #[test]

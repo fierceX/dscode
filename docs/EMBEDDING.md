@@ -21,7 +21,7 @@ Rust 发布包为 `mink-core`，库 crate 名为 `mink`。发布包只包含可�
 
 ```toml
 [dependencies]
-mink = { package = "mink-core", version = "0.3.3", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.4.0", default-features = false, features = ["runtime"] }
 ```
 
 稳定入口：`mink::prelude`、`mink::runtime`、`mink::config`、`mink::sandbox`、
@@ -34,7 +34,7 @@ use mink::prelude::{AgentOptions, AgentRuntime};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let rt = AgentRuntime::start_with_options(
+    let rt = AgentRuntime::start(
         AgentOptions::new("/tmp/mink-session", ".")
             .with_api_key(std::env::var("DEEPSEEK_API_KEY")?)
             .with_model("flash"),
@@ -50,24 +50,45 @@ async fn main() -> anyhow::Result<()> {
 
 ### 流式 turn
 
-`try_stream_turn()` 逐条消费事件，结束时通过 `outcome()` 取回完整结果：
+`stream_turn()` 逐条消费事件，结束时通过 `outcome()` 取回完整结果：
 
 ```rust
-use mink::prelude::{AgentEvent, AgentRuntime};
+use mink::prelude::{AgentEventKind, AgentRuntime};
 
-let mut stream = rt.try_stream_turn("explain")?;
+let mut stream = rt.stream_turn("explain")?;
 while let Some(ev) = stream.recv().await {
-    match ev {
-        AgentEvent::Text { content } => print!("{content}"),
-        AgentEvent::Thinking { content } => eprint!("{content}"),
-        AgentEvent::ToolCall { name, summary } => eprintln!("[tool] {name} {summary}"),
-        AgentEvent::Final { .. } => break,
-        AgentEvent::Error { message } => eprintln!("error: {message}"),
+    match ev.kind {
+        AgentEventKind::Text { content } => print!("{content}"),
+        AgentEventKind::Thinking { content } => eprint!("{content}"),
+        AgentEventKind::ToolCall { name, summary, .. } => eprintln!("[tool] {name} {summary}"),
+        AgentEventKind::Final { .. } => break,
+        AgentEventKind::Error { message } => eprintln!("error: {message}"),
         _ => {}
     }
 }
 let outcome = stream.outcome().await?;
 ```
+
+需要从多个任务共享同一 runtime 时，调用 `rt.handle()` 获取可克隆的
+`AgentRuntimeHandle`。handle 只提供 `run_turn`、`stream_turn`、`compact`、`set_model`
+和 interrupt，所有克隆共享同一个 Busy 门禁；只有原始 `AgentRuntime` 拥有
+`shutdown()`。0.4.0 不再暴露 raw actor sender、cancel token 或 interrupt flag。
+
+全局观察者实现异步 `EventSink`：
+
+```rust
+#[async_trait::async_trait]
+impl mink::runtime::EventSink for Observer {
+    async fn on_event(&self, event: mink::runtime::AgentEvent) -> Result<(), String> {
+        self.persist(event).await
+    }
+}
+```
+
+observer 通过固定容量队列与核心 turn 隔离；溢出或 observer 失败不会中断 turn，错误会在
+`AgentRuntime::shutdown()` 返回。Web SSE 会额外加入 `stream_sequence` 作为传输序号，
+同时保留核心的 `turn_id + sequence`。事件名使用 `turn_started`、`title_update.stats`、
+`sub_agent_status`、`sub_agent_output` 与 `turn_final.outcome`。
 
 ### AgentOptions 配置速查
 
@@ -96,7 +117,7 @@ use std::collections::BTreeMap;
 use mink::prelude::{AgentOptions, AgentRuntime};
 use serde_json::json;
 
-let runtime = AgentRuntime::start_with_options(
+let runtime = AgentRuntime::start(
     AgentOptions::new("/tmp/mink-session", ".")
         .with_model("local")
         .with_openai_reasoning_effort("high")
@@ -113,7 +134,7 @@ let runtime = AgentRuntime::start_with_options(
 use std::sync::Arc;
 use mink::prelude::{AgentOptions, AgentRuntime};
 
-let runtime = AgentRuntime::start_with_options(
+let runtime = AgentRuntime::start(
     AgentOptions::new("/tmp/mink-session", ".")
         .with_model("local")
         .with_llm_backend(Arc::new(MyLlmBackend::new())),
@@ -140,7 +161,7 @@ use std::sync::Arc;
 use mink::prelude::{AgentOptions, AgentRuntime};
 
 let vfs = Arc::new(MyReadOnlyFileSystem::open("knowledge.db")?);
-let runtime = AgentRuntime::start_with_options(
+let runtime = AgentRuntime::start(
     AgentOptions::new("/tmp/mink-session", ".")
         .with_resource_session_id("tenant-task-001")
         .with_read_only_file_system(vfs),
@@ -315,7 +336,7 @@ DeepSeek API 官方单价（纳元整数运算）：
 ```rust
 use mink::prelude::{AgentOptions, AgentRuntime, UsageSummary};
 
-let outcome = AgentRuntime::start_with_options(
+let outcome = AgentRuntime::start(
     AgentOptions::new("/tmp/mink-session", ".")
         .with_api_key(std::env::var("DEEPSEEK_API_KEY")?)
         .with_model("flash"),

@@ -1,4 +1,5 @@
 use anyhow::{Result, bail};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 /// Filesystem layout used to derive the session directory from `home`.
@@ -40,8 +41,61 @@ pub struct Paths {
     pub artifacts: PathBuf,
 }
 
+impl Paths {
+    pub fn from_session_dir(session_id: impl Into<String>, session_dir: PathBuf) -> Self {
+        let session_id = session_id.into();
+        let base_dir = session_dir
+            .parent()
+            .map_or_else(|| session_dir.clone(), Path::to_path_buf);
+        Self {
+            session_id,
+            base_dir,
+            conversation: session_dir.join("conversation.jsonl"),
+            events: session_dir.join("events.jsonl"),
+            summary: session_dir.join("summary.txt"),
+            metadata: session_dir.join("session.json"),
+            plan: session_dir.join("plan.md"),
+            plan_draft: session_dir.join("plan.draft"),
+            todos: session_dir.join("todos.json"),
+            stats: session_dir.join("stats.json"),
+            usage: session_dir.join("usage.jsonl"),
+            artifacts: session_dir.join("artifacts"),
+            session_dir,
+        }
+    }
+}
+
 /// Derive a filesystem-safe project key from the working directory path.
 pub fn project_key(cwd: &Path) -> String {
+    let normalized = normalized_project_path(cwd);
+    let digest = Sha256::digest(normalized.as_bytes());
+    let hash = digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let mut readable = normalized
+        .trim_start_matches('/')
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    while readable.contains("--") {
+        readable = readable.replace("--", "-");
+    }
+    readable = readable.trim_matches('-').chars().take(48).collect();
+    if readable.is_empty() {
+        readable.push_str("root");
+    }
+    format!("{readable}--{hash}")
+}
+
+/// Historical project key retained for read-only compatibility.
+pub fn legacy_project_key(cwd: &Path) -> String {
     let s = cwd.to_string_lossy();
     let stripped = s.strip_prefix(std::path::MAIN_SEPARATOR).unwrap_or(&s);
     let mut clean = stripped.replace(std::path::MAIN_SEPARATOR, "-");
@@ -57,6 +111,55 @@ pub fn project_key(cwd: &Path) -> String {
         }
     }
     out.trim_end_matches('-').to_string()
+}
+
+pub fn canonical_project_path(cwd: &Path) -> PathBuf {
+    cwd.canonicalize().unwrap_or_else(|_| {
+        let absolute = if cwd.is_absolute() {
+            cwd.to_path_buf()
+        } else {
+            std::env::current_dir().unwrap_or_default().join(cwd)
+        };
+        lexical_normalize(&absolute)
+    })
+}
+
+fn lexical_normalize(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn normalized_project_path(cwd: &Path) -> String {
+    let mut value = canonical_project_path(cwd)
+        .to_string_lossy()
+        .replace('\\', "/");
+    if value.as_bytes().get(1) == Some(&b':') {
+        value.replace_range(0..1, &value[..1].to_ascii_lowercase());
+    }
+    value
+}
+
+pub fn project_base_dirs(home: &Path, cwd: &Path) -> Vec<PathBuf> {
+    let root = home.join(".mink/projects");
+    let new = root.join(project_key(cwd));
+    let old = root.join(legacy_project_key(cwd));
+    if new == old {
+        vec![new]
+    } else {
+        vec![new, old]
+    }
 }
 
 /// Build all session paths for a given home directory, working directory, and session ID.
@@ -117,12 +220,23 @@ pub async fn continue_session_with_layout(
             bail!("no sessions found");
         }
         let paths = paths_for_layout(home, cwd, "isolated", layout);
-        if let Ok(text) = tokio::fs::read_to_string(&paths.metadata).await
-            && let Ok(value) = serde_json::from_str::<serde_json::Value>(&text)
-            && let Some(id) = value.get("id").and_then(|id| id.as_str())
-            && !id.trim().is_empty()
-        {
-            return Ok(id.to_string());
+        match tokio::fs::read_to_string(&paths.metadata).await {
+            Ok(text) if !text.trim().is_empty() => {
+                let value: serde_json::Value = serde_json::from_str(&text).map_err(|error| {
+                    anyhow::anyhow!(
+                        "corrupt session metadata {}: {error}",
+                        paths.metadata.display()
+                    )
+                })?;
+                if let Some(id) = value.get("id").and_then(|id| id.as_str())
+                    && !id.trim().is_empty()
+                {
+                    return Ok(id.to_string());
+                }
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
         return Ok(home
             .file_name()
@@ -131,21 +245,37 @@ pub async fn continue_session_with_layout(
             .unwrap_or_else(chrono_session_id));
     }
 
-    let dir = session_base_dir(home, cwd, layout);
+    let dirs = if layout == SessionLayout::ProjectScoped {
+        project_base_dirs(home, cwd)
+    } else {
+        vec![session_base_dir(home, cwd, layout)]
+    };
     let mut newest: Option<(std::time::SystemTime, String)> = None;
-    if !dir.exists() {
+    if dirs.iter().all(|dir| !dir.exists()) {
         bail!("no sessions found");
     }
-    let mut entries = tokio::fs::read_dir(&dir).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        if !entry.path().is_dir() {
+    for dir in dirs {
+        if !dir.exists() {
             continue;
         }
-        let name = entry.file_name().to_string_lossy().to_string();
-        let mt = session_activity_mod_time(&entry.path()).await?;
-        match &newest {
-            Some((ts, _)) if *ts >= mt => {}
-            _ => newest = Some((mt, name)),
+        let legacy_key = legacy_project_key(cwd);
+        let is_legacy = dir
+            .file_name()
+            .is_some_and(|name| name == std::ffi::OsStr::new(&legacy_key));
+        let mut entries = tokio::fs::read_dir(&dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            if !entry.path().is_dir() {
+                continue;
+            }
+            if is_legacy && !metadata_cwd_matches(&entry.path(), cwd).await {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            let mt = session_activity_mod_time(&entry.path()).await?;
+            match &newest {
+                Some((ts, _)) if *ts >= mt => {}
+                _ => newest = Some((mt, name)),
+            }
         }
     }
     if let Some((_, sid)) = newest {
@@ -153,6 +283,19 @@ pub async fn continue_session_with_layout(
     } else {
         bail!("no sessions found")
     }
+}
+
+async fn metadata_cwd_matches(session_dir: &Path, cwd: &Path) -> bool {
+    let Ok(text) = tokio::fs::read_to_string(session_dir.join("session.json")).await else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    let Some(recorded) = value.get("cwd").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    canonical_project_path(Path::new(recorded)) == canonical_project_path(cwd)
 }
 
 async fn session_activity_mod_time(session_dir: &Path) -> Result<std::time::SystemTime> {
@@ -215,6 +358,22 @@ mod tests {
     }
 
     #[test]
+    fn formerly_colliding_paths_have_distinct_project_keys() {
+        assert_ne!(
+            project_key(Path::new("/a/b-c")),
+            project_key(Path::new("/a-b/c"))
+        );
+    }
+
+    #[test]
+    fn nonexistent_paths_are_lexically_normalized_before_hashing() {
+        assert_eq!(
+            project_key(Path::new("/definitely-missing/a/../b")),
+            project_key(Path::new("/definitely-missing/b"))
+        );
+    }
+
+    #[test]
     fn paths_for_layout_project_scoped_keeps_existing_shape() {
         let paths = paths_for_layout(
             Path::new("/home/mink"),
@@ -222,9 +381,11 @@ mod tests {
             "sid",
             SessionLayout::ProjectScoped,
         );
-        assert_eq!(
-            paths.session_dir,
-            PathBuf::from("/home/mink/.mink/projects/-work-project/sid")
+        assert!(
+            paths
+                .session_dir
+                .to_string_lossy()
+                .contains("work-project--")
         );
     }
 

@@ -1,12 +1,25 @@
-use crate::runtime::TurnOutcome;
+use crate::runtime::{TurnId, TurnOutcome};
+use crate::tools::metadata::ToolResultKind;
 use crate::ui::{
-    Display, PresentedToolResultDisplay, StatsSnapshot, ToolCallDisplay, ToolResultDisplay,
+    ArtifactDisplay, Display, PresentedToolResultDisplay, StatsSnapshot, ToolCallDisplay,
+    ToolPresentation, ToolResultDisplay,
 };
-use std::sync::Arc;
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
-#[derive(Debug, Clone)]
-pub enum AgentEvent {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentEvent {
+    pub turn_id: Option<TurnId>,
+    pub sequence: u64,
+    #[serde(flatten)]
+    pub kind: AgentEventKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AgentEventKind {
+    TurnStarted,
     Thinking {
         content: String,
     },
@@ -17,15 +30,18 @@ pub enum AgentEvent {
         id: String,
         name: String,
         summary: String,
-        /// 完整调用参数（实时流透传；无参数事件为 Null）
         input: serde_json::Value,
     },
     ToolResult {
+        tool_use_id: Option<String>,
         tool_name: String,
         content_preview: String,
         content: String,
-        tool_use_id: Option<String>,
+        success: bool,
         exit_code: Option<i32>,
+        result_kind: ToolResultKind,
+        presentation: Option<ToolPresentation>,
+        artifacts: Vec<ArtifactDisplay>,
     },
     Signal {
         signal_kind: String,
@@ -67,226 +83,339 @@ pub enum AgentEvent {
     },
 }
 
+#[async_trait::async_trait]
 pub trait EventSink: Send + Sync {
-    fn on_event(&self, event: AgentEvent);
+    async fn on_event(&self, event: AgentEvent) -> Result<(), String>;
+}
+
+pub(crate) struct EventDispatcher {
+    tx: Mutex<Option<tokio::sync::mpsc::Sender<AgentEvent>>>,
+    task: Mutex<Option<tokio::task::JoinHandle<Result<(), String>>>>,
+    failure: Arc<Mutex<Option<String>>>,
+}
+
+impl EventDispatcher {
+    pub(crate) fn new(sink: Arc<dyn EventSink>) -> Arc<Self> {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1024);
+        let failure = Arc::new(Mutex::new(None));
+        let task_failure = failure.clone();
+        let task = tokio::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                if let Err(error) = sink.on_event(event).await {
+                    eprintln!("[mink] event observer failed: {error}");
+                    *task_failure.lock().unwrap_or_else(|e| e.into_inner()) = Some(error.clone());
+                    return Err(error);
+                }
+            }
+            Ok(())
+        });
+        Arc::new(Self {
+            tx: Mutex::new(Some(tx)),
+            task: Mutex::new(Some(task)),
+            failure,
+        })
+    }
+
+    fn dispatch(&self, event: AgentEvent) {
+        let failure = {
+            let tx = self.tx.lock().unwrap_or_else(|e| e.into_inner());
+            tx.as_ref().and_then(|tx| match tx.try_send(event) {
+                Ok(()) => None,
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    Some("event observer queue overflowed (capacity 1024)")
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    Some("event observer stopped before runtime shutdown")
+                }
+            })
+        };
+        if let Some(message) = failure {
+            self.stop_with_failure(message);
+        }
+    }
+
+    fn stop_with_failure(&self, message: impl Into<String>) {
+        let message = message.into();
+        let mut failure = self.failure.lock().unwrap_or_else(|e| e.into_inner());
+        if failure.is_some() {
+            return;
+        }
+        eprintln!("[mink] {message}");
+        *failure = Some(message);
+        self.tx.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(task) = self.task.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            task.abort();
+        }
+    }
+
+    pub(crate) async fn shutdown(&self) -> Result<(), String> {
+        self.shutdown_with_timeout(std::time::Duration::from_secs(5))
+            .await
+    }
+
+    async fn shutdown_with_timeout(&self, timeout: std::time::Duration) -> Result<(), String> {
+        self.tx.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let mut task = self.task.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(handle) = task.as_mut() {
+            match tokio::time::timeout(timeout, &mut *handle).await {
+                Ok(Ok(Ok(()))) => {}
+                Ok(Ok(Err(error))) => self.stop_with_failure(error),
+                Ok(Err(error)) if error.is_cancelled() => {}
+                Ok(Err(error)) => {
+                    self.stop_with_failure(format!("event observer task failed: {error}"))
+                }
+                Err(_) => {
+                    handle.abort();
+                    let _ = handle.await;
+                    self.stop_with_failure(format!(
+                        "event observer shutdown timed out after {:.3}s",
+                        timeout.as_secs_f64()
+                    ));
+                }
+            }
+        }
+        self.failure
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .map_or(Ok(()), Err)
+    }
+}
+
+#[doc(hidden)]
+pub struct TurnEventEmitter {
+    turn_id: TurnId,
+    next_sequence: AtomicU64,
+    tx: Option<tokio::sync::mpsc::UnboundedSender<AgentEvent>>,
+    dispatcher: Option<Arc<EventDispatcher>>,
+}
+
+impl TurnEventEmitter {
+    pub(crate) fn new(
+        turn_id: TurnId,
+        tx: Option<tokio::sync::mpsc::UnboundedSender<AgentEvent>>,
+        dispatcher: Option<Arc<EventDispatcher>>,
+    ) -> Self {
+        Self {
+            turn_id,
+            next_sequence: AtomicU64::new(1),
+            tx,
+            dispatcher,
+        }
+    }
+
+    pub(crate) fn emit(&self, kind: AgentEventKind) {
+        let event = AgentEvent {
+            turn_id: Some(self.turn_id.clone()),
+            sequence: self.next_sequence.fetch_add(1, Ordering::Relaxed),
+            kind,
+        };
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(event.clone());
+        }
+        if let Some(dispatcher) = &self.dispatcher {
+            dispatcher.dispatch(event);
+        }
+    }
 }
 
 pub(crate) struct EventDisplay {
-    sink: Option<Arc<dyn EventSink>>,
     delegate: Option<Arc<dyn Display>>,
-    next_turn_subscription_id: AtomicU64,
-    turn_tx: std::sync::Mutex<Option<TurnEventChannel>>,
-}
-
-struct TurnEventChannel {
-    id: u64,
-    tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>,
-}
-
-pub(crate) struct TurnEventSubscription {
-    display: Arc<EventDisplay>,
-    id: u64,
+    dispatcher: Option<Arc<EventDispatcher>>,
+    next_control_sequence: AtomicU64,
+    current_turn: Mutex<Option<Arc<TurnEventEmitter>>>,
 }
 
 impl EventDisplay {
     pub(crate) fn new(
-        sink: Option<Arc<dyn EventSink>>,
         delegate: Option<Arc<dyn Display>>,
+        dispatcher: Option<Arc<EventDispatcher>>,
     ) -> Self {
         Self {
-            sink,
             delegate,
-            next_turn_subscription_id: AtomicU64::new(1),
-            turn_tx: std::sync::Mutex::new(None),
+            dispatcher,
+            next_control_sequence: AtomicU64::new(1),
+            current_turn: Mutex::new(None),
         }
     }
 
-    pub(crate) fn subscribe_turn(
-        self: &Arc<Self>,
-        tx: tokio::sync::mpsc::UnboundedSender<AgentEvent>,
-    ) -> TurnEventSubscription {
-        let id = self
-            .next_turn_subscription_id
-            .fetch_add(1, Ordering::Relaxed);
-        *self.turn_tx.lock().unwrap() = Some(TurnEventChannel { id, tx });
-        TurnEventSubscription {
-            display: self.clone(),
-            id,
-        }
+    pub(crate) fn begin_turn(&self, emitter: Arc<TurnEventEmitter>) {
+        *self.current_turn.lock().unwrap_or_else(|e| e.into_inner()) = Some(emitter);
     }
 
-    fn clear_turn_channel(&self, id: u64) {
-        let mut turn_tx = self.turn_tx.lock().unwrap();
-        if turn_tx.as_ref().is_some_and(|channel| channel.id == id) {
-            *turn_tx = None;
-        }
+    pub(crate) fn dispatcher(&self) -> Option<Arc<EventDispatcher>> {
+        self.dispatcher.clone()
     }
 
-    fn emit(&self, event: AgentEvent) {
-        let turn_tx = self
-            .turn_tx
-            .lock()
-            .unwrap()
+    pub(crate) fn end_turn(&self, turn_id: &TurnId) {
+        let mut current = self.current_turn.lock().unwrap_or_else(|e| e.into_inner());
+        if current
             .as_ref()
-            .map(|channel| channel.tx.clone());
-        if let Some(tx) = turn_tx {
-            let _ = tx.send(event.clone());
-        }
-        if let Some(sink) = &self.sink {
-            sink.on_event(event);
+            .is_some_and(|emitter| &emitter.turn_id == turn_id)
+        {
+            *current = None;
         }
     }
-}
 
-impl Drop for TurnEventSubscription {
-    fn drop(&mut self) {
-        self.display.clear_turn_channel(self.id);
+    fn emit(&self, kind: AgentEventKind) {
+        let emitter = self
+            .current_turn
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(emitter) = emitter {
+            emitter.emit(kind);
+        } else if let Some(dispatcher) = &self.dispatcher {
+            dispatcher.dispatch(AgentEvent {
+                turn_id: None,
+                sequence: self.next_control_sequence.fetch_add(1, Ordering::Relaxed),
+                kind,
+            });
+        }
     }
 }
 
 impl Display for EventDisplay {
     fn render_thinking(&self, content: &str) {
-        self.emit(AgentEvent::Thinking {
-            content: content.to_string(),
+        self.emit(AgentEventKind::Thinking {
+            content: content.into(),
         });
-        if let Some(delegate) = &self.delegate {
-            delegate.render_thinking(content);
+        if let Some(d) = &self.delegate {
+            d.render_thinking(content);
         }
     }
-
     fn render_text(&self, content: &str) {
-        self.emit(AgentEvent::Text {
-            content: content.to_string(),
+        self.emit(AgentEventKind::Text {
+            content: content.into(),
         });
-        if let Some(delegate) = &self.delegate {
-            delegate.render_text(content);
+        if let Some(d) = &self.delegate {
+            d.render_text(content);
         }
     }
-
     fn render_tool_call(&self, name: &str, summary: &str) {
-        self.emit(AgentEvent::ToolCall {
+        self.emit(AgentEventKind::ToolCall {
             id: String::new(),
-            name: name.to_string(),
-            summary: summary.to_string(),
+            name: name.into(),
+            summary: summary.into(),
             input: serde_json::Value::Null,
         });
-        if let Some(delegate) = &self.delegate {
-            delegate.render_tool_call(name, summary);
+        if let Some(d) = &self.delegate {
+            d.render_tool_call(name, summary);
         }
     }
-
     fn render_tool_call_detail(&self, call: &ToolCallDisplay<'_>) {
-        self.emit(AgentEvent::ToolCall {
-            id: call.tool_use_id.to_string(),
-            name: call.tool_name.to_string(),
-            summary: call.summary.to_string(),
+        self.emit(AgentEventKind::ToolCall {
+            id: call.tool_use_id.into(),
+            name: call.tool_name.into(),
+            summary: call.summary.into(),
             input: call.input.cloned().unwrap_or(serde_json::Value::Null),
         });
-        if let Some(delegate) = &self.delegate {
-            delegate.render_tool_call_detail(call);
+        if let Some(d) = &self.delegate {
+            d.render_tool_call_detail(call);
         }
     }
-
     fn render_tool_result(&self, tool_name: &str, content_preview: &str) {
-        self.emit(AgentEvent::ToolResult {
-            tool_name: tool_name.to_string(),
-            content_preview: content_preview.to_string(),
-            content: content_preview.to_string(),
+        self.emit(AgentEventKind::ToolResult {
             tool_use_id: None,
+            tool_name: tool_name.into(),
+            content_preview: content_preview.into(),
+            content: content_preview.into(),
+            success: true,
             exit_code: None,
+            result_kind: ToolResultKind::Text,
+            presentation: None,
+            artifacts: Vec::new(),
         });
-        if let Some(delegate) = &self.delegate {
-            delegate.render_tool_result(tool_name, content_preview);
+        if let Some(d) = &self.delegate {
+            d.render_tool_result(tool_name, content_preview);
         }
     }
-
     fn render_tool_result_detail(&self, result: &ToolResultDisplay<'_>) {
-        self.emit(AgentEvent::ToolResult {
-            tool_name: result.tool_name.to_string(),
-            content_preview: result.content_preview.to_string(),
-            content: result.content.to_string(),
-            tool_use_id: result.tool_use_id.map(ToString::to_string),
+        self.emit(AgentEventKind::ToolResult {
+            tool_use_id: result.tool_use_id.map(Into::into),
+            tool_name: result.tool_name.into(),
+            content_preview: result.content_preview.into(),
+            content: result.content.into(),
+            success: result.exit_code.is_none_or(|code| code == 0),
             exit_code: result.exit_code,
+            result_kind: ToolResultKind::Text,
+            presentation: None,
+            artifacts: Vec::new(),
         });
-        if let Some(delegate) = &self.delegate {
-            delegate.render_tool_result_detail(result);
+        if let Some(d) = &self.delegate {
+            d.render_tool_result_detail(result);
         }
     }
-
     fn render_tool_result_presented(&self, result: &PresentedToolResultDisplay<'_>) {
-        self.emit(AgentEvent::ToolResult {
-            tool_name: result.base.tool_name.to_string(),
-            content_preview: result.base.content_preview.to_string(),
-            content: result.base.content.to_string(),
-            tool_use_id: result.base.tool_use_id.map(ToString::to_string),
+        self.emit(AgentEventKind::ToolResult {
+            tool_use_id: result.base.tool_use_id.map(Into::into),
+            tool_name: result.base.tool_name.into(),
+            content_preview: result.base.content_preview.into(),
+            content: result.base.content.into(),
+            success: result.success,
             exit_code: result.base.exit_code,
+            result_kind: result.result_kind,
+            presentation: result.presentation.cloned(),
+            artifacts: result.artifacts.to_vec(),
         });
-        if let Some(delegate) = &self.delegate {
-            delegate.render_tool_result_presented(result);
+        if let Some(d) = &self.delegate {
+            d.render_tool_result_presented(result);
         }
     }
-
     fn render_signal(&self, signal_kind: &str, severity: f64, message: &str) {
-        self.emit(AgentEvent::Signal {
-            signal_kind: signal_kind.to_string(),
+        self.emit(AgentEventKind::Signal {
+            signal_kind: signal_kind.into(),
             severity,
-            message: message.to_string(),
+            message: message.into(),
         });
     }
-
     fn render_stop(&self) {
-        self.emit(AgentEvent::Stop {
-            reason: "end_turn".to_string(),
+        self.emit(AgentEventKind::Stop {
+            reason: "end_turn".into(),
         });
-        if let Some(delegate) = &self.delegate {
-            delegate.render_stop();
+        if let Some(d) = &self.delegate {
+            d.render_stop();
         }
     }
-
     fn render_stop_with_reason(&self, reason: &str) {
-        self.emit(AgentEvent::Stop {
-            reason: reason.to_string(),
+        self.emit(AgentEventKind::Stop {
+            reason: reason.into(),
         });
-        if let Some(delegate) = &self.delegate {
-            delegate.render_stop_with_reason(reason);
+        if let Some(d) = &self.delegate {
+            d.render_stop_with_reason(reason);
         }
     }
-
     fn render_error(&self, message: &str) {
-        self.emit(AgentEvent::Error {
-            message: message.to_string(),
+        self.emit(AgentEventKind::Error {
+            message: message.into(),
         });
-        if let Some(delegate) = &self.delegate {
-            delegate.render_error(message);
+        if let Some(d) = &self.delegate {
+            d.render_error(message);
         }
     }
-
     fn render_retry(&self) {
-        self.emit(AgentEvent::Retry);
-        if let Some(delegate) = &self.delegate {
-            delegate.render_retry();
+        self.emit(AgentEventKind::Retry);
+        if let Some(d) = &self.delegate {
+            d.render_retry();
         }
     }
-
     fn render_info(&self, msg: &str) {
-        self.emit(AgentEvent::Info {
-            message: msg.to_string(),
+        self.emit(AgentEventKind::Info {
+            message: msg.into(),
         });
-        if let Some(delegate) = &self.delegate {
-            delegate.render_info(msg);
+        if let Some(d) = &self.delegate {
+            d.render_info(msg);
         }
     }
-
     fn render_title_update(&self, model: &str, stats: &StatsSnapshot) {
-        self.emit(AgentEvent::TitleUpdate {
-            model: model.to_string(),
+        self.emit(AgentEventKind::TitleUpdate {
+            model: model.into(),
             stats: stats.clone(),
         });
-        if let Some(delegate) = &self.delegate {
-            delegate.render_title_update(model, stats);
+        if let Some(d) = &self.delegate {
+            d.render_title_update(model, stats);
         }
     }
-
     fn render_sub_agent_status(
         &self,
         session_id: &str,
@@ -294,17 +423,16 @@ impl Display for EventDisplay {
         in_tokens: u64,
         out_tokens: u64,
     ) {
-        self.emit(AgentEvent::SubAgentStatus {
-            session_id: session_id.to_string(),
-            status: status.to_string(),
+        self.emit(AgentEventKind::SubAgentStatus {
+            session_id: session_id.into(),
+            status: status.into(),
             in_tokens,
             out_tokens,
         });
-        if let Some(delegate) = &self.delegate {
-            delegate.render_sub_agent_status(session_id, status, in_tokens, out_tokens);
+        if let Some(d) = &self.delegate {
+            d.render_sub_agent_status(session_id, status, in_tokens, out_tokens);
         }
     }
-
     fn render_sub_agent_output(
         &self,
         session_id: &str,
@@ -314,295 +442,107 @@ impl Display for EventDisplay {
         in_tokens: u64,
         out_tokens: u64,
     ) {
-        self.emit(AgentEvent::SubAgentOutput {
-            session_id: session_id.to_string(),
-            status: status.to_string(),
-            thinking: thinking.to_string(),
-            text: text.to_string(),
+        self.emit(AgentEventKind::SubAgentOutput {
+            session_id: session_id.into(),
+            status: status.into(),
+            thinking: thinking.into(),
+            text: text.into(),
             in_tokens,
             out_tokens,
         });
-        if let Some(delegate) = &self.delegate {
-            delegate
-                .render_sub_agent_output(session_id, status, thinking, text, in_tokens, out_tokens);
+        if let Some(d) = &self.delegate {
+            d.render_sub_agent_output(session_id, status, thinking, text, in_tokens, out_tokens);
         }
     }
-
     fn render_prompt(&self) {
-        self.emit(AgentEvent::Prompt);
-        if let Some(delegate) = &self.delegate {
-            delegate.render_prompt();
+        self.emit(AgentEventKind::Prompt);
+        if let Some(d) = &self.delegate {
+            d.render_prompt();
         }
     }
-
     fn render_clear_line(&self) {
-        self.emit(AgentEvent::ClearLine);
-        if let Some(delegate) = &self.delegate {
-            delegate.render_clear_line();
+        self.emit(AgentEventKind::ClearLine);
+        if let Some(d) = &self.delegate {
+            d.render_clear_line();
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::ui::{TodoCountsDisplay, TodoDisplay, ToolPresentation, ToolResultKind};
-    use std::sync::Mutex;
-
-    #[derive(Default)]
-    struct RecordingSink {
-        events: Mutex<Vec<AgentEvent>>,
-    }
-
-    impl EventSink for RecordingSink {
-        fn on_event(&self, event: AgentEvent) {
-            self.events.lock().unwrap().push(event);
-        }
-    }
-
-    #[derive(Default)]
-    struct StructuredRecordingDisplay {
-        tool_call_id: Mutex<Option<String>>,
-        presentation: Mutex<Option<ToolPresentation>>,
-    }
-
-    impl Display for StructuredRecordingDisplay {
-        fn render_thinking(&self, _content: &str) {}
-        fn render_text(&self, _content: &str) {}
-        fn render_tool_call(&self, _name: &str, _summary: &str) {}
-
-        fn render_tool_call_detail(&self, call: &ToolCallDisplay<'_>) {
-            *self.tool_call_id.lock().unwrap() = Some(call.tool_use_id.to_string());
-        }
-
-        fn render_tool_result(&self, _tool_name: &str, _content_preview: &str) {}
-
-        fn render_tool_result_presented(&self, result: &PresentedToolResultDisplay<'_>) {
-            *self.presentation.lock().unwrap() = result.presentation.cloned();
-        }
-
-        fn render_stop(&self) {}
-        fn render_error(&self, _message: &str) {}
-        fn render_retry(&self) {}
-        fn render_info(&self, _msg: &str) {}
-        fn render_title_update(&self, _model: &str, _stats: &StatsSnapshot) {}
-        fn render_sub_agent_status(
-            &self,
-            _session_id: &str,
-            _status: &str,
-            _in_tokens: u64,
-            _out_tokens: u64,
-        ) {
-        }
-        fn render_prompt(&self) {}
-        fn render_clear_line(&self) {}
-    }
-
-    #[derive(Default)]
-    struct StopRecordingDisplay {
-        stop_count: Mutex<usize>,
-    }
-
-    impl Display for StopRecordingDisplay {
-        fn render_thinking(&self, _content: &str) {}
-        fn render_text(&self, _content: &str) {}
-        fn render_tool_call(&self, _name: &str, _summary: &str) {}
-        fn render_tool_result(&self, _tool_name: &str, _content_preview: &str) {}
-        fn render_stop(&self) {
-            *self.stop_count.lock().unwrap() += 1;
-        }
-        fn render_error(&self, _message: &str) {}
-        fn render_retry(&self) {}
-        fn render_info(&self, _msg: &str) {}
-        fn render_title_update(&self, _model: &str, _stats: &StatsSnapshot) {}
-        fn render_sub_agent_status(
-            &self,
-            _session_id: &str,
-            _status: &str,
-            _in_tokens: u64,
-            _out_tokens: u64,
-        ) {
-        }
-        fn render_prompt(&self) {}
-        fn render_clear_line(&self) {}
-    }
+    use super::{AgentEvent, AgentEventKind, EventDispatcher, EventSink};
+    use std::sync::Arc;
 
     #[test]
-    fn event_display_maps_display_calls() {
-        let sink = Arc::new(RecordingSink::default());
-        let display = EventDisplay::new(Some(sink.clone()), None);
-
-        display.render_text("hello");
-        display.render_tool_result_detail(&ToolResultDisplay {
-            tool_name: "Bash",
-            content_preview: "ok",
-            content: "full",
-            tool_use_id: Some("call_1"),
-            exit_code: Some(0),
-        });
-
-        let events = sink.events.lock().unwrap();
-        assert!(matches!(
-            &events[0],
-            AgentEvent::Text { content } if content == "hello"
+    fn shared_server_protocol_fixture_is_real_agent_event_json() {
+        let fixture = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../mink-server/protocol-fixtures/agent-events.json"
         ));
-        assert!(matches!(
-            &events[1],
-            AgentEvent::ToolResult {
-                tool_name,
-                content_preview,
-                content,
-                tool_use_id,
-                exit_code,
-            } if tool_name == "Bash"
-                && content_preview == "ok"
-                && content == "full"
-                && tool_use_id.as_deref() == Some("call_1")
-                && *exit_code == Some(0)
-        ));
+        let expected: serde_json::Value = serde_json::from_str(fixture).unwrap();
+        let events: Vec<AgentEvent> = serde_json::from_value(expected.clone()).unwrap();
+        assert_eq!(serde_json::to_value(events).unwrap(), expected);
     }
 
-    #[test]
-    fn event_display_preserves_structured_calls_for_its_delegate() {
-        let delegate = Arc::new(StructuredRecordingDisplay::default());
-        let display = EventDisplay::new(None, Some(delegate.clone()));
-        let presentation = ToolPresentation::Todo(TodoDisplay {
-            revision: 2,
-            counts: TodoCountsDisplay {
-                pending: 1,
-                in_progress: 2,
-                completed: 0,
+    struct BlockingSink;
+
+    #[async_trait::async_trait]
+    impl EventSink for BlockingSink {
+        async fn on_event(&self, _event: AgentEvent) -> Result<(), String> {
+            std::future::pending().await
+        }
+    }
+
+    fn info_event(sequence: u64) -> AgentEvent {
+        AgentEvent {
+            turn_id: None,
+            sequence,
+            kind: AgentEventKind::Info {
+                message: sequence.to_string(),
             },
-            items: Vec::new(),
-            changes: Vec::new(),
-        });
-
-        display.render_tool_call_detail(&ToolCallDisplay {
-            tool_use_id: "call_1",
-            tool_name: "TodoAdvance",
-            summary: "TodoAdvance(2 transitions @r1)",
-            input: None,
-        });
-        display.render_tool_result_presented(&PresentedToolResultDisplay {
-            base: ToolResultDisplay {
-                tool_name: "TodoAdvance",
-                content_preview: "preview",
-                content: "full",
-                tool_use_id: Some("call_1"),
-                exit_code: None,
-            },
-            success: true,
-            result_kind: ToolResultKind::Control,
-            presentation: Some(&presentation),
-            artifacts: &[],
-        });
-
-        assert_eq!(
-            delegate.tool_call_id.lock().unwrap().as_deref(),
-            Some("call_1")
-        );
-        assert_eq!(
-            delegate.presentation.lock().unwrap().as_ref(),
-            Some(&presentation)
-        );
+        }
     }
 
-    /// Regression: `render_stop` must be forwarded to the delegate display.
-    /// The TUI relies on this signal to finalize the streaming transcript;
-    /// swallowing it leaves the previous turn's stream open, so the next
-    /// user input is rendered before the completed answer.
-    #[test]
-    fn event_display_forwards_render_stop_to_delegate() {
-        let sink = Arc::new(RecordingSink::default());
-        let delegate = Arc::new(StopRecordingDisplay::default());
-        let display = EventDisplay::new(Some(sink.clone()), Some(delegate.clone()));
+    #[tokio::test]
+    async fn observer_overflow_stops_only_the_observer() {
+        let dispatcher = EventDispatcher::new(Arc::new(BlockingSink));
+        for sequence in 0..2048 {
+            dispatcher.dispatch(info_event(sequence));
+        }
 
-        display.render_stop();
-
-        assert_eq!(*delegate.stop_count.lock().unwrap(), 1);
-        let events = sink.events.lock().unwrap();
-        assert!(matches!(
-            &events[0],
-            AgentEvent::Stop { reason } if reason == "end_turn"
-        ));
+        let error = dispatcher.shutdown().await.unwrap_err();
+        assert!(error.contains("overflowed"));
     }
 
-    /// Verify every Display method maps to the correct AgentEvent variant.
-    /// This is the contract that ensures TurnExecutor events — which flow
-    /// through Display — are fully observable by Rust callers via EventSink.
-    #[test]
-    fn all_display_methods_have_event_variants() {
-        let sink = Arc::new(RecordingSink::default());
-        let display = EventDisplay::new(Some(sink.clone()), None);
+    struct FailingSink;
 
-        display.render_thinking("think");
-        display.render_text("answer");
-        display.render_tool_call("Bash", "ls -la");
-        display.render_tool_result("Grep", "found 3 matches");
-        display.render_tool_result_detail(&ToolResultDisplay {
-            tool_name: "Read",
-            content_preview: "preview",
-            content: "full content",
-            tool_use_id: Some("call_2"),
-            exit_code: Some(0),
-        });
-        display.render_stop();
-        display.render_error("something broke");
-        display.render_retry();
-        display.render_info("compressing...");
-        display.render_title_update("pro", &StatsSnapshot::default());
-        display.render_sub_agent_status("sub-1", "running", 100, 50);
-        display.render_sub_agent_output("sub-2", "done", "hmm", "yes", 200, 80);
-        display.render_prompt();
-        display.render_clear_line();
+    #[async_trait::async_trait]
+    impl EventSink for FailingSink {
+        async fn on_event(&self, _event: AgentEvent) -> Result<(), String> {
+            Err("observer failure".into())
+        }
+    }
 
-        let events = sink.events.lock().unwrap();
-        assert!(
-            matches!(&events[0], AgentEvent::Thinking { content } if content == "think"),
-            "Thinking"
-        );
-        assert!(
-            matches!(&events[1], AgentEvent::Text { content } if content == "answer"),
-            "Text"
-        );
-        assert!(
-            matches!(&events[2], AgentEvent::ToolCall { name, summary, .. } if name == "Bash" && summary == "ls -la"),
-            "ToolCall"
-        );
-        assert!(
-            matches!(&events[3], AgentEvent::ToolResult { tool_name, .. } if tool_name == "Grep"),
-            "ToolResult render_tool_result"
-        );
-        assert!(
-            matches!(&events[4], AgentEvent::ToolResult { tool_name, tool_use_id, .. }
-                if tool_name == "Read" && tool_use_id.as_deref() == Some("call_2")),
-            "ToolResult render_tool_result_detail"
-        );
-        assert!(matches!(&events[5], AgentEvent::Stop { .. }), "Stop");
-        assert!(
-            matches!(&events[6], AgentEvent::Error { message } if message == "something broke"),
-            "Error"
-        );
-        assert!(matches!(&events[7], AgentEvent::Retry), "Retry");
-        assert!(
-            matches!(&events[8], AgentEvent::Info { message } if message == "compressing..."),
-            "Info"
-        );
-        assert!(
-            matches!(&events[9], AgentEvent::TitleUpdate { model, .. } if model == "pro"),
-            "TitleUpdate"
-        );
-        assert!(
-            matches!(&events[10], AgentEvent::SubAgentStatus { session_id, status, .. }
-                if session_id == "sub-1" && status == "running"),
-            "SubAgentStatus"
-        );
-        assert!(
-            matches!(&events[11], AgentEvent::SubAgentOutput { session_id, text, .. }
-                if session_id == "sub-2" && text == "yes"),
-            "SubAgentOutput"
-        );
-        assert!(matches!(&events[12], AgentEvent::Prompt), "Prompt");
-        assert!(matches!(&events[13], AgentEvent::ClearLine), "ClearLine");
+    #[tokio::test]
+    async fn observer_failure_is_reported_at_shutdown() {
+        let dispatcher = EventDispatcher::new(Arc::new(FailingSink));
+        dispatcher.dispatch(info_event(1));
+        tokio::task::yield_now().await;
+        dispatcher.dispatch(info_event(2));
+        let error = dispatcher.shutdown().await.unwrap_err();
+        assert!(error.contains("observer failure"));
+        assert!(!error.contains("stopped before runtime shutdown"));
+    }
+
+    #[tokio::test]
+    async fn observer_shutdown_timeout_aborts_and_reports_failure() {
+        let dispatcher = EventDispatcher::new(Arc::new(BlockingSink));
+        dispatcher.dispatch(info_event(1));
+        tokio::task::yield_now().await;
+        let error = dispatcher
+            .shutdown_with_timeout(std::time::Duration::from_millis(10))
+            .await
+            .unwrap_err();
+        assert!(error.contains("shutdown timed out"));
     }
 }

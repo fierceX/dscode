@@ -213,7 +213,7 @@ fn bash_misuse_guidance(
     {
         return None;
     }
-    let primary = binding.primary.tool;
+    let primary = &binding.primary.tool;
     let purpose = match capability {
         ToolSemanticCapability::PathRead => "file reading",
         ToolSemanticCapability::ContentSearch => "content search",
@@ -224,7 +224,7 @@ fn bash_misuse_guidance(
         content: format!(
             "Bash command looks like {purpose}. Use {primary}, the active specialized provider, instead."
         ),
-        referenced_tools: [primary].into_iter().collect(),
+        referenced_tools: [primary.clone()].into_iter().collect(),
     };
     guidance.validate(surface).ok()?;
     Some(guidance)
@@ -403,7 +403,10 @@ mod tests {
 
         let (read, read_caps) = routing_state(&["Bash", "Read"]);
         let guidance = bash_misuse_guidance("cat file", &read, &read_caps).unwrap();
-        assert_eq!(guidance.referenced_tools, ["Read"].into_iter().collect());
+        assert_eq!(
+            guidance.referenced_tools,
+            ["Read".to_string()].into_iter().collect()
+        );
         assert!(bash_misuse_guidance("rg term", &read, &read_caps).is_none());
 
         let (grep, grep_caps) = routing_state(&["Bash", "Grep"]);

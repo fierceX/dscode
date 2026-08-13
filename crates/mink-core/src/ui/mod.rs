@@ -167,7 +167,7 @@ pub trait SubAgentStreamSink: Send + Sync {
     fn render_sub_agent_stream(&self, session_id: &str, kind: SubAgentStreamKind, content: &str);
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StatsSnapshot {
     pub current_turn_count: u64,
     pub agent_request_count: u64,

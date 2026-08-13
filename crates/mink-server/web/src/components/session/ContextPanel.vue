@@ -17,19 +17,19 @@ const loaders = { plan: false, todo: false, art: false };
 async function loadPlan() {
   if (plan.value || loaders.plan) return;
   loaders.plan = true;
-  const resp = await api.plan(props.sessionId);
+  const resp = await api.plan(props.sessionId, appState.currentProjectKey ?? undefined);
   plan.value = resp.data as { plan: string | null; draft: string | null };
 }
 async function loadTodo() {
   if (todos.value || loaders.todo) return;
   loaders.todo = true;
-  const resp = await api.todo(props.sessionId);
+  const resp = await api.todo(props.sessionId, appState.currentProjectKey ?? undefined);
   todos.value = ((resp.data as { todos?: typeof todos.value }).todos ?? null) as typeof todos.value;
 }
 async function loadArt() {
   if (artifacts.value || loaders.art) return;
   loaders.art = true;
-  const resp = await api.artifacts(props.sessionId);
+  const resp = await api.artifacts(props.sessionId, appState.currentProjectKey ?? undefined);
   artifacts.value = (resp.data as { artifacts?: { id: string; tool?: string }[] }).artifacts ?? [];
 }
 

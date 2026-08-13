@@ -3,21 +3,27 @@
 export interface RawEvent {
   type: string;
   seq?: number;
+  /** Core turn-local diagnostic sequence. */
+  sequence?: number;
+  /** Server-wide live stream sequence; the authoritative realtime UI key. */
+  stream_sequence?: number;
   [key: string]: unknown;
 }
+
+export type TranscriptKey = number | `live:${number}`;
 
 export type ToolColor = "exec" | "file" | "search" | "todo" | "plan" | "delegate" | "tool";
 export type ResultView = "command" | "file" | "search" | "todo" | "plan" | "diff" | "text";
 
-export interface ThinkingItem { key?: number; kind: "thinking"; text: string; }
-export interface TextItem { key?: number; kind: "text"; text: string; }
-export interface UserItem { key?: number; kind: "user"; text: string; }
-export interface ErrorItem { key?: number; kind: "error"; text: string; }
-export interface SignalItem { key?: number; kind: "signal"; text: string; }
-export interface SystemItem { key?: number; kind: "system"; text: string; }
+export interface ThinkingItem { key?: TranscriptKey; kind: "thinking"; text: string; }
+export interface TextItem { key?: TranscriptKey; kind: "text"; text: string; }
+export interface UserItem { key?: TranscriptKey; kind: "user"; text: string; }
+export interface ErrorItem { key?: TranscriptKey; kind: "error"; text: string; }
+export interface SignalItem { key?: TranscriptKey; kind: "signal"; text: string; }
+export interface SystemItem { key?: TranscriptKey; kind: "system"; text: string; }
 
 export interface ToolItem {
-  key?: number;
+  key?: TranscriptKey;
   kind: "tool";
   id: string;
   name: string;
@@ -27,20 +33,40 @@ export interface ToolItem {
   input: string;
   result?: string;
   resultKind?: string;
+  rawResultKind?: string;
   success?: boolean;
-  exitCode?: number;
+  exitCode?: number | null;
   artifact?: string | null;
   failed?: boolean;
   presentation?: unknown;
+  artifacts?: unknown[];
 }
 
-export type TranscriptItem = ThinkingItem | TextItem | UserItem | ToolItem | ErrorItem | SignalItem | SystemItem;
+export interface SubAgentItem {
+  key?: TranscriptKey;
+  kind: "sub_agent";
+  sessionId: string;
+  status: string;
+  thinking: string;
+  text: string;
+  inTokens: number;
+  outTokens: number;
+}
+
+export type TranscriptItem = ThinkingItem | TextItem | UserItem | ToolItem | SubAgentItem | ErrorItem | SignalItem | SystemItem;
 
 export interface SessionState {
   sessionId: string;
   title: string;
   running: boolean;
+  /** Live stream may have missed events; input stays disabled until reload succeeds. */
+  desynced: boolean;
   lastSeq: number;
+  /** Last core turn-local envelope coordinates, for diagnostics. */
+  lastTurnId?: string;
+  lastCoreSequence?: number;
+  /** Bounded turn_id+sequence keys used to reject duplicate live delivery. */
+  seenTurnEvents: string[];
   model: string;
   tokensIn: number;
   tokensOut: number;
@@ -58,7 +84,7 @@ export interface SessionState {
 
 export function emptySession(sessionId: string, title: string): SessionState {
   return {
-    sessionId, title, running: false, lastSeq: 0, model: "",
+    sessionId, title, running: false, desynced: false, lastSeq: 0, seenTurnEvents: [], model: "",
     tokensIn: 0, tokensOut: 0, costMicros: 0, belief: 0, workState: "idle", cacheReadTokens: 0, contextTokens: 0, maxContextTokens: 0, items: [],
   };
 }

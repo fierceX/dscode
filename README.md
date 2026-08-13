@@ -69,7 +69,7 @@ session.close()
 
 ```toml
 [dependencies]
-mink = { package = "mink-core", version = "0.3.3", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.4.0", default-features = false, features = ["runtime"] }
 ```
 
 ```rust
@@ -77,7 +77,7 @@ use mink::prelude::{AgentOptions, AgentRuntime};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let rt = AgentRuntime::start_with_options(
+    let rt = AgentRuntime::start(
         AgentOptions::new("/tmp/mink-home", ".")
             .with_api_key(std::env::var("DEEPSEEK_API_KEY")?)
             .with_model("flash"),

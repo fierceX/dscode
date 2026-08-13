@@ -377,11 +377,9 @@ async fn spawn_worker_and_wait(token: &str, prompt: &str) -> Result<WorkerResult
     let (last_line, exit_status) = tokio::task::spawn_blocking(move || {
         let reader = BufReader::new(stdout);
         let mut last = String::new();
-        for line in reader.lines() {
-            if let Ok(l) = line {
-                if !l.trim().is_empty() {
-                    last = l;
-                }
+        for line in reader.lines().map_while(Result::ok) {
+            if !line.trim().is_empty() {
+                last = line;
             }
         }
         let status = child.wait().map_err(|e| format!("wait: {e}"))?;
@@ -447,7 +445,7 @@ async fn run_hidden_worker() -> Result<(), String> {
         .with_session(SessionPolicy::New)
         .with_sandbox(sandbox);
 
-    let rt = AgentRuntime::start_with_options(opts)
+    let rt = AgentRuntime::start(opts)
         .await
         .map_err(|e| format!("runtime start: {e}"))?;
 

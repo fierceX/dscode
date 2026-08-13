@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -37,6 +37,7 @@ pub struct CompactionEngine {
     state: RwLock<std::result::Result<CompactionState, String>>,
     compact_lock: tokio::sync::Mutex<()>,
     memo_epoch: Arc<AtomicU64>,
+    projection_dirty: AtomicBool,
 }
 
 impl CompactionEngine {
@@ -52,10 +53,19 @@ impl CompactionEngine {
         display: Arc<dyn Display>,
         cancel: crate::cancel::CancellationToken,
         llm_backend: Arc<dyn LlmBackend>,
-    ) -> Self {
+    ) -> Result<Self> {
         let state_path = summary_path.with_file_name("context-state.json");
-        let state = load_state(&state_path).map_err(|error| error.to_string());
-        Self {
+        let state = load_state(&state_path)?;
+        let expected_projection = format!("{}\n", state.summary);
+        let projection_matches = std::fs::read(&summary_path)
+            .is_ok_and(|content| content == expected_projection.as_bytes());
+        if !projection_matches {
+            crate::session::atomic_file::atomic_replace(
+                &summary_path,
+                expected_projection.as_bytes(),
+            )?;
+        }
+        Ok(Self {
             store,
             summary_path,
             state_path,
@@ -68,10 +78,11 @@ impl CompactionEngine {
             session_id,
             display,
             cancel,
-            state: RwLock::new(state),
+            state: RwLock::new(Ok(state)),
             compact_lock: tokio::sync::Mutex::new(()),
             memo_epoch: Arc::new(AtomicU64::new(0)),
-        }
+            projection_dirty: AtomicBool::new(false),
+        })
     }
 
     /// Shared epoch counter for read memos: any committed compaction invalidates
@@ -84,6 +95,22 @@ impl CompactionEngine {
     pub fn current_summary(&self) -> Result<Option<String>> {
         let state = self.current_state()?;
         Ok((!state.summary.trim().is_empty()).then_some(state.summary))
+    }
+
+    pub async fn validate_startup(&self) -> Result<()> {
+        let state = self.current_state()?;
+        let active = self.store.lines_from(state.active_start).await?;
+        if state.active_start > 0
+            && active
+                .first()
+                .is_some_and(|message| !is_safe_context_start(message))
+        {
+            bail!(
+                "compaction active_start {} splits the conversation protocol",
+                state.active_start
+            );
+        }
+        Ok(())
     }
 
     pub async fn read_summary(&self) -> Option<String> {
@@ -177,25 +204,40 @@ impl CompactionEngine {
 
     async fn commit_state(&self, state: CompactionState) -> Result<()> {
         let data = serde_json::to_vec_pretty(&state)?;
-        let temp_path = self.state_path.with_extension("json.tmp");
-        if let Some(parent) = self.state_path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        if let Err(error) = tokio::fs::write(&temp_path, &data).await {
-            let _ = tokio::fs::remove_file(&temp_path).await;
-            return Err(error.into());
-        }
-        if let Err(error) = tokio::fs::rename(&temp_path, &self.state_path).await {
-            let _ = tokio::fs::remove_file(&temp_path).await;
-            return Err(error.into());
-        }
+        let state_path = self.state_path.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::session::atomic_file::atomic_replace(&state_path, &data)
+        })
+        .await??;
         *self
             .state
             .write()
             .map_err(|_| anyhow::anyhow!("context state lock poisoned"))? = Ok(state.clone());
         self.store.prune_cache_before(state.active_start).await;
-        let _ = tokio::fs::write(&self.summary_path, format!("{}\n", state.summary)).await;
+        let summary_path = self.summary_path.clone();
+        let summary = format!("{}\n", state.summary);
+        let projection = tokio::task::spawn_blocking(move || {
+            crate::session::atomic_file::atomic_replace(&summary_path, summary.as_bytes())
+        })
+        .await;
+        self.projection_dirty
+            .store(!matches!(projection, Ok(Ok(()))), Ordering::SeqCst);
         self.memo_epoch.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    pub async fn flush_projection(&self) -> Result<()> {
+        if !self.projection_dirty.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        let state = self.current_state()?;
+        let summary_path = self.summary_path.clone();
+        let summary = format!("{}\n", state.summary);
+        tokio::task::spawn_blocking(move || {
+            crate::session::atomic_file::atomic_replace(&summary_path, summary.as_bytes())
+        })
+        .await??;
+        self.projection_dirty.store(false, Ordering::SeqCst);
         Ok(())
     }
 
@@ -742,14 +784,47 @@ mod tests {
         assert_eq!(messages[cut]["role"], "assistant");
     }
 
-    #[test]
-    fn compaction_state_rejects_boundary_beyond_history() {
+    #[tokio::test]
+    async fn startup_rebuilds_missing_or_stale_summary_projection() -> anyhow::Result<()> {
+        let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+            "compact-rebuild-projection-source",
+            |config| config.context_compact_tail_tokens = 1,
+            summary_backend(),
+        )
+        .await?;
+        let state_path = ctx.summary_path.with_file_name("context-state.json");
         let state = CompactionState {
-            active_start: 2,
-            ..CompactionState::default()
+            active_start: 0,
+            summary: "authoritative summary".into(),
         };
-        let messages = [json!({"role":"user","content":"only"})];
-        assert!(state.active_start > messages.len());
+        crate::session::atomic_file::atomic_replace(
+            &state_path,
+            &serde_json::to_vec_pretty(&state)?,
+        )?;
+        std::fs::write(&ctx.summary_path, "stale projection\n")?;
+
+        let engine = CompactionEngine::new(
+            ctx.store.clone(),
+            ctx.summary_path.clone(),
+            ctx.config.base_url.clone(),
+            &ctx.config,
+            ctx.stats.clone(),
+            ctx.usage.clone(),
+            ctx.config.session_id.clone(),
+            ctx.display.clone(),
+            ctx.cancel.clone(),
+            summary_backend(),
+        )?;
+
+        assert_eq!(
+            engine.current_summary()?.as_deref(),
+            Some("authoritative summary")
+        );
+        assert_eq!(
+            std::fs::read_to_string(&ctx.summary_path)?,
+            "authoritative summary\n"
+        );
+        Ok(())
     }
 
     #[tokio::test]

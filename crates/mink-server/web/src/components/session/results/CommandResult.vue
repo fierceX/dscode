@@ -1,5 +1,5 @@
 <script setup lang="ts">
-defineProps<{ content: string; exitCode?: number; summary?: string }>();
+defineProps<{ content: string; exitCode?: number | null; summary?: string }>();
 </script>
 
 <template>
@@ -7,7 +7,7 @@ defineProps<{ content: string; exitCode?: number; summary?: string }>();
     <div v-if="summary" class="t-cmd">$ {{ summary }}</div>
     <pre class="t-body">{{ content }}</pre>
   </div>
-  <div v-if="exitCode !== undefined" class="t-exit" :class="exitCode === 0 ? 'ok' : 'err'">exit {{ exitCode }}</div>
+  <div v-if="exitCode != null" class="t-exit" :class="exitCode === 0 ? 'ok' : 'err'">exit {{ exitCode }}</div>
 </template>
 
 <style scoped>

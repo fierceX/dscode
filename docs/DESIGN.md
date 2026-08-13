@@ -465,7 +465,7 @@ Parser 暂存 usage 和 stop reason，并通过 `saw_done` / `saw_usage` 保证�
 
 ### LLM backend 注入
 
-默认 backend 是 `OpenAiCompatibleBackend`。`AgentRuntimeConfig` / `AgentOptions` 可以注入
+默认 backend 是 `OpenAiCompatibleBackend`。`AgentOptions` 可以注入
 `Arc<dyn LlmBackend>`，主代理、子代理和自动压缩共用同一个 backend trait，不复制 agent loop、
 tool runner、session 写入或 usage 统计。
 
@@ -861,7 +861,7 @@ Rust 发布包名为 `mink-core`，库 crate 名为 `mink`。`mink-core` 发布�
 实现；终端二进制和 UI 实现由 workspace 中的 `mink-cli` 包持有。服务端依赖时推荐只启用嵌入式 runtime：
 
 ```toml
-mink = { package = "mink-core", version = "0.3.3", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.4.0", default-features = false, features = ["runtime"] }
 ```
 
 `mink::runtime` / `mink::prelude` 解决这些问题：**同一套 OrchActor / TurnExecutor / ToolRunner 核心，但无进程边界**。
@@ -875,7 +875,7 @@ Rust crate mink ───┘
          │
     mink-cli::cli::main_entry()
          │
-    runtime::build_runtime()
+    AgentRuntime::start(AgentOptions)
          │
     OrchActor::run()
 ```
@@ -887,23 +887,23 @@ Rust crate mink ───┘
 
 | 层 | 类型 | 定位 |
 |----|------|------|
-| **lossless** | `AgentRuntimeConfig` + 完整 `Config` | 不丢失任何配置项 |
-| **ergonomic** | `AgentOptions` builder | 常用字段快捷方法，`config_mut()` 逃生口 |
+| **唯一构建入口** | `AgentOptions` + 完整 `Config` | 常用字段快捷方法，`config_mut()` 逃生口 |
+| **并发入口** | `AgentRuntimeHandle` | 可克隆，共享同一 turn/control gate，不拥有 shutdown |
 | **stream** | `AgentEventStream` | per-turn 实时事件，`recv()` + `outcome()` |
 
 嵌入式调用方可通过 `AgentOptions::with_read_only_file_system()` 或
-`AgentRuntimeConfig.read_only_fs` 注入 VFS，并通过
-`AgentOptions::with_resource_session_id()` / `AgentRuntimeConfig.resource_session_id`
-指定业务知识库分区。VFS trait 和请求/结果类型从 `mink::runtime` 导出。
+`AgentOptions::with_read_only_file_system()` 注入 VFS，并通过
+`AgentOptions::with_resource_session_id()` 指定业务知识库分区。VFS trait 和请求/结果类型从
+`mink::runtime` 导出。
 
 ### 关键设计决策
 
 | 决策 | 理由 |
 |------|------|
-| `EventSink` 为同步 trait | 避免 async sink 引入背压复杂度，下游自行 channel |
+| `EventSink` 为异步 observer trait | 1024 容量 dispatcher 隔离慢 observer；溢出停止 observer 并在 shutdown 报错 |
 | `TurnOutcome` 聚合 text/thinking | 调用方不订阅事件也能拿到结果 |
 | `shutdown()` 5s grace period | 防止 orchestrator 死锁时无限等待 |
-| `try_stream_turn()` 返回并发错误，`stream_turn()` 保持 panic 兼容 | 服务端可优雅处理并发冲突，旧 API 行为不变 |
+| `stream_turn()` 返回 `RuntimeResult` | 与 `run_turn()` 共用非阻塞 permit，忙时携带活动 turn ID |
 | llm_override 仅 `#[cfg(test)]` | 不暴露生产 mock 能力 |
 
 ### 隐藏 worker 模式

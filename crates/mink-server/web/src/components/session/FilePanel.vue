@@ -3,7 +3,7 @@
 import { computed, ref, watch } from "vue";
 import { api } from "../../lib/api";
 import type { FileItem } from "../../lib/api";
-import { uiState } from "../../lib/store";
+import { appState, uiState } from "../../lib/store";
 import { renderMarkdown } from "../../lib/markdown";
 
 const props = defineProps<{ sessionId: string; embedded?: boolean }>();
@@ -24,7 +24,7 @@ const crumb = computed(() => {
 async function load() {
   error.value = "";
   loading.value = true;
-  const resp = await api.files(props.sessionId, path.value);
+  const resp = await api.files(props.sessionId, path.value, false, appState.currentProjectKey ?? undefined);
   loading.value = false;
   if (resp.code !== 200) { error.value = resp.message; items.value = []; }
   else items.value = resp.data?.items ?? [];
@@ -34,7 +34,7 @@ const go = (p: string) => { path.value = p; load(); };
 
 async function openFile(name: string) {
   const filePath = [path.value, name].filter(Boolean).join("/");
-  const resp = await api.files(props.sessionId, filePath, true);
+  const resp = await api.files(props.sessionId, filePath, true, appState.currentProjectKey ?? undefined);
   current.value = {
     name: filePath,
     lang: /\.(md|markdown)$/i.test(name) ? "md" : /\.rs$/i.test(name) ? "rust" : /\.(ts|tsx)$/i.test(name) ? "ts" : /\.(css|scss)$/i.test(name) ? "css" : "text",

@@ -3,7 +3,10 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::session::paths::{Paths, SessionLayout, paths_for_layout, session_base_dir};
+use crate::session::paths::{
+    Paths, SessionLayout, canonical_project_path, paths_for_layout, project_base_dirs,
+    session_base_dir,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SessionMetadata {
@@ -42,7 +45,13 @@ pub async fn ensure_metadata(paths: &Paths, cwd: &Path, seed: SessionSeed) -> Re
     let now = crate::session::stats::chrono_now_rfc3339();
     let mut metadata = match read_metadata(&paths.metadata).await {
         Ok(Some(metadata)) => metadata,
-        Ok(None) | Err(_) => new_metadata(paths, cwd, &now),
+        Ok(None) => new_metadata(paths, cwd, &now),
+        Err(error) => {
+            return Err(anyhow::anyhow!(
+                "corrupt session metadata {}: {error}",
+                paths.metadata.display()
+            ));
+        }
     };
 
     if metadata.id.is_empty() {
@@ -82,6 +91,19 @@ pub async fn resolve_session_reference_with_layout(
     reference: &str,
     layout: SessionLayout,
 ) -> Result<Option<String>> {
+    Ok(
+        resolve_session_record_with_layout(home, cwd, reference, layout)
+            .await?
+            .map(|record| record.id),
+    )
+}
+
+pub async fn resolve_session_record_with_layout(
+    home: &Path,
+    cwd: &Path,
+    reference: &str,
+    layout: SessionLayout,
+) -> Result<Option<SessionRecord>> {
     let reference = reference.trim();
     if reference.is_empty() {
         return Ok(None);
@@ -91,8 +113,8 @@ pub async fn resolve_session_reference_with_layout(
         return Ok(None);
     }
 
-    if records.iter().any(|record| record.id == reference) {
-        return Ok(Some(reference.to_string()));
+    if let Some(record) = records.iter().find(|record| record.id == reference) {
+        return Ok(Some(record.clone()));
     }
     let normalized_alias = sanitize_alias(reference);
     let alias_matches: Vec<_> = records
@@ -105,7 +127,7 @@ pub async fn resolve_session_reference_with_layout(
         })
         .collect();
     if alias_matches.len() == 1 {
-        return Ok(Some(alias_matches[0].id.clone()));
+        return Ok(Some(alias_matches[0].clone()));
     }
     if alias_matches.len() > 1 {
         bail!(
@@ -124,7 +146,7 @@ pub async fn resolve_session_reference_with_layout(
         .filter(|record| record.id.starts_with(reference))
         .collect();
     if id_prefix_matches.len() == 1 {
-        return Ok(Some(id_prefix_matches[0].id.clone()));
+        return Ok(Some(id_prefix_matches[0].clone()));
     }
     if id_prefix_matches.len() > 1 {
         bail!(
@@ -149,7 +171,7 @@ pub async fn resolve_session_reference_with_layout(
         })
         .collect();
     if title_matches.len() == 1 {
-        return Ok(Some(title_matches[0].id.clone()));
+        return Ok(Some(title_matches[0].clone()));
     }
     if title_matches.len() > 1 {
         bail!(
@@ -182,7 +204,19 @@ pub async fn list_sessions_with_layout(
         let paths = paths_for_layout(home, cwd, "isolated", layout);
         let metadata = match read_metadata(&paths.metadata).await {
             Ok(Some(metadata)) => metadata,
-            Ok(None) | Err(_) => fallback_metadata("isolated", cwd, &paths),
+            Ok(None) if !session_dir_has_data(&paths.session_dir).await? => return Ok(Vec::new()),
+            Ok(None) => {
+                bail!(
+                    "session metadata missing for existing session {}",
+                    paths.metadata.display()
+                )
+            }
+            Err(error) => {
+                return Err(anyhow::anyhow!(
+                    "corrupt session metadata {}: {error}",
+                    paths.metadata.display()
+                ));
+            }
         };
         let id = if metadata.id.is_empty() {
             "isolated".to_string()
@@ -198,32 +232,105 @@ pub async fn list_sessions_with_layout(
         }]);
     }
 
-    let dir = session_base_dir(home, cwd, layout);
-    if !dir.exists() {
+    let dirs = if layout == SessionLayout::ProjectScoped {
+        project_base_dirs(home, cwd)
+    } else {
+        vec![session_base_dir(home, cwd, layout)]
+    };
+    if dirs.iter().all(|dir| !dir.exists()) {
         return Ok(Vec::new());
     }
     let mut records = Vec::new();
-    let mut entries = tokio::fs::read_dir(&dir).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        let path = entry.path();
-        if !path.is_dir() {
+    for dir in dirs {
+        if !dir.exists() {
             continue;
         }
-        let id = entry.file_name().to_string_lossy().to_string();
-        let session_paths = paths_for_layout(home, cwd, &id, layout);
-        let metadata = match read_metadata(&session_paths.metadata).await {
-            Ok(Some(metadata)) => metadata,
-            Ok(None) | Err(_) => fallback_metadata(&id, cwd, &session_paths),
-        };
-        let modified = session_activity_mod_time(&path).await?;
-        records.push(SessionRecord {
-            id,
-            path,
-            metadata,
-            modified,
-        });
+        let is_legacy_dir = layout == SessionLayout::ProjectScoped
+            && dir.file_name().is_some_and(|name| {
+                name == std::ffi::OsStr::new(&crate::session::paths::legacy_project_key(cwd))
+            });
+        let mut entries = tokio::fs::read_dir(&dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let id = entry.file_name().to_string_lossy().to_string();
+            let session_paths = Paths::from_session_dir(&id, path.clone());
+            let metadata = match read_metadata(&session_paths.metadata).await {
+                Ok(Some(metadata)) => metadata,
+                Ok(None) if is_legacy_dir => continue,
+                Ok(None) => {
+                    bail!(
+                        "session metadata missing for existing session {}",
+                        session_paths.metadata.display()
+                    )
+                }
+                Err(error) => {
+                    return Err(anyhow::anyhow!(
+                        "corrupt session metadata {}: {error}",
+                        session_paths.metadata.display()
+                    ));
+                }
+            };
+            if layout == SessionLayout::ProjectScoped
+                && canonical_project_path(Path::new(&metadata.cwd)) != canonical_project_path(cwd)
+            {
+                continue;
+            }
+            let record_id = if metadata.id.is_empty() {
+                id
+            } else {
+                metadata.id.clone()
+            };
+            let modified = session_activity_mod_time(&path).await?;
+            records.push(SessionRecord {
+                id: record_id,
+                path,
+                metadata,
+                modified,
+            });
+        }
+    }
+    let mut identities = std::collections::BTreeMap::<String, Vec<PathBuf>>::new();
+    for record in &records {
+        identities
+            .entry(record.id.clone())
+            .or_default()
+            .push(record.path.clone());
+        if let Some(alias) = &record.metadata.alias {
+            identities
+                .entry(format!("alias:{alias}"))
+                .or_default()
+                .push(record.path.clone());
+        }
+    }
+    if let Some((identity, paths)) = identities.into_iter().find(|(_, paths)| paths.len() > 1) {
+        bail!(
+            "session identity '{identity}' is ambiguous across: {}",
+            paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     }
     Ok(records)
+}
+
+pub async fn session_dir_has_data(session_dir: &Path) -> Result<bool> {
+    let mut entries = match tokio::fs::read_dir(session_dir).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    while let Some(entry) = entries.next_entry().await? {
+        let name = entry.file_name();
+        if name != std::ffi::OsStr::new("session.lock") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn new_metadata(paths: &Paths, cwd: &Path, now: &str) -> SessionMetadata {
@@ -254,7 +361,11 @@ async fn write_metadata(path: &Path, metadata: &SessionMetadata) -> Result<()> {
         tokio::fs::create_dir_all(parent).await?;
     }
     let text = serde_json::to_string_pretty(metadata)?;
-    tokio::fs::write(path, format!("{text}\n")).await?;
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        crate::session::atomic_file::atomic_replace(&path, format!("{text}\n").as_bytes())
+    })
+    .await??;
     Ok(())
 }
 
@@ -269,27 +380,6 @@ async fn read_summary_line(path: &Path) -> Result<Option<String>> {
         .map(str::trim)
         .find(|line| !line.is_empty())
         .map(ToString::to_string))
-}
-
-fn fallback_metadata(id: &str, cwd: &Path, paths: &Paths) -> SessionMetadata {
-    SessionMetadata {
-        id: id.to_string(),
-        alias: None,
-        title: None,
-        created_at: String::new(),
-        updated_at: String::new(),
-        cwd: cwd.display().to_string(),
-        parent: None,
-        first_prompt: None,
-        summary: std::fs::read_to_string(&paths.summary)
-            .ok()
-            .and_then(|text| {
-                text.lines()
-                    .map(str::trim)
-                    .find(|line| !line.is_empty())
-                    .map(ToString::to_string)
-            }),
-    }
 }
 
 async fn session_activity_mod_time(session_dir: &Path) -> Result<SystemTime> {
@@ -408,7 +498,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn malformed_metadata_falls_back_to_legacy_summary() {
+    async fn malformed_metadata_is_reported_without_overwrite() {
         let home = temp_home("malformed");
         let cwd = home.join("workspace");
         tokio::fs::create_dir_all(&cwd).await.unwrap();
@@ -421,18 +511,17 @@ mod tests {
             .await
             .unwrap();
 
-        let records = list_project_sessions(&home, &cwd).await.unwrap();
-
-        assert_eq!(records.len(), 1);
+        let error = list_project_sessions(&home, &cwd).await.unwrap_err();
+        assert!(error.to_string().contains("corrupt session metadata"));
         assert_eq!(
-            records[0].metadata.summary.as_deref(),
-            Some("legacy summary")
+            tokio::fs::read_to_string(&paths.metadata).await.unwrap(),
+            "{not-json"
         );
         let _ = tokio::fs::remove_dir_all(&home).await;
     }
 
     #[tokio::test]
-    async fn ensure_metadata_recovers_malformed_file() {
+    async fn ensure_metadata_rejects_malformed_file_without_overwrite() {
         let home = temp_home("recover");
         let cwd = home.join("workspace");
         tokio::fs::create_dir_all(&cwd).await.unwrap();
@@ -442,7 +531,7 @@ mod tests {
             .await
             .unwrap();
 
-        ensure_metadata(
+        let error = ensure_metadata(
             &paths,
             &cwd,
             SessionSeed {
@@ -452,11 +541,39 @@ mod tests {
             },
         )
         .await
-        .unwrap();
-        let metadata = read_metadata(&paths.metadata).await.unwrap().unwrap();
+        .unwrap_err();
+        assert!(error.to_string().contains("corrupt session metadata"));
+        assert_eq!(
+            tokio::fs::read_to_string(&paths.metadata).await.unwrap(),
+            "{not-json"
+        );
+        let _ = tokio::fs::remove_dir_all(&home).await;
+    }
 
-        assert_eq!(metadata.alias.as_deref(), Some("feature-x"));
-        assert_eq!(metadata.title.as_deref(), Some("Feature X work"));
+    #[tokio::test]
+    async fn legacy_directory_requires_parseable_matching_metadata() {
+        let home = temp_home("legacy-filter");
+        let cwd = home.join("workspace");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+        let legacy = home
+            .join(".mink/projects")
+            .join(crate::session::paths::legacy_project_key(&cwd));
+        tokio::fs::create_dir_all(legacy.join("missing"))
+            .await
+            .unwrap();
+        let malformed = legacy.join("malformed");
+        tokio::fs::create_dir_all(&malformed).await.unwrap();
+        tokio::fs::write(malformed.join("session.json"), "{bad")
+            .await
+            .unwrap();
+
+        let error = list_project_sessions(&home, &cwd).await.unwrap_err();
+        assert!(error.to_string().contains("corrupt session metadata"));
+        assert!(
+            resolve_session_reference(&home, &cwd, "missing")
+                .await
+                .is_err()
+        );
         let _ = tokio::fs::remove_dir_all(&home).await;
     }
 

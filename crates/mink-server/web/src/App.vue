@@ -28,9 +28,13 @@ onMounted(async () => {
     appState.sessions = resp.data;
   }
   // 恢复会话：?session=<id> 优先（E2E/分享链接），否则读取上次会话（重开浏览器自动重连）
-  let targetId = new URLSearchParams(location.search).get("session") ?? savedSessionId();
+  const params = new URLSearchParams(location.search);
+  const stored = savedSessionId();
+  const [storedProject, storedId] = stored?.includes("\n") ? stored.split("\n", 2) : [undefined, stored];
+  const targetId = params.get("session") ?? storedId;
+  const targetProject = params.get("project") ?? storedProject;
   if (targetId) {
-    const found = appState.sessions.find((s) => s.id === targetId);
+    const found = appState.sessions.find((s) => s.id === targetId && (!targetProject || s.project_key === targetProject));
     if (found) {
       appState.currentWorkspace = found.cwd;
       openSession(found).catch((e) => { console.error("[App] restore session failed:", e); });

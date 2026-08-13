@@ -20,14 +20,25 @@ pub struct OrchActor {
 }
 
 /// Commands received by the orchestrator.
+#[doc(hidden)]
 pub enum OrchCmd {
     UserInput {
         input: String,
         done: oneshot::Sender<TurnRunResult>,
     },
+    RuntimeUserInput {
+        input: String,
+        turn_id: crate::runtime::TurnId,
+        emitter: std::sync::Arc<crate::runtime::TurnEventEmitter>,
+        done: oneshot::Sender<TurnRunResult>,
+    },
     SetModel(String),
+    SetModelAck {
+        model: String,
+        done: oneshot::Sender<anyhow::Result<()>>,
+    },
     Compact {
-        done: oneshot::Sender<()>,
+        done: oneshot::Sender<anyhow::Result<crate::runtime::CompactOutcome>>,
     },
 }
 
@@ -40,9 +51,12 @@ pub struct TurnRunResult {
     pub error: Option<String>,
     pub usage_records: Vec<UsageRecord>,
     pub usage: UsageSummary,
+    pub text: String,
+    pub thinking: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TurnStatus {
     Ok,
     Failed,
@@ -71,6 +85,8 @@ impl TurnRunResult {
             error: None,
             usage_records: Vec::new(),
             usage: UsageSummary::default(),
+            text: String::new(),
+            thinking: String::new(),
         }
     }
 
@@ -83,6 +99,8 @@ impl TurnRunResult {
             error: Some(error.into()),
             usage_records: Vec::new(),
             usage: UsageSummary::default(),
+            text: String::new(),
+            thinking: String::new(),
         }
     }
 
@@ -109,6 +127,8 @@ impl TurnRunResult {
             error,
             usage_records: Vec::new(),
             usage: UsageSummary::default(),
+            text: executor.text().to_string(),
+            thinking: executor.thinking().to_string(),
         }
     }
 }
@@ -129,11 +149,21 @@ impl OrchActor {
             tokio::select! {
                 cmd = self.cmd_rx.recv() => match cmd {
                     Some(OrchCmd::UserInput { input, done }) => {
-                        let result = self.handle_user_input(input).await;
+                        let result = self.handle_user_input(input, true).await;
+                        let _ = done.send(result);
+                    }
+                    Some(OrchCmd::RuntimeUserInput { input, turn_id, emitter, done }) => {
+                        emitter.emit(crate::runtime::AgentEventKind::TurnStarted);
+                        self.ctx.log_event(serde_json::json!({"type":"runtime_turn_started","turn_id":turn_id.as_str()}));
+                        let result = self.handle_user_input(input, false).await;
                         let _ = done.send(result);
                     }
                     Some(OrchCmd::SetModel(model)) => {
-                        self.handle_model_command(&model).await;
+                        let _ = self.handle_model_command(&model).await;
+                    }
+                    Some(OrchCmd::SetModelAck { model, done }) => {
+                        let result = self.handle_model_command(&model).await;
+                        let _ = done.send(result);
                     }
                     Some(OrchCmd::Compact { done }) => {
                         self.ctx.display.render_info("Compressing...");
@@ -148,7 +178,7 @@ impl OrchActor {
                             ),
                         ).await;
 
-                        match &result {
+                        let outcome = match &result {
                             Ok((true, _reason)) => {
                                 if let Some(summary) = self.ctx.compaction.read_summary().await {
                                     let trimmed = summary.trim();
@@ -161,16 +191,19 @@ impl OrchActor {
                                 }
                                 self.ctx.log_event(serde_json::json!({"type":"compact","trigger":"manual","result":_reason}));
                                 self.refresh_title().await;
+                                Ok(crate::runtime::CompactOutcome::Compacted { reason: _reason.clone() })
                             }
                             Ok((false, reason)) => {
                                 self.ctx.display.render_info(&format!("Compact skipped: {reason}"));
+                                Ok(crate::runtime::CompactOutcome::Skipped { reason: reason.clone() })
                             }
                             Err(e) => {
                                 self.ctx.display.render_error(&format!("Compact failed: {e}"));
+                                Err(anyhow::anyhow!("{e:#}"))
                             }
-                        }
+                        };
                         self.ctx.display.render_stop();
-                        let _ = done.send(());
+                        let _ = done.send(outcome);
                     }
                     None => break,
                 },
@@ -185,11 +218,13 @@ impl OrchActor {
         Ok(())
     }
 
-    async fn handle_user_input(&mut self, input: String) -> TurnRunResult {
+    async fn handle_user_input(&mut self, input: String, reset_interrupt: bool) -> TurnRunResult {
         let started_at = Instant::now();
         let billing_turn_id = self.ctx.usage.begin_turn();
         self.belief.reset();
-        self.ctx.interrupt.store(false, Ordering::SeqCst);
+        if reset_interrupt {
+            self.ctx.interrupt.store(false, Ordering::SeqCst);
+        }
         self.refresh_title().await;
         let prepared = self.prepare_turn().await;
         let (model, _api_url, mut executor) = match prepared {
@@ -354,6 +389,8 @@ impl OrchActor {
             error: Some(error),
             usage_records: Vec::new(),
             usage: UsageSummary::default(),
+            text: executor.text().to_string(),
+            thinking: executor.thinking().to_string(),
         }
     }
 
@@ -362,13 +399,13 @@ impl OrchActor {
         crate::ui::render_title_snapshot(&self.ctx, &label, self.belief.belief()).await;
     }
 
-    async fn handle_model_command(&mut self, model: &str) {
+    async fn handle_model_command(&mut self, model: &str) -> anyhow::Result<()> {
         let model = model.trim();
         if model.is_empty() {
             self.ctx
                 .display
                 .render_error("Model name must not be empty.");
-            return;
+            anyhow::bail!("Model name must not be empty.");
         }
         if model == self.ctx.config.model {
             self.forced_model = None;
@@ -381,6 +418,7 @@ impl OrchActor {
             .display
             .render_info(&format!("Switched to {} model.", resolved.label));
         self.refresh_title().await;
+        Ok(())
     }
 
     fn resolve_active(&self) -> crate::config::ResolvedModel {

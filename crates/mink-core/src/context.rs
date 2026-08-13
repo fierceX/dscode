@@ -72,6 +72,7 @@ pub(crate) fn resolve_tool_runtime(
     config: &ToolConfig,
     is_sub_agent: bool,
     read_only_fs_present: bool,
+    custom_tools: &[crate::runtime::RegisteredCustomTool],
 ) -> anyhow::Result<(
     ToolResolutionContext,
     Arc<ModelToolSurface>,
@@ -86,14 +87,17 @@ pub(crate) fn resolve_tool_runtime(
         config,
         read_only_fs_present,
     );
-    let surface = Arc::new(crate::tools::surface::ModelToolSurface::resolve(
-        crate::tools::catalog::ToolCatalog::builtin()?,
-        config,
-        &resolution,
-    )?);
+    let surface = Arc::new(
+        crate::tools::surface::ModelToolSurface::resolve_with_custom(
+            crate::tools::catalog::ToolCatalog::builtin()?,
+            config,
+            &resolution,
+            custom_tools,
+        )?,
+    );
     let capabilities = Arc::new(
         crate::tools::semantic_capabilities::ToolCapabilityRegistry::builtin()
-            .resolve(&surface, &resolution)?,
+            .resolve_with_custom(&surface, &resolution, custom_tools)?,
     );
     Ok((resolution, surface, capabilities))
 }
@@ -121,6 +125,7 @@ pub struct ToolContext {
     pub tool_resolution_context: ToolResolutionContext,
     pub tool_surface: Arc<ModelToolSurface>,
     pub tool_capabilities: Arc<ResolvedToolCapabilities>,
+    pub(crate) custom_tools: Arc<Vec<crate::runtime::RegisteredCustomTool>>,
 }
 
 impl From<&AgentSharedContext> for ToolContext {
@@ -148,6 +153,7 @@ impl From<&AgentSharedContext> for ToolContext {
             tool_resolution_context: ctx.tool_resolution_context,
             tool_surface: ctx.tool_surface.clone(),
             tool_capabilities: ctx.tool_capabilities.clone(),
+            custom_tools: ctx.custom_tools.clone(),
         }
     }
 }
@@ -275,6 +281,7 @@ pub struct AgentSharedContext {
     pub tool_resolution_context: ToolResolutionContext,
     pub tool_surface: Arc<ModelToolSurface>,
     pub tool_capabilities: Arc<ResolvedToolCapabilities>,
+    pub(crate) custom_tools: Arc<Vec<crate::runtime::RegisteredCustomTool>>,
     pub events_path: PathBuf,
     pub summary_path: PathBuf,
     pub plan_path: PathBuf,
@@ -289,18 +296,18 @@ pub struct AgentSharedContext {
 }
 
 impl AgentSharedContext {
-    pub(crate) fn todo_read_provider(&self) -> Option<&'static str> {
+    pub(crate) fn todo_read_provider(&self) -> Option<&str> {
         use crate::tools::semantic_capabilities::ToolSemanticCapability::TodoInspect;
         self.tool_capabilities
             .primary_provider(TodoInspect)
-            .map(|provider| provider.tool)
+            .map(|provider| provider.tool.as_str())
     }
 
-    pub(crate) fn todo_advance_provider(&self) -> Option<&'static str> {
+    pub(crate) fn todo_advance_provider(&self) -> Option<&str> {
         use crate::tools::semantic_capabilities::ToolSemanticCapability::TodoProgressTransition;
         self.tool_capabilities
             .primary_provider(TodoProgressTransition)
-            .map(|provider| provider.tool)
+            .map(|provider| provider.tool.as_str())
     }
 
     pub fn model(&self) -> String {

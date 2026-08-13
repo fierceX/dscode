@@ -202,6 +202,23 @@ impl ToolRunner {
             .map(|t| t.as_ref())
     }
 
+    fn find_custom_tool(&self, name: &str) -> Option<&crate::runtime::RegisteredCustomTool> {
+        self.ctx
+            .custom_tools
+            .iter()
+            .find(|tool| tool.definition.name == name)
+    }
+
+    fn metadata_for(&self, name: &str) -> Option<ToolMetadata> {
+        if let Some(tool) = self.find_tool(name) {
+            return Some(tool.metadata());
+        }
+        self.ctx
+            .tool_surface
+            .get(name)
+            .map(|tool| tool.metadata.clone())
+    }
+
     /// Reset storm breaker window — call at the start of each user turn.
     pub fn reset_storm(&self) {
         self.storm.lock().unwrap_or_else(|e| e.into_inner()).reset();
@@ -212,8 +229,11 @@ impl ToolRunner {
         let mut read_batch = Vec::new();
 
         for call in calls {
-            let metadata = self.find_tool(&call.name).map(|tool| tool.metadata());
-            if requires_sequential_execution(metadata) {
+            let metadata = self.metadata_for(&call.name);
+            let custom_sequential = self.find_custom_tool(&call.name).is_some_and(|tool| {
+                tool.definition.execution == crate::runtime::ToolExecutionMode::Sequential
+            });
+            if custom_sequential || requires_sequential_execution(metadata) {
                 results.extend(
                     self.execute_read_batch(std::mem::take(&mut read_batch))
                         .await?,
@@ -253,16 +273,26 @@ impl ToolRunner {
         for call in calls {
             match self.prepare_call(call) {
                 PreparedCall::Immediate(result) => {
-                    handles.push(tokio::task::spawn_blocking(move || Ok(*result)));
+                    handles.push(tokio::spawn(async move { Ok(*result) }));
                 }
                 PreparedCall::Execute(call) => {
+                    if let Some(tool) = self.find_custom_tool(&call.name).cloned() {
+                        let ctx = self.ctx.clone();
+                        handles.push(tokio::spawn(async move {
+                            execute_custom(&ctx, &call, tool).await
+                        }));
+                        continue;
+                    }
                     let ctx = self.ctx.clone();
                     let tool_name = call.name.clone();
-                    handles.push(tokio::task::spawn_blocking(move || {
-                        let tool = tool_registry()
-                            .iter()
-                            .find(|t| t.metadata().name == tool_name);
-                        Self::execute_one_sync(&ctx, &call, tool.map(|t| t.as_ref()))
+                    handles.push(tokio::spawn(async move {
+                        tokio::task::spawn_blocking(move || {
+                            let tool = tool_registry()
+                                .iter()
+                                .find(|t| t.metadata().name == tool_name);
+                            Self::execute_one_sync(&ctx, &call, tool.map(|t| t.as_ref()))
+                        })
+                        .await?
                     }));
                 }
             }
@@ -279,6 +309,9 @@ impl ToolRunner {
         match self.prepare_call(call) {
             PreparedCall::Immediate(result) => Ok(*result),
             PreparedCall::Execute(call) => {
+                if let Some(tool) = self.find_custom_tool(&call.name).cloned() {
+                    return execute_custom(&self.ctx, &call, tool).await;
+                }
                 let ctx = self.ctx.clone();
                 let tool_name = call.name.clone();
                 tokio::task::spawn_blocking(move || {
@@ -293,7 +326,7 @@ impl ToolRunner {
     }
 
     fn prepare_call(&self, mut call: ToolCallEvent) -> PreparedCall {
-        let tool_metadata = self.find_tool(&call.name).map(|tool| tool.metadata());
+        let tool_metadata = self.metadata_for(&call.name);
         let policy = ToolPolicyGate {
             surface: &self.ctx.tool_surface,
             storm: &self.storm,
@@ -315,6 +348,61 @@ impl ToolRunner {
         let raw = dispatch_tool(ctx, call, tool_fn);
         Ok(format_dispatched_result(ctx, call, raw))
     }
+}
+
+async fn execute_custom(
+    ctx: &ToolContext,
+    call: &ToolCallEvent,
+    tool: crate::runtime::RegisteredCustomTool,
+) -> Result<ToolRunResult> {
+    let definition = &tool.definition;
+    let started = std::time::Instant::now();
+    let result = tool
+        .executor
+        .execute(
+            call.input_json.clone(),
+            crate::runtime::ToolExecutionContext::new(ctx.cwd.clone(), ctx.interrupt.clone()),
+        )
+        .await;
+    let raw = match result {
+        Ok(output) => RawToolResult {
+            output: Ok(output.content),
+            is_bash: false,
+            conv_content: output.conversation_content.unwrap_or_default(),
+            exit_code: output.exit_code,
+            wall_ms: Some(started.elapsed().as_millis()),
+            no_mutation: false,
+            memo_candidate: None,
+            spawns_sub_agent: false,
+            success: output.success,
+            diagnostics: Vec::new(),
+            plan_command: None,
+            state_metadata: None,
+            result_kind: definition.result_kind,
+            presentation: None,
+        },
+        Err(error) => RawToolResult {
+            output: Err(anyhow::anyhow!(error)),
+            is_bash: false,
+            conv_content: String::new(),
+            exit_code: None,
+            wall_ms: None,
+            no_mutation: false,
+            memo_candidate: None,
+            spawns_sub_agent: false,
+            success: false,
+            diagnostics: Vec::new(),
+            plan_command: None,
+            state_metadata: None,
+            result_kind: definition.result_kind,
+            presentation: None,
+        },
+    };
+    let formatted = format_dispatched_result(ctx, call, raw);
+    if definition.mutating && formatted.success {
+        ctx.bump_mutation();
+    }
+    Ok(formatted)
 }
 
 impl ToolPolicyGate<'_> {
@@ -553,7 +641,11 @@ fn format_dispatched_result(
     }
     // A successful Write/Edit invalidates read memos: changed files must be
     // re-read before they are used again (engine-internal; no prompt impact).
-    if (call.name == "Edit" || call.name == "Write") && success && !no_mutation {
+    let mutating = crate::tools::runner::tool_registry()
+        .iter()
+        .find(|tool| tool.metadata().name == call.name)
+        .is_some_and(|tool| tool.metadata().mutating);
+    if mutating && success && !no_mutation {
         ctx.bump_mutation();
     }
 
@@ -1093,7 +1185,7 @@ mod tests {
         }
         for tool in registry {
             assert!(
-                schema_names.contains(tool.metadata().name),
+                schema_names.contains(tool.metadata().name.as_ref()),
                 "registry tool missing schema: {}",
                 tool.metadata().name
             );
@@ -1231,7 +1323,7 @@ mod tests {
             .find(|tool| tool.metadata().name == "Bash")
             .unwrap()
             .metadata();
-        assert_eq!(authorize_tool(bash, &config), ToolAuthorization::Allowed);
+        assert_eq!(authorize_tool(&bash, &config), ToolAuthorization::Allowed);
     }
 
     #[test]
@@ -1246,15 +1338,15 @@ mod tests {
         };
 
         assert_eq!(
-            authorize_tool(meta("Read"), &config),
+            authorize_tool(&meta("Read"), &config),
             ToolAuthorization::Allowed
         );
         assert_eq!(
-            authorize_tool(meta("Write"), &config),
+            authorize_tool(&meta("Write"), &config),
             ToolAuthorization::Allowed
         );
         assert!(matches!(
-            authorize_tool(meta("Bash"), &config),
+            authorize_tool(&meta("Bash"), &config),
             ToolAuthorization::Denied { .. }
         ));
     }
@@ -1277,11 +1369,12 @@ mod tests {
         };
 
         assert_eq!(
-            authorize_tool(meta("Bash"), &config),
+            authorize_tool(&meta("Bash"), &config),
             ToolAuthorization::Allowed
         );
-        let reason = match authorize_tool(meta("Read"), &config) {
-            ToolAuthorization::Denied { reason } => denied_message(meta("Read"), reason),
+        let read = meta("Read");
+        let reason = match authorize_tool(&read, &config) {
+            ToolAuthorization::Denied { reason } => denied_message(&read, reason),
             ToolAuthorization::Allowed => panic!("Read should be denied"),
         };
         assert!(reason.contains("deny"), "{reason}");

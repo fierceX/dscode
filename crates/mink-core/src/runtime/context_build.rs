@@ -25,6 +25,7 @@ pub(crate) struct AgentContextBuild {
     pub cwd: PathBuf,
     pub session_id: String,
     pub session_layout: SessionLayout,
+    pub resolved_paths: Option<paths::Paths>,
     pub api_url: String,
     pub display: Arc<dyn Display>,
     pub sub_stream_tx: Option<Arc<dyn SubAgentStreamSink>>,
@@ -41,6 +42,7 @@ pub(crate) struct AgentContextBuild {
     pub llm_backend: Arc<dyn LlmBackend>,
     pub resource_router: Option<Arc<ResourceRouter>>,
     pub capability_snapshot: Option<Arc<CapabilitySnapshot>>,
+    pub custom_tools: Vec<crate::runtime::RegisteredCustomTool>,
 }
 
 pub(crate) struct BuiltAgentContext {
@@ -58,22 +60,19 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
             &tool_config,
             params.is_sub_agent,
             params.read_only_fs.is_some(),
+            &params.custom_tools,
         )?;
-    let paths = paths::paths_for_layout(
-        &params.home,
-        &params.cwd,
-        &params.session_id,
-        params.session_layout,
-    );
+    let paths = params.resolved_paths.unwrap_or_else(|| {
+        paths::paths_for_layout(
+            &params.home,
+            &params.cwd,
+            &params.session_id,
+            params.session_layout,
+        )
+    });
     let is_new = !paths.events.exists();
 
-    let (store, stats, artifacts) = crate::session::init::init_session_base_with_layout(
-        &params.home,
-        &params.cwd,
-        &params.session_id,
-        params.session_layout,
-    )
-    .await?;
+    let (store, stats, artifacts) = crate::session::init::init_session_base_at(&paths).await?;
     let usage = params
         .usage_journal
         .unwrap_or_else(|| UsageJournal::new(paths.usage.clone()));
@@ -120,7 +119,7 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
         params.display.clone(),
         params.cancel.clone(),
         params.llm_backend.clone(),
-    ));
+    )?);
 
     let ctx = Arc::new(AgentSharedContext {
         config: config.clone(),
@@ -150,6 +149,7 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
         tool_resolution_context,
         tool_surface,
         tool_capabilities,
+        custom_tools: Arc::new(params.custom_tools),
         events_path: paths.events.clone(),
         summary_path: paths.summary.clone(),
         plan_path: paths.plan.clone(),
@@ -176,7 +176,7 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
                 "capability": format!("{capability:?}"),
                 "primary": binding.primary.tool,
                 "tier": format!("{:?}", binding.primary.tier),
-                "alternatives": binding.alternatives.iter().map(|provider| provider.tool).collect::<Vec<_>>(),
+                "alternatives": binding.alternatives.iter().map(|provider| provider.tool.clone()).collect::<Vec<_>>(),
                 "use_scope": format!("{:?}", binding.primary.use_scope),
             })
         }).collect::<Vec<_>>(),

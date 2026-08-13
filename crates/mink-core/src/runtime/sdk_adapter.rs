@@ -352,6 +352,7 @@ mod tests {
             todos_path: PathBuf::from("/tmp/home/sid-1/todos.json"),
         };
         let outcome = TurnOutcome {
+            turn_id: crate::runtime::TurnId::new("sid-1:1"),
             billing_turn_id: "turn-1".into(),
             status: TurnStatus::Ok,
             session: session.clone(),
@@ -416,6 +417,7 @@ mod tests {
             todos_path: "/h/sid/todos.json".into(),
         };
         let outcome = TurnOutcome {
+            turn_id: crate::runtime::TurnId::new("sid:1"),
             billing_turn_id: "turn-2".into(),
             status: TurnStatus::Failed,
             session,

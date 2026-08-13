@@ -19,7 +19,7 @@ pub struct PromptSection {
     pub origin: PromptSectionOrigin,
     pub content: String,
     pub name: Option<String>,
-    pub referenced_tools: BTreeSet<&'static str>,
+    pub referenced_tools: BTreeSet<String>,
     pub consumed_facts: BTreeSet<PromptFact>,
 }
 

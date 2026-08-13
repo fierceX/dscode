@@ -2,9 +2,9 @@
 // TopBar：品牌 + 面包屑（项目 ▾ / 会话 ▾）+ 右侧操作 + 连接状态（最右胶囊）
 // 提示类信息用独立 toast（右下角），不影响顶栏布局
 import { computed, onMounted, onUnmounted, ref } from "vue";
-import { appState, detachSession, uiState, workspaces } from "../lib/store";
+import { appState, uiState, workspaces } from "../lib/store";
 import { fmtK } from "../lib/fmt";
-import { openSession } from "../lib/sessionController";
+import { closeSessionView, openSession } from "../lib/sessionController";
 import { api } from "../lib/api";
 import type { SessionSummary } from "../lib/api";
 
@@ -32,7 +32,7 @@ const sessList = computed(() =>
     .filter((s) => s.cwd === (curProj.value?.cwd ?? ""))
     .filter((s) => (s.title ?? s.alias ?? "").toLowerCase().includes(sessQuery.value.toLowerCase())),
 );
-const curSess = computed(() => appState.sessions.find((s) => s.id === appState.currentSessionId) ?? null);
+const curSess = computed(() => appState.sessions.find((s) => s.id === appState.currentSessionId && s.project_key === appState.currentProjectKey) ?? null);
 const crumbLabel = computed(() => curSess.value ? (curSess.value.title ?? curSess.value.alias ?? curSess.value.id) : "选择会话");
 
 // 时间：今天 HH:MM / 昨天 / M月d日
@@ -52,7 +52,7 @@ function statusColor(s: SessionSummary): string {
 function selectProj(cwd: string) {
   appState.currentWorkspace = cwd;
   // 切换项目：清空当前会话（列表保留，可随时重开）
-  appState.currentSessionId = null;
+  closeSessionView();
   projOpen.value = false;
 }
 function selectSess(s: SessionSummary) {
@@ -61,7 +61,7 @@ function selectSess(s: SessionSummary) {
 }
 // 点击品牌图标 → 回到 Home（空状态工作台；会话在服务端继续后台运行，可随时重开）
 const goHome = () => {
-  detachSession();
+  closeSessionView();
   projOpen.value = false;
   sessOpen.value = false;
 };
@@ -107,7 +107,7 @@ onUnmounted(() => document.removeEventListener("click", onDocClick));
 // 顶栏 ⟳ 重连：复用 openSession（幂等 open + 重拉 conversation + 新订阅）
 const onReconnect = async () => {
   const id = appState.currentSessionId;
-  const s = id ? appState.sessions.find((x) => x.id === id) : null;
+  const s = id ? appState.sessions.find((x) => x.id === id && x.project_key === appState.currentProjectKey) : null;
   if (!s) { flash("当前无会话"); return; }
   try { await openSession(s); flash("已重连"); } catch { flash("重连失败"); }
 };

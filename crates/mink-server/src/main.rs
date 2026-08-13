@@ -41,6 +41,19 @@ async fn main() -> Result<()> {
         cfg.model.clone(),
         cfg.max_running,
     ));
+    let reaper_registry = registry.clone();
+    let idle_close = std::time::Duration::from_secs(cfg.idle_close_secs);
+    let reaper = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        loop {
+            interval.tick().await;
+            for (id, project) in reaper_registry.idle_session_ids(idle_close) {
+                if let Err(error) = reaper_registry.close(&id, Some(&project)).await {
+                    eprintln!("[mink-server] idle close {id} failed: {error:#}");
+                }
+            }
+        }
+    });
     let state = Arc::new(api::ApiState {
         registry: registry.clone(),
         cwd: cwd.clone(),
@@ -65,8 +78,14 @@ async fn main() -> Result<()> {
         "mink-server listening on http://{addr} (home: {})",
         cfg.mink_home.display()
     );
-    axum::serve(listener, app).await?;
-    Ok(())
+    let server = axum::serve(listener, app).with_graceful_shutdown(async {
+        let _ = tokio::signal::ctrl_c().await;
+    });
+    let serve_result = server.await;
+    reaper.abort();
+    let shutdown_result = registry.shutdown_all().await;
+    serve_result?;
+    shutdown_result
 }
 
 fn version_line() -> String {

@@ -16,7 +16,7 @@ mod theme;
 pub use display::{TuiDisplay, TuiSubAgentStreamSink};
 pub use signal::TuiSignal;
 
-use crate::agent::orchestrator::OrchCmd;
+use crate::cli::RuntimeCmd;
 use crate::config::{SandboxConfig, TuiMode};
 use file_picker::FilePickerPolicy;
 use input::handle_event_for_mode;
@@ -25,34 +25,28 @@ use render::render;
 use replay::load_session;
 use signal::drain_signals;
 use state::{TuiState, short_cwd_label};
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 use std::time::Duration;
 
 pub fn run_tui(
     mode: TuiMode,
     sig_rx: mpsc::Receiver<TuiSignal>,
-    orch_tx: tokio::sync::mpsc::UnboundedSender<OrchCmd>,
+    orch_tx: tokio::sync::mpsc::UnboundedSender<RuntimeCmd>,
     session: &crate::runtime::SessionInfo,
-    interrupt: Option<Arc<AtomicBool>>,
     initial_model: &str,
     sandbox: &SandboxConfig,
 ) -> anyhow::Result<()> {
     match mode {
-        TuiMode::Full => run_full_tui(sig_rx, orch_tx, session, interrupt, initial_model, sandbox),
-        TuiMode::Inline => {
-            run_inline_tui(sig_rx, orch_tx, session, interrupt, initial_model, sandbox)
-        }
+        TuiMode::Full => run_full_tui(sig_rx, orch_tx, session, initial_model, sandbox),
+        TuiMode::Inline => run_inline_tui(sig_rx, orch_tx, session, initial_model, sandbox),
         TuiMode::Off => anyhow::bail!("TUI mode is disabled"),
     }
 }
 
 fn run_full_tui(
     sig_rx: mpsc::Receiver<TuiSignal>,
-    orch_tx: tokio::sync::mpsc::UnboundedSender<OrchCmd>,
+    orch_tx: tokio::sync::mpsc::UnboundedSender<RuntimeCmd>,
     session: &crate::runtime::SessionInfo,
-    interrupt: Option<Arc<AtomicBool>>,
     initial_model: &str,
     sandbox: &SandboxConfig,
 ) -> anyhow::Result<()> {
@@ -81,7 +75,6 @@ fn run_full_tui(
         TuiLoopConfig {
             mode: TuiMode::Full,
             session,
-            interrupt,
             initial_model,
             sandbox,
         },
@@ -90,9 +83,8 @@ fn run_full_tui(
 
 fn run_inline_tui(
     sig_rx: mpsc::Receiver<TuiSignal>,
-    orch_tx: tokio::sync::mpsc::UnboundedSender<OrchCmd>,
+    orch_tx: tokio::sync::mpsc::UnboundedSender<RuntimeCmd>,
     session: &crate::runtime::SessionInfo,
-    interrupt: Option<Arc<AtomicBool>>,
     initial_model: &str,
     sandbox: &SandboxConfig,
 ) -> anyhow::Result<()> {
@@ -133,7 +125,6 @@ fn run_inline_tui(
         TuiLoopConfig {
             mode: effective_mode,
             session,
-            interrupt,
             initial_model,
             sandbox,
         },
@@ -143,7 +134,6 @@ fn run_inline_tui(
 struct TuiLoopConfig<'a> {
     mode: TuiMode,
     session: &'a crate::runtime::SessionInfo,
-    interrupt: Option<Arc<AtomicBool>>,
     initial_model: &'a str,
     sandbox: &'a SandboxConfig,
 }
@@ -151,13 +141,12 @@ struct TuiLoopConfig<'a> {
 fn tui_main_loop(
     terminal: &mut ratatui::DefaultTerminal,
     sig_rx: mpsc::Receiver<TuiSignal>,
-    orch_tx: tokio::sync::mpsc::UnboundedSender<OrchCmd>,
+    orch_tx: tokio::sync::mpsc::UnboundedSender<RuntimeCmd>,
     config: TuiLoopConfig<'_>,
 ) -> anyhow::Result<()> {
     let TuiLoopConfig {
         mode,
         session,
-        interrupt,
         initial_model,
         sandbox,
     } = config;
@@ -167,7 +156,6 @@ fn tui_main_loop(
         cwd_label: short_cwd_label(),
         artifacts_dir: session.artifacts_dir.clone(),
         model: initial_model.to_string(),
-        interrupt,
         file_picker_policy: FilePickerPolicy::from_sandbox(cwd, sandbox),
         ..Default::default()
     };
@@ -404,7 +392,6 @@ mod tests {
         text::{Line, Span},
     };
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicBool, Ordering};
 
     #[test]
     fn tui_display_detail_uses_full_tool_result_content() {
@@ -1055,29 +1042,29 @@ mod tests {
 
     #[test]
     fn ctrl_c_interrupts_working_state_then_exits_on_second_press() {
-        let interrupt = Arc::new(AtomicBool::new(false));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let mut state = TuiState {
             streaming: true,
             work_state: WorkState::StreamingText,
-            interrupt: Some(interrupt.clone()),
             ..Default::default()
         };
 
-        assert!(!handle_ctrl_c(&mut state));
-        assert!(interrupt.load(Ordering::SeqCst));
+        assert!(!handle_ctrl_c(&mut state, &tx));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(crate::cli::RuntimeCmd::Interrupt)
+        ));
         assert!(!state.quit);
 
-        assert!(handle_ctrl_c(&mut state));
+        assert!(handle_ctrl_c(&mut state, &tx));
         assert!(state.quit);
     }
 
     #[test]
     fn ctrl_shift_c_interrupts_working_state() {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let interrupt = Arc::new(AtomicBool::new(false));
         let mut state = TuiState {
             work_state: WorkState::WaitingModel,
-            interrupt: Some(interrupt.clone()),
             ..Default::default()
         };
 
@@ -1089,18 +1076,15 @@ mod tests {
             &mut state,
             &tx,
         ));
-        assert!(interrupt.load(Ordering::SeqCst));
         assert!(!state.quit);
     }
 
     #[test]
     fn ctrl_c_exits_immediately_when_idle() {
-        let mut state = TuiState {
-            interrupt: Some(Arc::new(AtomicBool::new(false))),
-            ..Default::default()
-        };
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut state = TuiState::default();
 
-        assert!(handle_ctrl_c(&mut state));
+        assert!(handle_ctrl_c(&mut state, &tx));
         assert!(state.quit);
     }
 

@@ -5,23 +5,22 @@ use crate::config::{
 };
 use crate::llm::client::{LlmBackend, TokenParamKind};
 use crate::resources::ResourceHandler;
-use crate::runtime::config::{first_prompt_from_config, session_policy_from_config};
-use crate::runtime::{AgentRuntimeConfig, EventSink, SessionPolicy};
+use crate::runtime::config::{
+    AgentRuntimeConfig, first_prompt_from_config, session_policy_from_config,
+};
+use crate::runtime::{EventSink, SessionPolicy};
 use crate::session::paths::SessionLayout;
 use crate::tools::vfs::ReadOnlyFileSystem;
 use crate::ui::{Display, SubAgentStreamSink};
-use anyhow::Result;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Ergonomic builder for embedding mink from Rust.
 ///
-/// `AgentOptions` is a convenience layer only. It owns a complete [`Config`]
-/// and converts losslessly into [`AgentRuntimeConfig`], so callers can either
-/// use the typed setters below or mutate the underlying config directly through
-/// [`AgentOptions::config_mut`]. This keeps the public Rust API compact without
-/// creating a second, reduced configuration model.
+/// This is the single public configuration entry point for [`AgentRuntime`](crate::runtime::AgentRuntime).
+/// It owns a complete [`Config`]; callers can use the typed setters below or
+/// mutate the underlying config directly through [`AgentOptions::config_mut`].
 pub struct AgentOptions {
     config: Config,
     home: PathBuf,
@@ -41,6 +40,7 @@ pub struct AgentOptions {
     skill_discovery_policy: SkillDiscoveryPolicy,
     llm_backend: Option<Arc<dyn LlmBackend>>,
     resource_session_id: Option<String>,
+    custom_tools: Vec<Arc<dyn crate::runtime::AgentTool>>,
 }
 
 impl AgentOptions {
@@ -85,6 +85,7 @@ impl AgentOptions {
             skill_discovery_policy: SkillDiscoveryPolicy::Defaults,
             llm_backend: None,
             resource_session_id: None,
+            custom_tools: Vec::new(),
         }
     }
 
@@ -254,6 +255,19 @@ impl AgentOptions {
     /// inherit this value while retaining their own agent session id.
     pub fn with_resource_session_id(mut self, session_id: impl Into<String>) -> Self {
         self.resource_session_id = Some(session_id.into());
+        self
+    }
+
+    pub fn with_tool(mut self, tool: Arc<dyn crate::runtime::AgentTool>) -> Self {
+        self.custom_tools.push(tool);
+        self
+    }
+
+    pub fn with_tools<I>(mut self, tools: I) -> Self
+    where
+        I: IntoIterator<Item = Arc<dyn crate::runtime::AgentTool>>,
+    {
+        self.custom_tools.extend(tools);
         self
     }
 
@@ -467,7 +481,7 @@ impl AgentOptions {
         self
     }
 
-    pub fn into_runtime_config(mut self) -> AgentRuntimeConfig {
+    pub(crate) fn into_runtime_config(mut self) -> AgentRuntimeConfig {
         if !self.session_overridden {
             self.session = session_policy_from_config(&self.config);
         }
@@ -491,15 +505,8 @@ impl AgentOptions {
             skill_discovery_policy: self.skill_discovery_policy,
             llm_backend: self.llm_backend,
             resource_session_id: self.resource_session_id,
+            custom_tools: self.custom_tools,
         }
-    }
-}
-
-impl TryFrom<AgentOptions> for AgentRuntimeConfig {
-    type Error = anyhow::Error;
-
-    fn try_from(options: AgentOptions) -> Result<Self> {
-        Ok(options.into_runtime_config())
     }
 }
 

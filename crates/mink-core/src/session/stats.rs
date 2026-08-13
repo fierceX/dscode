@@ -38,9 +38,14 @@ pub struct StatsTracker {
 impl StatsTracker {
     pub async fn load(path: &Path) -> Result<Arc<Self>> {
         let stats = if path.exists() {
-            match tokio::fs::read_to_string(path).await {
-                Ok(data) => serde_json::from_str(&data).unwrap_or_default(),
-                Err(_) => Stats::default(),
+            let data = tokio::fs::read_to_string(path).await.map_err(|error| {
+                anyhow::anyhow!("failed to read stats {}: {error}", path.display())
+            })?;
+            if data.trim().is_empty() {
+                Stats::default()
+            } else {
+                serde_json::from_str(&data)
+                    .map_err(|error| anyhow::anyhow!("corrupt stats {}: {error}", path.display()))?
             }
         } else {
             Stats::default()
@@ -55,7 +60,11 @@ impl StatsTracker {
     pub async fn flush(&self) -> Result<()> {
         let stats = self.stats.read().await;
         let data = serde_json::to_string(&*stats)?;
-        tokio::fs::write(&self.path, data + "\n").await?;
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::session::atomic_file::atomic_replace(&path, format!("{data}\n").as_bytes())
+        })
+        .await??;
         self.dirty.store(false, Ordering::Release);
         Ok(())
     }
@@ -69,7 +78,7 @@ impl StatsTracker {
 
     pub async fn record_turn(&self) {
         let mut s = self.stats.write().await;
-        s.current_turn_count += 1;
+        s.current_turn_count = s.current_turn_count.saturating_add(1);
         s.last_updated = chrono_now_rfc3339();
         self.dirty.store(true, Ordering::Release);
     }
@@ -93,7 +102,7 @@ impl StatsTracker {
             }
         };
         let mut s = self.stats.write().await;
-        s.agent_request_count += 1;
+        s.agent_request_count = s.agent_request_count.saturating_add(1);
         s.total_input_tokens = s.total_input_tokens.saturating_add(tokens.input_tokens);
         s.total_output_tokens = s.total_output_tokens.saturating_add(tokens.output_tokens);
         s.total_cache_read_tokens = s
@@ -116,8 +125,12 @@ impl StatsTracker {
                 * 1_000_000.0) as u64;
 
             match tier {
-                crate::config::ModelTier::Flash => s.flash_cost_micros += delta_micros,
-                crate::config::ModelTier::Pro => s.pro_cost_micros += delta_micros,
+                crate::config::ModelTier::Flash => {
+                    s.flash_cost_micros = s.flash_cost_micros.saturating_add(delta_micros)
+                }
+                crate::config::ModelTier::Pro => {
+                    s.pro_cost_micros = s.pro_cost_micros.saturating_add(delta_micros)
+                }
             }
         }
 
@@ -134,7 +147,7 @@ impl StatsTracker {
             }
         };
         let mut s = self.stats.write().await;
-        s.compact_request_count += 1;
+        s.compact_request_count = s.compact_request_count.saturating_add(1);
         s.total_input_tokens = s.total_input_tokens.saturating_add(tokens.input_tokens);
         s.total_output_tokens = s.total_output_tokens.saturating_add(tokens.output_tokens);
         s.total_cache_read_tokens = s
@@ -156,12 +169,13 @@ impl StatsTracker {
         cache_creation: u64,
     ) {
         let mut s = self.stats.write().await;
-        s.sub_agent_request_count += 1;
-        s.agent_request_count += request_count;
-        s.total_input_tokens += in_tokens;
-        s.total_output_tokens += out_tokens;
-        s.total_cache_read_tokens += cache_read;
-        s.total_cache_creation_tokens += cache_creation;
+        s.sub_agent_request_count = s.sub_agent_request_count.saturating_add(1);
+        s.agent_request_count = s.agent_request_count.saturating_add(request_count);
+        s.total_input_tokens = s.total_input_tokens.saturating_add(in_tokens);
+        s.total_output_tokens = s.total_output_tokens.saturating_add(out_tokens);
+        s.total_cache_read_tokens = s.total_cache_read_tokens.saturating_add(cache_read);
+        s.total_cache_creation_tokens =
+            s.total_cache_creation_tokens.saturating_add(cache_creation);
         s.last_updated = chrono_now_rfc3339();
         self.dirty.store(true, Ordering::Release);
     }
@@ -352,5 +366,21 @@ mod tests {
         assert_eq!(stats.total_input_tokens, 0);
         assert_eq!(stats.flash_cost_micros, 0);
         assert_eq!(stats.pro_cost_micros, 0);
+    }
+
+    #[tokio::test]
+    async fn malformed_stats_are_reported_without_overwrite() {
+        let dir = std::env::temp_dir().join(format!(
+            "mink-stats-corrupt-{}-{}",
+            std::process::id(),
+            chrono_now_rfc3339().replace([':', '.'], "-")
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("stats.json");
+        std::fs::write(&path, "{not-json").unwrap();
+        let error = StatsTracker::load(&path).await.err().unwrap().to_string();
+        assert!(error.contains("corrupt stats"), "{error}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{not-json");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

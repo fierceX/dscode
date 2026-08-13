@@ -213,6 +213,15 @@ impl UsageJournal {
         &self.path
     }
 
+    pub fn flush(&self) -> Result<()> {
+        let _guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+        match OpenOptions::new().read(true).open(&self.path) {
+            Ok(file) => file.sync_all().map_err(Into::into),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     fn append(&self, record: &UsageRecord) -> Result<()> {
         let _guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
         let mut file = OpenOptions::new()
@@ -221,6 +230,7 @@ impl UsageJournal {
             .open(&self.path)?;
         serde_json::to_writer(&mut file, record)?;
         writeln!(file)?;
+        file.flush()?;
         Ok(())
     }
 }

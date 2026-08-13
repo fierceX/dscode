@@ -7,6 +7,8 @@ import ThinkingBlock from "./ThinkingBlock.vue";
 import { appState, attachSession } from "../../lib/store";
 import type { ToolItem, ThinkingItem } from "../../lib/types";
 
+const session = () => ({ project_key: "proj", corrupt: false, id: "s1", title: "t", alias: null, cwd: "/tmp", created_at: "", updated_at: "", modified_secs: 0, status: "free" as const, path: "" });
+
 beforeEach(() => {
   appState.currentSessionId = null;
   appState.sessionState = null;
@@ -15,7 +17,7 @@ beforeEach(() => {
 
 describe("ToolCard", () => {
   it("Bash 卡片：着色类/摘要/CMD 徽章/退出码/命令条", () => {
-    attachSession({ id: "s1", title: "t", alias: null, cwd: "/tmp", created_at: "", updated_at: "", modified_secs: 0, status: "free", path: "" });
+    attachSession(session());
     appState.sessionState!.running = false;
     const item: ToolItem = {
       kind: "tool", id: "c1", name: "Bash", color: "exec", view: "command",
@@ -32,7 +34,7 @@ describe("ToolCard", () => {
   });
 
   it("工具卡片始终折叠（即使 running 中），头部 summary 显示核心参数", () => {
-    attachSession({ id: "s1", title: "t", alias: null, cwd: "/tmp", created_at: "", updated_at: "", modified_secs: 0, status: "free", path: "" });
+    attachSession(session());
     appState.sessionState!.running = true; // turn 进行中
     const item: ToolItem = {
       kind: "tool", id: "c1", name: "Glob", color: "search", view: "search",
@@ -44,7 +46,7 @@ describe("ToolCard", () => {
   });
 
   it("失败结果：err 类 + tc-failed", () => {
-    attachSession({ id: "s1", title: "t", alias: null, cwd: "/tmp", created_at: "", updated_at: "", modified_secs: 0, status: "free", path: "" });
+    attachSession(session());
     const item: ToolItem = {
       kind: "tool", id: "c1", name: "Grep", color: "search", view: "search",
       summary: "TODO src", input: "{}",
@@ -56,7 +58,7 @@ describe("ToolCard", () => {
   });
 
   it("TodoWrite：markdown 任务列表 + presentation 变更摘要", () => {
-    attachSession({ id: "s1", title: "t", alias: null, cwd: "/tmp", created_at: "", updated_at: "", modified_secs: 0, status: "free", path: "" });
+    attachSession(session());
     const item: ToolItem = {
       kind: "tool", id: "c1", name: "TodoWrite", color: "todo", view: "todo",
       summary: "更新 Todo +1", input: "{}",
@@ -71,7 +73,7 @@ describe("ToolCard", () => {
   });
 
   it("Edit 调用：hunk 头 + 内容行", () => {
-    attachSession({ id: "s1", title: "t", alias: null, cwd: "/tmp", created_at: "", updated_at: "", modified_secs: 0, status: "free", path: "" });
+    attachSession(session());
     const item: ToolItem = {
       kind: "tool", id: "c1", name: "Edit", color: "file", view: "diff",
       summary: "demo.txt", input: "{}", key: 1,
@@ -84,7 +86,7 @@ describe("ToolCard", () => {
 
 describe("ThinkingBlock 折叠策略", () => {
   it("idle 折叠 / running 展开 / 结束折叠", async () => {
-    attachSession({ id: "s1", title: "t", alias: null, cwd: "/tmp", created_at: "", updated_at: "", modified_secs: 0, status: "free", path: "" });
+    attachSession(session());
     const item: ThinkingItem = { kind: "thinking", text: "第一段" };
     const w = mount(ThinkingBlock, { props: { item } });
     expect(w.find("details").attributes("open")).toBeUndefined();
@@ -97,7 +99,7 @@ describe("ThinkingBlock 折叠策略", () => {
   });
 
   it("流式推进（后续 text 到达）自动折叠思考块", async () => {
-    attachSession({ id: "s1", title: "t", alias: null, cwd: "/tmp", created_at: "", updated_at: "", modified_secs: 0, status: "free", path: "" });
+    attachSession(session());
     appState.sessionState!.running = true;
     const item: ThinkingItem = { kind: "thinking", text: "思考中", key: 1 };
     const w = mount(ThinkingBlock, { props: { item } });
@@ -112,7 +114,7 @@ describe("ThinkingBlock 折叠策略", () => {
   });
 
   it("markdown 渲染思考内容", () => {
-    attachSession({ id: "s1", title: "t", alias: null, cwd: "/tmp", created_at: "", updated_at: "", modified_secs: 0, status: "free", path: "" });
+    attachSession(session());
     appState.sessionState!.running = true;
     const item: ThinkingItem = { kind: "thinking", text: "# 标题\n**粗体**" };
     const w = mount(ThinkingBlock, { props: { item } });

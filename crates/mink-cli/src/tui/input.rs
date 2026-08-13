@@ -1,4 +1,4 @@
-use crate::agent::orchestrator::OrchCmd;
+use crate::cli::RuntimeCmd;
 use crate::config::TuiMode;
 use crate::tui::command::{SlashCommand, parse_slash_command};
 use crate::tui::file_picker::FilePickerState;
@@ -7,7 +7,6 @@ use crate::tui::state::{
     ActiveOverlay, ClickAction, TranscriptItem, TranscriptKind, TuiState, View, WorkState,
 };
 use crossterm::event::{Event, KeyCode, KeyModifiers, MouseEventKind};
-use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 const SCROLL_STEP: usize = 3;
@@ -32,7 +31,7 @@ fn scroll_by(state: &mut TuiState, delta: isize) {
 fn handle_key(
     key: crossterm::event::KeyEvent,
     state: &mut TuiState,
-    orch_tx: &tokio::sync::mpsc::UnboundedSender<OrchCmd>,
+    orch_tx: &tokio::sync::mpsc::UnboundedSender<RuntimeCmd>,
 ) -> bool {
     if key.kind == crossterm::event::KeyEventKind::Release {
         return false;
@@ -42,7 +41,7 @@ fn handle_key(
     if key.modifiers.contains(KeyModifiers::CONTROL)
         && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'c'))
     {
-        return handle_ctrl_c(state);
+        return handle_ctrl_c(state, orch_tx);
     }
 
     if handle_overlay_key(&key, state) {
@@ -261,7 +260,10 @@ fn is_text_modifier(modifiers: KeyModifiers) -> bool {
     modifiers == KeyModifiers::NONE || modifiers == KeyModifiers::SHIFT
 }
 
-pub(crate) fn handle_ctrl_c(state: &mut TuiState) -> bool {
+pub(crate) fn handle_ctrl_c(
+    state: &mut TuiState,
+    orch_tx: &tokio::sync::mpsc::UnboundedSender<RuntimeCmd>,
+) -> bool {
     let now = Instant::now();
     if state
         .last_interrupt
@@ -271,10 +273,8 @@ pub(crate) fn handle_ctrl_c(state: &mut TuiState) -> bool {
         return true;
     }
 
-    if state.work_state.is_working()
-        && let Some(ref interrupt) = state.interrupt
-    {
-        interrupt.store(true, Ordering::SeqCst);
+    if state.work_state.is_working() {
+        let _ = orch_tx.send(RuntimeCmd::Interrupt);
         state.last_interrupt = Some(now);
         return false;
     }
@@ -442,7 +442,7 @@ fn next_char_boundary(s: &str, pos: usize) -> usize {
 
 fn handle_enter(
     state: &mut TuiState,
-    orch_tx: &tokio::sync::mpsc::UnboundedSender<OrchCmd>,
+    orch_tx: &tokio::sync::mpsc::UnboundedSender<RuntimeCmd>,
 ) -> bool {
     state.input.clamp_cursor();
     let input = std::mem::take(&mut state.input.buf);
@@ -462,20 +462,16 @@ fn handle_enter(
     match parse_slash_command(&input) {
         Ok(Some(command)) => match command {
             SlashCommand::Flash => {
-                let _ = orch_tx.send(OrchCmd::SetModel("flash".into()));
-                state.model = "flash".into();
+                let _ = orch_tx.send(RuntimeCmd::SetModel("flash".into()));
             }
             SlashCommand::Pro => {
-                let _ = orch_tx.send(OrchCmd::SetModel("pro".into()));
-                state.model = "pro".into();
+                let _ = orch_tx.send(RuntimeCmd::SetModel("pro".into()));
             }
             SlashCommand::Model(model) => {
-                let _ = orch_tx.send(OrchCmd::SetModel(model.clone()));
-                state.model = model;
+                let _ = orch_tx.send(RuntimeCmd::SetModel(model));
             }
             SlashCommand::Compact => {
-                let (done_tx, _) = tokio::sync::oneshot::channel();
-                if orch_tx.send(OrchCmd::Compact { done: done_tx }).is_ok() {
+                if orch_tx.send(RuntimeCmd::Compact).is_ok() {
                     state.arm_task_notification();
                     state.work_state = WorkState::Compacting;
                 } else {
@@ -502,14 +498,7 @@ fn handle_enter(
             }
         },
         Ok(None) => {
-            let (done_tx, _) = tokio::sync::oneshot::channel();
-            if orch_tx
-                .send(OrchCmd::UserInput {
-                    input,
-                    done: done_tx,
-                })
-                .is_ok()
-            {
+            if orch_tx.send(RuntimeCmd::Run { input, done: None }).is_ok() {
                 state.arm_task_notification();
                 state.work_state = WorkState::WaitingModel;
             } else {
@@ -534,7 +523,7 @@ fn handle_enter(
 pub(crate) fn handle_event(
     ev: Event,
     state: &mut TuiState,
-    orch_tx: &tokio::sync::mpsc::UnboundedSender<OrchCmd>,
+    orch_tx: &tokio::sync::mpsc::UnboundedSender<RuntimeCmd>,
 ) -> bool {
     handle_event_for_mode(ev, state, orch_tx, TuiMode::Full)
 }
@@ -542,7 +531,7 @@ pub(crate) fn handle_event(
 pub(crate) fn handle_event_for_mode(
     ev: Event,
     state: &mut TuiState,
-    orch_tx: &tokio::sync::mpsc::UnboundedSender<OrchCmd>,
+    orch_tx: &tokio::sync::mpsc::UnboundedSender<RuntimeCmd>,
     mode: TuiMode,
 ) -> bool {
     match ev {

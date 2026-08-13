@@ -10,7 +10,7 @@
 
 ## 包内容
 
-- `mink::runtime` / `mink::prelude`：Rust 嵌入式入口，提供 `AgentRuntime`、`AgentOptions`、流式事件和 turn outcome。
+- `mink::runtime` / `mink::prelude`：Rust 嵌入式入口，提供唯一 shutdown owner `AgentRuntime`、可克隆 `AgentRuntimeHandle`、异步 `EventSink`、流式事件和 turn outcome。
 - `mink::config`：与 CLI 共用的完整配置结构和解析辅助函数。
 - `mink::ui`：`Display` trait、结构化工具调用/结果 presentation 和状态快照协议。具体
   REPL/TUI 渲染不在本包。
@@ -46,7 +46,7 @@ revision 和稳定 ID 防止 stale write。
 
 ```toml
 [dependencies]
-mink = { package = "mink-core", version = "0.3.3", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.4.0", default-features = false, features = ["runtime"] }
 ```
 
 ```rust
@@ -54,7 +54,7 @@ use mink::prelude::{AgentOptions, AgentRuntime, UsageSummary};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let rt = AgentRuntime::start_with_options(
+    let rt = AgentRuntime::start(
         AgentOptions::new("/tmp/mink-session", ".")
             .with_api_key(std::env::var("DEEPSEEK_API_KEY")?)
             .with_model("flash"),
@@ -84,16 +84,16 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-流式 turn 使用 `try_stream_turn()` 逐条消费事件，结束时通过 `outcome()` 取回结果：
+流式 turn 使用 `stream_turn()` 逐条消费事件，结束时通过 `outcome()` 取回结果：
 
 ```rust
-use mink::prelude::{AgentEvent, AgentRuntime};
+use mink::prelude::{AgentEventKind, AgentRuntime};
 
-let mut stream = rt.try_stream_turn("explain")?;
+let mut stream = rt.stream_turn("explain")?;
 while let Some(ev) = stream.recv().await {
-    match ev {
-        AgentEvent::Text { content } => print!("{content}"),
-        AgentEvent::Final { .. } => break,
+    match ev.kind {
+        AgentEventKind::Text { content } => print!("{content}"),
+        AgentEventKind::Final { .. } => break,
         _ => {}
     }
 }
@@ -143,7 +143,7 @@ loop when the protocol itself is not OpenAI-compatible:
 use std::sync::Arc;
 use mink::prelude::{AgentOptions, AgentRuntime};
 
-let runtime = AgentRuntime::start_with_options(
+let runtime = AgentRuntime::start(
     AgentOptions::new("/tmp/mink-session", ".")
         .with_model("local")
         .with_llm_backend(Arc::new(MyLlmBackend::new())),

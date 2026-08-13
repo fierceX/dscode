@@ -242,11 +242,11 @@ ToolRunResult
 | 文件 | 职责 |
 |------|------|
 | `runtime/mod.rs` | `mink::runtime` 公共 API 导出，供 `mink::prelude` facade 复用 |
-| `runtime/builder.rs` | `build_runtime()` — 从 `AgentRuntimeConfig` 构造完整 runtime |
-| `runtime/config.rs` | `AgentRuntimeConfig` / `SessionPolicy` / `SessionInfo` |
-| `runtime/handle.rs` | `AgentRuntime` — `start()`, `run_turn()`, `try_stream_turn()`, `stream_turn()`, `shutdown()` |
+| `runtime/builder.rs` | crate-private `build_runtime()` — 从 `AgentOptions` 的内部 resolved 配置构造 runtime |
+| `runtime/config.rs` | 私有 resolved 配置 / `SessionPolicy` / `SessionInfo` |
+| `runtime/handle.rs` | `AgentRuntime` — `start()`, `run_turn()`, `stream_turn()`, `compact()`, `set_model()`, `shutdown()` |
 | `runtime/options.rs` | `AgentOptions` ergonomic builder，包括 LLM backend、只读 VFS 和 resource session scope 注入 |
-| `runtime/events.rs` | `AgentEvent` 枚举 / `EventSink` trait / `EventDisplay` adapter |
+| `runtime/events.rs` | turn-scoped `AgentEvent` envelope / `EventSink` / 异步 dispatcher / `EventDisplay` adapter |
 | `runtime/sdk_adapter.rs` | SDK option 映射、status/exit code 映射、`SdkFinal` 组装 |
 
 ### Agent 核心
@@ -407,7 +407,7 @@ Read / Glob / Grep
               └── 结构化结果 -> mink-core 统一格式化
 ```
 
-注入链路为 `AgentOptions` / `AgentRuntimeConfig` → runtime builder → `AgentSharedContext` → `ToolContext`。未显式设置 `resource_session_id` 时使用当前 runtime session id。子代理复用同一个 `Arc<dyn ReadOnlyFileSystem>`，继承父代理的 `resource_session_id`，但使用自己的 `agent_session_id`，从而共享同一知识库作用域并保留调用方身份。
+注入链路为 `AgentOptions` → crate-private resolved 配置 → runtime builder → runtime/tool dependencies。未显式设置 `resource_session_id` 时使用当前 runtime session id。子代理复用同一个 `Arc<dyn ReadOnlyFileSystem>`，继承父代理的 `resource_session_id`，但使用自己的 `agent_session_id`，从而共享同一知识库作用域并保留调用方身份。
 
 VFS 只接管普通路径。`artifact://`、`skill://`、`rule://` 和 `session://` 仍先走资源读取路径。Grep 对 registered resource 直接搜索 handler 返回的文本，不要求暴露底层物理路径。虚拟路径使用 POSIX 分隔符和词法规范化，拒绝越过虚拟根目录。Glob/regex 请求由工具层先校验，后端返回结构化路径或匹配行，`mink-core` 统一输出格式和 100KB 搜索输出保护。请求中的 `max_files` / `max_results` 是后端契约，后端必须自行遵守；核心不提供第二套 VFS 搜索实现。
 

@@ -2,7 +2,7 @@
 //!
 //! - `cargo build -p mink-server` 时自动执行 `npm run build`（web/ 目录）
 //! - 遍历 dist 产物，生成 `OUT_DIR/assets.rs`（路径 → include_str! 内容表）
-//! - npm 缺失/失败时打印 warning 并生成空表（运行时回退磁盘 ServeDir）
+//! - npm 缺失/失败默认中止；MINK_SERVER_ALLOW_EMPTY_WEB=1 才允许空 UI
 
 use std::env;
 use std::fs;
@@ -57,6 +57,7 @@ fn main() {
         git_dir.join("packed-refs").display()
     );
     println!("cargo:rerun-if-env-changed=MINK_GIT_HASH");
+    println!("cargo:rerun-if-env-changed=MINK_SERVER_ALLOW_EMPTY_WEB");
     let hash = match env::var("MINK_GIT_HASH") {
         Ok(value) if !value.trim().is_empty() => value.trim().to_string(),
         _ => git_short_hash()
@@ -82,20 +83,25 @@ fn main() {
         .map(|s| s.success())
         .unwrap_or(false);
     if !npm_ok {
-        eprintln!(
-            "[build.rs] warning: `npm run build` failed in {}; embedded web UI will be empty (runtime falls back to disk ServeDir)",
-            web_dir.display()
-        );
+        if env::var("MINK_SERVER_ALLOW_EMPTY_WEB").as_deref() != Ok("1") {
+            panic!(
+                "`npm run build` failed in {}; set MINK_SERVER_ALLOW_EMPTY_WEB=1 only for explicit headless builds",
+                web_dir.display()
+            );
+        }
+        eprintln!("[build.rs] warning: building without embedded web UI by explicit opt-in");
     }
 
     // 2. 复制 dist → OUT_DIR/assets（include_str! 需要编译期路径）
     let dist = web_dir.join("dist");
     let out_assets = out_dir.join("assets");
     let _ = fs::remove_dir_all(&out_assets);
-    if dist.exists() {
+    if dist.join("index.html").exists() {
         if let Err(e) = copy_dir(&dist, &out_assets) {
             eprintln!("[build.rs] warning: failed to copy dist: {e}");
         }
+    } else if env::var("MINK_SERVER_ALLOW_EMPTY_WEB").as_deref() != Ok("1") {
+        panic!("web build did not produce dist/index.html");
     }
 
     // 3. 生成 assets.rs（rel_path → include_str!(absolute))

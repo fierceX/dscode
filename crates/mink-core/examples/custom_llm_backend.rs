@@ -84,7 +84,7 @@ async fn main() -> Result<()> {
         .model_aliases
         .insert("local".to_string(), "private-model-v1".to_string());
 
-    let runtime = AgentRuntime::start_with_options(options).await?;
+    let runtime = AgentRuntime::start(options).await?;
     let outcome = runtime
         .run_turn("Explain how custom LLM injection works.")
         .await?;

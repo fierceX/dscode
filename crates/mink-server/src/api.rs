@@ -98,8 +98,14 @@ struct TurnReq {
     input: String,
 }
 
+#[derive(Default, Deserialize)]
+struct ProjectQuery {
+    project: Option<String>,
+}
+
 #[derive(Deserialize)]
 struct HistoryQuery {
+    project: Option<String>,
     #[serde(default)]
     from_seq: u64,
     #[serde(default = "default_limit")]
@@ -116,6 +122,7 @@ fn default_limit() -> usize {
 
 #[derive(Deserialize)]
 struct FilesQuery {
+    project: Option<String>,
     path: Option<String>,
     #[serde(default)]
     raw: bool,
@@ -123,13 +130,28 @@ struct FilesQuery {
 
 const FILE_RAW_MAX_BYTES: u64 = 1 << 20; // 1 MiB
 
-/// Resolve a session's directory; returns ApiResponse 404 on failure.
-async fn session_dir_or_err(state: &ApiState, id: &str) -> Result<std::path::PathBuf, ApiResponse> {
+/// Resolve a session directory with the registry's typed status mapping.
+async fn session_dir_or_err(
+    state: &ApiState,
+    id: &str,
+    project: Option<&str>,
+) -> Result<std::path::PathBuf, ApiResponse> {
     state
         .registry
-        .session_dir(id)
+        .session_dir(id, project)
         .await
-        .map_err(|e| ApiResponse::err(404, e.to_string()))
+        .map_err(registry_error)
+}
+
+fn registry_error(error: crate::session::registry::RegistryError) -> ApiResponse {
+    use crate::session::registry::RegistryError;
+    let code = match &error {
+        RegistryError::NotFound(_) => 404,
+        RegistryError::Ambiguous(_) | RegistryError::Locked(_) | RegistryError::Busy(_) => 409,
+        RegistryError::Capacity(_) => 429,
+        RegistryError::Internal(_) => 500,
+    };
+    ApiResponse::err(code, error.to_string())
 }
 async fn list_sessions(State(state): State<Arc<ApiState>>) -> ApiResponse {
     match state.registry.list().await {
@@ -146,88 +168,72 @@ async fn create_session(
     let name = req.name.unwrap_or_else(|| "unnamed".to_string());
     match state.registry.create(&name, &cwd).await {
         Ok(summary) => ApiResponse::ok(json!(summary)),
-        Err(e) => ApiResponse::err(500, e.to_string()),
+        Err(error) => registry_error(error),
     }
 }
 
 async fn get_session(
     State(state): State<Arc<ApiState>>,
     AxumPath(id): AxumPath<String>,
+    Query(query): Query<ProjectQuery>,
 ) -> ApiResponse {
-    match state.registry.session_dir(&id).await {
+    match state
+        .registry
+        .session_dir(&id, query.project.as_deref())
+        .await
+    {
         Ok(_) => {
-            let is_open = state.registry.is_open(&id);
-            let running = state.registry.running(&id);
+            let is_open = state
+                .registry
+                .is_open(&id, query.project.as_deref())
+                .unwrap_or(false);
+            let running = state
+                .registry
+                .running(&id, query.project.as_deref())
+                .unwrap_or(false);
             ApiResponse::ok(json!({ "id": id, "open": is_open, "running": running }))
         }
-        Err(_) => ApiResponse::err(404, format!("session {id} not found")),
+        Err(error) => registry_error(error),
     }
 }
 
 async fn delete_session(
     State(state): State<Arc<ApiState>>,
     AxumPath(id): AxumPath<String>,
+    Query(query): Query<ProjectQuery>,
 ) -> ApiResponse {
-    if state.registry.is_open(&id) {
-        // 运行中先中断并等待复位（带超时），避免删除目录后 core 继续写入
-        if state.registry.running(&id) {
-            let _ = state.registry.interrupt(&id);
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-            while state.registry.running(&id) {
-                if std::time::Instant::now() >= deadline {
-                    return ApiResponse::err(
-                        409,
-                        "session is still running; interrupt did not stop it",
-                    );
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            }
-        }
-        if let Err(e) = state.registry.close(&id).await {
-            return ApiResponse::err(500, e.to_string());
-        }
-    }
-    match state.registry.session_dir(&id).await {
-        Ok(dir) => match std::fs::remove_dir_all(&dir) {
-            Ok(_) => ApiResponse::ok(json!({ "id": id, "deleted": true })),
-            Err(e) => ApiResponse::err(500, format!("failed to delete session: {e}")),
-        },
-        Err(_) => ApiResponse::err(404, format!("session {id} not found")),
+    match state.registry.delete(&id, query.project.as_deref()).await {
+        Ok(()) => ApiResponse::ok(json!({ "id": id, "deleted": true })),
+        Err(error) => registry_error(error),
     }
 }
 
 async fn open_session(
     State(state): State<Arc<ApiState>>,
     AxumPath(id): AxumPath<String>,
+    Query(query): Query<ProjectQuery>,
 ) -> ApiResponse {
-    match state.registry.open(&id).await {
+    match state.registry.open(&id, query.project.as_deref()).await {
         Ok(_) => ApiResponse::ok(json!({ "id": id, "status": "active" })),
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("locked") {
-                ApiResponse::err(409, msg)
-            } else if msg.contains("not found") {
-                ApiResponse::err(404, msg)
-            } else {
-                ApiResponse::err(500, msg)
-            }
-        }
+        Err(error) => registry_error(error),
     }
 }
 
 async fn close_session(
     State(state): State<Arc<ApiState>>,
     AxumPath(id): AxumPath<String>,
+    Query(query): Query<ProjectQuery>,
 ) -> ApiResponse {
-    match state.registry.close(&id).await {
+    match state.registry.close(&id, query.project.as_deref()).await {
         Ok(_) => ApiResponse::ok(json!({ "id": id, "status": "free" })),
-        Err(e) => ApiResponse::err(404, e.to_string()),
+        Err(error) => registry_error(error),
     }
 }
 
 async fn turn_session(
     State(state): State<Arc<ApiState>>,
     AxumPath(id): AxumPath<String>,
+    Query(query): Query<ProjectQuery>,
     Json(req): Json<TurnReq>,
 ) -> ApiResponse {
     let input = req.input.trim().to_string();
@@ -237,31 +243,23 @@ async fn turn_session(
     if input.len() > 128 * 1024 {
         return ApiResponse::err(400, "input too large (max 128 KiB)");
     }
-    match state.registry.start_turn(&id, input) {
+    match state
+        .registry
+        .start_turn(&id, query.project.as_deref(), input)
+    {
         Ok(_) => ApiResponse::ok(json!({ "id": id, "status": "running" })),
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("already has a turn") {
-                ApiResponse::err(409, msg)
-            } else if msg.contains("too many running") {
-                ApiResponse::err(429, msg)
-            } else if msg.contains("not open") {
-                ApiResponse::err(404, msg)
-            } else {
-                eprintln!("[mink-server] turn failed: {msg}");
-                ApiResponse::err(500, msg)
-            }
-        }
+        Err(error) => registry_error(error),
     }
 }
 
 async fn interrupt_session(
     State(state): State<Arc<ApiState>>,
     AxumPath(id): AxumPath<String>,
+    Query(query): Query<ProjectQuery>,
 ) -> ApiResponse {
-    match state.registry.interrupt(&id) {
+    match state.registry.interrupt(&id, query.project.as_deref()) {
         Ok(_) => ApiResponse::ok(json!({ "id": id, "interrupted": true })),
-        Err(e) => ApiResponse::err(404, e.to_string()),
+        Err(error) => registry_error(error),
     }
 }
 
@@ -270,9 +268,16 @@ async fn events_history(
     AxumPath(id): AxumPath<String>,
     Query(query): Query<HistoryQuery>,
 ) -> ApiResponse {
-    let dir = match state.registry.session_dir(&id).await {
+    if !(1..=2000).contains(&query.limit) {
+        return ApiResponse::err(400, "history limit must be in 1..=2000");
+    }
+    let dir = match state
+        .registry
+        .session_dir(&id, query.project.as_deref())
+        .await
+    {
         Ok(d) => d,
-        Err(_) => return ApiResponse::err(404, format!("session {id} not found")),
+        Err(error) => return registry_error(error),
     };
     let events_path = dir.join("events.jsonl");
     match read_history(
@@ -293,9 +298,16 @@ async fn conversation_history(
     AxumPath(id): AxumPath<String>,
     Query(query): Query<HistoryQuery>,
 ) -> ApiResponse {
-    let dir = match state.registry.session_dir(&id).await {
+    if !(1..=2000).contains(&query.limit) {
+        return ApiResponse::err(400, "history limit must be in 1..=2000");
+    }
+    let dir = match state
+        .registry
+        .session_dir(&id, query.project.as_deref())
+        .await
+    {
         Ok(d) => d,
-        Err(_) => return ApiResponse::err(404, format!("session {id} not found")),
+        Err(error) => return registry_error(error),
     };
     let conv_path = dir.join("conversation.jsonl");
     match read_conversation(
@@ -317,14 +329,16 @@ async fn conversation_history(
 async fn stream_events(
     State(state): State<Arc<ApiState>>,
     AxumPath(id): AxumPath<String>,
+    Query(query): Query<ProjectQuery>,
 ) -> Response {
     use axum::body::Body;
     use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
     use http_body_util::StreamBody;
 
-    let session = match state.registry.active_runtime(&id) {
-        Some(s) => s,
-        None => return ApiResponse::err(404, format!("session {id} not open")).into_response(),
+    let session = match state.registry.active_runtime(&id, query.project.as_deref()) {
+        Ok(Some(s)) => s,
+        Err(error) => return registry_error(error).into_response(),
+        Ok(None) => return ApiResponse::err(404, format!("session {id} not open")).into_response(),
     };
     let mut rx = session.event_receiver();
     let stream = async_stream::stream! {
@@ -340,7 +354,13 @@ async fn stream_events(
                                 http_body::Frame::data(axum::body::Bytes::from(sse)),
                             );
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                            let line = serde_json::json!({"type":"stream_gap","missed":missed}).to_string();
+                            yield Ok::<http_body::Frame<axum::body::Bytes>, std::convert::Infallible>(
+                                http_body::Frame::data(axum::body::Bytes::from(format!("data: {line}\n\n"))),
+                            );
+                            break;
+                        }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
                 }
@@ -367,25 +387,27 @@ async fn health() -> ApiResponse {
 async fn get_plan(
     State(state): State<Arc<ApiState>>,
     AxumPath(id): AxumPath<String>,
+    Query(query): Query<ProjectQuery>,
 ) -> ApiResponse {
-    let dir = match session_dir_or_err(&state, &id).await {
-        Ok(d) => d,
-        Err(r) => return r,
+    let dir = match session_dir_or_err(&state, &id, query.project.as_deref()).await {
+        Ok(dir) => dir,
+        Err(response) => return response,
     };
-    let plan = read_optional(&dir.join("plan.md"));
-    let draft = read_optional(&dir.join("plan.draft"));
+    let plan = read_optional(&dir.join("plan.md")).await;
+    let draft = read_optional(&dir.join("plan.draft")).await;
     ApiResponse::ok(json!({ "plan": plan, "draft": draft }))
 }
 
 async fn get_todo(
     State(state): State<Arc<ApiState>>,
     AxumPath(id): AxumPath<String>,
+    Query(query): Query<ProjectQuery>,
 ) -> ApiResponse {
-    let dir = match session_dir_or_err(&state, &id).await {
-        Ok(d) => d,
-        Err(r) => return r,
+    let dir = match session_dir_or_err(&state, &id, query.project.as_deref()).await {
+        Ok(dir) => dir,
+        Err(response) => return response,
     };
-    let todo = read_optional(&dir.join("todos.json"));
+    let todo = read_optional(&dir.join("todos.json")).await;
     match todo {
         Some(text) => match serde_json::from_str::<serde_json::Value>(&text) {
             Ok(v) => ApiResponse::ok(json!({ "todos": v })),
@@ -398,13 +420,14 @@ async fn get_todo(
 async fn list_artifacts(
     State(state): State<Arc<ApiState>>,
     AxumPath(id): AxumPath<String>,
+    Query(query): Query<ProjectQuery>,
 ) -> ApiResponse {
-    let dir = match session_dir_or_err(&state, &id).await {
-        Ok(d) => d,
-        Err(r) => return r,
+    let dir = match session_dir_or_err(&state, &id, query.project.as_deref()).await {
+        Ok(dir) => dir,
+        Err(response) => return response,
     };
     let artifacts_dir = dir.join("artifacts");
-    let index = read_optional(&artifacts_dir.join("index.jsonl"));
+    let index = read_optional(&artifacts_dir.join("index.jsonl")).await;
     let mut records = Vec::new();
     if let Some(index) = index {
         for line in index.lines() {
@@ -422,10 +445,11 @@ async fn list_artifacts(
 async fn get_artifact(
     State(state): State<Arc<ApiState>>,
     AxumPath((id, name)): AxumPath<(String, String)>,
+    Query(query): Query<ProjectQuery>,
 ) -> ApiResponse {
-    let dir = match session_dir_or_err(&state, &id).await {
-        Ok(d) => d,
-        Err(r) => return r,
+    let dir = match session_dir_or_err(&state, &id, query.project.as_deref()).await {
+        Ok(dir) => dir,
+        Err(response) => return response,
     };
     // `artifact://<id>` maps to artifacts/<id>.txt; also accept the raw
     // filename. Reject anything that could escape the artifacts directory.
@@ -438,7 +462,7 @@ async fn get_artifact(
         format!("{name}.txt")
     };
     let path = dir.join("artifacts").join(&filename);
-    match read_optional(&path) {
+    match read_optional(&path).await {
         Some(text) => ApiResponse::ok(json!({ "name": filename, "content": text })),
         None => ApiResponse::err(404, format!("artifact {name} not found")),
     }
@@ -449,23 +473,34 @@ async fn get_files(
     AxumPath(id): AxumPath<String>,
     Query(query): Query<FilesQuery>,
 ) -> ApiResponse {
-    let dir = match session_dir_or_err(&state, &id).await {
-        Ok(d) => d,
-        Err(r) => return r,
-    };
+    if let Err(response) = session_dir_or_err(&state, &id, query.project.as_deref()).await {
+        return response;
+    }
     // cwd 是会话工作目录（SessionMetadata.cwd），文件浏览限制在其内。
-    let cwd = match state.registry.session_metadata_cwd(&id).await {
+    let cwd = match state
+        .registry
+        .session_metadata_cwd(&id, query.project.as_deref())
+        .await
+    {
         Ok(Some(c)) => std::path::PathBuf::from(c),
-        _ => dir.clone(), // 兜底：会话目录本身
+        Ok(None) => return ApiResponse::err(500, "session metadata cwd is missing"),
+        Err(error) => return ApiResponse::err(500, format!("failed to read session cwd: {error}")),
     };
     let rel = query.path.unwrap_or_default();
-    let target = resolve_within(&cwd, &rel);
+    let target = {
+        let cwd = cwd.clone();
+        let rel = rel.clone();
+        match tokio::task::spawn_blocking(move || resolve_within(&cwd, &rel)).await {
+            Ok(target) => target,
+            Err(error) => return ApiResponse::err(500, format!("path task failed: {error}")),
+        }
+    };
     let Some(target) = target else {
         return ApiResponse::err(400, "path escapes the workspace");
     };
 
     if query.raw {
-        let meta = match std::fs::metadata(&target) {
+        let meta = match tokio::fs::metadata(&target).await {
             Ok(m) => m,
             Err(_) => return ApiResponse::err(404, "file not found"),
         };
@@ -478,19 +513,26 @@ async fn get_files(
                 format!("file too large ({} bytes, limit 1 MiB)", meta.len()),
             );
         }
-        match std::fs::read_to_string(&target) {
+        match tokio::fs::read_to_string(&target).await {
             Ok(text) => ApiResponse::ok(json!({ "path": rel, "content": text })),
             Err(e) => ApiResponse::err(500, format!("read failed: {e}")),
         }
     } else {
-        let entries = match std::fs::read_dir(&target) {
+        let mut entries = match tokio::fs::read_dir(&target).await {
             Ok(entries) => entries,
             Err(_) => return ApiResponse::err(404, "directory not found"),
         };
         let mut items = Vec::new();
-        for entry in entries.flatten() {
+        loop {
+            let entry = match entries.next_entry().await {
+                Ok(Some(entry)) => entry,
+                Ok(None) => break,
+                Err(error) => {
+                    return ApiResponse::err(500, format!("directory read failed: {error}"));
+                }
+            };
             let name = entry.file_name().to_string_lossy().to_string();
-            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            let is_dir = entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
             items.push(json!({ "name": name, "dir": is_dir }));
         }
         items.sort_by(|a, b| {
@@ -503,8 +545,8 @@ async fn get_files(
     }
 }
 
-fn read_optional(path: &std::path::Path) -> Option<String> {
-    std::fs::read_to_string(path).ok()
+async fn read_optional(path: &std::path::Path) -> Option<String> {
+    tokio::fs::read_to_string(path).await.ok()
 }
 
 /// Join `rel` onto `root`, refusing any path that escapes `root`.
@@ -538,6 +580,32 @@ mod tests {
     use axum::http::{Method, Request, StatusCode};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
+
+    struct MockRuntimeBackend;
+
+    #[async_trait::async_trait]
+    impl mink::runtime::LlmBackend for MockRuntimeBackend {
+        fn name(&self) -> &str {
+            "server-api-mock"
+        }
+
+        async fn stream(
+            &self,
+            _request: mink::runtime::LlmRequest,
+        ) -> anyhow::Result<mink::runtime::LlmResponseStream> {
+            Ok(mink::runtime::LlmResponseStream {
+                events: Box::pin(futures::stream::iter(vec![
+                    Ok(mink::runtime::LlmEvent::Text(mink::runtime::LlmTextEvent {
+                        content: "mock api answer".into(),
+                    })),
+                    Ok(mink::runtime::LlmEvent::Stop(mink::runtime::LlmStopEvent {
+                        reason: "end_turn".into(),
+                    })),
+                ])),
+                attempt_count: 1,
+            })
+        }
+    }
 
     /// 临时 home + 一个含 3 行 conversation 的会话 + 1 个 artifact。
     /// 每个调用使用唯一 home（进程内并行测试共享同一 pid 的固定目录会
@@ -689,5 +757,107 @@ mod tests {
         let (s, body) = req(&app, Method::GET, "/api/sessions/test-session/plan").await;
         assert_eq!(s, StatusCode::OK);
         assert_eq!(body["data"]["plan"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn mock_runtime_api_streams_authoritative_sse_envelope() {
+        let home = std::env::temp_dir().join(format!(
+            "mink-server-mock-sse-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let cwd = home.join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let registry = Arc::new(Registry::with_llm_backend(
+            home.clone(),
+            "mock".into(),
+            1,
+            Arc::new(MockRuntimeBackend),
+        ));
+        let created = registry.create("mock-sse", &cwd).await.unwrap();
+        let project = created.project_key.clone();
+        let state = Arc::new(ApiState {
+            registry: registry.clone(),
+            cwd,
+        });
+        let app = router(state);
+
+        let (status, _) = req(
+            &app,
+            Method::POST,
+            &format!("/api/sessions/{}/open?project={project}", created.id),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let stream_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/sessions/{}/stream?project={project}",
+                        created.id
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(stream_response.status(), StatusCode::OK);
+        let mut body = stream_response.into_body();
+
+        let turn_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!(
+                        "/api/sessions/{}/turn?project={project}",
+                        created.id
+                    ))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"input":"hello"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(turn_response.status(), StatusCode::OK);
+
+        let mut types = Vec::new();
+        let mut saw_stream_sequence = false;
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while let Some(frame) = body.frame().await {
+                let frame = frame.unwrap();
+                let Ok(data) = frame.into_data() else {
+                    continue;
+                };
+                for line in String::from_utf8_lossy(&data).lines() {
+                    let Some(json) = line.strip_prefix("data: ") else {
+                        continue;
+                    };
+                    let event: serde_json::Value = serde_json::from_str(json).unwrap();
+                    saw_stream_sequence |= event["stream_sequence"].is_number();
+                    if let Some(kind) = event["type"].as_str() {
+                        types.push(kind.to_string());
+                        if kind == "turn_final" {
+                            return;
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .expect("mock runtime SSE did not reach turn_final");
+
+        assert!(saw_stream_sequence);
+        assert!(types.starts_with(&["turn_started".into()]));
+        assert!(types.contains(&"text".into()));
+        assert!(types.contains(&"stop".into()));
+        assert_eq!(types.last().map(String::as_str), Some("turn_final"));
+        registry.close(&created.id, Some(&project)).await.unwrap();
+        let _ = std::fs::remove_dir_all(home);
     }
 }

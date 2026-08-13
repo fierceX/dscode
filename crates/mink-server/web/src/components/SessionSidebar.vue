@@ -45,7 +45,7 @@ const displayTitle = (s: SessionSummary) => s.title ?? s.alias ?? s.id.slice(0, 
 
 const del = async (s: SessionSummary) => {
   if (!confirm(`删除会话 ${s.title ?? s.id.slice(0, 8)} 及其全部文件？`)) return;
-  await api.deleteSession(s.id);
+  await api.deleteSession(s.id, s.project_key);
   location.reload();
 };
 const open = async (s: SessionSummary) => {
@@ -62,8 +62,8 @@ const open = async (s: SessionSummary) => {
         <template v-if="list.length">
           <div class="dgroup">{{ groupLabel[key as GroupKey] }}</div>
           <div
-            v-for="s in list" :key="s.id"
-            class="sess-row" :class="{ active: s.id === appState.currentSessionId }"
+            v-for="s in list" :key="`${s.project_key}:${s.id}`"
+            class="sess-row" :class="{ active: s.id === appState.currentSessionId && s.project_key === appState.currentProjectKey }"
             role="button" tabindex="0" :data-id="s.id" @click="open(s)" @keydown.enter="open(s)"
           >
             <div class="sess-top">

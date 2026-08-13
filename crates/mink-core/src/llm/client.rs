@@ -935,11 +935,11 @@ mod tests {
             Arc::new(TestDisplay::new()),
             CancellationToken::new(),
             llm_backend.clone(),
-        ));
+        )?);
         let tool_config = ToolConfig::from_config(&cfg);
         let todo_store = Arc::new(crate::session::todo::TodoStore::load(spaths.todos.clone())?);
         let (tool_resolution_context, tool_surface, tool_capabilities) =
-            crate::context::resolve_tool_runtime(&tool_config, false, false)?;
+            crate::context::resolve_tool_runtime(&tool_config, false, false, &[])?;
         Ok(Arc::new(AgentSharedContext {
             config: cfg.clone(),
             cwd: cwd.clone(),
@@ -973,6 +973,7 @@ mod tests {
             tool_resolution_context,
             tool_surface,
             tool_capabilities,
+            custom_tools: Arc::new(Vec::new()),
             events_path: spaths.events,
             summary_path: spaths.summary,
             plan_path: spaths.plan,

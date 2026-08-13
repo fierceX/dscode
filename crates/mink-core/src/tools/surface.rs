@@ -71,7 +71,7 @@ pub struct ModelTool {
 #[derive(Debug, Clone)]
 pub struct ModelToolSurface {
     ordered: Vec<ModelTool>,
-    by_name: BTreeMap<&'static str, usize>,
+    by_name: BTreeMap<String, usize>,
     hidden: BTreeMap<String, ToolHiddenReason>,
     fingerprint: String,
 }
@@ -97,6 +97,92 @@ const TOOL_HARD_DEPENDENCIES: &[ToolHardDependencySpec] = &[
 ];
 
 impl ModelToolSurface {
+    pub(crate) fn resolve_with_custom(
+        catalog: &ToolCatalog,
+        config: &ToolConfig,
+        context: &ToolResolutionContext,
+        custom_tools: &[crate::runtime::RegisteredCustomTool],
+    ) -> Result<Self> {
+        let custom_names = custom_tools
+            .iter()
+            .map(|tool| tool.definition.name.clone())
+            .collect::<BTreeSet<_>>();
+        let mut builtin_config = config.clone();
+        if let Some(names) = &mut builtin_config.enabled_tools {
+            names.retain(|name| !custom_names.contains(name));
+        }
+        builtin_config
+            .tool_approval
+            .retain(|name, _| !custom_names.contains(name));
+        let mut surface = Self::resolve(catalog, &builtin_config, context)?;
+        let whitelist = config.enabled_tools.as_ref();
+        for tool in custom_tools {
+            let definition = &tool.definition;
+            if whitelist
+                .as_ref()
+                .is_some_and(|names| !names.contains(&definition.name))
+            {
+                continue;
+            }
+            if whitelist.is_none()
+                && definition.activation == crate::runtime::ToolActivation::ExplicitOnly
+            {
+                continue;
+            }
+            let metadata = ToolMetadata {
+                name: std::borrow::Cow::Owned(definition.name.clone()),
+                summary: std::borrow::Cow::Owned(definition.summary.clone()),
+                approval: definition.approval,
+                result_kind: definition.result_kind,
+                mutating: definition.mutating,
+                storm_exempt: definition.storm_exempt,
+                internal: false,
+                discoverable: definition.discoverable,
+                spawns_sub_agent: false,
+            };
+            match authorize_tool(&metadata, config) {
+                ToolAuthorization::Allowed => {}
+                ToolAuthorization::Denied {
+                    reason: ToolAuthorizationDeniedReason::ExplicitDeny,
+                } => {
+                    surface
+                        .hidden
+                        .insert(definition.name.clone(), ToolHiddenReason::DeniedByApproval);
+                    continue;
+                }
+                ToolAuthorization::Denied {
+                    reason: ToolAuthorizationDeniedReason::PromptUnavailable,
+                } => {
+                    surface.hidden.insert(
+                        definition.name.clone(),
+                        ToolHiddenReason::ApprovalPromptUnavailable,
+                    );
+                    continue;
+                }
+            }
+            let schema = serde_json::json!({"name": definition.name, "description": definition.summary, "input_schema": definition.input_schema});
+            surface
+                .by_name
+                .insert(definition.name.clone(), surface.ordered.len());
+            surface.ordered.push(ModelTool { metadata, schema });
+        }
+        for tool in custom_tools {
+            let definition = &tool.definition;
+            if surface.has(&definition.name) {
+                for dependency in &definition.hard_dependencies {
+                    ensure!(
+                        surface.has(dependency),
+                        "tool '{}' requires active tool '{}'",
+                        definition.name,
+                        dependency
+                    );
+                }
+            }
+        }
+        surface.fingerprint = surface_fingerprint(&surface.ordered);
+        Ok(surface)
+    }
+
     pub fn resolve(
         catalog: &ToolCatalog,
         config: &ToolConfig,
@@ -114,8 +200,8 @@ impl ModelToolSurface {
         let mut hidden = BTreeMap::new();
 
         for tool in catalog.iter() {
-            let metadata = match tool.availability {
-                ToolBuildAvailability::Compiled { metadata } => metadata,
+            let metadata = match &tool.availability {
+                ToolBuildAvailability::Compiled { metadata } => metadata.clone(),
                 ToolBuildAvailability::FeatureUnavailable { .. } => {
                     hidden.insert(tool.name.clone(), ToolHiddenReason::FeatureUnavailable);
                     continue;
@@ -133,7 +219,7 @@ impl ModelToolSurface {
                 hidden.insert(tool.name.clone(), ToolHiddenReason::ExplicitOptInRequired);
                 continue;
             }
-            match authorize_tool(metadata, config) {
+            match authorize_tool(&metadata, config) {
                 ToolAuthorization::Allowed => {}
                 ToolAuthorization::Denied {
                     reason: ToolAuthorizationDeniedReason::ExplicitDeny,
@@ -166,14 +252,14 @@ impl ModelToolSurface {
                 hidden.insert(tool.name.clone(), ToolHiddenReason::UnavailableForBackend);
                 continue;
             }
-            candidates.insert(metadata.name);
+            candidates.insert(metadata.name.to_string());
         }
 
         for dependency in TOOL_HARD_DEPENDENCIES {
             if candidates.contains(dependency.tool) {
                 for required in dependency.requires {
                     ensure!(
-                        candidates.contains(required),
+                        candidates.contains(*required),
                         "tool '{}' requires active tool '{}'",
                         dependency.tool,
                         required
@@ -184,16 +270,16 @@ impl ModelToolSurface {
 
         let ordered: Vec<ModelTool> = catalog
             .iter_compiled()
-            .filter(|(_, metadata)| candidates.contains(metadata.name))
-            .map(|(tool, metadata)| ModelTool {
-                metadata,
-                schema: resolved_schema(tool.schema.clone(), metadata.name, config),
+            .filter(|(_, metadata)| candidates.contains(metadata.name.as_ref()))
+            .map(|(tool, metadata)| {
+                let schema = resolved_schema(tool.schema.clone(), metadata.name.as_ref(), config);
+                ModelTool { metadata, schema }
             })
             .collect();
         let by_name = ordered
             .iter()
             .enumerate()
-            .map(|(index, tool)| (tool.metadata.name, index))
+            .map(|(index, tool)| (tool.metadata.name.to_string(), index))
             .collect();
         let fingerprint = surface_fingerprint(&ordered);
         Ok(Self {
@@ -227,8 +313,8 @@ impl ModelToolSurface {
             .collect()
     }
 
-    pub fn names(&self) -> impl Iterator<Item = &'static str> + '_ {
-        self.ordered.iter().map(|tool| tool.metadata.name)
+    pub fn names(&self) -> impl Iterator<Item = &str> + '_ {
+        self.ordered.iter().map(|tool| tool.metadata.name.as_ref())
     }
 
     pub fn hidden(&self) -> &BTreeMap<String, ToolHiddenReason> {

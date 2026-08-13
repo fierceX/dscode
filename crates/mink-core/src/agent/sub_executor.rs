@@ -122,6 +122,7 @@ impl SubAgentExecutor {
             cwd: parent_ctx.cwd.clone(),
             session_id: session_id.clone(),
             session_layout: SessionLayout::Isolated,
+            resolved_paths: None,
             api_url: parent_ctx.api_url.clone(),
             display: capture.clone(),
             sub_stream_tx: None,
@@ -138,6 +139,7 @@ impl SubAgentExecutor {
             llm_backend: parent_ctx.llm_backend.clone(),
             resource_router: Some(parent_ctx.resource_router.clone()),
             capability_snapshot: Some(parent_ctx.capability_snapshot.clone()),
+            custom_tools: parent_ctx.custom_tools.as_ref().clone(),
         })
         .await?;
         let child_ctx = built.ctx;

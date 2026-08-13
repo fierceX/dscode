@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 #[derive(Debug, Clone)]
 pub struct RenderedRuntimeGuidance {
     pub content: String,
-    pub referenced_tools: BTreeSet<&'static str>,
+    pub referenced_tools: BTreeSet<String>,
 }
 
 impl RenderedRuntimeGuidance {

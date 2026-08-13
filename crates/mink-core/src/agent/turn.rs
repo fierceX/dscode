@@ -54,6 +54,8 @@ pub struct TurnExecutor {
     todo_final_reminder_sent: bool,
     todo_progress_reminder_sent: bool,
     successful_work_calls_since_todo_advance: u32,
+    final_text: String,
+    final_thinking: String,
 }
 
 /// Represents the outcome of a turn that needs to be actioned.
@@ -110,6 +112,8 @@ impl TurnExecutor {
             todo_final_reminder_sent: false,
             todo_progress_reminder_sent: false,
             successful_work_calls_since_todo_advance: 0,
+            final_text: String::new(),
+            final_thinking: String::new(),
         }
     }
 
@@ -126,6 +130,14 @@ impl TurnExecutor {
     /// Collected signals from all tool calls in this turn.
     pub fn collected_signals(&self) -> &[crate::guard::collector::Signal] {
         self.signal_processor.collected_signals()
+    }
+
+    pub fn text(&self) -> &str {
+        &self.final_text
+    }
+
+    pub fn thinking(&self) -> &str {
+        &self.final_thinking
     }
 
     fn ensure_prefix(&self) -> Result<(String, Vec<serde_json::Value>)> {
@@ -729,15 +741,15 @@ impl TurnExecutor {
                     self.todo_final_reminder_sent = true;
                     return Ok(None);
                 }
-                self.ctx.display.render_stop();
+                self.ctx.display.render_stop_with_reason(stop);
                 Ok(Some(TurnDecision::Stop))
             }
             "error" | "max_tokens" | "length" => {
-                self.ctx.display.render_stop();
+                self.ctx.display.render_stop_with_reason(stop);
                 Ok(Some(TurnDecision::Failed(format!("stop: {stop}"))))
             }
             _ => {
-                self.ctx.display.render_stop();
+                self.ctx.display.render_stop_with_reason(stop);
                 Ok(Some(TurnDecision::Stop))
             }
         }
@@ -807,6 +819,8 @@ impl TurnExecutor {
         self.todo_final_reminder_sent = false;
         self.todo_progress_reminder_sent = false;
         self.successful_work_calls_since_todo_advance = 0;
+        self.final_text.clear();
+        self.final_thinking.clear();
 
         let mut messages = self.ctx.compaction.active_messages().await?;
         self.reconcile_todo_state(&mut messages).await?;
@@ -907,6 +921,8 @@ impl TurnExecutor {
                 mut stop,
                 usage,
             } = stream_output;
+            self.final_text.push_str(&text);
+            self.final_thinking.push_str(&thinking);
 
             if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.load(Ordering::SeqCst) {
                 self.ctx.display.render_stop_with_reason("interrupted");

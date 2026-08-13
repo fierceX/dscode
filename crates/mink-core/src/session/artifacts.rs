@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,6 +21,7 @@ pub struct ArtifactManager {
     root: PathBuf,
     index_path: PathBuf,
     counter: AtomicU64,
+    index_lock: Mutex<()>,
 }
 
 impl ArtifactManager {
@@ -28,6 +30,7 @@ impl ArtifactManager {
             index_path: root.join("index.jsonl"),
             root,
             counter: AtomicU64::new(0),
+            index_lock: Mutex::new(()),
         }
     }
 
@@ -36,6 +39,7 @@ impl ArtifactManager {
         if !self.index_path.exists() {
             std::fs::File::create(&self.index_path)?;
         }
+        self.repair_index_tail()?;
         if self.counter.load(Ordering::SeqCst) == 0 {
             let next = self.next_counter_from_index()?;
             let _ = self
@@ -68,6 +72,7 @@ impl ArtifactManager {
         };
         file.write_all(content.as_bytes())?;
         file.flush()?;
+        file.sync_all()?;
         let record = ArtifactRecord {
             id,
             tool: tool.to_string(),
@@ -152,11 +157,39 @@ impl ArtifactManager {
     }
 
     fn append_index(&self, record: &ArtifactRecord) -> Result<()> {
+        let _guard = self
+            .index_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.index_path)?;
-        writeln!(file, "{}", serde_json::to_string(record)?)?;
+        let line = format!("{}\n", serde_json::to_string(record)?);
+        file.write_all(line.as_bytes())?;
+        file.flush()?;
+        file.sync_all()?;
+        Ok(())
+    }
+
+    fn repair_index_tail(&self) -> Result<()> {
+        let _guard = self
+            .index_lock
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let bytes = std::fs::read(&self.index_path)?;
+        if bytes.is_empty() || bytes.ends_with(b"\n") {
+            return Ok(());
+        }
+        let keep = bytes
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |index| index + 1);
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&self.index_path)?;
+        file.set_len(keep as u64)?;
+        file.sync_all()?;
         Ok(())
     }
 }
@@ -296,5 +329,38 @@ mod tests {
         let record = manager.write_text("Tool Name", "full output", "x").unwrap();
         assert_eq!(record.id, "toolname-0001");
         let _ = std::fs::remove_dir_all(manager.root);
+    }
+
+    #[test]
+    fn concurrent_spills_create_unique_bodies_and_complete_index() {
+        let manager = std::sync::Arc::new(temp_manager("concurrent"));
+        let root = manager.root.clone();
+        let mut workers = Vec::new();
+        for index in 0..32 {
+            let manager = manager.clone();
+            workers.push(std::thread::spawn(move || {
+                manager
+                    .write_text("Read", "concurrent output", &format!("body-{index}"))
+                    .unwrap()
+            }));
+        }
+        let records = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>();
+        let ids = records
+            .iter()
+            .map(|record| record.id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(ids.len(), 32);
+        for record in &records {
+            assert!(root.join(&record.path).is_file());
+        }
+        let index = std::fs::read_to_string(root.join("index.jsonl")).unwrap();
+        assert_eq!(index.lines().filter(|line| !line.is_empty()).count(), 32);
+        for line in index.lines() {
+            serde_json::from_str::<ArtifactRecord>(line).unwrap();
+        }
+        let _ = std::fs::remove_dir_all(root);
     }
 }

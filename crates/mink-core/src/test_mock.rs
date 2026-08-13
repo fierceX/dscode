@@ -354,7 +354,7 @@ fn full_chain_edit_loop_triggers_belief_drop() {
 fn system_prompt_contains_causal_reasoning() {
     let tool_config = crate::context::ToolConfig::from_config(&crate::config::Config::default());
     let (_, tool_surface, tool_capabilities) =
-        crate::context::resolve_tool_runtime(&tool_config, false, false).unwrap();
+        crate::context::resolve_tool_runtime(&tool_config, false, false, &[]).unwrap();
     let builder = crate::prompt::Builder {
         cwd: std::path::PathBuf::from("/tmp"),
         home: std::path::PathBuf::from("/tmp"),

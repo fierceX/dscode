@@ -46,10 +46,11 @@ impl ToolCatalog {
         let mut registry = BTreeMap::new();
         for tool in crate::tools::runner::tool_registry() {
             let metadata = tool.metadata();
+            let name = metadata.name.to_string();
             ensure!(
-                registry.insert(metadata.name, metadata).is_none(),
+                registry.insert(name.clone(), metadata).is_none(),
                 "duplicate executor registration for '{}'",
-                metadata.name
+                name
             );
         }
 
@@ -90,7 +91,7 @@ impl ToolCatalog {
         ensure!(
             registry.is_empty(),
             "compiled executors missing schemas: {}",
-            registry.keys().copied().collect::<Vec<_>>().join(", ")
+            registry.keys().cloned().collect::<Vec<_>>().join(", ")
         );
         for (name, _) in FEATURE_GATED_TOOLS {
             ensure!(
@@ -112,8 +113,8 @@ impl ToolCatalog {
     pub fn iter_compiled(&self) -> impl Iterator<Item = (&CatalogTool, ToolMetadata)> {
         self.ordered
             .iter()
-            .filter_map(|tool| match tool.availability {
-                ToolBuildAvailability::Compiled { metadata } => Some((tool, metadata)),
+            .filter_map(|tool| match &tool.availability {
+                ToolBuildAvailability::Compiled { metadata } => Some((tool, metadata.clone())),
                 ToolBuildAvailability::FeatureUnavailable { .. } => None,
             })
     }
@@ -160,10 +161,144 @@ pub fn validate_tool_config(config: &ToolConfig) -> Result<()> {
     ToolCatalog::builtin()?.validate_configured_names(config)
 }
 
+pub(crate) fn validate_custom_tools(tools: &[crate::runtime::RegisteredCustomTool]) -> Result<()> {
+    let builtin = ToolCatalog::builtin()?;
+    let mut names = BTreeSet::new();
+    for tool in tools {
+        let definition = &tool.definition;
+        ensure!(
+            !definition.name.trim().is_empty(),
+            "custom tool name must not be empty"
+        );
+        ensure!(
+            builtin.get(&definition.name).is_none(),
+            "custom tool '{}' cannot override a built-in",
+            definition.name
+        );
+        ensure!(
+            names.insert(definition.name.clone()),
+            "duplicate custom tool '{}'",
+            definition.name
+        );
+        ensure!(
+            definition
+                .input_schema
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                == Some("object"),
+            "custom tool '{}' schema must be an object",
+            definition.name
+        );
+        ensure!(
+            definition.input_schema.get("additionalProperties") == Some(&serde_json::json!(false)),
+            "custom tool '{}' schema must set additionalProperties:false",
+            definition.name
+        );
+        ensure!(
+            !definition.mutating
+                || definition.execution == crate::runtime::ToolExecutionMode::Sequential,
+            "mutating custom tool '{}' must be Sequential",
+            definition.name
+        );
+        for offer in &definition.semantic_capabilities {
+            ensure!(
+                offer.priority > 0,
+                "custom tool '{}' capability priority must be nonzero",
+                definition.name
+            );
+        }
+    }
+    for tool in tools {
+        let definition = &tool.definition;
+        for required in &definition.hard_dependencies {
+            ensure!(
+                builtin.get(required).is_some() || names.contains(required),
+                "custom tool '{}' requires missing tool '{}'",
+                definition.name,
+                required
+            );
+        }
+    }
+    fn visit(
+        name: &str,
+        definitions: &BTreeMap<String, crate::runtime::ToolDefinition>,
+        visiting: &mut BTreeSet<String>,
+        visited: &mut BTreeSet<String>,
+    ) -> Result<()> {
+        if visited.contains(name) {
+            return Ok(());
+        }
+        ensure!(
+            visiting.insert(name.to_string()),
+            "custom tool dependency cycle includes '{name}'"
+        );
+        if let Some(definition) = definitions.get(name) {
+            for dependency in &definition.hard_dependencies {
+                if definitions.contains_key(dependency) {
+                    visit(dependency, definitions, visiting, visited)?;
+                }
+            }
+        }
+        visiting.remove(name);
+        visited.insert(name.to_string());
+        Ok(())
+    }
+    let definitions = tools
+        .iter()
+        .map(|tool| (tool.definition.name.clone(), tool.definition.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let mut visiting = BTreeSet::new();
+    let mut visited = BTreeSet::new();
+    for name in definitions.keys() {
+        visit(name, &definitions, &mut visiting, &mut visited)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::Config;
+    use std::sync::Arc;
+
+    struct TestTool(crate::runtime::ToolDefinition);
+
+    #[async_trait::async_trait]
+    impl crate::runtime::AgentTool for TestTool {
+        fn definition(&self) -> crate::runtime::ToolDefinition {
+            self.0.clone()
+        }
+
+        async fn execute(
+            &self,
+            _input: serde_json::Value,
+            _ctx: crate::runtime::ToolExecutionContext,
+        ) -> std::result::Result<crate::runtime::ToolOutput, crate::runtime::ToolError> {
+            Ok(crate::runtime::ToolOutput::text("ok"))
+        }
+    }
+
+    fn custom_definition(name: &str) -> crate::runtime::ToolDefinition {
+        crate::runtime::ToolDefinition::new(
+            name,
+            "test tool",
+            serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+        )
+    }
+
+    fn custom_tool(
+        definition: crate::runtime::ToolDefinition,
+    ) -> crate::runtime::RegisteredCustomTool {
+        let executor: Arc<dyn crate::runtime::AgentTool> = Arc::new(TestTool(definition.clone()));
+        crate::runtime::RegisteredCustomTool {
+            definition,
+            executor,
+        }
+    }
 
     #[test]
     fn catalog_joins_every_schema_and_executor() {
@@ -255,6 +390,66 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("unknown tool")
+        );
+    }
+
+    #[test]
+    fn custom_tool_validation_rejects_duplicate_builtin_schema_dependency_and_cycles() {
+        let builtin = custom_tool(custom_definition("Read"));
+        assert!(
+            validate_custom_tools(&[builtin])
+                .unwrap_err()
+                .to_string()
+                .contains("built-in")
+        );
+
+        let duplicate = vec![
+            custom_tool(custom_definition("Duplicate")),
+            custom_tool(custom_definition("Duplicate")),
+        ];
+        assert!(
+            validate_custom_tools(&duplicate)
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate")
+        );
+
+        let mut bad_schema = custom_definition("BadSchema");
+        bad_schema.input_schema = serde_json::json!({"type": "string"});
+        assert!(
+            validate_custom_tools(&[custom_tool(bad_schema)])
+                .unwrap_err()
+                .to_string()
+                .contains("schema")
+        );
+
+        let mut missing = custom_definition("MissingDependency");
+        missing.hard_dependencies.push("NoSuchTool".into());
+        assert!(
+            validate_custom_tools(&[custom_tool(missing)])
+                .unwrap_err()
+                .to_string()
+                .contains("missing tool")
+        );
+
+        let mut first = custom_definition("CycleA");
+        first.hard_dependencies.push("CycleB".into());
+        let mut second = custom_definition("CycleB");
+        second.hard_dependencies.push("CycleA".into());
+        assert!(
+            validate_custom_tools(&[custom_tool(first), custom_tool(second)])
+                .unwrap_err()
+                .to_string()
+                .contains("dependency cycle")
+        );
+
+        let mut mutating = custom_definition("MutatingParallel");
+        mutating.mutating = true;
+        assert!(
+            validate_custom_tools(&[custom_tool(mutating)])
+                .unwrap_err()
+                .to_string()
+                .contains("Sequential")
         );
     }
 

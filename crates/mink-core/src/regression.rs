@@ -321,11 +321,11 @@ async fn harness_with_config(
         display.clone(),
         crate::cancel::CancellationToken::new(),
         llm_backend.clone(),
-    ));
+    )?);
     let tool_config = ToolConfig::from_config(&cfg);
     let todo_store = Arc::new(crate::session::todo::TodoStore::load(spaths.todos.clone())?);
     let (tool_resolution_context, tool_surface, tool_capabilities) =
-        crate::context::resolve_tool_runtime(&tool_config, is_sub_agent, false)?;
+        crate::context::resolve_tool_runtime(&tool_config, is_sub_agent, false, &[])?;
     let ctx = Arc::new(AgentSharedContext {
         config: cfg.clone(),
         cwd: cwd.clone(),
@@ -359,6 +359,7 @@ async fn harness_with_config(
         tool_resolution_context,
         tool_surface,
         tool_capabilities,
+        custom_tools: Arc::new(Vec::new()),
         events_path: spaths.events,
         summary_path: spaths.summary,
         plan_path: spaths.plan,
@@ -447,6 +448,7 @@ fn test_context_with_llm_backend(
         tool_resolution_context: ctx.tool_resolution_context,
         tool_surface: ctx.tool_surface.clone(),
         tool_capabilities: ctx.tool_capabilities.clone(),
+        custom_tools: ctx.custom_tools.clone(),
         events_path: ctx.events_path.clone(),
         summary_path: ctx.summary_path.clone(),
         plan_path: ctx.plan_path.clone(),
@@ -1604,7 +1606,7 @@ async fn orchestrator_manual_compact_empty_session_reports_skip() -> anyhow::Res
     let handle = tokio::spawn(actor.run());
     let (done_tx, done_rx) = tokio::sync::oneshot::channel();
     tx.send(OrchCmd::Compact { done: done_tx })?;
-    done_rx.await?;
+    done_rx.await??;
     drop(tx);
     handle.await??;
     let info = h.display.info.lock().unwrap();
@@ -1647,7 +1649,7 @@ async fn orchestrator_manual_compact_uses_active_model_and_shared_backend() -> a
     tx.send(OrchCmd::SetModel("pro".into()))?;
     let (done_tx, done_rx) = tokio::sync::oneshot::channel();
     tx.send(OrchCmd::Compact { done: done_tx })?;
-    done_rx.await?;
+    done_rx.await??;
     drop(tx);
     handle.await??;
 

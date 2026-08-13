@@ -63,7 +63,7 @@ pub struct PromptWorkflowSpec {
 
 pub struct RenderedPromptPack {
     pub content: String,
-    pub referenced_tools: BTreeSet<&'static str>,
+    pub referenced_tools: BTreeSet<String>,
     pub consumed_facts: BTreeSet<PromptFact>,
 }
 
@@ -402,11 +402,13 @@ fn render_search_then_inspect(
     let read = tools.primary_provider(PathRead).unwrap();
     Ok(RenderedPromptPack {
         content: include_str!("../assets/prompts/workflows/search_then_inspect.md")
-            .replace("{{SEARCH_PROVIDER}}", search.tool)
-            .replace("{{READ_PROVIDER}}", read.tool)
+            .replace("{{SEARCH_PROVIDER}}", search.tool.as_str())
+            .replace("{{READ_PROVIDER}}", read.tool.as_str())
             .trim()
             .into(),
-        referenced_tools: [search.tool, read.tool].into_iter().collect(),
+        referenced_tools: [search.tool.clone(), read.tool.clone()]
+            .into_iter()
+            .collect(),
         consumed_facts: SEARCH_FACTS.iter().copied().collect(),
     })
 }
@@ -419,11 +421,13 @@ fn render_memory_recall(
     let read = tools.primary_provider(PathRead).unwrap();
     Ok(RenderedPromptPack {
         content: include_str!("../assets/prompts/workflows/memory_recall.md")
-            .replace("{{SEARCH_PROVIDER}}", search.tool)
-            .replace("{{READ_PROVIDER}}", read.tool)
+            .replace("{{SEARCH_PROVIDER}}", search.tool.as_str())
+            .replace("{{READ_PROVIDER}}", read.tool.as_str())
             .trim()
             .into(),
-        referenced_tools: [search.tool, read.tool].into_iter().collect(),
+        referenced_tools: [search.tool.clone(), read.tool.clone()]
+            .into_iter()
+            .collect(),
         consumed_facts: SEARCH_FACTS.iter().copied().collect(),
     })
 }
@@ -439,8 +443,8 @@ fn render_hashline_edit(
     let read = tools.primary_provider(EditableSnapshotRead).unwrap();
     let edit = tools.primary_provider(HashlineEdit).unwrap();
     let mut content = include_str!("../assets/prompts/workflows/hashline_edit.md")
-        .replace("{{READ_PROVIDER}}", read.tool)
-        .replace("{{EDIT_PROVIDER}}", edit.tool)
+        .replace("{{READ_PROVIDER}}", read.tool.as_str())
+        .replace("{{EDIT_PROVIDER}}", edit.tool.as_str())
         .replace(
             "{{SEEN_LINE_MODE}}",
             if context.edit_enforce_seen_lines {
@@ -449,11 +453,12 @@ fn render_hashline_edit(
                 "disabled"
             },
         );
-    let mut referenced_tools: BTreeSet<_> = [read.tool, edit.tool].into_iter().collect();
+    let mut referenced_tools: BTreeSet<_> =
+        [read.tool.clone(), edit.tool.clone()].into_iter().collect();
     let mut consumed_facts: BTreeSet<_> = HASHLINE_EDIT_FACTS.iter().copied().collect();
     if let Some(search) = tools.primary_provider(ContentSearch) {
         content.push_str(&format!("\n{} results may also provide per-file hashline headers and mark only displayed match/context lines as seen.", search.tool));
-        referenced_tools.insert(search.tool);
+        referenced_tools.insert(search.tool.clone());
         consumed_facts.insert(ToolCapability(ContentSearch));
     }
     if let Some(write) = tools.primary_provider(FileOverwrite) {
@@ -464,7 +469,7 @@ fn render_hashline_edit(
                 write.tool
             ),
         );
-        referenced_tools.insert(write.tool);
+        referenced_tools.insert(write.tool.clone());
         consumed_facts.insert(ToolCapability(FileOverwrite));
     } else {
         content = content.replace(
@@ -491,8 +496,8 @@ fn render_replace_edit(
     let edit = tools.primary_provider(ContentReplaceEdit).unwrap();
     Ok(RenderedPromptPack {
         content: include_str!("../assets/prompts/workflows/replace_edit.md")
-            .replace("{{READ_PROVIDER}}", read.tool)
-            .replace("{{EDIT_PROVIDER}}", edit.tool)
+            .replace("{{READ_PROVIDER}}", read.tool.as_str())
+            .replace("{{EDIT_PROVIDER}}", edit.tool.as_str())
             .replace(
                 "{{FUZZY_MODE}}",
                 if context.edit_fuzzy_match {
@@ -507,7 +512,7 @@ fn render_replace_edit(
             )
             .trim()
             .into(),
-        referenced_tools: [read.tool, edit.tool].into_iter().collect(),
+        referenced_tools: [read.tool.clone(), edit.tool.clone()].into_iter().collect(),
         consumed_facts: REPLACE_EDIT_FACTS.iter().copied().collect(),
     })
 }
@@ -535,12 +540,12 @@ fn render_specialized_routing(
         if binding.primary.tier != ProviderTier::Specialized || fallbacks.is_empty() {
             continue;
         }
-        referenced_tools.insert(binding.primary.tool);
+        referenced_tools.insert(binding.primary.tool.clone());
         let names = fallbacks
             .iter()
             .map(|provider| {
-                referenced_tools.insert(provider.tool);
-                provider.tool
+                referenced_tools.insert(provider.tool.clone());
+                provider.tool.as_str()
             })
             .collect::<Vec<_>>()
             .join(", ");
@@ -571,7 +576,7 @@ fn render_specialized_mutation_routing(
 ) -> Result<RenderedPromptPack> {
     let shell = tools.primary_provider(ShellExec).unwrap();
     let mut lines = Vec::new();
-    let mut referenced_tools = BTreeSet::from([shell.tool]);
+    let mut referenced_tools = BTreeSet::from([shell.tool.clone()]);
     let mut consumed_facts = BTreeSet::from([ToolCapability(ShellExec)]);
 
     if let Some(create) = tools.primary_provider(FileCreate)
@@ -581,7 +586,7 @@ fn render_specialized_mutation_routing(
             "- For file creation, use {} rather than {} redirection or heredocs.",
             create.tool, shell.tool
         ));
-        referenced_tools.insert(create.tool);
+        referenced_tools.insert(create.tool.clone());
         consumed_facts.insert(ToolCapability(FileCreate));
     }
     if let Some(overwrite) = tools.primary_provider(FileOverwrite)
@@ -591,7 +596,7 @@ fn render_specialized_mutation_routing(
             "- For full-file replacement, use {} rather than {} redirection or heredocs.",
             overwrite.tool, shell.tool
         ));
-        referenced_tools.insert(overwrite.tool);
+        referenced_tools.insert(overwrite.tool.clone());
         consumed_facts.insert(ToolCapability(FileOverwrite));
     }
     if let Some(edit) = tools.primary_provider(FileEdit)
@@ -601,7 +606,7 @@ fn render_specialized_mutation_routing(
             "- For changes to existing file content, use {} with its resolved edit protocol rather than mutation commands through {} such as sed or awk.",
             edit.tool, shell.tool
         ));
-        referenced_tools.insert(edit.tool);
+        referenced_tools.insert(edit.tool.clone());
         consumed_facts.insert(ToolCapability(FileEdit));
     }
     ensure!(
@@ -632,7 +637,7 @@ fn render_python_routing(
     ] {
         if let Some(provider) = tools.primary_provider(capability) {
             providers.push(format!("- {} provides {label}.", provider.tool));
-            referenced_tools.insert(provider.tool);
+            referenced_tools.insert(provider.tool.clone());
             consumed_facts.insert(ToolCapability(capability));
         }
     }
@@ -655,7 +660,9 @@ fn render_plan_lifecycle(
     let confirm = tools.primary_provider(PlanConfirm).unwrap();
     let clear = tools.primary_provider(PlanClear).unwrap();
     let referenced_tools: BTreeSet<_> =
-        [draft.tool, confirm.tool, clear.tool].into_iter().collect();
+        [draft.tool.clone(), confirm.tool.clone(), clear.tool.clone()]
+            .into_iter()
+            .collect();
     let consumed_facts: BTreeSet<_> = [
         ToolCapability(PlanDraft),
         ToolCapability(PlanConfirm),
@@ -664,9 +671,9 @@ fn render_plan_lifecycle(
     .into_iter()
     .collect();
     let content = include_str!("../assets/prompts/workflows/plan_lifecycle.md")
-        .replace("{{DRAFT_PROVIDER}}", draft.tool)
-        .replace("{{CONFIRM_PROVIDER}}", confirm.tool)
-        .replace("{{CLEAR_PROVIDER}}", clear.tool);
+        .replace("{{DRAFT_PROVIDER}}", draft.tool.as_str())
+        .replace("{{CONFIRM_PROVIDER}}", confirm.tool.as_str())
+        .replace("{{CLEAR_PROVIDER}}", clear.tool.as_str());
     Ok(RenderedPromptPack {
         content: content.trim().into(),
         referenced_tools,
@@ -681,10 +688,10 @@ fn render_todo_inspection(
     let read = tools.primary_provider(TodoInspect).unwrap();
     Ok(RenderedPromptPack {
         content: include_str!("../assets/prompts/workflows/todo_inspection.md")
-            .replace("{{TODO_READ_PROVIDER}}", read.tool)
+            .replace("{{TODO_READ_PROVIDER}}", read.tool.as_str())
             .trim()
             .into(),
-        referenced_tools: [read.tool].into_iter().collect(),
+        referenced_tools: [read.tool.clone()].into_iter().collect(),
         consumed_facts: TODO_INSPECT.iter().copied().collect(),
     })
 }
@@ -697,11 +704,13 @@ fn render_todo_structure(
     let write = tools.primary_provider(TodoStructureMutation).unwrap();
     Ok(RenderedPromptPack {
         content: include_str!("../assets/prompts/workflows/todo_structure.md")
-            .replace("{{TODO_READ_PROVIDER}}", read.tool)
-            .replace("{{TODO_WRITE_PROVIDER}}", write.tool)
+            .replace("{{TODO_READ_PROVIDER}}", read.tool.as_str())
+            .replace("{{TODO_WRITE_PROVIDER}}", write.tool.as_str())
             .trim()
             .into(),
-        referenced_tools: [read.tool, write.tool].into_iter().collect(),
+        referenced_tools: [read.tool.clone(), write.tool.clone()]
+            .into_iter()
+            .collect(),
         consumed_facts: TODO_STRUCTURE.iter().copied().collect(),
     })
 }
@@ -714,11 +723,13 @@ fn render_todo_progress(
     let advance = tools.primary_provider(TodoProgressTransition).unwrap();
     Ok(RenderedPromptPack {
         content: include_str!("../assets/prompts/workflows/todo_progress.md")
-            .replace("{{TODO_READ_PROVIDER}}", read.tool)
-            .replace("{{TODO_ADVANCE_PROVIDER}}", advance.tool)
+            .replace("{{TODO_READ_PROVIDER}}", read.tool.as_str())
+            .replace("{{TODO_ADVANCE_PROVIDER}}", advance.tool.as_str())
             .trim()
             .into(),
-        referenced_tools: [read.tool, advance.tool].into_iter().collect(),
+        referenced_tools: [read.tool.clone(), advance.tool.clone()]
+            .into_iter()
+            .collect(),
         consumed_facts: TODO_PROGRESS.iter().copied().collect(),
     })
 }

@@ -1962,7 +1962,7 @@ checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 
 [[package]]
 name = "mink-cli"
-version = "0.3.3"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -1978,7 +1978,7 @@ dependencies = [
 
 [[package]]
 name = "mink-core"
-version = "0.3.3"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2004,15 +2004,17 @@ dependencies = [
  "unicode-normalization",
  "wasmtime",
  "wasmtime-wasi",
+ "windows-sys 0.61.2",
  "xxhash-rust",
 ]
 
 [[package]]
 name = "mink-server"
-version = "0.3.3"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-stream",
+ "async-trait",
  "axum",
  "futures",
  "http-body",

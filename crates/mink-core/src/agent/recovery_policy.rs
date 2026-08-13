@@ -36,20 +36,20 @@ impl RecoveryPolicy {
             ResourceSearch,
             FocusedVerificationExec,
         ] {
-            let Some(provider) = resolved.primary_provider(capability).copied() else {
+            let Some(provider) = resolved.primary_provider(capability).cloned() else {
                 continue;
             };
-            let Some(tool) = catalog.get(provider.tool) else {
+            let Some(tool) = catalog.get(&provider.tool) else {
                 continue;
             };
-            let metadata = match tool.availability {
+            let metadata = match &tool.availability {
                 crate::tools::catalog::ToolBuildAvailability::Compiled { metadata } => metadata,
                 crate::tools::catalog::ToolBuildAvailability::FeatureUnavailable { .. } => continue,
             };
             if metadata.mutating && capability != FocusedVerificationExec {
                 continue;
             }
-            if seen.insert((provider.tool, capability)) {
+            if seen.insert((provider.tool.clone(), capability)) {
                 inspection_actions.push(InspectionAction {
                     capability,
                     provider,
@@ -91,11 +91,11 @@ impl RecoveryPolicy {
         let referenced_tools: BTreeSet<_> = self
             .inspection_actions
             .iter()
-            .map(|action| action.provider.tool)
+            .map(|action| action.provider.tool.clone())
             .collect();
         let actions = referenced_tools
             .iter()
-            .copied()
+            .cloned()
             .collect::<Vec<_>>()
             .join(", ");
         RenderedRuntimeGuidance {
@@ -125,7 +125,7 @@ impl RecoveryPolicy {
         let referenced_tools: BTreeSet<_> = self
             .inspection_actions
             .iter()
-            .map(|action| action.provider.tool)
+            .map(|action| action.provider.tool.clone())
             .collect();
         let content = if referenced_tools.is_empty() {
             "SIGNAL_RECOVERY guard: no tool call is allowed because no active inspection provider is available. Report the limitation and stop the turn.".to_string()
@@ -134,7 +134,7 @@ impl RecoveryPolicy {
                 "SIGNAL_RECOVERY guard: this call was not executed because it does not satisfy an approved first-step inspection. Use one of: {}.",
                 referenced_tools
                     .iter()
-                    .copied()
+                    .cloned()
                     .collect::<Vec<_>>()
                     .join(", ")
             )

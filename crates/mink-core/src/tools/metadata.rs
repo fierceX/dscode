@@ -18,10 +18,10 @@ pub enum ToolResultKind {
     SubAgent,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ToolMetadata {
-    pub name: &'static str,
-    pub summary: &'static str,
+    pub name: std::borrow::Cow<'static, str>,
+    pub summary: std::borrow::Cow<'static, str>,
     pub approval: ApprovalTier,
     pub result_kind: ToolResultKind,
     pub mutating: bool,
@@ -39,8 +39,8 @@ impl ToolMetadata {
         result_kind: ToolResultKind,
     ) -> Self {
         Self {
-            name,
-            summary,
+            name: std::borrow::Cow::Borrowed(name),
+            summary: std::borrow::Cow::Borrowed(summary),
             approval,
             result_kind,
             mutating: false,

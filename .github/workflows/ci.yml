@@ -18,9 +18,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: make check
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20.18.1"
+      - run: npm ci
+        working-directory: crates/mink-server/web
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --workspace
+      - run: cargo test -p mink-core --features python-sandbox
       - run: make feature-matrix
-      - run: cargo test
+      - run: npm test -- --run
+        working-directory: crates/mink-server/web
+      - run: npm run typecheck
+        working-directory: crates/mink-server/web
+      - run: npm run build
+        working-directory: crates/mink-server/web
 
   # ── Static docs / homepage validation ──────────────────────────
   pages-check:

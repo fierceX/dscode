@@ -46,10 +46,75 @@ pub(crate) fn atomic_replace(path: &Path, content: &[u8]) -> Result<()> {
 }
 
 fn write_and_replace(file: &mut File, temporary: &Path, path: &Path, content: &[u8]) -> Result<()> {
+    write_and_replace_with(file, temporary, path, content, || Ok(()))
+}
+
+fn write_and_replace_with(
+    file: &mut File,
+    temporary: &Path,
+    path: &Path,
+    content: &[u8],
+    before_replace: impl FnOnce() -> Result<()>,
+) -> Result<()> {
     file.write_all(content)?;
     file.flush()?;
     file.sync_all()?;
+    before_replace()?;
+    replace_existing(temporary, path)?;
+    sync_parent(path)?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn replace_existing(temporary: &Path, path: &Path) -> Result<()> {
     std::fs::rename(temporary, path)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn replace_existing(temporary: &Path, path: &Path) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+    let source = temporary
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let destination = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let result = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if result == 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+
+fn sync_parent(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("state path has no parent: {}", path.display()))?;
+        if let Err(error) = File::open(parent)?.sync_all() {
+            let explicitly_unsupported = error
+                .raw_os_error()
+                .is_some_and(|code| code == libc::EINVAL || code == libc::ENOTSUP);
+            if !explicitly_unsupported {
+                return Err(error.into());
+            }
+        }
+    }
     Ok(())
 }
 
@@ -62,4 +127,37 @@ fn ensure_parent(path: &Path) -> Result<()> {
     }
     std::fs::create_dir_all(parent)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failure_before_replace_preserves_old_body() {
+        let root = std::env::temp_dir().join(format!(
+            "mink-atomic-fault-{}-{}",
+            std::process::id(),
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let target = root.join("state.json");
+        let temporary = root.join(".state.json.injected");
+        std::fs::write(&target, b"old").unwrap();
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .unwrap();
+
+        let error = write_and_replace_with(&mut file, &temporary, &target, b"new", || {
+            bail!("injected pre-replace failure")
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("injected"));
+        assert_eq!(std::fs::read(&target).unwrap(), b"old");
+        let _ = std::fs::remove_file(temporary);
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

@@ -37,12 +37,22 @@ pub async fn init_session_base_with_layout(
     Arc<ArtifactManager>,
 )> {
     let paths = paths_for_layout(home, cwd, session_id, layout);
+    init_session_base_at(&paths).await
+}
+
+pub async fn init_session_base_at(
+    paths: &crate::session::paths::Paths,
+) -> anyhow::Result<(
+    Arc<ConversationStore>,
+    Arc<StatsTracker>,
+    Arc<ArtifactManager>,
+)> {
     ensure_dir(&paths.session_dir).await?;
     ensure_dir(&paths.artifacts).await?;
 
     for f in [&paths.conversation, &paths.events, &paths.summary] {
         if !f.exists() {
-            let _ = tokio::fs::File::create(f).await;
+            tokio::fs::File::create(f).await?;
         }
     }
 
@@ -59,7 +69,14 @@ pub async fn init_session_base_with_layout(
             == 0
     {
         let initial = r#"{"current_turn_count":0,"agent_request_count":0,"compact_request_count":0,"sub_agent_request_count":0,"total_input_tokens":0,"total_output_tokens":0,"total_cache_read_tokens":0,"total_cache_creation_tokens":0,"current_context_tokens":0,"last_updated":""}"#;
-        let _ = tokio::fs::write(&paths.stats, format!("{initial}\n")).await;
+        let stats_path = paths.stats.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::session::atomic_file::atomic_replace(
+                &stats_path,
+                format!("{initial}\n").as_bytes(),
+            )
+        })
+        .await??;
     }
 
     Ok((store, stats, artifacts))

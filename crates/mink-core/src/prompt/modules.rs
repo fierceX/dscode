@@ -25,7 +25,7 @@ pub(super) fn append_tool_sections(
         if !surface.has(spec.tool) {
             continue;
         }
-        let referenced_tools = [spec.tool].into_iter().collect();
+        let referenced_tools = [spec.tool.to_string()].into_iter().collect();
         ensure!(surface.has(spec.tool));
         document.push(PromptSection {
             id: spec.id.into(),

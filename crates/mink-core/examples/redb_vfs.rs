@@ -291,7 +291,7 @@ async fn main() -> Result<()> {
         "# Refunds\nRefunds are reviewed within two business days.\n",
     )?;
 
-    let runtime = AgentRuntime::start_with_options(
+    let runtime = AgentRuntime::start(
         AgentOptions::new(root.join("session"), ".")
             .with_resource_session_id("tenant-task-001")
             .with_read_only_file_system(fs),

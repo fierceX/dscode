@@ -49,6 +49,9 @@ wasmtime = { workspace = true, optional = true }
 wasmtime-wasi = { workspace = true, optional = true }
 axum = { workspace = true, optional = true }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
 [dev-dependencies]
 redb = "4"
 

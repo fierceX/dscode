@@ -66,9 +66,9 @@ pub struct CapabilityOfferSpec {
     pub use_scope: CapabilityUseScope,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityProvider {
-    pub tool: &'static str,
+    pub tool: String,
     pub tier: ProviderTier,
     pub priority: u16,
     pub use_scope: CapabilityUseScope,
@@ -323,6 +323,15 @@ impl ToolCapabilityRegistry {
         surface: &ModelToolSurface,
         context: &ToolResolutionContext,
     ) -> Result<ResolvedToolCapabilities> {
+        self.resolve_with_custom(surface, context, &[])
+    }
+
+    pub(crate) fn resolve_with_custom(
+        &self,
+        surface: &ModelToolSurface,
+        context: &ToolResolutionContext,
+        custom_tools: &[crate::runtime::RegisteredCustomTool],
+    ) -> Result<ResolvedToolCapabilities> {
         self.validate()?;
         let catalog = ToolCatalog::builtin()?;
         let mut grouped: BTreeMap<ToolSemanticCapability, Vec<CapabilityProvider>> =
@@ -347,11 +356,41 @@ impl ToolCapabilityRegistry {
                 .entry(offer.capability)
                 .or_default()
                 .push(CapabilityProvider {
-                    tool: offer.provider_tool,
+                    tool: offer.provider_tool.to_string(),
                     tier: offer.tier,
                     priority: offer.priority,
                     use_scope: offer.use_scope,
                 });
+        }
+        for tool in custom_tools {
+            let definition = &tool.definition;
+            if !surface.has(&definition.name) {
+                continue;
+            }
+            let provider_tool = surface
+                .get(&definition.name)
+                .expect("active custom tool must be present")
+                .metadata
+                .name
+                .to_string();
+            for offer in &definition.semantic_capabilities {
+                ensure!(
+                    offer.priority > 0,
+                    "custom capability priority must be nonzero"
+                );
+                if !availability_matches(offer.available_if, context) {
+                    continue;
+                }
+                grouped
+                    .entry(offer.capability)
+                    .or_default()
+                    .push(CapabilityProvider {
+                        tool: provider_tool.clone(),
+                        tier: offer.tier,
+                        priority: offer.priority,
+                        use_scope: offer.use_scope,
+                    });
+            }
         }
         let mut bindings = BTreeMap::new();
         for (capability, mut providers) in grouped {
@@ -489,11 +528,11 @@ fn compare_provider(
         .then_with(|| right.priority.cmp(&left.priority))
         .then_with(|| {
             catalog
-                .order_of(left.tool)
+                .order_of(&left.tool)
                 .unwrap_or(usize::MAX)
-                .cmp(&catalog.order_of(right.tool).unwrap_or(usize::MAX))
+                .cmp(&catalog.order_of(&right.tool).unwrap_or(usize::MAX))
         })
-        .then_with(|| left.tool.cmp(right.tool))
+        .then_with(|| left.tool.cmp(&right.tool))
 }
 
 fn capability_fingerprint(
@@ -534,7 +573,7 @@ pub fn call_satisfies_capability(
     match provider.use_scope {
         CapabilityUseScope::Unconditional => true,
         CapabilityUseScope::FilesystemPath => {
-            if matches!(provider.tool, "Glob" | "Grep") {
+            if matches!(provider.tool.as_str(), "Glob" | "Grep") {
                 let path = call
                     .input
                     .get("path")

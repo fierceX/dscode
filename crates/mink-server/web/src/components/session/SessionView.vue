@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import { fmtK } from "../../lib/fmt";
-import { appState, detachSession } from "../../lib/store";
-import { openSession } from "../../lib/sessionController";
+import { appState } from "../../lib/store";
+import { closeSessionView, openSession } from "../../lib/sessionController";
 import ContextPanel from "./ContextPanel.vue";
 import FilePanel from "./FilePanel.vue";
 import { uiState } from "../../lib/store";
@@ -83,7 +83,7 @@ const reconnect = async () => {
         <button class="op-desktop" title="Todo" @click="openCtx('todo')">Todo</button>
         <button class="op-desktop" title="Artifacts" @click="openCtx('art')">Artifacts</button>
         <button class="op-desktop" title="文件" @click="openFiles">文件</button>
-        <button class="op-desktop" title="关闭会话" @click="detachSession()">关闭</button>
+        <button class="op-desktop" title="关闭会话" @click="closeSessionView()">关闭</button>
         <button class="op-more" title="更多" @click="openCtx('plan')">⋯</button>
       </span>
       <span class="sm-state-wrap">

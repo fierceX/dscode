@@ -4,7 +4,7 @@ use crate::config::api_url;
 use crate::llm::client::OpenAiCompatibleBackend;
 use crate::runtime::config::{AgentRuntimeConfig, SessionInfo, SessionPolicy};
 use crate::runtime::context_build::{AgentContextBuild, build_agent_context};
-use crate::runtime::events::EventDisplay;
+use crate::runtime::events::{EventDispatcher, EventDisplay};
 use crate::runtime::handle::AgentRuntime;
 use crate::session::metadata::{SessionSeed, sanitize_alias};
 use crate::session::paths;
@@ -12,7 +12,7 @@ use anyhow::{Result, bail};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-pub async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRuntime> {
+pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRuntime> {
     let AgentRuntimeConfig {
         mut config,
         home,
@@ -30,17 +30,30 @@ pub async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRuntime> {
         skill_discovery_policy,
         llm_backend,
         resource_session_id,
+        custom_tools,
     } = config;
 
     crate::config::validate_runtime_config(&config)?;
-    crate::tools::catalog::validate_tool_config(&crate::context::ToolConfig::from_config(&config))?;
+    let custom_tools = crate::runtime::tools::freeze_custom_tools(custom_tools);
+    crate::tools::catalog::validate_custom_tools(&custom_tools)?;
 
-    let (sid, session_ref, session_alias) =
+    let (sid, session_ref, session_alias, resolved_paths) =
         resolve_session(&home, &cwd, session, session_layout).await?;
+    if !resolved_paths.metadata.exists()
+        && resolved_paths.session_dir.exists()
+        && (session_layout != paths::SessionLayout::Isolated
+            || crate::session::metadata::session_dir_has_data(&resolved_paths.session_dir).await?)
+    {
+        bail!(
+            "session metadata missing for existing session {}",
+            resolved_paths.metadata.display()
+        );
+    }
     config.session_id = sid.clone();
 
     let cancel = CancellationToken::new();
-    let event_display = Arc::new(EventDisplay::new(event_sink.clone(), display));
+    let event_dispatcher = event_sink.map(EventDispatcher::new);
+    let event_display = Arc::new(EventDisplay::new(display, event_dispatcher));
     let display: Arc<dyn crate::ui::Display> = event_display.clone();
     let interrupt = Arc::new(AtomicBool::new(false));
     let api_url_str = api_url(&config);
@@ -53,6 +66,7 @@ pub async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRuntime> {
         cwd: cwd.clone(),
         session_id: sid.clone(),
         session_layout,
+        resolved_paths: Some(resolved_paths),
         api_url: api_url_str.clone(),
         display: display.clone(),
         sub_stream_tx,
@@ -69,11 +83,14 @@ pub async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRuntime> {
         llm_backend,
         resource_router: None,
         capability_snapshot: None,
+        custom_tools,
     })
     .await?;
     let ctx = built.ctx;
     let spaths = built.paths;
     let new_session = built.is_new;
+
+    ctx.compaction.validate_startup().await?;
 
     crate::session::metadata::ensure_metadata(
         &spaths,
@@ -91,9 +108,11 @@ pub async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRuntime> {
     let (orchestrator, cmd_tx) = new_orchestrator(ctx.clone());
     let orch_display = display.clone();
     let orch_handle = tokio::spawn(async move {
-        if let Err(e) = orchestrator.run().await {
+        let result = orchestrator.run().await;
+        if let Err(e) = &result {
             orch_display.render_error(&format!("Orchestrator: {e}"));
         }
+        result
     });
 
     if new_session {
@@ -101,14 +120,18 @@ pub async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRuntime> {
     }
 
     let session_info = SessionInfo::new(sid, session_ref, new_session, home, cwd, &spaths);
+    let handle = crate::runtime::AgentRuntimeHandle {
+        cmd_tx,
+        session: session_info,
+        event_display: event_display.clone(),
+        turn_gate: crate::runtime::handle::new_turn_gate(ctx.interrupt.clone()),
+        turn_counter: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+    };
     Ok(AgentRuntime {
         ctx,
-        cmd_tx,
         orch_handle,
-        session: session_info,
-        event_sink,
         event_display,
-        stream_in_progress: Arc::new(AtomicBool::new(false)),
+        handle,
     })
 }
 
@@ -117,21 +140,24 @@ async fn resolve_session(
     cwd: &std::path::Path,
     policy: SessionPolicy,
     layout: paths::SessionLayout,
-) -> Result<(String, String, Option<String>)> {
+) -> Result<(String, String, Option<String>, paths::Paths)> {
     match policy {
         SessionPolicy::New => {
             let sid = paths::chrono_session_id();
-            Ok((sid.clone(), sid, None))
+            let resolved = paths::paths_for_layout(home, cwd, &sid, layout);
+            Ok((sid.clone(), sid, None, resolved))
         }
         SessionPolicy::ContinueLatest => {
-            let sid = paths::continue_session_with_layout(home, cwd, layout)
-                .await
-                .unwrap_or_default();
-            if sid.is_empty() {
-                let sid = paths::chrono_session_id();
-                Ok((sid.clone(), sid, None))
+            let records =
+                crate::session::metadata::list_sessions_with_layout(home, cwd, layout).await?;
+            if let Some(record) = records.into_iter().max_by_key(|record| record.modified) {
+                let sid = record.id;
+                let resolved = paths::Paths::from_session_dir(&sid, record.path);
+                Ok((sid.clone(), sid, None, resolved))
             } else {
-                Ok((sid.clone(), sid, None))
+                let sid = paths::chrono_session_id();
+                let resolved = paths::paths_for_layout(home, cwd, &sid, layout);
+                Ok((sid.clone(), sid, None, resolved))
             }
         }
         SessionPolicy::Resume(reference) => {
@@ -139,12 +165,14 @@ async fn resolve_session(
             if trimmed.is_empty() {
                 bail!("invalid empty session reference");
             }
-            if let Some(resolved) = crate::session::metadata::resolve_session_reference_with_layout(
+            if let Some(record) = crate::session::metadata::resolve_session_record_with_layout(
                 home, cwd, trimmed, layout,
             )
             .await?
             {
-                Ok((resolved, trimmed.to_string(), None))
+                let resolved = record.id;
+                let selected = paths::Paths::from_session_dir(&resolved, record.path);
+                Ok((resolved, trimmed.to_string(), None, selected))
             } else {
                 bail!("session not found: {trimmed}");
             }
@@ -153,14 +181,17 @@ async fn resolve_session(
             let trimmed = reference.trim();
             if trimmed.is_empty() {
                 let sid = paths::chrono_session_id();
-                return Ok((sid.clone(), sid, None));
+                let resolved = paths::paths_for_layout(home, cwd, &sid, layout);
+                return Ok((sid.clone(), sid, None, resolved));
             }
-            if let Some(resolved) = crate::session::metadata::resolve_session_reference_with_layout(
+            if let Some(record) = crate::session::metadata::resolve_session_record_with_layout(
                 home, cwd, trimmed, layout,
             )
             .await?
             {
-                Ok((resolved, trimmed.to_string(), None))
+                let resolved = record.id;
+                let selected = paths::Paths::from_session_dir(&resolved, record.path);
+                Ok((resolved, trimmed.to_string(), None, selected))
             } else {
                 let alias = sanitize_alias(trimmed);
                 let Some(alias) = alias else {
@@ -171,7 +202,8 @@ async fn resolve_session(
                 } else {
                     alias.clone()
                 };
-                Ok((sid, trimmed.to_string(), Some(alias)))
+                let resolved = paths::paths_for_layout(home, cwd, &sid, layout);
+                Ok((sid, trimmed.to_string(), Some(alias), resolved))
             }
         }
     }
@@ -186,7 +218,10 @@ mod tests {
     use crate::resources::{
         Resource, ResourceContentType, ResourceHandler, ResourceMetadata, ResourceRequest,
     };
-    use crate::runtime::{AgentEvent, AgentOptions, EventSink, SkillDiscoveryPolicy};
+    use crate::runtime::{
+        AgentEvent, AgentOptions, AgentTool, EventSink, SkillDiscoveryPolicy, ToolDefinition,
+        ToolError, ToolExecutionContext, ToolExecutionMode, ToolOutput,
+    };
     use crate::runtime::{
         runtime_skills_from_sdk_request, skill_discovery_policy_from_sdk_request,
     };
@@ -323,6 +358,137 @@ mod tests {
         assert!(!second_session.is_new);
 
         second.shutdown().await.unwrap();
+        let _ = tokio::fs::remove_dir_all(home).await;
+        let _ = tokio::fs::remove_dir_all(cwd).await;
+    }
+
+    async fn write_session_metadata(dir: &std::path::Path, id: &str, cwd: &std::path::Path) {
+        tokio::fs::create_dir_all(dir).await.unwrap();
+        let metadata = crate::session::metadata::SessionMetadata {
+            id: id.into(),
+            alias: Some("legacy-alias".into()),
+            title: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+            cwd: cwd.display().to_string(),
+            parent: None,
+            first_prompt: None,
+            summary: None,
+        };
+        tokio::fs::write(
+            dir.join("session.json"),
+            serde_json::to_vec_pretty(&metadata).unwrap(),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn project_scoped_resume_reads_legacy_location_and_writes_in_place() {
+        let home = unique_temp_dir("legacy-resume-home");
+        let cwd = unique_temp_dir("legacy-resume-cwd");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+        let id = "legacy-session";
+        let old_dir = home
+            .join(".mink/projects")
+            .join(crate::session::paths::legacy_project_key(&cwd))
+            .join(id);
+        write_session_metadata(&old_dir, id, &cwd).await;
+
+        let mut config = runtime_config_with_mock(&home, &cwd, mock_llm_hello());
+        config.session = SessionPolicy::Resume(id.into());
+        let runtime = build_runtime(config).await.unwrap();
+        assert_eq!(
+            runtime.session_info().conversation_path.parent(),
+            Some(old_dir.as_path())
+        );
+        runtime.run_turn("continue legacy").await.unwrap();
+        runtime.shutdown().await.unwrap();
+        assert!(old_dir.join("conversation.jsonl").is_file());
+        let new_dir = home
+            .join(".mink/projects")
+            .join(crate::session::paths::project_key(&cwd))
+            .join(id);
+        assert!(!new_dir.exists());
+
+        let _ = tokio::fs::remove_dir_all(home).await;
+        let _ = tokio::fs::remove_dir_all(cwd).await;
+    }
+
+    #[tokio::test]
+    async fn project_scoped_resume_fails_when_new_and_legacy_locations_collide() {
+        let home = unique_temp_dir("legacy-ambiguous-home");
+        let cwd = unique_temp_dir("legacy-ambiguous-cwd");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+        let id = "duplicate-session";
+        for key in [
+            crate::session::paths::project_key(&cwd),
+            crate::session::paths::legacy_project_key(&cwd),
+        ] {
+            write_session_metadata(&home.join(".mink/projects").join(key).join(id), id, &cwd).await;
+        }
+
+        let mut config = runtime_config_with_mock(&home, &cwd, mock_llm_hello());
+        config.session = SessionPolicy::Resume(id.into());
+        let error = build_runtime(config).await.err().unwrap().to_string();
+        assert!(error.contains("ambiguous across"), "{error}");
+        assert!(error.contains(&crate::session::paths::project_key(&cwd)));
+        assert!(error.contains(&crate::session::paths::legacy_project_key(&cwd)));
+
+        let _ = tokio::fs::remove_dir_all(home).await;
+        let _ = tokio::fs::remove_dir_all(cwd).await;
+    }
+
+    #[tokio::test]
+    async fn continue_latest_propagates_corrupt_metadata() {
+        let home = unique_temp_dir("continue-corrupt-home");
+        let cwd = unique_temp_dir("continue-corrupt-cwd");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+        let dir = home
+            .join(".mink/projects")
+            .join(crate::session::paths::project_key(&cwd))
+            .join("broken");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("session.json"), "{not-json")
+            .await
+            .unwrap();
+
+        let mut config = runtime_config_with_mock(&home, &cwd, mock_llm_hello());
+        config.session = SessionPolicy::ContinueLatest;
+        let error = build_runtime(config).await.err().unwrap().to_string();
+        assert!(error.contains("corrupt session metadata"), "{error}");
+        assert_eq!(
+            tokio::fs::read_to_string(dir.join("session.json"))
+                .await
+                .unwrap(),
+            "{not-json"
+        );
+
+        let _ = tokio::fs::remove_dir_all(home).await;
+        let _ = tokio::fs::remove_dir_all(cwd).await;
+    }
+
+    #[tokio::test]
+    async fn continue_latest_fails_on_duplicate_alias_across_layouts() {
+        let home = unique_temp_dir("continue-alias-home");
+        let cwd = unique_temp_dir("continue-alias-cwd");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+        for (key, id) in [
+            (crate::session::paths::project_key(&cwd), "new-session"),
+            (
+                crate::session::paths::legacy_project_key(&cwd),
+                "old-session",
+            ),
+        ] {
+            write_session_metadata(&home.join(".mink/projects").join(key).join(id), id, &cwd).await;
+        }
+
+        let mut config = runtime_config_with_mock(&home, &cwd, mock_llm_hello());
+        config.session = SessionPolicy::ContinueLatest;
+        let error = build_runtime(config).await.err().unwrap().to_string();
+        assert!(error.contains("alias:legacy-alias"), "{error}");
+        assert!(error.contains("ambiguous across"), "{error}");
+
         let _ = tokio::fs::remove_dir_all(home).await;
         let _ = tokio::fs::remove_dir_all(cwd).await;
     }
@@ -772,9 +938,11 @@ mod tests {
         events: Mutex<Vec<AgentEvent>>,
     }
 
+    #[async_trait::async_trait]
     impl EventSink for RecordingSink {
-        fn on_event(&self, event: AgentEvent) {
+        async fn on_event(&self, event: AgentEvent) -> Result<(), String> {
             self.events.lock().unwrap().push(event);
+            Ok(())
         }
     }
 
@@ -802,12 +970,12 @@ mod tests {
             let events = sink.events.lock().unwrap();
             assert!(events.iter().any(|event| matches!(
                 event,
-                AgentEvent::Info { message } if message == "Compressing..."
+                AgentEvent { kind: crate::runtime::AgentEventKind::Info { message }, .. } if message == "Compressing..."
             )));
             assert!(
                 events
                     .iter()
-                    .any(|event| matches!(event, AgentEvent::Stop { .. }))
+                    .any(|event| matches!(event.kind, crate::runtime::AgentEventKind::Stop { .. }))
             );
         }
 
@@ -1054,14 +1222,14 @@ mod tests {
             assert!(
                 events.iter().any(|event| matches!(
                     event,
-                    AgentEvent::Text { content } if content == "Hello, world!"
+                    AgentEvent { kind: crate::runtime::AgentEventKind::Text { content }, .. } if content == "Hello, world!"
                 )),
                 "expected Text event with greeting"
             );
             assert!(
                 events.iter().any(|event| matches!(
                     event,
-                    AgentEvent::Final { outcome } if outcome.status == crate::agent::orchestrator::TurnStatus::Ok
+                    AgentEvent { kind: crate::runtime::AgentEventKind::Final { outcome }, .. } if outcome.status == crate::agent::orchestrator::TurnStatus::Ok
                 )),
                 "expected Final event with Ok status"
             );
@@ -1081,7 +1249,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut stream = runtime.stream_turn("say hello");
+        let mut stream = runtime.stream_turn("say hello").unwrap();
         let mut saw_text = false;
         let mut saw_final = false;
         while let Some(event) =
@@ -1089,11 +1257,11 @@ mod tests {
                 .await
                 .expect("stream event timed out")
         {
-            match event {
-                AgentEvent::Text { content } if content == "Hello, world!" => {
+            match event.kind {
+                crate::runtime::AgentEventKind::Text { content } if content == "Hello, world!" => {
                     saw_text = true;
                 }
-                AgentEvent::Final { outcome } => {
+                crate::runtime::AgentEventKind::Final { outcome } => {
                     assert_eq!(outcome.status, crate::agent::orchestrator::TurnStatus::Ok);
                     saw_final = true;
                     break;
@@ -1122,7 +1290,7 @@ mod tests {
             .await
             .unwrap();
 
-        let stream = runtime.stream_turn("say hello");
+        let stream = runtime.stream_turn("say hello").unwrap();
         let outcome = stream.outcome().await.unwrap();
         assert_eq!(outcome.status, crate::agent::orchestrator::TurnStatus::Ok);
         assert!(outcome.text.contains("Hello, world!"));
@@ -1133,7 +1301,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn try_stream_turn_reports_concurrent_turn_as_error() {
+    async fn stream_turn_reports_concurrent_turn_as_busy() {
         let home = unique_temp_dir("mock-stream-concurrent-home");
         let cwd = unique_temp_dir("mock-stream-concurrent-cwd");
         tokio::fs::create_dir_all(&cwd).await.unwrap();
@@ -1142,17 +1310,202 @@ mod tests {
             .await
             .unwrap();
 
-        let stream = runtime.try_stream_turn("say hello").unwrap();
-        let err = match runtime.try_stream_turn("second stream") {
+        let stream = runtime.stream_turn("say hello").unwrap();
+        let active_turn_id = stream.turn_id().clone();
+        let err = match runtime.stream_turn("second stream") {
             Ok(_) => panic!("concurrent stream should fail"),
             Err(err) => err,
         };
-        assert!(err.to_string().contains("stream_turn already in progress"));
+        assert!(matches!(
+            err,
+            crate::runtime::RuntimeError::Busy { active_turn_id: ref id } if id == &active_turn_id
+        ));
 
         let outcome = stream.outcome().await.unwrap();
         assert_eq!(outcome.status, crate::agent::orchestrator::TurnStatus::Ok);
 
         runtime.shutdown().await.unwrap();
+        let _ = tokio::fs::remove_dir_all(home).await;
+        let _ = tokio::fs::remove_dir_all(cwd).await;
+    }
+
+    #[tokio::test]
+    async fn cloned_handles_share_the_turn_gate_and_reject_empty_models() {
+        let home = unique_temp_dir("mock-handle-gate-home");
+        let cwd = unique_temp_dir("mock-handle-gate-cwd");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+        let runtime = build_runtime(runtime_config_with_mock(&home, &cwd, mock_llm_hello()))
+            .await
+            .unwrap();
+        let first = runtime.handle();
+        let second = runtime.handle();
+
+        let stream = first.stream_turn("first").unwrap();
+        assert!(matches!(
+            second.stream_turn("second"),
+            Err(crate::runtime::RuntimeError::Busy { .. })
+        ));
+        stream.outcome().await.unwrap();
+        assert!(matches!(
+            second.set_model("   ").await,
+            Err(crate::runtime::RuntimeError::Command(message)) if message.contains("must not be empty")
+        ));
+
+        runtime.shutdown().await.unwrap();
+        let _ = tokio::fs::remove_dir_all(home).await;
+        let _ = tokio::fs::remove_dir_all(cwd).await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_run_turns_share_the_same_nonblocking_gate() {
+        let home = unique_temp_dir("mock-run-concurrent-home");
+        let cwd = unique_temp_dir("mock-run-concurrent-cwd");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+        let runtime = build_runtime(runtime_config_with_mock(&home, &cwd, mock_llm_hello()))
+            .await
+            .unwrap();
+
+        let (first, second) = tokio::join!(runtime.run_turn("first"), runtime.run_turn("second"));
+        let results = [first, second];
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(crate::runtime::RuntimeError::Busy { .. })))
+                .count(),
+            1
+        );
+
+        runtime.shutdown().await.unwrap();
+        let _ = tokio::fs::remove_dir_all(home).await;
+        let _ = tokio::fs::remove_dir_all(cwd).await;
+    }
+
+    #[tokio::test]
+    async fn run_turn_is_busy_while_a_stream_owns_the_turn() {
+        let home = unique_temp_dir("mock-run-stream-busy-home");
+        let cwd = unique_temp_dir("mock-run-stream-busy-cwd");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+        let runtime = build_runtime(runtime_config_with_mock(&home, &cwd, mock_llm_hello()))
+            .await
+            .unwrap();
+
+        let stream = runtime.stream_turn("stream").unwrap();
+        let active_turn_id = stream.turn_id().clone();
+        assert!(matches!(
+            runtime.run_turn("run").await,
+            Err(crate::runtime::RuntimeError::Busy { active_turn_id: ref id }) if id == &active_turn_id
+        ));
+        stream.outcome().await.unwrap();
+
+        runtime.shutdown().await.unwrap();
+        let _ = tokio::fs::remove_dir_all(home).await;
+        let _ = tokio::fs::remove_dir_all(cwd).await;
+    }
+
+    #[tokio::test]
+    async fn dropping_a_stream_cancels_then_releases_the_turn_gate() {
+        let home = unique_temp_dir("mock-drop-stream-home");
+        let cwd = unique_temp_dir("mock-drop-stream-cwd");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+        let runtime = build_runtime(runtime_config_with_blocking_mock(&home, &cwd))
+            .await
+            .unwrap();
+
+        drop(runtime.stream_turn("blocking").unwrap());
+        let replacement = tokio::time::timeout(tokio::time::Duration::from_secs(2), async {
+            loop {
+                match runtime.stream_turn("replacement") {
+                    Ok(stream) => break stream,
+                    Err(crate::runtime::RuntimeError::Busy { .. }) => {
+                        tokio::task::yield_now().await;
+                    }
+                    Err(error) => panic!("unexpected runtime error: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("dropped stream did not release its permit");
+        let outcome = replacement.outcome().await.unwrap();
+        assert_eq!(outcome.status, crate::agent::orchestrator::TurnStatus::Ok);
+
+        runtime.shutdown().await.unwrap();
+        let _ = tokio::fs::remove_dir_all(home).await;
+        let _ = tokio::fs::remove_dir_all(cwd).await;
+    }
+
+    #[tokio::test]
+    async fn dropping_completed_old_stream_does_not_interrupt_new_turn() {
+        let home = unique_temp_dir("mock-drop-completed-home");
+        let cwd = unique_temp_dir("mock-drop-completed-cwd");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+        let runtime = build_runtime(runtime_config_with_mock(&home, &cwd, mock_llm_hello()))
+            .await
+            .unwrap();
+
+        let mut old = runtime.stream_turn("first").unwrap();
+        while old.recv().await.is_some() {}
+        let second = runtime.stream_turn("second").unwrap();
+        drop(old);
+        let outcome = second.outcome().await.unwrap();
+        assert_eq!(outcome.status, crate::agent::orchestrator::TurnStatus::Ok);
+        assert_eq!(outcome.text, "second");
+
+        runtime.shutdown().await.unwrap();
+        let _ = tokio::fs::remove_dir_all(home).await;
+        let _ = tokio::fs::remove_dir_all(cwd).await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_closes_gate_before_cloned_handles_can_submit_commands() {
+        let home = unique_temp_dir("mock-shutdown-gate-home");
+        let cwd = unique_temp_dir("mock-shutdown-gate-cwd");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+        let runtime = build_runtime(runtime_config_with_mock(&home, &cwd, mock_llm_hello()))
+            .await
+            .unwrap();
+        let handle = runtime.handle();
+
+        runtime.shutdown().await.unwrap();
+        assert!(matches!(
+            handle.stream_turn("late"),
+            Err(crate::runtime::RuntimeError::Closed)
+        ));
+        assert!(matches!(
+            handle.compact().await,
+            Err(crate::runtime::RuntimeError::Closed)
+        ));
+        assert!(matches!(
+            handle.set_model("pro").await,
+            Err(crate::runtime::RuntimeError::Closed)
+        ));
+
+        let _ = tokio::fs::remove_dir_all(home).await;
+        let _ = tokio::fs::remove_dir_all(cwd).await;
+    }
+
+    #[tokio::test]
+    async fn runtime_start_rejects_compaction_boundary_beyond_history() {
+        let home = unique_temp_dir("invalid-compaction-boundary-home");
+        let cwd = unique_temp_dir("invalid-compaction-boundary-cwd");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+        let first = build_runtime(runtime_config_with_mock(&home, &cwd, mock_llm_hello()))
+            .await
+            .unwrap();
+        let session = first.session_info().clone();
+        first.shutdown().await.unwrap();
+        tokio::fs::write(
+            session.summary_path.with_file_name("context-state.json"),
+            r#"{"active_start":1,"summary":"bad"}"#,
+        )
+        .await
+        .unwrap();
+
+        let mut config = runtime_config_with_mock(&home, &cwd, mock_llm_hello());
+        config.session = SessionPolicy::Resume(session.session_id.clone());
+        let error = build_runtime(config).await.err().unwrap().to_string();
+        assert!(error.contains("exceeds history length"), "{error}");
+
         let _ = tokio::fs::remove_dir_all(home).await;
         let _ = tokio::fs::remove_dir_all(cwd).await;
     }
@@ -1174,6 +1527,26 @@ mod tests {
             assert_eq!(outcome.status, crate::agent::orchestrator::TurnStatus::Ok);
             assert!(outcome.error.is_none());
         }
+
+        runtime.shutdown().await.unwrap();
+        let _ = tokio::fs::remove_dir_all(home).await;
+        let _ = tokio::fs::remove_dir_all(cwd).await;
+    }
+
+    #[tokio::test]
+    async fn consecutive_turn_outcomes_keep_their_own_text() {
+        let home = unique_temp_dir("mock-outcome-ownership-home");
+        let cwd = unique_temp_dir("mock-outcome-ownership-cwd");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+        let runtime = build_runtime(runtime_config_with_mock(&home, &cwd, mock_llm_hello()))
+            .await
+            .unwrap();
+
+        let first = runtime.run_turn("first").await.unwrap();
+        let second = runtime.run_turn("second").await.unwrap();
+        assert_eq!(first.text, "Hello, world!");
+        assert_eq!(second.text, "second");
+        assert_ne!(first.turn_id, second.turn_id);
 
         runtime.shutdown().await.unwrap();
         let _ = tokio::fs::remove_dir_all(home).await;
@@ -1253,27 +1626,17 @@ mod tests {
             .await
             .unwrap();
 
-        // Snapshot the shared interrupt flag before moving the runtime.
-        let interrupt_flag = runtime.interrupt_flag();
-
-        // Wrap runtime so the spawned task can take ownership and return it.
-        let turn_rt = std::sync::Arc::new(tokio::sync::Mutex::new(Some(runtime)));
-        let turn_rt_clone = turn_rt.clone();
-
-        let handle = tokio::spawn(async move {
-            let runtime = turn_rt_clone.lock().await.take().unwrap();
-            let outcome = runtime.run_turn("blocking turn").await;
-            (runtime, outcome)
-        });
+        let runtime_handle = runtime.handle();
+        let turn_handle = runtime_handle.clone();
+        let task = tokio::spawn(async move { turn_handle.run_turn("blocking turn").await });
 
         // Let the orchestrator enter the LLM stream loop.
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
         // The orchestrator's turn executor polls this flag every 25 ms.
-        interrupt_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        runtime_handle.interrupt_current_turn();
 
-        let (runtime, outcome) = handle.await.unwrap();
-        let outcome = outcome.unwrap();
+        let outcome = task.await.unwrap().unwrap();
         assert_eq!(
             outcome.status,
             crate::agent::orchestrator::TurnStatus::Interrupted
@@ -1282,6 +1645,30 @@ mod tests {
         // Next turn must still run successfully.
         let outcome2 = runtime.run_turn("recovery turn").await.unwrap();
         assert_eq!(outcome2.status, crate::agent::orchestrator::TurnStatus::Ok);
+
+        runtime.shutdown().await.unwrap();
+        let _ = tokio::fs::remove_dir_all(home).await;
+        let _ = tokio::fs::remove_dir_all(cwd).await;
+    }
+
+    #[tokio::test]
+    async fn explicit_stream_cancel_releases_the_turn_gate_after_outcome() {
+        let home = unique_temp_dir("mock-cancel-stream-home");
+        let cwd = unique_temp_dir("mock-cancel-stream-cwd");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+        let runtime = build_runtime(runtime_config_with_blocking_mock(&home, &cwd))
+            .await
+            .unwrap();
+
+        let stream = runtime.stream_turn("blocking").unwrap();
+        stream.cancel();
+        let cancelled = stream.outcome().await.unwrap();
+        assert_eq!(
+            cancelled.status,
+            crate::agent::orchestrator::TurnStatus::Interrupted
+        );
+        let recovered = runtime.run_turn("recovery").await.unwrap();
+        assert_eq!(recovered.status, crate::agent::orchestrator::TurnStatus::Ok);
 
         runtime.shutdown().await.unwrap();
         let _ = tokio::fs::remove_dir_all(home).await;
@@ -1324,6 +1711,313 @@ mod tests {
                 ],
             ],
         )
+    }
+
+    struct AsyncEchoTool;
+
+    #[async_trait::async_trait]
+    impl AgentTool for AsyncEchoTool {
+        fn definition(&self) -> ToolDefinition {
+            let mut definition = ToolDefinition::new(
+                "AsyncEcho",
+                "Echo text asynchronously",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {"text": {"type": "string"}},
+                    "required": ["text"],
+                    "additionalProperties": false
+                }),
+            );
+            definition.execution = ToolExecutionMode::ParallelReadOnly;
+            definition
+        }
+
+        async fn execute(
+            &self,
+            input: serde_json::Value,
+            ctx: ToolExecutionContext,
+        ) -> Result<ToolOutput, ToolError> {
+            if ctx.is_cancelled() {
+                return Err(ToolError::new("cancelled"));
+            }
+            Ok(ToolOutput::text(format!(
+                "echo:{}@{}",
+                input["text"].as_str().unwrap_or_default(),
+                ctx.cwd().display()
+            )))
+        }
+    }
+
+    struct MutatingEchoTool;
+
+    #[async_trait::async_trait]
+    impl AgentTool for MutatingEchoTool {
+        fn definition(&self) -> ToolDefinition {
+            let mut definition = ToolDefinition::new(
+                "MutatingEcho",
+                "A mutating test tool",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }),
+            );
+            definition.execution = ToolExecutionMode::Sequential;
+            definition.mutating = true;
+            definition
+        }
+
+        async fn execute(
+            &self,
+            _input: serde_json::Value,
+            _ctx: ToolExecutionContext,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::text("mutated"))
+        }
+    }
+
+    struct CancellableTool;
+
+    #[async_trait::async_trait]
+    impl AgentTool for CancellableTool {
+        fn definition(&self) -> ToolDefinition {
+            let mut definition = ToolDefinition::new(
+                "Cancellable",
+                "Wait until cancelled",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }),
+            );
+            definition.execution = ToolExecutionMode::Sequential;
+            definition
+        }
+
+        async fn execute(
+            &self,
+            _input: serde_json::Value,
+            ctx: ToolExecutionContext,
+        ) -> Result<ToolOutput, ToolError> {
+            while !ctx.is_cancelled() {
+                tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+            }
+            Err(ToolError::new("cancelled"))
+        }
+    }
+
+    struct DriftingDefinitionTool {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl AgentTool for DriftingDefinitionTool {
+        fn definition(&self) -> ToolDefinition {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            ToolDefinition::new(
+                if call == 0 {
+                    "FrozenTool"
+                } else {
+                    "DriftedTool"
+                },
+                "Definition must be frozen at startup",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }),
+            )
+        }
+
+        async fn execute(
+            &self,
+            _input: serde_json::Value,
+            _ctx: ToolExecutionContext,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::text("frozen"))
+        }
+    }
+
+    fn mock_llm_single_tool(name: &str) -> crate::llm::mock::MockLlmClient {
+        use crate::protocol::{Event, StopEvent, TextEvent, ToolCallEvent};
+        crate::llm::mock::MockLlmClient::new(
+            "flash",
+            vec![
+                vec![
+                    Ok(Event::ToolCall(ToolCallEvent {
+                        name: name.into(),
+                        id: format!("call_{}", name.to_ascii_lowercase()),
+                        input_json: serde_json::json!({}),
+                        fields: Default::default(),
+                        order: Vec::new(),
+                    })),
+                    Ok(Event::Stop(StopEvent {
+                        reason: "tool_use".into(),
+                    })),
+                ],
+                vec![
+                    Ok(Event::Text(TextEvent {
+                        content: "done".into(),
+                    })),
+                    Ok(Event::Stop(StopEvent {
+                        reason: "end_turn".into(),
+                    })),
+                ],
+            ],
+        )
+    }
+
+    fn mock_llm_custom_tool_use() -> crate::llm::mock::MockLlmClient {
+        use crate::protocol::{Event, StopEvent, TextEvent, ToolCallEvent};
+        let mut fields = std::collections::BTreeMap::new();
+        fields.insert("text".into(), "hello".into());
+        crate::llm::mock::MockLlmClient::new(
+            "flash",
+            vec![
+                vec![
+                    Ok(Event::ToolCall(ToolCallEvent {
+                        name: "AsyncEcho".into(),
+                        id: "call_echo_1".into(),
+                        input_json: serde_json::json!({"text": "hello"}),
+                        fields,
+                        order: vec!["text".into()],
+                    })),
+                    Ok(Event::Stop(StopEvent {
+                        reason: "tool_use".into(),
+                    })),
+                ],
+                vec![
+                    Ok(Event::Text(TextEvent {
+                        content: "custom done".into(),
+                    })),
+                    Ok(Event::Stop(StopEvent {
+                        reason: "end_turn".into(),
+                    })),
+                ],
+            ],
+        )
+    }
+
+    #[tokio::test]
+    async fn registered_async_custom_tool_executes_through_the_core_pipeline() {
+        let home = unique_temp_dir("custom-tool-home");
+        let cwd = unique_temp_dir("custom-tool-cwd");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+        let mut config = runtime_config_with_mock(&home, &cwd, mock_llm_custom_tool_use());
+        config.custom_tools.push(Arc::new(AsyncEchoTool));
+        let runtime = build_runtime(config).await.unwrap();
+
+        let mut stream = runtime.stream_turn("echo").unwrap();
+        let turn_id = stream.turn_id().clone();
+        let mut sequences = Vec::new();
+        let mut result = None;
+        while let Some(event) = stream.recv().await {
+            assert_eq!(event.turn_id.as_ref(), Some(&turn_id));
+            sequences.push(event.sequence);
+            if let crate::runtime::AgentEventKind::ToolResult {
+                tool_use_id,
+                tool_name,
+                content,
+                success,
+                result_kind,
+                ..
+            } = event.kind
+            {
+                result = Some((tool_use_id, tool_name, content, success, result_kind));
+            }
+        }
+        assert!(sequences.windows(2).all(|pair| pair[0] < pair[1]));
+        let outcome = stream.outcome().await.unwrap();
+        assert!(outcome.text.contains("custom done"));
+        let (tool_use_id, tool_name, content, success, result_kind) = result.unwrap();
+        assert_eq!(tool_use_id.as_deref(), Some("call_echo_1"));
+        assert_eq!(tool_name, "AsyncEcho");
+        assert!(content.contains("echo:hello@"));
+        assert!(success);
+        assert_eq!(result_kind, crate::tools::metadata::ToolResultKind::Text);
+
+        runtime.shutdown().await.unwrap();
+        let _ = tokio::fs::remove_dir_all(home).await;
+        let _ = tokio::fs::remove_dir_all(cwd).await;
+    }
+
+    #[tokio::test]
+    async fn custom_tool_definition_is_evaluated_once_and_frozen() {
+        let home = unique_temp_dir("custom-frozen-home");
+        let cwd = unique_temp_dir("custom-frozen-cwd");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut config = runtime_config_with_mock(&home, &cwd, mock_llm_single_tool("FrozenTool"));
+        config.custom_tools.push(Arc::new(DriftingDefinitionTool {
+            calls: calls.clone(),
+        }));
+
+        let runtime = build_runtime(config).await.unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let outcome = runtime.run_turn("use frozen definition").await.unwrap();
+        assert_eq!(outcome.tool_call_count, 1);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        runtime.shutdown().await.unwrap();
+        let _ = tokio::fs::remove_dir_all(home).await;
+        let _ = tokio::fs::remove_dir_all(cwd).await;
+    }
+
+    #[tokio::test]
+    async fn successful_mutating_custom_tool_invalidates_read_memos() {
+        let home = unique_temp_dir("custom-mutating-home");
+        let cwd = unique_temp_dir("custom-mutating-cwd");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+        let mut config =
+            runtime_config_with_mock(&home, &cwd, mock_llm_single_tool("MutatingEcho"));
+        config.custom_tools.push(Arc::new(MutatingEchoTool));
+        let runtime = build_runtime(config).await.unwrap();
+
+        assert_eq!(
+            runtime
+                .ctx
+                .memo_mutation
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        runtime.run_turn("mutate").await.unwrap();
+        assert_eq!(
+            runtime
+                .ctx
+                .memo_mutation
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+
+        runtime.shutdown().await.unwrap();
+        let _ = tokio::fs::remove_dir_all(home).await;
+        let _ = tokio::fs::remove_dir_all(cwd).await;
+    }
+
+    #[tokio::test]
+    async fn async_custom_tool_observes_stream_cancellation() {
+        let home = unique_temp_dir("custom-cancel-home");
+        let cwd = unique_temp_dir("custom-cancel-cwd");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+        let mut config = runtime_config_with_mock(&home, &cwd, mock_llm_single_tool("Cancellable"));
+        config.custom_tools.push(Arc::new(CancellableTool));
+        let runtime = build_runtime(config).await.unwrap();
+
+        let stream = runtime.stream_turn("wait").unwrap();
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+        stream.cancel();
+        let outcome = tokio::time::timeout(tokio::time::Duration::from_secs(2), stream.outcome())
+            .await
+            .expect("custom tool did not stop after cancellation")
+            .unwrap();
+        assert_eq!(
+            outcome.status,
+            crate::agent::orchestrator::TurnStatus::Interrupted
+        );
+
+        runtime.shutdown().await.unwrap();
+        let _ = tokio::fs::remove_dir_all(home).await;
+        let _ = tokio::fs::remove_dir_all(cwd).await;
     }
 
     #[tokio::test]
@@ -1371,11 +2065,13 @@ mod tests {
             (
                 events
                     .iter()
-                    .any(|e| matches!(e, AgentEvent::ToolCall { .. })),
+                    .any(|e| matches!(e.kind, crate::runtime::AgentEventKind::ToolCall { .. })),
                 events
                     .iter()
-                    .any(|e| matches!(e, AgentEvent::ToolResult { .. })),
-                events.iter().any(|e| matches!(e, AgentEvent::Final { .. })),
+                    .any(|e| matches!(e.kind, crate::runtime::AgentEventKind::ToolResult { .. })),
+                events
+                    .iter()
+                    .any(|e| matches!(e.kind, crate::runtime::AgentEventKind::Final { .. })),
             )
         };
 
@@ -1397,7 +2093,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut stream = runtime.stream_turn("run echo hello");
+        let mut stream = runtime.stream_turn("run echo hello").unwrap();
         let mut saw_tool_call = false;
         let mut saw_tool_result = false;
         while let Some(event) =
@@ -1405,10 +2101,10 @@ mod tests {
                 .await
                 .expect("stream event timed out")
         {
-            match event {
-                AgentEvent::ToolCall { .. } => saw_tool_call = true,
-                AgentEvent::ToolResult { .. } => saw_tool_result = true,
-                AgentEvent::Final { .. } => break,
+            match event.kind {
+                crate::runtime::AgentEventKind::ToolCall { .. } => saw_tool_call = true,
+                crate::runtime::AgentEventKind::ToolResult { .. } => saw_tool_result = true,
+                crate::runtime::AgentEventKind::Final { .. } => break,
                 _ => {}
             }
         }

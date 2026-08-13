@@ -10,8 +10,6 @@ use ratatui::text::Line;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Display as FmtDisplay, Formatter};
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -347,7 +345,6 @@ pub(crate) struct TuiState {
     pub artifacts_dir: PathBuf,
     pub artifact_detail: Option<ArtifactDetail>,
     /// 中断当前任务（由 Ctrl+C 触发），None 表示无中断能力
-    pub interrupt: Option<Arc<AtomicBool>>,
     pub view: View,
     pub overlay: Option<ActiveOverlay>,
     pub file_picker_policy: FilePickerPolicy,
@@ -406,7 +403,6 @@ impl Default for TuiState {
             todos: None,
             artifacts_dir: PathBuf::new(),
             artifact_detail: None,
-            interrupt: None,
             view: View::Main,
             overlay: None,
             file_picker_policy: FilePickerPolicy::default(),

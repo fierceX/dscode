@@ -18,6 +18,7 @@ export const appState = reactive({
   sessions: [] as SessionSummary[],
   currentWorkspace: null as string | null,
   currentSessionId: null as string | null,
+  currentProjectKey: null as string | null,
   sessionState: null as SessionState | null,
 });
 
@@ -28,6 +29,7 @@ const SESSION_KEY = "mink.currentSession";
 /** 会话打开/切换：重建状态 + 持久化当前会话（重开浏览器自动恢复并重连 SSE） */
 export function attachSession(summary: SessionSummary) {
   appState.currentSessionId = summary.id;
+  appState.currentProjectKey = summary.project_key;
   const st = emptySession(summary.id, summary.title ?? summary.alias ?? summary.id);
   // 历史用量初始化（usage.jsonl 汇总），实时 usage 事件继续累计
   st.tokensIn = summary.tokens_in ?? 0;
@@ -37,7 +39,7 @@ export function attachSession(summary: SessionSummary) {
   st.contextTokens = summary.last_context_tokens ?? st.tokensIn;
   st.costMicros = Math.round((summary.cost_nano_cny ?? 0) / 1000);
   appState.sessionState = st;
-  try { localStorage.setItem(SESSION_KEY, summary.id); } catch { /* 隐私模式等忽略 */ }
+  try { localStorage.setItem(SESSION_KEY, `${summary.project_key}\n${summary.id}`); } catch { /* 隐私模式等忽略 */ }
 }
 
 export function savedSessionId(): string | null {
@@ -49,7 +51,9 @@ export function clearSavedSession() {
 }
 
 export function detachSession() {
+  // Invalidate any in-flight controller callbacks before clearing state.
   appState.currentSessionId = null;
+  appState.currentProjectKey = null;
   appState.sessionState = null;
   sseClient.value?.close();
   sseClient.value = null;

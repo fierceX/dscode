@@ -240,7 +240,15 @@ impl SubAgentCoordinator {
                 }
                 pending_handles.push(launch.handle);
             }
-            await_cooperative_sub_agent_shutdown(pending_handles).await;
+            // A zero-second deadline is used as an immediate-cancellation
+            // policy. Do not add a cleanup grace period after that deadline;
+            // abort and join the tasks so the caller can rely on the timeout.
+            let shutdown_grace = if timeout == 0 {
+                Duration::ZERO
+            } else {
+                Duration::from_millis(SUB_AGENT_ABORT_GRACE_MS)
+            };
+            await_cooperative_sub_agent_shutdown(pending_handles, shutdown_grace).await;
         }
 
         for pr in &mut processed_results {
@@ -253,11 +261,14 @@ impl SubAgentCoordinator {
     }
 }
 
-async fn await_cooperative_sub_agent_shutdown(handles: Vec<tokio::task::JoinHandle<()>>) {
+async fn await_cooperative_sub_agent_shutdown(
+    handles: Vec<tokio::task::JoinHandle<()>>,
+    grace: Duration,
+) {
     if handles.is_empty() {
         return;
     }
-    let deadline = Instant::now() + Duration::from_millis(SUB_AGENT_ABORT_GRACE_MS);
+    let deadline = Instant::now() + grace;
     while handles.iter().any(|handle| !handle.is_finished()) {
         let now = Instant::now();
         if now >= deadline {

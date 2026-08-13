@@ -16,7 +16,7 @@ use std::sync::Arc;
 /// CLI. The runtime builder derives `ToolConfig`, session paths, API URL,
 /// compaction state, and the orchestrator from this value so that embedded
 /// callers and the `mink`/`mink-core` binaries share the same execution logic.
-pub struct AgentRuntimeConfig {
+pub(crate) struct AgentRuntimeConfig {
     pub config: Config,
     pub home: PathBuf,
     pub cwd: PathBuf,
@@ -35,8 +35,10 @@ pub struct AgentRuntimeConfig {
     /// Knowledge-base scope used by the read-only VFS. Defaults to the
     /// resolved runtime session id.
     pub resource_session_id: Option<String>,
+    pub custom_tools: Vec<Arc<dyn crate::runtime::AgentTool>>,
 }
 
+#[cfg(test)]
 impl AgentRuntimeConfig {
     /// Create runtime configuration from an existing mink config and explicit
     /// home/current working directories.
@@ -65,12 +67,8 @@ impl AgentRuntimeConfig {
             skill_discovery_policy: SkillDiscoveryPolicy::Defaults,
             llm_backend: None,
             resource_session_id: None,
+            custom_tools: Vec::new(),
         }
-    }
-
-    pub fn with_display(mut self, display: Arc<dyn Display>) -> Self {
-        self.display = Some(display);
-        self
     }
 
     pub fn with_event_sink(mut self, event_sink: Arc<dyn EventSink>) -> Self {
@@ -78,18 +76,8 @@ impl AgentRuntimeConfig {
         self
     }
 
-    pub fn with_sub_stream_tx(mut self, sub_stream_tx: Arc<dyn SubAgentStreamSink>) -> Self {
-        self.sub_stream_tx = Some(sub_stream_tx);
-        self
-    }
-
     pub fn with_llm_backend(mut self, backend: Arc<dyn LlmBackend>) -> Self {
         self.llm_backend = Some(backend);
-        self
-    }
-
-    pub fn with_first_prompt(mut self, first_prompt: Option<String>) -> Self {
-        self.first_prompt = first_prompt;
         self
     }
 
@@ -136,7 +124,7 @@ pub enum SessionPolicy {
 /// These paths are the same paths emitted by the SDK protocol and used by the
 /// existing binaries for event logs, conversation JSONL, artifacts, summaries,
 /// and plan files.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SessionInfo {
     pub session_id: String,
     pub session_ref: String,

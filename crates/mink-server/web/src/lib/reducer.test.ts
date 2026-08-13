@@ -3,6 +3,7 @@ import { reduceEvent, prependEvents } from "./reducer";
 import { conversationToEvents, parsePatch } from "./toolFormat";
 import { fmtK } from "./fmt";
 import { emptySession } from "./types";
+import protocolFixture from "../../../protocol-fixtures/agent-events.json";
 
 const ev = (type: string, extra: Record<string, unknown> = {}) => ({ type, ...extra });
 
@@ -53,6 +54,15 @@ describe("reduceEvent", () => {
     if (tool.kind === "tool") expect(tool.failed).toBe(true);
   });
 
+  it("实时 tool_result 缺少 tool_use_id 时 fail closed，旧重放仍兼容", () => {
+    let s = emptySession("s1", "t");
+    s = reduceEvent(s, ev("tool_call", { name: "Read", id: "c1", input: {} }));
+    s = reduceEvent(s, ev("tool_result", { stream_sequence: 2, content: "must not attach" }));
+    expect((s.items[0] as { result?: string }).result).toBeUndefined();
+    s = reduceEvent(s, ev("tool_result", { seq: 3, content: "legacy replay" }));
+    expect((s.items[0] as { result?: string }).result).toBe("legacy replay");
+  });
+
   it("跨工具间隔：结果填充最近未完成的工具", () => {
     let s = emptySession("s1", "t");
     s = reduceEvent(s, ev("tool_call", { name: "Glob", id: "c1", input: { pattern: "*.rs" } }));
@@ -65,10 +75,9 @@ describe("reduceEvent", () => {
 
   it("turn 生命周期：running 置位与复位", () => {
     let s = emptySession("s1", "t");
-    s = reduceEvent(s, ev("turn_start", { model: "flash" }));
+    s = reduceEvent(s, ev("turn_started"));
     expect(s.running).toBe(true);
-    expect(s.model).toBe("flash");
-    s = reduceEvent(s, ev("turn_final", { status: "ok" }));
+    s = reduceEvent(s, ev("turn_final", { outcome: { status: "ok", error: null } }));
     expect(s.running).toBe(false);
   });
 
@@ -86,10 +95,34 @@ describe("reduceEvent", () => {
     expect(s.tokensOut).toBe(23);
   });
 
-  it("sub_agent 事件渲染状态行", () => {
+  it("sub-agent status/output 合并为结构化 transcript item", () => {
     let s = emptySession("s1", "t");
-    s = reduceEvent(s, ev("sub_agent", { session_id: "abc12345", status: "launched" }));
-    expect(s.items.at(-1)).toMatchObject({ kind: "system", text: "子代理 abc12345 launched" });
+    s = reduceEvent(s, ev("sub_agent_status", { session_id: "abc12345", status: "running", in_tokens: 4 }));
+    s = reduceEvent(s, ev("sub_agent_output", { session_id: "abc12345", status: "completed", thinking: "t", text: "ok", in_tokens: 4, out_tokens: 2 }));
+    expect(s.items).toHaveLength(1);
+    expect(s.items[0]).toMatchObject({ kind: "sub_agent", sessionId: "abc12345", status: "completed", thinking: "t", text: "ok", inTokens: 4, outTokens: 2 });
+  });
+
+  it("sub-agent output 后的 final status 保留 thinking/text", () => {
+    let s = emptySession("s1", "t");
+    s = reduceEvent(s, ev("sub_agent_output", { session_id: "abc12345", status: "completed", thinking: "t", text: "ok", in_tokens: 4, out_tokens: 2 }));
+    s = reduceEvent(s, ev("sub_agent_status", { session_id: "abc12345", status: "ok", in_tokens: 4, out_tokens: 2 }));
+    expect(s.items[0]).toMatchObject({ kind: "sub_agent", status: "ok", thinking: "t", text: "ok" });
+  });
+
+  it("title_update 严格读取嵌套 stats", () => {
+    let s = emptySession("s1", "t");
+    s = reduceEvent(s, ev("title_update", { model: "pro", stats: { total_input_tokens: 7, total_output_tokens: 3, total_cache_read_tokens: 5, current_context_tokens: 12, max_context_tokens: 100, flash_cost_micros: 2, pro_cost_micros: 4, belief: 0.8 } }));
+    expect(s).toMatchObject({ model: "pro", tokensIn: 7, tokensOut: 3, cacheReadTokens: 5, contextTokens: 12, maxContextTokens: 100, costMicros: 6, belief: 0.8 });
+  });
+
+  it("stop 插入唯一结束标记，turn_final 只提交权威状态", () => {
+    let s = emptySession("s1", "t");
+    s = reduceEvent(s, ev("turn_started"));
+    s = reduceEvent(s, ev("stop", { reason: "end_turn" }));
+    s = reduceEvent(s, ev("turn_final", { outcome: { status: "ok", error: null } }));
+    expect(s.items.filter((item) => item.kind === "system")).toHaveLength(1);
+    expect(s.running).toBe(false);
   });
 
   it("系统事件（tool_surface 等）不渲染", () => {
@@ -107,6 +140,25 @@ describe("reduceEvent", () => {
     s = reduceEvent(s, ev("tool_result", { tool_use_id: "c1", content: "很长... artifact://grep-0001" }));
     const tool = s.items[0];
     if (tool.kind === "tool") expect(tool.artifact).toBe("grep-0001");
+  });
+});
+
+describe("共享 Core/SSE 协议 fixture", () => {
+  it("覆盖并发工具结果、artifact/presentation、sub-agent 与 final outcome", () => {
+    let s = emptySession("fixture", "fixture");
+    for (const [index, event] of protocolFixture.entries()) {
+      const raw = event.type === "final"
+        ? { ...event, type: "turn_final", stream_sequence: index + 100 }
+        : { ...event, stream_sequence: index + 100 };
+      s = reduceEvent(s, raw as never);
+    }
+    const tools = s.items.filter((item) => item.kind === "tool");
+    expect(tools).toHaveLength(2);
+    expect(tools[0]).toMatchObject({ id: "read-1", success: true, presentation: { kind: "todo" } });
+    expect(tools[1]).toMatchObject({ id: "grep-1", artifact: "grep-0001", artifacts: [{ id: "grep-0001" }] });
+    expect(s.items.find((item) => item.kind === "sub_agent")).toMatchObject({ status: "ok", text: "done" });
+    expect(s.running).toBe(false);
+    expect(s.lastSeq).toBe(110);
   });
 });
 
@@ -128,6 +180,27 @@ describe("prependEvents（懒加载前插）", () => {
     // tool_result 配对到同批 tool_call（不新增项）；100/101 流式合并为一条
     expect(keys).toEqual([90, 91, 100]);
     expect((s.items[1] as { result?: string }).result).toBe("out");
+  });
+});
+
+describe("实时 key 命名空间", () => {
+  it("历史 seq 与实时 stream_sequence 相同也不会产生 keyed-list 冲突", () => {
+    let s = emptySession("s1", "t");
+    s = reduceEvent(s, ev("user_input", { content: "history", seq: 1 }));
+    s = reduceEvent(s, ev("text", { content: "live", stream_sequence: 1 }));
+    expect(s.items.map((item) => item.key)).toEqual([1, "live:1"]);
+    expect(s.lastSeq).toBe(1);
+  });
+
+  it("使用 turn_id + core sequence 去重并保留诊断坐标", () => {
+    let s = emptySession("s1", "t");
+    const live = ev("text", { content: "once", turn_id: "turn-7", sequence: 4, stream_sequence: 22 });
+    s = reduceEvent(s, live);
+    s = reduceEvent(s, live);
+    expect(s.items).toHaveLength(1);
+    expect(s.items[0]).toMatchObject({ text: "once", key: "live:22" });
+    expect(s.lastTurnId).toBe("turn-7");
+    expect(s.lastCoreSequence).toBe(4);
   });
 });
 

@@ -16,8 +16,8 @@ pub enum ToolAuthorization {
     },
 }
 
-pub fn authorize_tool(metadata: ToolMetadata, config: &ToolConfig) -> ToolAuthorization {
-    match config.tool_approval.get(metadata.name).copied() {
+pub fn authorize_tool(metadata: &ToolMetadata, config: &ToolConfig) -> ToolAuthorization {
+    match config.tool_approval.get(metadata.name.as_ref()).copied() {
         Some(ToolApprovalPolicy::Allow) => return ToolAuthorization::Allowed,
         Some(ToolApprovalPolicy::Deny) => {
             return ToolAuthorization::Denied {
@@ -48,7 +48,7 @@ pub fn authorize_tool(metadata: ToolMetadata, config: &ToolConfig) -> ToolAuthor
     }
 }
 
-pub fn denied_message(metadata: ToolMetadata, reason: ToolAuthorizationDeniedReason) -> String {
+pub fn denied_message(metadata: &ToolMetadata, reason: ToolAuthorizationDeniedReason) -> String {
     match reason {
         ToolAuthorizationDeniedReason::ExplicitDeny => {
             format!("Tool '{}' blocked by approval policy: deny", metadata.name)
@@ -76,30 +76,30 @@ mod tests {
         let mut config = ToolConfig::from_config(&Config::default());
         for tier in [ApprovalTier::Read, ApprovalTier::Write, ApprovalTier::Exec] {
             assert_eq!(
-                authorize_tool(metadata(tier), &config),
+                authorize_tool(&metadata(tier), &config),
                 ToolAuthorization::Allowed
             );
         }
         config.tool_approval_mode = ToolApprovalMode::Write;
         assert_eq!(
-            authorize_tool(metadata(ApprovalTier::Read), &config),
+            authorize_tool(&metadata(ApprovalTier::Read), &config),
             ToolAuthorization::Allowed
         );
         assert_eq!(
-            authorize_tool(metadata(ApprovalTier::Write), &config),
+            authorize_tool(&metadata(ApprovalTier::Write), &config),
             ToolAuthorization::Allowed
         );
         assert!(matches!(
-            authorize_tool(metadata(ApprovalTier::Exec), &config),
+            authorize_tool(&metadata(ApprovalTier::Exec), &config),
             ToolAuthorization::Denied { .. }
         ));
         config.tool_approval_mode = ToolApprovalMode::AlwaysAsk;
         assert_eq!(
-            authorize_tool(metadata(ApprovalTier::Read), &config),
+            authorize_tool(&metadata(ApprovalTier::Read), &config),
             ToolAuthorization::Allowed
         );
         assert!(matches!(
-            authorize_tool(metadata(ApprovalTier::Write), &config),
+            authorize_tool(&metadata(ApprovalTier::Write), &config),
             ToolAuthorization::Denied { .. }
         ));
 
@@ -107,14 +107,14 @@ mod tests {
             .tool_approval
             .insert("Example".into(), ToolApprovalPolicy::Allow);
         assert_eq!(
-            authorize_tool(metadata(ApprovalTier::Exec), &config),
+            authorize_tool(&metadata(ApprovalTier::Exec), &config),
             ToolAuthorization::Allowed
         );
         config
             .tool_approval
             .insert("Example".into(), ToolApprovalPolicy::Deny);
         assert_eq!(
-            authorize_tool(metadata(ApprovalTier::Read), &config),
+            authorize_tool(&metadata(ApprovalTier::Read), &config),
             ToolAuthorization::Denied {
                 reason: ToolAuthorizationDeniedReason::ExplicitDeny
             }
@@ -123,7 +123,7 @@ mod tests {
             .tool_approval
             .insert("Example".into(), ToolApprovalPolicy::Prompt);
         assert_eq!(
-            authorize_tool(metadata(ApprovalTier::Read), &config),
+            authorize_tool(&metadata(ApprovalTier::Read), &config),
             ToolAuthorization::Denied {
                 reason: ToolAuthorizationDeniedReason::PromptUnavailable
             }
