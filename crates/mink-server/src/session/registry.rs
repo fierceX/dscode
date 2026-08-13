@@ -614,6 +614,16 @@ impl Registry {
         if !dir.is_dir() {
             return Err(RegistryError::NotFound(format!("session {id} not found")));
         }
+
+        // `active` only describes runtimes owned by this Registry instance. A
+        // different server process (or another Registry in the same process)
+        // may still have the session open and own the advisory file lock. Take
+        // the lease here, after any locally owned runtime has shut down, so the
+        // destructive operation is protected by the same cross-process gate as
+        // open(). Keep the file handle alive through remove_dir_all: releasing
+        // it before deletion would introduce a lock-to-delete TOCTOU window.
+        let _delete_lease =
+            SessionLease::acquire(dir.join(LOCK_FILE)).map_err(RegistryError::from_lease)?;
         tokio::task::spawn_blocking(move || fs::remove_dir_all(dir))
             .await
             .map_err(|error| RegistryError::Internal(error.into()))?
@@ -1002,6 +1012,48 @@ mod tests {
 
         assert_eq!(ids.len(), 1);
         assert_eq!(registry.list().await.unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn delete_respects_a_lease_owned_by_another_registry() {
+        let root = unique_temp_dir("cross-registry-delete");
+        let home = root.join("home");
+        let cwd = root.join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let owner = Registry::new(home.clone(), "flash".to_string(), 4);
+        let deleter = Registry::new(home, "flash".to_string(), 4);
+        let created = owner.create("leased", &cwd).await.unwrap();
+        owner
+            .open(&created.id, Some(&created.project_key))
+            .await
+            .unwrap();
+
+        // The second Registry has an empty local active map, so this assertion
+        // specifically verifies the OS-backed lease rather than the in-memory
+        // operation lock. A locked delete must leave every session file intact.
+        let error = deleter
+            .delete(&created.id, Some(&created.project_key))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, RegistryError::Locked(_)));
+        let session_dir = owner
+            .session_dir(&created.id, Some(&created.project_key))
+            .await
+            .unwrap();
+        assert!(session_dir.join("session.json").is_file());
+
+        // Once the owner shuts down and drops its lease, the same independent
+        // Registry can acquire the deletion lease and remove the directory.
+        owner
+            .close(&created.id, Some(&created.project_key))
+            .await
+            .unwrap();
+        deleter
+            .delete(&created.id, Some(&created.project_key))
+            .await
+            .unwrap();
+        assert!(!session_dir.exists());
         let _ = std::fs::remove_dir_all(root);
     }
 

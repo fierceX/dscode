@@ -16,8 +16,10 @@ let liveGeneration = 0;
 let connected = false;
 let activeAttempt: { revision: number; events: RawEvent[] } | null = null;
 let recoveryFinal: RawEvent | null = null;
+const recoveryRequests = new Set<AbortController>();
 
 const POLL_MS = 500;
+const RECOVERY_REQUEST_TIMEOUT_MS = 15_000;
 const LIFECYCLE_EVENTS = new Set(["turn_started", "turn_final"]);
 
 function delay(ms: number): Promise<void> {
@@ -36,7 +38,37 @@ function setDesynced(summary: SessionSummary, token: number): void {
   }
 }
 
+function abortRecoveryRequests(): void {
+  // Recovery reads are disposable snapshots. Once their revision or attached
+  // session is no longer current, allowing them to remain pending would block
+  // the single worker slot and prevent a reconnect from reaching authority.
+  for (const controller of recoveryRequests) controller.abort();
+  recoveryRequests.clear();
+}
+
+async function recoveryRequest<T>(request: (signal: AbortSignal) => Promise<T>): Promise<T | null> {
+  const controller = new AbortController();
+  recoveryRequests.add(controller);
+  const aborted = new Promise<null>((resolve) => {
+    controller.signal.addEventListener("abort", () => resolve(null), { once: true });
+  });
+  const timeout = setTimeout(() => controller.abort(), RECOVERY_REQUEST_TIMEOUT_MS);
+  try {
+    // The abort branch also releases the worker if a mocked or non-standard
+    // request ignores AbortSignal. Native fetch still receives the signal and
+    // stops its underlying network work through api.ts.
+    return await Promise.race([
+      request(controller.signal).catch(() => null),
+      aborted,
+    ]);
+  } finally {
+    clearTimeout(timeout);
+    recoveryRequests.delete(controller);
+  }
+}
+
 function invalidateRecovery(summary: SessionSummary, token: number): number {
+  abortRecoveryRequests();
   const revision = ++recoveryRevision;
   activeAttempt = null;
   setDesynced(summary, token);
@@ -74,17 +106,19 @@ function reduceConversation(summary: SessionSummary, rows: Record<string, unknow
 }
 
 async function loadConversation(summary: SessionSummary): Promise<Record<string, unknown>[] | null> {
-  const tail = await api.conversation(summary.id, {
+  const tail = await recoveryRequest((signal) => api.conversation(summary.id, {
     limit: 20,
     tail: true,
     project: summary.project_key,
-  }).catch(() => null);
+    signal,
+  }));
   if (tail?.code !== 200 || !Array.isArray(tail.data)) return null;
   return tail.data as Record<string, unknown>[];
 }
 
 export async function openSession(summary: SessionSummary): Promise<void> {
   const token = ++openToken;
+  abortRecoveryRequests();
   ++recoveryRevision;
   reloadWorker = null;
   reconcileWorker = null;
@@ -146,7 +180,13 @@ export async function openSession(summary: SessionSummary): Promise<void> {
 
 function scheduleReload(summary: SessionSummary, token: number): void {
   if (!isCurrent(summary, token) || !connected || reloadWorker) return;
-  reloadWorker = runReloadWorker(summary, token).finally(() => {
+  const worker = runReloadWorker(summary, token);
+  reloadWorker = worker;
+  void worker.finally(() => {
+    // A session switch may install a newer worker while this promise is still
+    // unwinding. Only the worker that still owns the slot may clear it or
+    // schedule follow-up work for the current session.
+    if (reloadWorker !== worker) return;
     reloadWorker = null;
     if (isCurrent(summary, token) && connected && appState.sessionState?.desynced && !reconcileWorker) {
       queueMicrotask(() => scheduleReload(summary, token));
@@ -158,7 +198,8 @@ async function runReloadWorker(summary: SessionSummary, token: number): Promise<
   while (isCurrent(summary, token) && connected) {
     const revision = recoveryRevision;
     setDesynced(summary, token);
-    const before = await api.getSession(summary.id, summary.project_key).catch(() => null);
+    const before = await recoveryRequest((signal) =>
+      api.getSession(summary.id, summary.project_key, signal));
     if (!isCurrent(summary, token) || !connected) return;
     if (revision !== recoveryRevision) continue;
     if (before?.code !== 200 || !before.data || before.data.running) {
@@ -170,7 +211,8 @@ async function runReloadWorker(summary: SessionSummary, token: number): Promise<
     const attempt = { revision, events: [] as RawEvent[] };
     activeAttempt = attempt;
     const conversation = await loadConversation(summary);
-    const after = await api.getSession(summary.id, summary.project_key).catch(() => null);
+    const after = await recoveryRequest((signal) =>
+      api.getSession(summary.id, summary.project_key, signal));
     if (activeAttempt === attempt) activeAttempt = null;
     if (!isCurrent(summary, token) || !connected) return;
 
@@ -199,9 +241,10 @@ async function runReloadWorker(summary: SessionSummary, token: number): Promise<
 
 function scheduleReconcile(summary: SessionSummary, token: number): void {
   if (reconcileWorker || !isCurrent(summary, token)) return;
-  reconcileWorker = (async () => {
+  const worker = (async () => {
     while (isCurrent(summary, token)) {
-      const detail = await api.getSession(summary.id, summary.project_key).catch(() => null);
+      const detail = await recoveryRequest((signal) =>
+        api.getSession(summary.id, summary.project_key, signal));
       if (!isCurrent(summary, token)) return;
       if (detail?.code === 200 && detail.data?.running === false) {
         invalidateRecovery(summary, token);
@@ -209,7 +252,10 @@ function scheduleReconcile(summary: SessionSummary, token: number): void {
       }
       await delay(POLL_MS);
     }
-  })().finally(() => {
+  })();
+  reconcileWorker = worker;
+  void worker.finally(() => {
+    if (reconcileWorker !== worker) return;
     reconcileWorker = null;
     if (isCurrent(summary, token) && connected) scheduleReload(summary, token);
   });
@@ -217,6 +263,7 @@ function scheduleReconcile(summary: SessionSummary, token: number): void {
 
 export function closeSessionView(): void {
   ++openToken;
+  abortRecoveryRequests();
   ++recoveryRevision;
   connected = false;
   reloadWorker = null;

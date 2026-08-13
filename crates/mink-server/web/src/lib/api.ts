@@ -50,9 +50,10 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ name, cwd }),
     }),
-  getSession: (id: string, project?: string) =>
+  getSession: (id: string, project?: string, signal?: AbortSignal) =>
     request<{ id: string; open: boolean; running: boolean }>(
       sessionUrl(id, "", project),
+      { signal },
     ),
   openSession: (id: string, project?: string) =>
     request(sessionUrl(id, "/open", project), { method: "POST" }),
@@ -66,12 +67,14 @@ export const api = {
   interrupt: (id: string, project?: string) =>
     request(sessionUrl(id, "/interrupt", project), { method: "POST" }),
   /** conversation.jsonl 完整轮次分页（历史展示主源） */
-  conversation: (id: string, opts: { limit?: number; tail?: boolean; beforeSeq?: number; project?: string } = {}) => {
+  conversation: (id: string, opts: { limit?: number; tail?: boolean; beforeSeq?: number; project?: string; signal?: AbortSignal } = {}) => {
     const params = new URLSearchParams({ limit: String(opts.limit ?? 20) });
     if (opts.project) params.set("project", opts.project);
     if (opts.tail) params.set("tail", "true");
     if (opts.beforeSeq) params.set("before_seq", String(opts.beforeSeq));
-    return request<unknown[]>(`/api/sessions/${encodeURIComponent(id)}/conversation?${params}`);
+    return request<unknown[]>(`/api/sessions/${encodeURIComponent(id)}/conversation?${params}`, {
+      signal: opts.signal,
+    });
   },
   plan: (id: string, project?: string) =>
     request<{ plan: string | null; draft: string | null }>(
