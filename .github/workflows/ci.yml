@@ -20,7 +20,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-node@v4
         with:
-          node-version: "20.18.1"
+          # Vite 8 currently resolves Rolldown 1.2.x, whose native bindings
+          # require Node >=20.19.0. On 20.18 npm treats those platform packages
+          # as failed optional dependencies, so installation appears successful
+          # but the Rust build script later fails when it invokes `vite build`.
+          node-version: "20.19.0"
       - run: npm ci
         working-directory: crates/mink-server/web
       - run: cargo fmt --all -- --check
