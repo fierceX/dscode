@@ -37,11 +37,12 @@ pub fn try_nsjail(
     cmd.push("--tmpfs".into());
     cmd.push("/tmp".into());
     // If TMPDIR is set and differs from /tmp, also mount it
-    if let Ok(tmpdir) = std::env::var("TMPDIR") {
-        if !tmpdir.is_empty() && tmpdir != "/tmp" {
-            cmd.push("--tmpfs".into());
-            cmd.push(tmpdir);
-        }
+    if let Ok(tmpdir) = std::env::var("TMPDIR")
+        && !tmpdir.is_empty()
+        && tmpdir != "/tmp"
+    {
+        cmd.push("--tmpfs".into());
+        cmd.push(tmpdir);
     }
 
     // ── User-configured bind mounts ──────────────────────────
@@ -68,11 +69,11 @@ pub fn try_nsjail(
     }
 
     // ── HOME directory (read-only for config access) ─────────
-    if let Ok(ref home) = std::env::var("HOME") {
-        if !home.is_empty() {
-            cmd.push("--bindmount_ro".into());
-            cmd.push(format!("{0}:{0}", home));
-        }
+    if let Ok(ref home) = std::env::var("HOME")
+        && !home.is_empty()
+    {
+        cmd.push("--bindmount_ro".into());
+        cmd.push(format!("{0}:{0}", home));
     }
 
     // ── MINK_HOME / default ~/.mink (writable for session persistence) ──
@@ -188,12 +189,12 @@ pub fn try_bwrap(
     }
 
     // ── HOME directory (read-only for config access) ─────────
-    if let Ok(ref home) = std::env::var("HOME") {
-        if !home.is_empty() {
-            cmd.push("--ro-bind".into());
-            cmd.push(home.to_string());
-            cmd.push(home.to_string());
-        }
+    if let Ok(ref home) = std::env::var("HOME")
+        && !home.is_empty()
+    {
+        cmd.push("--ro-bind".into());
+        cmd.push(home.to_string());
+        cmd.push(home.to_string());
     }
 
     // ── MINK_HOME / default ~/.mink (writable for session persistence) ──

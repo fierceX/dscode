@@ -95,77 +95,42 @@ jobs:
           - runner: macos-14
             target: aarch64-apple-darwin
             suffix: darwin-arm64
-          - runner: ubuntu-latest
+          - runner: ubuntu-22.04
             target: x86_64-unknown-freebsd
             suffix: freebsd-amd64
-            freebsd: true
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
 
-      # ── FreeBSD build (via VM) ──
-      - name: Build on FreeBSD VM
-        if: matrix.freebsd
-        uses: vmactions/freebsd-vm@v1
-        with:
-          release: "15.0"
-          usesh: true
-          mem: 4096
-          prepare: |
-            pkg install -y rust llvm node npm
-          run: |
-            set -e
-            cd crates/mink-server/web
-            npm ci
-            cd ../..
-            # --target-dir 显式锁定仓库根 ./target（FreeBSD VM 可能设置 CARGO_TARGET_DIR 重定向产物）
-            cargo build --release -p mink-cli -p mink-server --target-dir ./target
-            ls -la target/release/ | grep mink || true
-            mkdir -p dist
-            cp target/release/mink dist/mink-freebsd-amd64
-            cp target/release/mink-server dist/mink-server-freebsd-amd64
-            test -s dist/mink-freebsd-amd64
-            test -s dist/mink-server-freebsd-amd64
-
-      # ── Linux / macOS build ──
       - uses: dtolnay/rust-toolchain@stable
-        if: '!matrix.freebsd'
         with:
           targets: ${{ matrix.target }}
 
       - name: Install Python (for zigbuild)
-        if: matrix.target == 'x86_64-unknown-linux-musl'
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Install cargo-zigbuild
-        if: matrix.target == 'x86_64-unknown-linux-musl'
         run: pip install -q cargo-zigbuild
 
       - name: Setup Node (embedded frontend build)
-        if: '!matrix.freebsd'
         uses: actions/setup-node@v4
         with:
           node-version: "20"
 
       - name: Install web deps (embedded frontend)
-        if: '!matrix.freebsd'
-        run: |
-          cd crates/mink-server/web
-          npm ci
+        run: npm ci
+        working-directory: crates/mink-server/web
 
       - name: Build mink + mink-server binaries
-        if: '!matrix.freebsd'
         run: |
           mkdir -p dist
-          if [ "${{ matrix.target }}" = "x86_64-unknown-linux-musl" ]; then
-            cargo zigbuild --release --target x86_64-unknown-linux-musl
-            cargo zigbuild -p mink-server --release --target x86_64-unknown-linux-musl
-          else
-            cargo build --release --target ${{ matrix.target }}
-            cargo build -p mink-server --release --target ${{ matrix.target }}
-          fi
+          # 所有发布目标统一由 cargo-zigbuild 驱动。Linux runner 可直接为
+          # GNU、musl 和 FreeBSD 提供目标 linker/sysroot，不再为 FreeBSD
+          # 启动整套虚拟机；Darwin 仍保留 macOS runner，以使用 Apple SDK。
+          cargo zigbuild --release --target ${{ matrix.target }}
+          cargo zigbuild -p mink-server --release --target ${{ matrix.target }}
           cp target/${{ matrix.target }}/release/mink dist/mink-${{ matrix.suffix }}
           cp target/${{ matrix.target }}/release/mink-server dist/mink-server-${{ matrix.suffix }}
           # 内嵌前端校验：server 二进制大小应显著大于纯 Rust 骨架（> 1MB 视为含 dist）
