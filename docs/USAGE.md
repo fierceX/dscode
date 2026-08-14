@@ -202,10 +202,44 @@ local = "private-model-v1"
 [sandbox_python]
 wasm_path = "/path/to/python.wasm"
 read_dirs = ["./data"]
+
+[signal]
+# 信号反馈系统：全部可省略，未提供则用默认值
+remind_threshold = 0.70        # B >= 此值不响应
+warn_threshold = 0.50          # B < 此值：证据注入 + 快照回滚 + 恢复守卫
+abort_threshold = 0.30         # B < 此值：用户接管（非交互环境先降级策略重启）
+alpha_prior = 3.0              # Beta 先验（成功证据）
+beta_prior = 1.0               # Beta 先验（失败证据）
+window_size = 16               # 滑动窗口
+decay_per_input = 0.6          # 跨输入信念衰减（0 = 完全重置，1 = 不衰减）
+evidence_max_chars = 4000      # 轨迹证据注入的字符预算
+evidence_dedup_window = 6      # 证据新鲜度去重窗口（工具步）
+guard_max_blocks = 3           # 守卫连续拦截上限，达到后绕过并强制证据注入
+cooldown_turns = 3             # 注入后的冷却轮数
+rollback_enabled = true        # Warning 级快照回滚开关
+replan_max_turns = 12          # 策略重启子代理的最大轮数
+replan_token_budget = 24000    # 策略重启子代理输出预算
+replan_max_attempts = 1        # 每次用户输入内最多重启次数（0 = 禁用）
 ```
 
 `model_aliases` 可覆盖默认别名；未命中别名的 `model` 作为真实模型名原样发送。
 `--agent-jsonl` 模式不会读取 `.minkrc`，但仍应用命令行 `--config`。
+
+#### 信号系统（分层响应模型）
+
+信号系统的响应按信念度分层（设计依据见 `docs/设计哲学-信号系统.md`）：
+
+- **记录不干预**：软信号（regex 嗅探类）单独出现且信念尚可时，只记录不改行为；
+- **证据注入**：信念进入提醒区后注入 `[trajectory]`/`[detector]` 轨迹事实
+  （重复调用、失败聚类、预算消耗），不注入命令；
+- **状态操作**：警告区把循环窗口内编辑过的文件回滚到最近快照，并启用恢复首步守卫
+  （拦截会喂回信念，连续拦截达 `guard_max_blocks` 后绕过并强制证据注入）；
+- **策略重启**：同一输入内连续第 2 次警告，或非交互环境下信念跌破 abort 阈值时，
+  以 fresh 子代理（不继承父对话）重新规划后继续；
+- **用户接管**：交互环境下信念跌破 abort 阈值时，输出结构化接管报告
+  （证据/编辑路径/选项）并返回失败，等待用户重锚定。
+
+`MINK_SIGNAL_MODE=off` 关闭全部信号采集、证据注入、回滚、接管与守卫。
 
 ### 配置文件
 
@@ -230,6 +264,7 @@ context_reserve_tokens = 64000
 context_compact_tail_tokens = 256000
 context_compact_max_output_tokens = 8192
 context_compact_input_reduction = false
+plan_projection_tail = true          # 计划尾置投影（最后一条消息），保住前缀缓存命中率；false 回退前置投影
 log_events = true
 max_search_files = 5000
 max_search_results = 1000
@@ -466,6 +501,7 @@ PlanConfirm/PlanClear 的压缩请求服从 TurnCompactor 同轮一次守卫，�
 | `context_compact_tail_tokens` | 256000 | 压缩后保留的热尾部目标 |
 | `context_compact_max_output_tokens` | 8192 | 摘要输出上限 |
 | `context_compact_input_reduction` | false | 压缩 think 和工具噪声 |
+| `plan_projection_tail` | true | 已确认计划尾置投影（最后一条消息），计划修订不失效前缀缓存；`false` 回退前置投影 |
 
 触发点取百分比阈值和 `max_context - context_reserve_tokens` 中较早者。
 `max_context_tokens=0` 禁用 auto/preflight 压缩，保留 `/compact`。
@@ -715,6 +751,27 @@ mink --list-sessions
 # 查看事件日志中的信念变化
 grep '"belief"' events.jsonl | jq '{type, belief}'
 
-# 查看注入历史
-grep '"Injecting hint"' events.jsonl
+# 查看前缀快照（system prompt + tools 指纹，用于离线重建请求前缀）
+grep '"prefix_snapshot"' events.jsonl | jq '{version, fingerprint, dependency_fingerprint}'
+
+# 查看请求级缓存明细（缓存命中率可算：兼容拼写路径已通，原生拼写为兜底）
+cat usage.jsonl | jq '{input_tokens, cache_read_tokens, cache_creation_tokens}'
+
+# 查看注入历史（轨迹证据注入落在 conversation.jsonl）
+grep '\[trajectory\]' conversation.jsonl
 ```
+
+### 缓存指标观测
+
+DeepSeek 的 context caching 用量通过 OpenAI 兼容字段回传：
+`prompt_tokens_details.cached_tokens`（DeepSeek 返回的就是这个兼容拼写，
+不是原生 `prompt_cache_hit_tokens`）。mink 的解析链以兼容拼写优先、原生拼写
+兜底（`prompt_cache_hit_tokens`），未命中部分隐含在
+`input_tokens = prompt_tokens - cache_read_tokens` 的减法中。
+
+**缓存命中率可正常计算**：命中率 = 累计 `cache_read_tokens` / 累计
+`prompt_tokens`；标题栏 `I:` 字段括号内即该比率。前缀命中要求 system prompt、
+tools 与历史消息前缀字节级稳定——计划修订会改变其后的全部前缀，因此
+`plan_projection_tail=true`（默认）把计划放在最后一条消息，修订只影响自身位置；
+`prefix_snapshot` 事件（events.jsonl）可用于离线重建请求前缀并归因
+"这次为什么 cache miss"。

@@ -390,13 +390,13 @@ StormDecision::Suppress(reason) => {
 - 信号采集：`ToolFailed`（退出码/`Error:` 前缀）、`ToolError`（regex 启发式）、
   `EditLoop`（滑动窗口序列检测）三类；一次调用多条信号取 `max(severity)`，不叠加
 - 信念计算：Beta-Binomial 拉普拉斯平滑，先验 `α=3, β=1`（无观测时 `B=0.75`），
-  滑动窗口 W=16，每次用户输入重置
-- 决策阈值：`B ≥ 0.70` 不干预；`B < 0.70` 注入（带冷却）；`B < 0.30` 中止（绕过冷却）；
-  `DecisionEngine` 每个用户输入重置冷却
-- 注入协议：以独立 User 消息（`[System note: ...]`）写入 conversation，不污染 system
-  prefix；`RecoveryPolicy` 按 resolved capabilities 渲染恢复提示并校验恢复首步
+  滑动窗口 W=16，跨输入按 `Config.signal.decay_per_input`（默认 0.6）衰减替代硬重置
+- 分层响应：`B ≥ remind` 不干预（单次软信号只记录）；提醒区注入轨迹证据；警告区叠加
+  快照回滚与恢复首步守卫（拦截喂回信念）；`B < abort` 用户接管；阈值/超参/档位全可配置
+- 注入协议：以独立 User 消息（`[trajectory]`/`[detector]` 事实帧）写入 conversation，
+  不污染 system prefix；`RecoveryPolicy` 按 resolved capabilities 校验恢复首步
 - `MINK_SIGNAL_MODE=off`：不生成 `<belief-awareness>` prompt 段，不采集、不注入、
-  不中止、不启用恢复守卫
+  不回滚、不接管、不启用恢复守卫
 - 错误分类（`errors.rs` 的 `ErrorCategory`：Network/Auth/RateLimit/Parse/Tool/Internal）
   仅用于日志与用户提示，不驱动任何决策
 

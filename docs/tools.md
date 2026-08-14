@@ -250,8 +250,8 @@ cargo build --release
 - 空命令和危险命令会被安全策略拒绝。
 - 用于读文件、搜索内容或发现路径的 Bash 命令会被拦截，提示改用 `Read`、`Grep` 或 `Glob`。
 - 当 `Write` 或 `Edit` 同时位于模型工具 surface 时，系统提示词要求文件创建、完整覆盖和锚定修改优先使用专用 provider，不使用 Bash 重定向、heredoc、sed 或 awk 代替。
-- `SIGNAL_RECOVERY` 注入后的首个 Bash 调用还要单独满足 `FocusedVerificationExec`。这只是
-  Recovery 首步资格，不改变普通 Bash 是否可以执行；
+- 恢复首步守卫生效后，首个 Bash 调用还要单独满足 `FocusedVerificationExec`。这只是
+  恢复首步资格，不改变普通 Bash 的误用拦截；
 - 显式 `timeout` 优先；未设置时使用全局 `tool_timeout`（`--config` 或 `.minkrc` 设置），默认超时会稳定夹在 5 到 600 秒之间，不再根据历史执行耗时自适应调整。
 - Ctrl+C / interrupt 会尝试中断子进程，返回 exit code 130 语义。
 - stdout 和 stderr 合并返回，非零退出码会追加提示。

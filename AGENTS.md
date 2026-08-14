@@ -1,6 +1,6 @@
 # Agents Guide
 
-> 更新日期：2026-08-13
+> 更新日期：2026-08-14
 
 [TOC]
 
@@ -14,7 +14,7 @@ Mink 是一个 Rust 实现的轻量 AI coding agent，专为 DeepSeek/OpenAI-com
 
 - LLM 流式请求 -> 工具执行 -> 决策的内循环
 - **Rust 库 API**：`AgentRuntime::start() → run_turn() / stream_turn() → shutdown()`，无需子进程
-- 信号驱动的信念系统：自动错误检测、注入修正、恢复首步守卫，可用 `MINK_SIGNAL_MODE=off` 关闭
+- 信号驱动的信念系统：自动错误检测、轨迹证据注入（`[trajectory]`）、编辑循环快照回滚与恢复首步守卫，阈值/超参全可配置（`Config.signal`），可用 `MINK_SIGNAL_MODE=off` 关闭
 - 上下文自适应压缩：显式阈值、响应预留、热尾部和摘要预算；可选摘要输入降噪
 - 维修流水线：Scavenge 回收、Truncation 修复、StormBreaker 重复调用抑制
 - Session 持久化：JSONL 追加写入，支持恢复和重放
@@ -176,10 +176,11 @@ TurnExecutor (agent/turn.rs)
 └───────────────────────┘
          │
 ┌─────── 信号层 ────────┐
-│ guard/collector.rs    │ ToolFailed/ToolError/EditLoop 信号采集
-│ agent/belief.rs       │ 信念度计算
-│ agent/decision.rs     │ 注入/中止决策
- │ config.rs             │ MINK_SIGNAL_MODE 开关 / SignalMode 枚举
+│ guard/collector.rs    │ ToolFailed/ToolError/EditLoop 信号采集（soft/hard 分级）
+│ guard/evidence.rs     │ 轨迹证据跟踪：重复调用/失败聚类/预算消耗（证据注入、回滚定位）
+│ agent/belief.rs       │ 信念度计算（先验/窗口/衰减可配置）
+│ agent/decision.rs     │ 分层响应决策（证据注入/回滚/接管）
+ │ config.rs             │ MINK_SIGNAL_MODE 开关 / SignalMode 枚举 / Config.signal 参数组
 └───────────────────────┘
          │
 ┌─────── 持久化层 ──────┐
@@ -215,7 +216,7 @@ TurnExecutor (agent/turn.rs)
   │
   ▼
 OrchActor.handle_user_input()
-  ├── belief.reset()
+  ├── belief.decay(Config.signal.decay_per_input)   # 跨轮衰减替代硬重置
   ├── DecisionEngine reset cooldown
   ├── StormBreaker reset
   └── TurnExecutor::execute()
@@ -241,7 +242,7 @@ OrchActor.handle_user_input()
 └──────────────────────────────────────────────────────┘
 ```
 
-### 信号系统
+### 信号系统（分层响应模型）
 
 ```
 工具执行完毕
@@ -251,17 +252,23 @@ SignalCollector.collect()
        ├── ToolError：regex 匹配编译错、测试失败等
        └── EditLoop：编辑-检查循环窗口检测
        │
-       ▼
-BeliefTracker.observe()
+BeliefTracker.observe()      # 参数来自 Config.signal（阈值/先验/窗口/衰减）
        │  滑动窗口 + 拉普拉斯平滑
        ▼
-DecisionEngine.decide()
-       ├── B >= 0.70 -> None
-       ├── B < 0.70 -> Inject + 冷却 + 恢复首步守卫
-       └── B < 0.30 -> Abort
+DecisionEngine.decide_with_signals()
+       ├── 单次软失败且 B >= warn_threshold -> None（记录不干预；累计 >= 2 次参与决策）
+       ├── B 在提醒区 -> 轨迹证据注入（[trajectory]/[detector] 事实，无命令）
+       ├── B 在警告区 -> 证据注入 + 快照回滚 + 恢复首步守卫（拦截喂回信念）
+       ├── 守卫连续拦截 >= guard_max_blocks -> 绕过守卫并强制证据注入
+       └── B < abort_threshold -> 用户接管（HandOver 事件 + 证据报告）
 ```
 
-`MINK_SIGNAL_MODE=off` 时，不生成 `<belief-awareness>` prompt 段，也不执行信号采集、信念更新、注入、中止和恢复守卫。
+阈值/超参/响应档位全部可配置（`Config.signal`：`remind/warn/abort_threshold`、
+`alpha/beta_prior`、`window_size`、`decay_per_input`、`evidence_max_chars`、
+`guard_max_blocks`、`rollback_enabled` 等）。设计依据见
+`docs/设计哲学-信号系统.md`。
+
+`MINK_SIGNAL_MODE=off` 时，不生成 `<belief-awareness>` prompt 段，也不执行信号采集、信念更新、证据注入、回滚、接管和恢复守卫。
 
 ---
 
@@ -312,9 +319,10 @@ DecisionEngine.decide()
 | `agent/plan_actions.rs` | 将已完成的 Plan 类型化命令转换为 turn effect 和压缩请求 |
 | `agent/belief.rs` | 信念度追踪 |
 | `agent/decision.rs` | 结构化注入/中止决策 |
-| `agent/recovery_policy.rs` | 从 resolved semantic capabilities 渲染恢复提示并校验恢复首个调用 |
+| `agent/recovery_policy.rs` | 从 resolved semantic capabilities 校验恢复首个调用 |
  | `config.rs` | `SignalMode` / 信号模式开关 |
-| `agent/tool_signals.rs` | 工具信号处理 |
+| `agent/tool_signals.rs` | 工具信号处理 + 轨迹证据记录（EvidenceTracker） |
+| `guard/evidence.rs` | 轨迹证据构造与渲染：重复调用/失败聚类/预算截断/新鲜度去重 |
 | `agent/sub_coordinator.rs` | 子代理启动、并发限制、结果收集 |
 | `agent/sub_executor.rs` | 子代理执行 |
 | `agent/prefix.rs` | agent 层 prefix manager |
@@ -323,7 +331,7 @@ DecisionEngine.decide()
 
 | 文件 | 职责 |
 |------|------|
-| `tools/metadata.rs` | ToolMetadata、ApprovalTier、ToolResultKind |
+| `tools/metadata.rs` | ToolMetadata、ApprovalTier、ToolResultKind、ToolErrorKind（结构化错误码） |
 | `tools/catalog.rs` | schema、executor registry 和 build availability 的统一目录 |
 | `tools/surface.rs` | 按工具选择、approval、角色、后端、feature 和硬依赖解析模型可见工具面 |
 | `tools/approval.rs` | 构建模型工具面时使用的非交互审批判定 |
@@ -425,6 +433,7 @@ fail closed。
 
 - `TurnCompactor`：同一用户输入的内循环最多压缩一次上下文；PlanConfirm/PlanClear 的强制压缩也必须经过该守卫并传播失败
 - `ImmutablePrefix`：system prompt/tools 变更必须 invalidate prefix
+- 前缀构建/失效重建时必须向 events.jsonl 写一条 `prefix_snapshot` 事件（fingerprint/dependency_fingerprint/system_prompt/tools_json），使任意请求的模型可见前缀可离线重建；缓存命中不得重复写（invariant 测试钉住）
 - `ConversationStore` 内存缓存只保留当前活跃后缀；append 增量更新该缓存，完整历史读取作为一次性读盘操作
 - `conversation.jsonl` 完整保留且只追加；压缩只推进 `context-state.json` 中的活跃投影边界
 - `ConversationStore` 续写前修复未换行尾记录，并以包含换行的单缓冲区追加
@@ -450,8 +459,13 @@ fail closed。
 - `ArtifactManager` 初始化必须从已有 index 的最大序号继续，正文文件必须使用独占创建，禁止覆盖恢复或 fork 继承的 artifact
 - `ConversationStore` append 写入通过内部写锁串行化；读盘只容忍文件末尾未换行的半截 JSONL
 - `StormBreaker` 每个新用户输入重置
-- `BeliefTracker` 每个新用户输入 reset，初始信念为 0.75
-- `DecisionEngine` 每个新用户输入 reset cooldown
+- `BeliefTracker` 初始信念 0.75；每用户输入按 `Config.signal.decay_per_input`（默认 0.6）衰减替代硬重置——跨轮重复失败累积升级、偶然失败自然消退；`DecisionEngine` 冷却与 `StormBreaker` 仍每输入 reset
+- 软信号（ToolError/EditLoop/ArgumentError）单独出现（累计 <= 1 次）且信念 >= warn_threshold 时不产生任何响应（记录不干预）；累计 >= 2 次软失败或出现硬信号（ToolFailed/SafetyBlocked/CompileError/TestFailure）与结构化错误码（Timeout/ProcessFailed/SafetyBlocked/Aborted）即参与决策
+- 信号响应注入的是轨迹事实（`[trajectory]`/`[detector]` 帧），禁止祈使句与"进入恢复模式"类命令；证据按新鲜度哈希去重（`evidence_dedup_window`），同一证据批不重复注入；响应事件必须携带证据文本（可回溯到 conversation.jsonl）
+- 快照回滚只作用于循环窗口（最近 ROLLBACK_WINDOW_STEPS 步，与 collector seq_window 对齐）内被编辑过的路径；回滚目标是该路径**最后一次 Read/Write 完整内容基线**（record_edit 的编辑后内容不得作为回滚目标，否则恒等 no-op）；Replace 模式的 Read 同样记录基线；写回必须经 atomic_replace 且磁盘内容与基线不一致时才写；写回后 bump memo mutation；回滚事件以 `signal_rollback` 落 events.jsonl
+- 恢复守卫拦截必须生成真实信号喂回信念；连续拦截达到 `guard_max_blocks` 必须绕过守卫并强制证据注入，禁止无限拦截
+- B < abort_threshold 时进入用户接管：结构化 `signal_handover` 事件（证据/编辑路径/选项）落 events.jsonl 后返回 Failed；禁止静默丢弃证据
+- 策略重启子代理初始化失败必须降级（记录 `signal_replan_error` 事件后返回 None），禁止把信号响应路径的初始化错误升级为整轮 Err
 - Recovery 首步资格来自 resolved semantic capabilities；Bash 的 `FocusedVerificationExec` classifier 与普通 Bash 安全/误用策略相互独立
 - approval 在构建 `ModelToolSurface` 时解析；`ToolRunner::execute_all()` 在 StormBreaker 前校验调用属于同一个 resolved surface
 - `ToolRunner::execute_all()` 只并发连续只读工具；写入、执行、控制和 SubAgent 工具必须按调用顺序串行执行
@@ -460,7 +474,7 @@ fail closed。
 - 工具真实执行只接受 `ModelToolSurface` 中的工具；disable flag 和 sandbox 工具策略不属于运行时合同
 - PlanDraft/PlanConfirm/PlanClear 必须通过类型化 `PlanCommand` 和 `PlanStore` 完成；文件错误必须返回模型，禁止空成功
 - 已确认计划存在时禁止创建新草稿；PlanClear 必须同时清理可能遗留的陈旧草稿
-- 已确认计划必须在每次 LLM 请求时作为唯一的动态 `<current-plan>` system message 投影；不得写入 conversation、压缩摘要或 immutable prefix
+- 已确认计划必须在每次 LLM 请求时作为唯一的动态 `<current-plan>` system message 投影；不得写入 conversation、压缩摘要或 immutable prefix；默认**尾置投影**（作为最后一条消息），使计划修订不失效前缀缓存，`plan_projection_tail=false` 可回退前置投影（插入前导 system 消息之后）
 - Plan 与 SubAgent 结果必须在延迟工作完成并经过统一大小保护后再进入信号采集
 - 默认 approval mode 是 `yolo`；`prompt` 目前没有交互式 UI，会 fail closed
 - `ToolRunner::format_tool_result()` 是工具输出进入 LLM/UI 前的统一最大字节保护，超长输出写入 `artifact://<id>`
@@ -472,7 +486,7 @@ fail closed。
 - `Read` 模型可见参数只含 `path`（行范围用路径选择器）；全工具 schema 声明字段必须与 serde 接受字段一致且 `additionalProperties:false`（catalog 一致性测试强制）
 - Read memo 命中必须同时满足 len/mtime 一致、epoch 一致、mutation_epoch 一致与范围覆盖；任何压缩提交成功后必须 bump epoch，任何 Write/Edit 成功后必须 bump mutation；子代理 memo 相互独立，仅本地文件
 - `tool-inventory` section 内容必须与当前 `ModelToolSurface` 名称集一致；空 surface 才使用 `runtime-capabilities`
-- prompt 资产写作纪律：所有适用的 system 指令均必须遵守；RFC2119 只精确定义 system prompt 内全大写关键字的强度，不重解释用户/rule/skill 普通措辞或输出标记；每个 `<critical>` 必须有 3-6 条战术 bullet，每条 ≤12 英文词且只表达一个主张；示例/规范形态置尾、禁 token/budget 措辞、不写引擎内部机制，测试必须执行这些约束
+- prompt 资产写作纪律：所有适用的 system 指令均必须遵守；RFC2119 只精确定义 system prompt 内全大写关键字的强度，不重解释用户/rule/skill 普通措辞或输出标记；每个 `<critical>` 必须有 3-6 条战术 bullet，每条 ≤12 英文词且只表达一个主张；示例/规范形态置尾、禁 token/budget 措辞、不写引擎内部机制；由 `tests/prompt_discipline.rs` 机械执行（bullet 数/词数/禁词/占位符白名单/示例置尾）
 - 压缩 cut point 必须保留最近真实 user 消息（≥2 条，优先于纯 token 预算）
 - Edit no-change 幂等成功仅当"位置精确且最终状态可验证一致"（`hashline::already_applied`）；任何歧义必须退回 soft no-op → 3 次硬错误的 fail-closed 路径
 - prompt skill index、selected skills、`skill://` 和 `rule://` 必须来自同一 `CapabilitySnapshot`
@@ -536,7 +550,13 @@ CPU 密集度高。CI 环境应使用 `--features slow-tests -- --include-ignore
 grep '"belief"' events.jsonl | jq '{type, belief}'
 
 # 查看注入历史
-grep '"Injecting hint"' events.jsonl
+grep '"Injecting trajectory evidence"' events.jsonl
+
+# 查看回滚与接管事件
+grep '"signal_rollback"\|"signal_handover"' events.jsonl
+
+# 查看前缀快照（system prompt + tools 指纹，离线重建请求前缀 / cache miss 归因）
+grep '"prefix_snapshot"' events.jsonl | jq '{version, fingerprint, dependency_fingerprint}'
 
 # stream-json 模式
 ./target/release/mink --print "..."
