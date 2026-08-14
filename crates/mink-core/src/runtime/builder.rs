@@ -983,6 +983,131 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(cwd).await;
     }
 
+    fn tool_call_event(
+        name: &str,
+        id: &str,
+        input: serde_json::Value,
+    ) -> crate::protocol::ToolCallEvent {
+        let fields: std::collections::BTreeMap<String, String> = input
+            .as_object()
+            .map(|obj| {
+                obj.iter()
+                    .map(|(key, value)| (key.clone(), value.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let order = fields.keys().cloned().collect();
+        crate::protocol::ToolCallEvent {
+            name: name.into(),
+            id: id.into(),
+            input_json: input,
+            fields,
+            order,
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_result_events_carry_presentation_and_artifacts() {
+        use crate::protocol::{Event, StopEvent, TextEvent};
+        use serde_json::json;
+        let home = unique_temp_dir("b3-home");
+        let cwd = unique_temp_dir("b3-cwd");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+        let sink = Arc::new(RecordingSink::default());
+
+        let mock = crate::llm::mock::MockLlmClient::new(
+            "flash",
+            vec![
+                vec![
+                    Ok(Event::ToolCall(tool_call_event(
+                        "TodoWrite",
+                        "call_todo",
+                        json!({"base_revision":0,"add":[{"content":"first task"}]}),
+                    ))),
+                    Ok(Event::Stop(StopEvent {
+                        reason: "tool_use".into(),
+                    })),
+                ],
+                vec![
+                    Ok(Event::Text(TextEvent {
+                        content: "todo done".into(),
+                    })),
+                    Ok(Event::Stop(StopEvent {
+                        reason: "end_turn".into(),
+                    })),
+                ],
+                vec![
+                    Ok(Event::ToolCall(tool_call_event(
+                        "Bash",
+                        "call_bash",
+                        json!({"command":"yes x | head -c 150000"}),
+                    ))),
+                    Ok(Event::Stop(StopEvent {
+                        reason: "tool_use".into(),
+                    })),
+                ],
+                vec![
+                    Ok(Event::Text(TextEvent {
+                        content: "bash done".into(),
+                    })),
+                    Ok(Event::Stop(StopEvent {
+                        reason: "end_turn".into(),
+                    })),
+                ],
+            ],
+        );
+        let runtime_config =
+            runtime_config_with_mock(&home, &cwd, mock).with_event_sink(sink.clone());
+        let runtime = build_runtime(runtime_config).await.unwrap();
+
+        runtime.run_turn("add a todo").await.unwrap();
+        runtime.run_turn("produce a big output").await.unwrap();
+        runtime.shutdown().await.unwrap();
+
+        {
+            let events = sink.events.lock().unwrap();
+            let todo_presentations: Vec<_> = events
+                .iter()
+                .filter_map(|event| match &event.kind {
+                    crate::runtime::AgentEventKind::ToolResult {
+                        tool_name,
+                        presentation,
+                        ..
+                    } if tool_name == "TodoWrite" => Some(presentation.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(todo_presentations.len(), 1, "exactly one TodoWrite result");
+            assert!(
+                matches!(
+                    todo_presentations[0],
+                    Some(crate::ui::ToolPresentation::Todo(_))
+                ),
+                "TodoWrite ToolResult event must carry its structured presentation"
+            );
+
+            let bash_artifacts: Vec<_> = events
+                .iter()
+                .filter_map(|event| match &event.kind {
+                    crate::runtime::AgentEventKind::ToolResult {
+                        tool_name,
+                        artifacts,
+                        ..
+                    } if tool_name == "Bash" => Some(artifacts.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(bash_artifacts.len(), 1, "exactly one Bash result");
+            assert!(
+                !bash_artifacts[0].is_empty(),
+                "oversized Bash result must carry artifact references in the event"
+            );
+        }
+
+        let _ = tokio::fs::remove_dir_all(home).await;
+        let _ = tokio::fs::remove_dir_all(cwd).await;
+    }
+
     // ── Mock LLM runtime integration tests ──────────────────────────
 
     /// Build a minimal mock LLM that returns Text + Stop for each call.

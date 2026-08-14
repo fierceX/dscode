@@ -95,6 +95,32 @@ impl ToolSignalProcessor {
             scan_error_patterns,
         );
         result.signals = new_signals;
+        // 内容型工具（Read/Write）失败文本是 "Error: ..." 形态，但结果摘要头
+        //（"Read(path)"）会挡住收集器的 "Error:" 前缀检测；success=false 与
+        // exit_code=None 组合是执行路径的权威判定。此处补一条硬信号，恢复
+        // "Error 前缀 = ToolFailed" 的设计意图，保证信念随确定性失败下降
+        //（B2 invariant 测试暴露：失败 Read 曾被信念当作成功观察）。
+        // SignalRecoveryGuard 的拦截已由 apply_signal_recovery_guard 单独喂回
+        // 信念，这里排除以免双重计数。
+        if !result.success
+            && result.exit_code.is_none()
+            && result.tool_name != "SignalRecoveryGuard"
+            && !result.signals.iter().any(|s| s.kind.is_hard())
+        {
+            let message = result
+                .content
+                .lines()
+                .find(|line| line.starts_with("Error:"))
+                .or_else(|| result.content.lines().next())
+                .unwrap_or("Error")
+                .to_string();
+            result.signals.push(Signal::synthetic(
+                SignalKind::ToolFailed,
+                1.0,
+                result.tool_name.clone(),
+                message,
+            ));
+        }
         self.signals.extend(result.signals.clone());
 
         // 轨迹证据（SIGNAL_RESPONSE_REDESIGN R1/S2）：把本批调用压缩成统计事实。
@@ -259,6 +285,44 @@ mod tests {
             )
             .await;
         assert!(result.signals.is_empty());
+    }
+
+    #[tokio::test]
+    async fn content_tool_failure_with_summary_header_still_produces_hard_signal() {
+        let mut processor = ToolSignalProcessor::new();
+        let mut result = ToolRunResult {
+            tool_name: "Read".into(),
+            content: "Read(missing.txt)\nError: tool execution failed: Error: file not found or unreadable: missing.txt".into(),
+            exit_code: None,
+            error_code: None,
+            result_kind: crate::tools::metadata::ToolResultKind::FileRead,
+            signals: Vec::new(),
+            ..tool_result("unused")
+        };
+        let mut belief = crate::agent::belief::BeliefTracker::new(16);
+        processor
+            .process_with_mode(
+                &mut result,
+                Some(&mut belief),
+                &crate::regression::test_context_for_agent("tool-signals-read-fail")
+                    .await
+                    .unwrap(),
+                "flash",
+                true,
+            )
+            .await;
+        assert!(
+            result
+                .signals
+                .iter()
+                .any(|s| s.kind.is_hard()),
+            "content-tool failure must produce a hard signal even behind the summary header"
+        );
+        assert!(
+            belief.belief() < 0.75,
+            "hard failure must drop belief, belief={}",
+            belief.belief()
+        );
     }
 
     #[tokio::test]
