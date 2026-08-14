@@ -1,6 +1,6 @@
 # Agents Guide
 
-> 更新日期：2026-08-10
+> 更新日期：2026-08-13
 
 [TOC]
 
@@ -293,11 +293,13 @@ DecisionEngine.decide()
 
 | 文件 | 职责 |
 |------|------|
-| `crates/mink-core/src/runtime/mod.rs` | 公共 API 导出：`AgentRuntime`、`AgentEventStream`、`AgentOptions` 等 |
-| `crates/mink-core/src/runtime/builder.rs` | `build_runtime()` — 构造 runtime，与 CLI 共用同一核心 |
-| `crates/mink-core/src/runtime/handle.rs` | `AgentRuntime` — `start()`, `run_turn()`, `stream_turn()`, `shutdown()` |
-| `crates/mink-core/src/runtime/options.rs` | `AgentOptions` ergonomic builder |
-| `crates/mink-core/src/runtime/events.rs` | `AgentEvent` / `EventSink` / `EventDisplay` adapter |
+| `crates/mink-core/src/runtime/mod.rs` | 公共 API 导出：`AgentRuntime`、`AgentRuntimeHandle`、`AgentEventStream`、`AgentEvent`/`AgentEventKind`、`AgentOptions` 等 |
+| `crates/mink-core/src/runtime/builder.rs` | crate-private `build_runtime()` — 从 `AgentOptions` 内部 resolved 配置构造 runtime |
+| `crates/mink-core/src/runtime/config.rs` | 私有 resolved 配置 / `SessionPolicy` / `SessionInfo` |
+| `crates/mink-core/src/runtime/handle.rs` | `AgentRuntime`（唯一 shutdown owner）/ 可克隆 `AgentRuntimeHandle` — `start()`, `handle()`, `run_turn()`, `stream_turn()`, `compact()`, `set_model()`, `interrupt_current_turn()`, `shutdown()` |
+| `crates/mink-core/src/runtime/options.rs` | `AgentOptions` ergonomic builder，含 `with_tool()` 自定义工具注册 |
+| `crates/mink-core/src/runtime/events.rs` | turn-scoped `AgentEvent` envelope / 异步 `EventSink` + dispatcher / `EventDisplay` adapter |
+| `crates/mink-core/src/runtime/tools.rs` | 稳定异步 `AgentTool` 自定义工具 API：`ToolDefinition` / `ToolExecutionContext` / `ToolOutput` / `ToolError` |
 | `crates/mink-core/src/runtime/sdk_adapter.rs` | SDK option/status/exit code 映射，CLI/SDK 去重 |
 | `crates/mink-core/examples/web_api.rs` | Hidden-worker web API demo：axum + 进程沙箱 + 异步任务队列 |
 ### Agent 核心
@@ -554,6 +556,7 @@ grep '"Injecting hint"' events.jsonl
 | `docs/USAGE.md` | CLI 参数、环境变量、会话管理、工具参考 |
 | `docs/EMBEDDING.md` | Rust 库 / Python SDK 嵌入、Token 用量与费用 |
 | `docs/PROTOCOL.md` | `--print` stream-json 与 `--agent-jsonl` 协议 |
+| `docs/server.md` | mink-server REST/SSE API、生命周期与并发语义 |
 | `docs/tools.md` | 内置工具参数与行为 |
 | `docs/设计哲学-工具能力与提示词解耦.md` | 工具 surface、语义能力、自由组合、前向求值和 prompt 所有权 |
 | `docs/设计哲学-信号系统.md` | 信号系统完整设计 |

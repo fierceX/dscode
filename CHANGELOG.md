@@ -2,16 +2,113 @@
 
 ## v0.4.0 (2026-08-13)
 
-### Runtime 所有权、统一事件与异步工具扩展
+### Runtime 所有权与统一事件（Breaking）
 
-- Rust SDK 以 `AgentRuntime::start(AgentOptions)` 作为唯一公开构建入口；并发 turn、压缩和模型切换在 runtime 忙时立即返回带活动 turn ID 的 `RuntimeError::Busy`。
-- 每轮使用独立 `TurnId`、有序事件 envelope 和完整 `TurnOutcome`；stream 的取消与 Drop 都等待核心清理后释放 permit。
-- 新增稳定异步 `AgentTool` 扩展 API；custom/builtin 工具共用 surface、审批、执行顺序、artifact 和 mutation memo 失效语义。
-- session project key 改为可读前缀加 canonical cwd 哈希，采用旧/新目录双读、新目录写入；歧义恢复 fail-closed。
-- server 使用显式 runtime 生命周期、graceful shutdown、idle reaper、SSE gap 对账和 project-aware API；PythonSandbox timeout/cancel 使用 Wasmtime epoch interruption 并等待执行线程退出。
-- 权威 session 状态改用加强的原子替换与损坏检测；版本升级到 0.4.0。
+- `AgentRuntime::start(AgentOptions)` 成为唯一公开构建入口：`AgentRuntimeConfig` 与
+  `build_runtime()` 降为 crate-private，`AgentOptions` 独占构建路径（含 LLM backend、
+  只读 VFS、resource session scope 与自定义工具注入）。
+- 每轮使用独立 `TurnId`；`AgentEvent` 改为 `{turn_id, sequence, kind}` 有序 envelope，
+  变体收敛到 `AgentEventKind`；`TurnOutcome` 完整聚合 turn_id、billing、status、text、
+  thinking、工具调用/错误计数与 usage 明细。
+- `run_turn()` / `stream_turn()` 共用非阻塞 turn permit：runtime 忙时立即返回
+  `RuntimeError::Busy { active_turn_id }`；stream 的 Drop 与显式 `cancel()` 都等待核心
+  清理后才释放 permit，取消不再泄漏并发槽位。
+- 新增可克隆 `AgentRuntimeHandle`：`run_turn` / `stream_turn` / `compact` / `set_model` /
+  `interrupt_current_turn` 共享同一 Busy 门禁；只有原始 `AgentRuntime` 拥有 `shutdown()`。
+  `compact()` 返回 `CompactOutcome`（Compacted/Skipped），`set_model()` 返回 typed error。
+- 全局观察者改为异步 `EventSink`（1024 容量 dispatcher 隔离慢 observer）：溢出或 observer
+  失败只停止 observer，不中断 turn，错误在 `shutdown()` 返回；shutdown 执行 5s 宽限、
+  orchestrator abort，并 flush usage/stats/compaction projection。
+- 移除公开的 raw actor sender、cancel token 与 interrupt flag，控制面收敛到 handle。
 
-迁移：将 `start_with_options()` 改为 `start()`，将 `try_stream_turn()` 改为返回 `Result` 的 `stream_turn()`，并通过 `AgentEvent.kind` 匹配 `AgentEventKind`。
+### AgentTool 自定义工具（稳定异步 API）
+
+- 新增稳定异步 `AgentTool` 接口：`ToolDefinition`（approval tier、result kind、并行只读/
+  串行执行模式、mutating、discoverable、storm_exempt、activation、硬依赖与语义能力 offer）
+  + `ToolExecutionContext`（cwd + interrupt 查询）+ `ToolOutput` / `ToolError`；
+  `AgentOptions::with_tool()` / `with_tools()` 注册。
+- 自定义工具与 builtin 共用 catalog 校验（`validate_custom_tools`）、ModelToolSurface
+  解析、approval、执行顺序（只读并行/写入串行）、artifact spill 与 mutation memo 失效语义。
+- 自定义工具复用全局 tool timeout，executor / timeout / interrupt 三路竞争，非合作式工具
+  也能被局部终止。
+
+### Session 持久化与恢复加固
+
+- project key 改为可读前缀 + canonical cwd SHA-256 短哈希：旧 key 目录双读兼容、新 key
+  目录写入；同一 session 身份跨目录出现时 fail-closed 报歧义。
+- session metadata fail-closed：损坏 metadata 直接报错拒绝启动；已有数据但缺 metadata
+  的目录报错（旧 key 遗留目录除外）。
+- 原子替换跨平台化：Windows 使用 `MoveFileExW(MOVEFILE_REPLACE_EXISTING |
+  MOVEFILE_WRITE_THROUGH)` + 父目录 sync；stats/todos/plan/compaction state/summary
+  统一走 `atomic_file::atomic_replace`。
+- Compaction 启动校验 `active_start` 不拆分 tool call/result 协议；加载时自动修复 summary
+  投影，shutdown 时 `flush_projection()` 兜底落盘；摘要请求接入共享 interrupt
+  （linked cancellation 覆盖请求建立与流消费），中断后释放 turn gate，后续 turn 可继续。
+- Artifact index 尾部修复 + `sync_all` + 写锁；conversation/events/summary 初始化错误
+  传播而非静默忽略。
+
+### mink-server 生命周期与跨进程一致性
+
+- SessionRegistry 引入 typed `RegistryError`：NotFound→404、Ambiguous/Locked/Busy→409、
+  Capacity→429、Internal→500；`(project_key, id)` locator 区分同名会话。
+- create/open/close/delete 并发语义：operation lock + create lock（锁前/锁后幂等检查，
+  不等待锁、不启动临时 runtime、不改写已有 metadata）；delete 先获取并持有系统文件锁，
+  阻止其他 Registry 或进程删除使用中的会话。
+- session lease 改为 fs2 advisory file lock：锁文件永久保留，独占打开的文件句柄持有 lease；
+  移除 PID 存活与陈旧锁启发式判断，跨进程状态一致。
+- SessionRuntime 显式阶段机（Idle/Running/Cancelling/Closing/Closed）；forced terminal
+  统一登记并发布——外部 shutdown 竞争下 Closed 先于 timeout stop/final 可见且最多发布一次。
+- graceful shutdown：ctrl_c → server 停止 → reaper abort → `shutdown_all()`；idle reaper
+  按 `idle_close_secs` 定期关闭闲置会话。
+- API project-aware：session 路由接受 `?project=` 消歧；history/conversation limit 校验
+  1..=2000；SSE 广播通道 1024、30s `: ping` 心跳、`stream_gap {missed}` 断线对账；
+  SSE 事件增加 `stream_sequence` 传输序号，`turn_final` 携带完整 `outcome`。
+
+### Web 权威恢复
+
+- reducer 事件语义更新：`turn_started` / `turn_final` / `stop` 职责分离（stop 记录结束原因，
+  final 持有权威运行态并携带 outcome error）；`title_update` 改用 `stats` 快照；
+  实时 tool_result 强制完整字段（tool_use_id/presentation/artifacts/success/exit_code/
+  result_kind）；`(turn_id, sequence)` 去重窗口 4096；transcript key 区分 `seq`（历史）
+  与 `live:N`（实时）。
+- 权威恢复改为 recovery revision 驱动的单 worker：断线、stream_gap、失败终态与生命周期
+  变化使代次失效；恢复请求带 AbortSignal + 15s 超时；会话切换/断线/代次失效取消陈旧请求；
+  worker 实例身份保护清理逻辑，旧会话不能覆盖新会话 worker；稳定 Idle 后才解除 desynced。
+
+### PythonSandbox 取消
+
+- 接入 Wasmtime epoch interruption：`epoch_interruption(true)` + `set_epoch_deadline(1)`，
+  超时/取消时 `increment_epoch()` 中断执行并 join 执行线程；退出码 124（timeout）/
+  130（user cancel）区分原因；epoch/interrupt trap 映射为可读错误。
+
+### CLI / TUI
+
+- CLI 命令统一走 runtime broker 串行队列（Run/Compact/SetModel 排队执行、Interrupt 旁路
+  直发），模型切换等待 ack 后更新状态，TUI 错误恢复不再绕过 runtime 门禁。
+
+### CI 与构建
+
+- 发布矩阵统一 cargo-zigbuild 交叉编译：Linux GNU/musl、macOS ARM 与 FreeBSD 均由
+  Ubuntu runner 产出（FreeBSD 用 Zig sysroot，macOS 保留 macOS runner 提供 Apple SDK），
+  移除 FreeBSD VM 独立分支；统一 Python/cargo-zigbuild/Node/Web 依赖安装，保留
+  mink-server 内嵌前端体积检查；修复 Rust 1.97 `-D warnings` 下 collapsible_if Clippy 错误。
+- Node 20.18.1 → 20.19.0，满足 Rolldown 1.2.x 原生绑定 engines 要求，避免 npm 静默跳过
+  可选依赖导致 build.rs 调 Vite 失败。
+
+### 测试
+
+- mink-core **624 passed** / 5 ignored（+28：runtime gate/handle、observer dispatcher、
+  custom tool surface、session 旧/新目录双读与歧义、compaction 启动校验与中断、
+  atomic replace 故障注入、artifact index 修复、sandbox epoch 取消等）；mink-server 14、
+  Web vitest（reducer/sessionController/sse）与 E2E 14 全部通过。
+- 新增共享 protocol fixture `protocol-fixtures/agent-events.json`：mink-core 测试反序列化
+  round-trip，保证 server SSE 事件与 core `AgentEvent` 协议一致。
+
+迁移：`start_with_options()` → `start()`；`try_stream_turn()` → 返回 `Result` 的
+`stream_turn()`；`AgentEvent` 改为通过 `ev.kind` 匹配 `AgentEventKind`；
+`AgentRuntimeConfig` / `build_runtime()` 不再公开；`command_sender()` / `cancel_token()` /
+`interrupt_flag()` 由 `handle()` / `interrupt_current_turn()` / `shutdown()` 取代；
+同步 `EventSink` 迁移到异步 `on_event`。
 
 ## v0.3.3 (2026-08-06)
 

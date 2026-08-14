@@ -1,6 +1,6 @@
 # 架构说明
 
-> 更新日期：2026-08-10
+> 更新日期：2026-08-13
 
 本文描述 Mink 当前代码结构、模块职责和运行时数据流。终端用户命令、配置和工作流见
 [USAGE.md](USAGE.md)；Rust/Python 嵌入见 [EMBEDDING.md](EMBEDDING.md)；机器协议见
@@ -228,14 +228,18 @@ ToolRunResult
 
 | 文件 | 职责 |
 |------|------|
-| `crates/mink-server/src/main.rs` | 服务装配：config 加载、registry、嵌入/磁盘静态服务 |
-| `crates/mink-server/src/api.rs` | REST + SSE 路由（sessions/conversation/plan/todo/artifacts/files/stream） |
-| `crates/mink-server/src/session/registry.rs` | 会话扫描、锁协议、active map、usage.jsonl 汇总注入列表 |
-| `crates/mink-server/src/session/runtime.rs` | AgentRuntime 包装、turn 事件循环、超时保护、AgentEvent→SSE JSON |
+| `crates/mink-server/src/main.rs` | 服务装配：config 加载、registry、idle reaper、graceful shutdown、嵌入/磁盘静态服务 |
+| `crates/mink-server/src/api.rs` | REST + SSE 路由（sessions/conversation/plan/todo/artifacts/files/stream；project-aware `?project=`） |
+| `crates/mink-server/src/session/registry.rs` | 会话扫描、fs2 advisory lock lease、typed RegistryError、并发 create/open/close/delete、usage.jsonl 汇总 |
+| `crates/mink-server/src/session/runtime.rs` | AgentRuntime 包装、阶段机（Idle/Running/Cancelling/Closing/Closed）、forced terminal、AgentEvent→SSE JSON（stream_sequence） |
+
 | `crates/mink-server/src/session/config.rs` | ServerConfig（env > toml > ~/.minkrc > 默认） |
 | `crates/mink-server/src/web_assets.rs` | 嵌入前端服务（content-type/SPA fallback/缓存） |
 | `crates/mink-server/build.rs` | 自动 npm build + dist 嵌入（include_str! 清单） |
 | `crates/mink-server/web/` | Vue 3 SPA：单栏对话、指标行、面板体系、Edit 结构化渲染 |
+Server 生命周期：Ctrl+C → axum serve 停止 → idle reaper abort → `registry.shutdown_all()`；
+每 30s 扫描并按 `idle_close_secs` 关闭闲置会话；SSE 广播通道 1024、30s 心跳、
+`stream_gap {missed}` 断线对账；删除会话前持有系统文件锁。
 
 ### Rust 库门面
 
@@ -244,9 +248,10 @@ ToolRunResult
 | `runtime/mod.rs` | `mink::runtime` 公共 API 导出，供 `mink::prelude` facade 复用 |
 | `runtime/builder.rs` | crate-private `build_runtime()` — 从 `AgentOptions` 的内部 resolved 配置构造 runtime |
 | `runtime/config.rs` | 私有 resolved 配置 / `SessionPolicy` / `SessionInfo` |
-| `runtime/handle.rs` | `AgentRuntime` — `start()`, `run_turn()`, `stream_turn()`, `compact()`, `set_model()`, `shutdown()` |
+| `runtime/handle.rs` | `AgentRuntime`（唯一 shutdown owner）/ 可克隆 `AgentRuntimeHandle` — `start()`, `handle()`, `run_turn()`, `stream_turn()`, `compact()`, `set_model()`, `interrupt_current_turn()`, `shutdown()` |
 | `runtime/options.rs` | `AgentOptions` ergonomic builder，包括 LLM backend、只读 VFS 和 resource session scope 注入 |
 | `runtime/events.rs` | turn-scoped `AgentEvent` envelope / `EventSink` / 异步 dispatcher / `EventDisplay` adapter |
+| `runtime/tools.rs` | 稳定异步 `AgentTool` 自定义工具 API：`ToolDefinition` / `ToolExecutionContext` / `ToolOutput` / `ToolError` |
 | `runtime/sdk_adapter.rs` | SDK option 映射、status/exit code 映射、`SdkFinal` 组装 |
 
 ### Agent 核心
