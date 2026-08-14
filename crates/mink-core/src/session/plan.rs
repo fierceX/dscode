@@ -8,9 +8,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(test)]
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+/// Project the confirmed `<current-plan>` into a message list.
+///
+/// `tail=true` appends the plan as the **last** message (default): the plan
+/// stays outside the cacheable prefix, so plan edits no longer invalidate the
+/// whole conversation prefix. `tail=false` keeps the legacy head projection
+/// (inserted after the leading system messages) as an A/B fallback.
 pub fn project_current_plan(
     plan_path: &Path,
     messages: &[serde_json::Value],
+    tail: bool,
 ) -> Result<Vec<serde_json::Value>> {
     let content = match std::fs::read_to_string(plan_path) {
         Ok(content) => content,
@@ -30,19 +37,21 @@ pub fn project_current_plan(
     }
 
     let mut projected = messages.to_vec();
-    let insert_at = projected
-        .iter()
-        .take_while(|message| {
-            message.get("role").and_then(serde_json::Value::as_str) == Some("system")
-        })
-        .count();
-    projected.insert(
-        insert_at,
-        serde_json::json!({
-            "role": "system",
-            "content": format!("<current-plan>\n{content}\n</current-plan>"),
-        }),
-    );
+    let plan_message = serde_json::json!({
+        "role": "system",
+        "content": format!("<current-plan>\n{content}\n</current-plan>"),
+    });
+    if tail {
+        projected.push(plan_message);
+    } else {
+        let insert_at = projected
+            .iter()
+            .take_while(|message| {
+                message.get("role").and_then(serde_json::Value::as_str) == Some("system")
+            })
+            .count();
+        projected.insert(insert_at, plan_message);
+    }
     Ok(projected)
 }
 
@@ -220,6 +229,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    fn plan_content_message() -> serde_json::Value {
+        serde_json::json!({
+            "role": "system",
+            "content": "<current-plan>\n1. implement\n2. verify\n</current-plan>",
+        })
+    }
+
     #[test]
     fn current_plan_projection_is_dynamic_and_not_persisted() {
         let (root, store) = store("plan-projection");
@@ -228,28 +244,37 @@ mod tests {
             serde_json::json!({"role": "user", "content": "continue"}),
         ];
 
+        // No plan file: both modes return the base untouched.
         assert_eq!(
-            project_current_plan(&root.join("plan.md"), &base).unwrap(),
+            project_current_plan(&root.join("plan.md"), &base, false).unwrap(),
+            base
+        );
+        assert_eq!(
+            project_current_plan(&root.join("plan.md"), &base, true).unwrap(),
             base
         );
 
         store.set_draft("1. implement\n2. verify\n", 1024).unwrap();
         store.confirm().unwrap();
-        let projected = project_current_plan(&root.join("plan.md"), &base).unwrap();
+
+        // Legacy head projection: plan inserted after the leading system messages.
+        let projected = project_current_plan(&root.join("plan.md"), &base, false).unwrap();
         assert_eq!(projected.len(), base.len() + 1);
         assert_eq!(projected[0], base[0]);
+        assert_eq!(projected[1], plan_content_message());
         assert_eq!(projected[2], base[1]);
-        assert!(
-            projected[1]["content"]
-                .as_str()
-                .unwrap()
-                .contains("<current-plan>\n1. implement\n2. verify\n</current-plan>")
-        );
         assert_eq!(base.len(), 2);
+
+        // Default tail projection: plan appended as the last message.
+        let projected = project_current_plan(&root.join("plan.md"), &base, true).unwrap();
+        assert_eq!(projected.len(), base.len() + 1);
+        assert_eq!(projected[0], base[0]);
+        assert_eq!(projected[1], base[1]);
+        assert_eq!(projected[2], plan_content_message());
 
         store.clear().unwrap();
         assert_eq!(
-            project_current_plan(&root.join("plan.md"), &base).unwrap(),
+            project_current_plan(&root.join("plan.md"), &base, true).unwrap(),
             base
         );
         let _ = std::fs::remove_dir_all(root);

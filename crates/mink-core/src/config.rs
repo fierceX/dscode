@@ -273,6 +273,7 @@ pub struct MinkConfigFile {
     pub context_compact_tail_tokens: Option<usize>,
     pub context_compact_max_output_tokens: Option<i32>,
     pub context_compact_input_reduction: Option<bool>,
+    pub plan_projection_tail: Option<bool>,
     pub log_events: Option<bool>,
     pub output_format: Option<String>,
     pub approval_mode: Option<String>,
@@ -495,6 +496,10 @@ pub struct Config {
     pub context_compact_tail_tokens: usize,
     pub context_compact_max_output_tokens: i32,
     pub context_compact_input_reduction: bool,
+    /// Project the confirmed plan as the **last** message (default true) so
+    /// plan edits stay outside the cacheable prefix; false restores the legacy
+    /// head projection (after leading system messages) for A/B fallback.
+    pub plan_projection_tail: bool,
     pub skills: Vec<String>,
     pub interactive: bool,
     pub session_id: String,
@@ -584,6 +589,7 @@ impl Default for Config {
             context_compact_tail_tokens: 256_000,
             context_compact_max_output_tokens: 8_192,
             context_compact_input_reduction: false,
+            plan_projection_tail: true,
             skills: Vec::new(),
             interactive: false,
             session_id: String::new(),
@@ -1020,6 +1026,9 @@ fn apply_config_sources(
         }
         if let Some(enabled) = toml_cfg.context_compact_input_reduction {
             cfg.context_compact_input_reduction = enabled;
+        }
+        if let Some(tail) = toml_cfg.plan_projection_tail {
+            cfg.plan_projection_tail = tail;
         }
         if let Some(log_events) = toml_cfg.log_events {
             cfg.log_events = log_events;
@@ -1982,6 +1991,23 @@ Read = "allow"
         assert!(!cfg.edit_fuzzy_match);
         assert_eq!(cfg.edit_fuzzy_threshold, 0.88);
         assert!(cfg.edit_enforce_seen_lines);
+    }
+
+    #[test]
+    fn plan_projection_tail_config_defaults_true_and_toml_overrides() {
+        assert!(Config::default().plan_projection_tail);
+
+        let defaults = Config::default();
+        let mut cfg = Config::default();
+        apply_config_sources(&mut cfg, &defaults, None, None, None);
+        assert!(cfg.plan_projection_tail);
+
+        let file: MinkConfigFile =
+            toml::from_str("plan_projection_tail = false").unwrap();
+        assert_eq!(file.plan_projection_tail, Some(false));
+
+        apply_config_sources(&mut cfg, &defaults, None, None, Some(&file));
+        assert!(!cfg.plan_projection_tail);
     }
 
     #[test]

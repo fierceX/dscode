@@ -1118,6 +1118,41 @@ mod tests {
         }
     }
 
+    type SeenMessages = Arc<Mutex<Vec<Vec<serde_json::Value>>>>;
+
+    struct MessageCaptureBackend {
+        seen: SeenMessages,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::runtime::LlmBackend for MessageCaptureBackend {
+        fn name(&self) -> &str {
+            "message-capture"
+        }
+
+        async fn stream(
+            &self,
+            request: crate::runtime::LlmRequest,
+        ) -> anyhow::Result<crate::runtime::LlmResponseStream> {
+            self.seen.lock().unwrap().push(request.messages);
+            Ok(crate::runtime::LlmResponseStream {
+                events: Box::pin(futures::stream::iter(vec![
+                    Ok(crate::runtime::LlmEvent::Text(
+                        crate::runtime::LlmTextEvent {
+                            content: "ok".into(),
+                        },
+                    )),
+                    Ok(crate::runtime::LlmEvent::Stop(
+                        crate::runtime::LlmStopEvent {
+                            reason: "end_turn".into(),
+                        },
+                    )),
+                ])),
+                attempt_count: 1,
+            })
+        }
+    }
+
     #[tokio::test]
     async fn injected_backend_receives_resolved_model_alias() {
         let home = unique_temp_dir("backend-alias-home");
@@ -1145,6 +1180,56 @@ mod tests {
             seen.lock().unwrap().as_slice(),
             &[("local-fast".to_string(), Some("flash".to_string()))]
         );
+
+        runtime.shutdown().await.unwrap();
+        let _ = tokio::fs::remove_dir_all(home).await;
+        let _ = tokio::fs::remove_dir_all(cwd).await;
+    }
+
+    #[tokio::test]
+    async fn confirmed_plan_projects_as_last_message_by_default() {
+        let home = unique_temp_dir("plan-tail-home");
+        let cwd = unique_temp_dir("plan-tail-cwd");
+        tokio::fs::create_dir_all(&cwd).await.unwrap();
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let cfg = Config {
+            model: "flash".into(),
+            api_key: "test-key".into(),
+            base_url: "https://example.invalid/v1".into(),
+            max_context_tokens: 1_000_000,
+            ..Config::default()
+        };
+        assert!(cfg.plan_projection_tail);
+        let runtime_config = AgentRuntimeConfig::from_config(cfg, home.clone(), cwd.clone())
+            .with_llm_backend(Arc::new(MessageCaptureBackend { seen: seen.clone() }));
+        let runtime = build_runtime(runtime_config).await.unwrap();
+
+        // Confirm a plan via the same file path the turn executor projects from.
+        tokio::fs::write(
+            runtime.session_info().plan_path.clone(),
+            "# Verified plan\n1. implement\n2. verify\n",
+        )
+        .await
+        .unwrap();
+
+        let outcome = runtime.run_turn("execute").await.unwrap();
+        assert_eq!(outcome.status, crate::agent::orchestrator::TurnStatus::Ok);
+
+        {
+            let captured = seen.lock().unwrap();
+            assert_eq!(captured.len(), 1);
+            let messages = &captured[0];
+            let last = messages.last().expect("request has at least one message");
+            assert_eq!(last["role"], "system");
+            let plan_text = last["content"]
+                .as_str()
+                .expect("plan message content is a string");
+            assert!(plan_text.contains("<current-plan>\n# Verified plan"));
+            // Tail projection: the plan must not sit before the conversation.
+            let first = &messages[0];
+            assert!(!first["content"].as_str().unwrap().contains("<current-plan>"));
+        }
 
         runtime.shutdown().await.unwrap();
         let _ = tokio::fs::remove_dir_all(home).await;

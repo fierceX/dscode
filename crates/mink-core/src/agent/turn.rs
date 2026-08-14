@@ -168,7 +168,11 @@ impl TurnExecutor {
         &self,
         messages: &[serde_json::Value],
     ) -> Result<Vec<serde_json::Value>> {
-        crate::session::plan::project_current_plan(&self.ctx.plan_path, messages)
+        crate::session::plan::project_current_plan(
+            &self.ctx.plan_path,
+            messages,
+            self.ctx.config.plan_projection_tail,
+        )
     }
 
     async fn reconcile_todo_state(&self, messages: &mut Vec<serde_json::Value>) -> Result<bool> {
