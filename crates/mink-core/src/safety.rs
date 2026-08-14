@@ -9,11 +9,6 @@ static RE_BLOCK_DEVICE_WRITE: Lazy<Regex> = Lazy::new(|| {
         .expect("regex")
 });
 
-pub enum SafetyDecision {
-    Allow,
-    Warn(&'static str),
-    Block(&'static str),
-}
 
 pub fn deny_bash_command_reason(command: &str) -> Option<&'static str> {
     let trimmed = command.trim();

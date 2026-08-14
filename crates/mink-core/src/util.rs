@@ -123,6 +123,54 @@ pub(crate) fn join_output_readers_bounded(readers: Vec<JoinHandle<()>>) {
     }
 }
 
+/// Outcome of waiting for a child process with timeout/interrupt enforcement.
+pub(crate) struct ChildCompletion {
+    pub exit_code: Option<i32>,
+    pub timed_out: bool,
+    pub interrupted: bool,
+}
+
+/// Wait for the child to exit (killing the process tree on timeout or
+/// interrupt), then join output readers with a bounded grace period.
+/// Shared by the Bash and Python tools so their wait semantics stay
+/// identical; the caller supplies a label for the wait-error message.
+pub(crate) fn wait_child_with_output(
+    child: &mut Child,
+    readers: Vec<JoinHandle<()>>,
+    timeout: Duration,
+    interrupt: Option<&std::sync::atomic::AtomicBool>,
+    wait_error_label: &str,
+) -> anyhow::Result<ChildCompletion> {
+    let start = Instant::now();
+    let mut timed_out = false;
+    let mut interrupted = false;
+    let exit_code = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status.code(),
+            Ok(None) => {
+                if interrupt.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst)) {
+                    terminate_child_process_tree(child);
+                    interrupted = true;
+                    break Some(130);
+                }
+                if start.elapsed() >= timeout {
+                    terminate_child_process_tree(child);
+                    timed_out = true;
+                    break Some(124);
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => return Err(anyhow::anyhow!("Error: {wait_error_label}: {e}")),
+        }
+    };
+    join_output_readers_bounded(readers);
+    Ok(ChildCompletion {
+        exit_code,
+        timed_out,
+        interrupted,
+    })
+}
+
 /// Put spawned Unix children in their own process group so timeout/cancel can
 /// clean up grandchildren that keep pipes or files open.
 #[cfg(unix)]

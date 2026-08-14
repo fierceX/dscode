@@ -665,7 +665,7 @@ impl TuiState {
                         format!(
                             "  {} [{}] - {}",
                             skill.skill.name,
-                            tui_skill_source_label(skill),
+                            skill.source_label(),
                             skill.skill.description
                         ),
                         TranscriptKind::Text,
@@ -742,11 +742,3 @@ fn set_todo_status(items: &mut [crate::ui::TodoItemDisplay], id: &str, status: T
     }
 }
 
-fn tui_skill_source_label(skill: &crate::capabilities::LoadedSkill) -> &'static str {
-    match skill.source.level {
-        crate::capabilities::SourceLevel::Runtime => "runtime",
-        crate::capabilities::SourceLevel::Project => "project",
-        crate::capabilities::SourceLevel::User => "user",
-        crate::capabilities::SourceLevel::BuiltIn => "built-in",
-    }
-}

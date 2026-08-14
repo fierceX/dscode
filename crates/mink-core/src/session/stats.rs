@@ -180,12 +180,6 @@ impl StatsTracker {
         self.dirty.store(true, Ordering::Release);
     }
 
-    pub async fn recalculate_turn_count(&self, remaining_turns: u64) {
-        let mut s = self.stats.write().await;
-        s.current_turn_count = remaining_turns;
-        s.last_updated = chrono_now_rfc3339();
-        self.dirty.store(true, Ordering::Release);
-    }
 
     pub async fn snapshot(&self) -> Stats {
         self.stats.read().await.clone()

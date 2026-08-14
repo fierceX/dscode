@@ -142,6 +142,19 @@ pub struct ToolRunResult {
     pub(crate) state_metadata: Option<serde_json::Value>,
 }
 
+impl From<&ToolRunResult> for crate::session::store::ToolResult {
+    fn from(r: &ToolRunResult) -> Self {
+        crate::session::store::ToolResult {
+            tool_use_id: r.tool_use_id.clone(),
+            tool_name: r.tool_name.clone(),
+            tool_args: r.tool_args.clone(),
+            content: r.content.clone(),
+            conv_content: r.conv_content.clone(),
+            state_metadata: r.state_metadata.clone(),
+        }
+    }
+}
+
 pub struct SubAgentRequest {
     pub prompt: String,
     pub fork: bool,

@@ -565,17 +565,7 @@ impl TurnExecutor {
                         )
                     })
                     .collect();
-                let tool_results: Vec<ToolResult> = synthetic
-                    .iter()
-                    .map(|r| ToolResult {
-                        tool_use_id: r.tool_use_id.clone(),
-                        tool_name: r.tool_name.clone(),
-                        tool_args: r.tool_args.clone(),
-                        content: r.content.clone(),
-                        conv_content: r.conv_content.clone(),
-                        state_metadata: r.state_metadata.clone(),
-                    })
-                    .collect();
+                let tool_results: Vec<ToolResult> = synthetic.iter().map(ToolResult::from).collect();
                 self.ctx.store.add_tool_results(&tool_results).await?;
                 return Err(error);
             }
@@ -603,14 +593,7 @@ impl TurnExecutor {
 
         let tool_results: Vec<ToolResult> = processed_results
             .iter()
-            .map(|r| ToolResult {
-                tool_use_id: r.tool_use_id.clone(),
-                tool_name: r.tool_name.clone(),
-                tool_args: r.tool_args.clone(),
-                content: r.content.clone(),
-                conv_content: r.conv_content.clone(),
-                state_metadata: r.state_metadata.clone(),
-            })
+            .map(ToolResult::from)
             .collect();
 
         self.ctx.store.add_tool_results(&tool_results).await?;

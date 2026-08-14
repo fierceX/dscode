@@ -413,7 +413,7 @@ fn list_skills() {
     match snapshot {
         Ok(snapshot) => {
             for skill in &snapshot.skills.discoverable {
-                println!("   {} [{}]", skill.skill.name, skill_source_label(skill));
+                println!("   {} [{}]", skill.skill.name, skill.source_label());
                 println!("      {}", skill.skill.description);
                 println!();
             }
@@ -426,14 +426,6 @@ fn list_skills() {
     println!("Load with --skill NAME or Read skill://NAME.");
 }
 
-fn skill_source_label(skill: &crate::capabilities::LoadedSkill) -> &'static str {
-    match skill.source.level {
-        crate::capabilities::SourceLevel::Runtime => "runtime",
-        crate::capabilities::SourceLevel::Project => "project",
-        crate::capabilities::SourceLevel::User => "user",
-        crate::capabilities::SourceLevel::BuiltIn => "built-in",
-    }
-}
 
 async fn run_interactive(cmd_tx: mpsc::UnboundedSender<RuntimeCmd>, home: &Path) -> Result<()> {
     #[cfg(feature = "repl")]
@@ -464,6 +456,7 @@ async fn run_interactive(cmd_tx: mpsc::UnboundedSender<RuntimeCmd>, home: &Path)
         });
     }
     tokio::task::spawn_blocking(move || {
+        #[cfg_attr(not(feature = "repl"), allow(unused_mut))]
         let mut exit_rx = exit_rx;
         #[cfg(feature = "repl")]
         {
@@ -503,49 +496,10 @@ async fn run_interactive(cmd_tx: mpsc::UnboundedSender<RuntimeCmd>, home: &Path)
                 if line.is_empty() {
                     continue;
                 }
-                if line == "/help" {
-                    println!("Commands:");
-                    println!("  /flash        Switch to flash alias");
-                    println!("  /pro          Switch to pro alias");
-                    println!("  /model NAME   Switch to a model name or alias");
-                    println!("  /compact      Force context compaction");
-                    println!("  /skills       List available skills");
-                    println!("  /help         Show this help");
-                    println!("  Ctrl+C        Interrupt current task");
-                    println!("  Ctrl+C again  Exit REPL");
-                    println!("  exit / quit   Exit REPL");
-                    continue;
-                }
-                if line == "/skills" {
-                    list_skills();
-                    continue;
-                }
-                if line == "/compact" {
-                    if cmd_tx.send(RuntimeCmd::Compact).is_err() {
-                        break;
-                    }
-                    continue;
-                }
-                if line == "/flash" || line == "/pro" {
-                    let model = line.trim_start_matches('/');
-                    if cmd_tx
-                        .send(RuntimeCmd::SetModel(model.to_string()))
-                        .is_err()
-                    {
-                        break;
-                    }
-                    continue;
-                }
-                if let Some(model) = line.strip_prefix("/model ") {
-                    let model = model.trim();
-                    if !model.is_empty()
-                        && cmd_tx
-                            .send(RuntimeCmd::SetModel(model.to_string()))
-                            .is_err()
-                    {
-                        break;
-                    }
-                    continue;
+                match dispatch_local_command(&line, &cmd_tx) {
+                    LocalCommandOutcome::Shutdown => break,
+                    LocalCommandOutcome::Handled => continue,
+                    LocalCommandOutcome::PassThrough => {}
                 }
                 if line == "exit" || line == "quit" {
                     break;
@@ -609,21 +563,9 @@ fn simple_stdin_loop(
             continue;
         }
         if line.starts_with('/') {
-            if line == "/help" {
-                println!("Commands: /flash, /pro, /model NAME, /compact, /skills, /help");
-                println!("Ctrl+C = interrupt, Ctrl+C again = exit");
-            } else if line == "/skills" {
-                list_skills();
-            } else if line == "/compact" {
-                let _ = cmd_tx.send(RuntimeCmd::Compact);
-            } else if line == "/flash" || line == "/pro" {
-                let model = line.trim_start_matches('/');
-                let _ = cmd_tx.send(RuntimeCmd::SetModel(model.to_string()));
-            } else if let Some(model) = line.strip_prefix("/model ") {
-                let model = model.trim();
-                if !model.is_empty() {
-                    let _ = cmd_tx.send(RuntimeCmd::SetModel(model.to_string()));
-                }
+            match dispatch_local_command(&line, cmd_tx) {
+                LocalCommandOutcome::Shutdown => break,
+                LocalCommandOutcome::Handled | LocalCommandOutcome::PassThrough => {}
             }
             continue;
         }
@@ -644,6 +586,68 @@ fn simple_stdin_loop(
         if exit_rx.try_recv().is_ok() {
             break;
         }
+    }
+}
+enum LocalCommandOutcome {
+    /// The line was consumed by a local slash command.
+    Handled,
+    /// Not a local command; the caller decides how to treat it as input.
+    PassThrough,
+    /// A command-channel send failed; the caller should stop the loop.
+    Shutdown,
+}
+
+/// Handle local slash commands shared by the readline and simple stdin
+/// loops. Unknown `/...` lines are reported as `PassThrough`; the readline
+/// loop forwards them as input while the simple loop consumes them.
+fn dispatch_local_command(
+    line: &str,
+    cmd_tx: &mpsc::UnboundedSender<RuntimeCmd>,
+) -> LocalCommandOutcome {
+    match line {
+        "/help" => {
+            println!("Commands:");
+            println!("  /flash        Switch to flash alias");
+            println!("  /pro          Switch to pro alias");
+            println!("  /model NAME   Switch to a model name or alias");
+            println!("  /compact      Force context compaction");
+            println!("  /skills       List available skills");
+            println!("  /help         Show this help");
+            println!("  Ctrl+C        Interrupt current task");
+            println!("  Ctrl+C again  Exit REPL");
+            println!("  exit / quit   Exit REPL");
+            LocalCommandOutcome::Handled
+        }
+        "/skills" => {
+            list_skills();
+            LocalCommandOutcome::Handled
+        }
+        "/compact" => {
+            if cmd_tx.send(RuntimeCmd::Compact).is_err() {
+                LocalCommandOutcome::Shutdown
+            } else {
+                LocalCommandOutcome::Handled
+            }
+        }
+        "/flash" | "/pro" => {
+            let model = line.trim_start_matches('/');
+            if cmd_tx.send(RuntimeCmd::SetModel(model.to_string())).is_err() {
+                LocalCommandOutcome::Shutdown
+            } else {
+                LocalCommandOutcome::Handled
+            }
+        }
+        _ if line.starts_with("/model ") => {
+            let model = line["/model ".len()..].trim();
+            if model.is_empty() {
+                LocalCommandOutcome::Handled
+            } else if cmd_tx.send(RuntimeCmd::SetModel(model.to_string())).is_err() {
+                LocalCommandOutcome::Shutdown
+            } else {
+                LocalCommandOutcome::Handled
+            }
+        }
+        _ => LocalCommandOutcome::PassThrough,
     }
 }
 

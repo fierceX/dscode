@@ -381,27 +381,6 @@ impl Default for SandboxPythonConfig {
     }
 }
 
-impl SandboxPythonConfig {
-    pub fn from_file(cfg: Option<&SandboxPythonConfigFile>) -> Self {
-        let Some(cfg) = cfg else {
-            return Self::default();
-        };
-        Self {
-            wasm_path: cfg
-                .wasm_path
-                .clone()
-                .unwrap_or_else(|| "cpython-wasi/python.wasm".into()),
-            stdlib_dir: cfg
-                .stdlib_dir
-                .clone()
-                .unwrap_or_else(|| "cpython-wasi".into()),
-            timeout: cfg.timeout.unwrap_or(30),
-            read_dirs: cfg.read_dirs.clone().unwrap_or_default(),
-            write_dirs: cfg.write_dirs.clone().unwrap_or_default(),
-            package_dirs: cfg.package_dirs.clone().unwrap_or_default(),
-        }
-    }
-}
 
 /// 信号反馈系统全部可调参数（SIGNAL_RESPONSE_REDESIGN 设计 S1）。
 #[derive(Debug, Clone)]
@@ -1364,10 +1343,6 @@ pub fn validate_runtime_config(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
-/// Resolve the actual API model name from a Config model string with default aliases.
-pub fn resolve_model_name(model: &str) -> String {
-    ModelResolver::new(&BTreeMap::new()).resolve(model).actual
-}
 
 /// Resolve the display label for the title bar.
 pub fn resolve_model_label(model: &str) -> String {

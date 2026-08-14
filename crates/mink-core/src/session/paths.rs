@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::Result;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
@@ -206,105 +206,6 @@ pub async fn ensure_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub async fn continue_session(home: &Path, cwd: &Path) -> Result<String> {
-    continue_session_with_layout(home, cwd, SessionLayout::ProjectScoped).await
-}
-
-pub async fn continue_session_with_layout(
-    home: &Path,
-    cwd: &Path,
-    layout: SessionLayout,
-) -> Result<String> {
-    if layout == SessionLayout::Isolated {
-        if !home.exists() {
-            bail!("no sessions found");
-        }
-        let paths = paths_for_layout(home, cwd, "isolated", layout);
-        match tokio::fs::read_to_string(&paths.metadata).await {
-            Ok(text) if !text.trim().is_empty() => {
-                let value: serde_json::Value = serde_json::from_str(&text).map_err(|error| {
-                    anyhow::anyhow!(
-                        "corrupt session metadata {}: {error}",
-                        paths.metadata.display()
-                    )
-                })?;
-                if let Some(id) = value.get("id").and_then(|id| id.as_str())
-                    && !id.trim().is_empty()
-                {
-                    return Ok(id.to_string());
-                }
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-        return Ok(home
-            .file_name()
-            .map(|name| name.to_string_lossy().to_string())
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(chrono_session_id));
-    }
-
-    let dirs = if layout == SessionLayout::ProjectScoped {
-        project_base_dirs(home, cwd)
-    } else {
-        vec![session_base_dir(home, cwd, layout)]
-    };
-    let mut newest: Option<(std::time::SystemTime, String)> = None;
-    if dirs.iter().all(|dir| !dir.exists()) {
-        bail!("no sessions found");
-    }
-    for dir in dirs {
-        if !dir.exists() {
-            continue;
-        }
-        let legacy_key = legacy_project_key(cwd);
-        let is_legacy = dir
-            .file_name()
-            .is_some_and(|name| name == std::ffi::OsStr::new(&legacy_key));
-        let mut entries = tokio::fs::read_dir(&dir).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            if !entry.path().is_dir() {
-                continue;
-            }
-            if is_legacy && !metadata_cwd_matches(&entry.path(), cwd).await {
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy().to_string();
-            let mt = session_activity_mod_time(&entry.path()).await?;
-            match &newest {
-                Some((ts, _)) if *ts >= mt => {}
-                _ => newest = Some((mt, name)),
-            }
-        }
-    }
-    if let Some((_, sid)) = newest {
-        Ok(sid)
-    } else {
-        bail!("no sessions found")
-    }
-}
-
-async fn metadata_cwd_matches(session_dir: &Path, cwd: &Path) -> bool {
-    let Ok(text) = tokio::fs::read_to_string(session_dir.join("session.json")).await else {
-        return false;
-    };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return false;
-    };
-    let Some(recorded) = value.get("cwd").and_then(serde_json::Value::as_str) else {
-        return false;
-    };
-    canonical_project_path(Path::new(recorded)) == canonical_project_path(cwd)
-}
-
-async fn session_activity_mod_time(session_dir: &Path) -> Result<std::time::SystemTime> {
-    let events = session_dir.join("events.jsonl");
-    if let Ok(meta) = tokio::fs::metadata(&events).await {
-        return Ok(meta.modified()?);
-    }
-    Ok(tokio::fs::metadata(session_dir).await?.modified()?)
-}
 
 /// Generate a unique session ID: YYYYMMDD-HHmmss-XXXX.
 pub fn chrono_session_id() -> String {

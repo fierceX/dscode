@@ -4,8 +4,8 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use std::path::Path;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::sync::atomic::AtomicBool;
+use std::time::Duration;
 
 static RE_BASH_READ_MISUSE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)^\s*(cat|head|tail|less|more)\b").expect("regex"));
@@ -16,6 +16,7 @@ static RE_BASH_FIND_MISUSE: Lazy<Regex> =
 static RE_BASH_RG_FILES_MISUSE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)^\s*rg\s+--files\b").expect("regex"));
 
+#[cfg(test)]
 pub fn execute(
     command: &str,
     timeout_secs: Option<u64>,
@@ -24,6 +25,7 @@ pub fn execute(
     execute_with_interrupt(command, timeout_secs, default_timeout, None)
 }
 
+#[cfg(test)]
 pub fn execute_with_interrupt(
     command: &str,
     timeout_secs: Option<u64>,
@@ -100,29 +102,13 @@ fn execute_sync(
         readers.push(crate::util::spawn_output_reader(stderr, stderr_buf.clone()));
     }
 
-    let start_sync = Instant::now();
-    let mut timed_out = false;
-    let exit_code = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status.code(),
-            Ok(None) => {
-                if interrupt.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
-                    crate::util::terminate_child_process_tree(&mut child);
-                    break Some(130);
-                }
-                if start_sync.elapsed() >= timeout {
-                    crate::util::terminate_child_process_tree(&mut child);
-                    timed_out = true;
-                    break Some(124);
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Err(e) => bail!("Error: failed to wait on child process: {e}"),
-        }
-    };
-
-
-    crate::util::join_output_readers_bounded(readers);
+    let completion = crate::util::wait_child_with_output(
+        &mut child,
+        readers,
+        timeout,
+        interrupt,
+        "failed to wait on child process",
+    )?;
 
     let mut out = stdout_buf.to_string_lossy("stdout");
     let stderr_out = stderr_buf.to_string_lossy("stderr");
@@ -133,19 +119,19 @@ fn execute_sync(
         out.push_str(&stderr_out);
     }
 
-    if timed_out {
+    if completion.timed_out {
         out.push_str(&format!(
             "\n[... truncated, command timed out after {} seconds ...]",
             timeout.as_secs()
         ));
-    } else if exit_code == Some(130) {
+    } else if completion.exit_code == Some(130) {
         out.push_str("\n[... command interrupted ...]");
     }
 
     Ok(SyncOutput {
         stdout: out.into_bytes(),
         stderr: Vec::new(),
-        code: exit_code,
+        code: completion.exit_code,
     })
 }
 

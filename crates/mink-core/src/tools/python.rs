@@ -1,12 +1,13 @@
 use anyhow::{Result, bail};
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::sync::atomic::AtomicBool;
+use std::time::Duration;
 
-/// Patterns that are blocked in Python scripts for safety.
-/// 已废弃：安全策略交给 OS 进程沙箱处理，不再在工具层做静态字符串过滤。
 /// Execute a Python script and return (stdout, stderr, exit_code).
+/// Test-only convenience wrapper; the tool executes through
+/// [`execute_script_with_interrupt_in_dir`].
+#[cfg(test)]
 pub fn execute_script(
     script: &str,
     timeout_secs: Option<u64>,
@@ -14,6 +15,7 @@ pub fn execute_script(
     execute_script_with_interrupt(script, timeout_secs, None)
 }
 
+#[cfg(test)]
 pub fn execute_script_with_interrupt(
     script: &str,
     timeout_secs: Option<u64>,
@@ -21,6 +23,7 @@ pub fn execute_script_with_interrupt(
 ) -> Result<(String, String, Option<i32>)> {
     execute_script_with_interrupt_in_dir(script, timeout_secs, interrupt, None)
 }
+
 
 fn execute_script_with_interrupt_in_dir(
     script: &str,
@@ -63,34 +66,17 @@ fn execute_script_with_interrupt_in_dir(
     }
 
     // Read output with timeout
-    let start = Instant::now();
-    let mut timed_out = false;
-    let mut interrupted = false;
-    let exit_code = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status.code(),
-            Ok(None) => {
-                if interrupt.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
-                    crate::util::terminate_child_process_tree(&mut child);
-                    interrupted = true;
-                    break Some(130);
-                }
-                if start.elapsed() >= timeout {
-                    crate::util::terminate_child_process_tree(&mut child);
-                    timed_out = true;
-                    break Some(124);
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(e) => bail!("Error: failed to wait for python3: {e}"),
-        }
-    };
-
-    crate::util::join_output_readers_bounded(readers);
+    let completion = crate::util::wait_child_with_output(
+        &mut child,
+        readers,
+        timeout,
+        interrupt,
+        "failed to wait for python3",
+    )?;
     let mut stdout = stdout_buf.to_string_lossy("stdout");
     let stderr = stderr_buf.to_string_lossy("stderr");
 
-    if timed_out {
+    if completion.timed_out {
         if !stdout.is_empty() {
             stdout.push('\n');
         }
@@ -99,14 +85,14 @@ fn execute_script_with_interrupt_in_dir(
             timeout.as_secs()
         ));
     }
-    if interrupted {
+    if completion.interrupted {
         if !stdout.is_empty() {
             stdout.push('\n');
         }
         stdout.push_str("[... Python script interrupted ...]");
     }
 
-    Ok((stdout, stderr, exit_code))
+    Ok((stdout, stderr, completion.exit_code))
 }
 
 pub struct PythonTool;

@@ -2,20 +2,6 @@ use regex::Regex;
 use serde_json::Value;
 use std::sync::LazyLock;
 
-/// Result of a scavenge operation.
-#[derive(Debug, Default)]
-pub struct ScavengeResult {
-    pub calls: Vec<ToolCallInfo>,
-    pub notes: Vec<String>,
-}
-
-/// A recovered tool call.
-#[derive(Debug, Clone)]
-pub struct ToolCallInfo {
-    pub name: String,
-    pub arguments: String,
-}
-
 /// Result of a truncation repair operation.
 #[derive(Debug)]
 pub struct TruncationResult {
@@ -23,6 +9,13 @@ pub struct TruncationResult {
     pub changed: bool,
     pub notes: Vec<String>,
     pub fallback: bool,
+}
+
+/// A recovered tool call.
+#[derive(Debug, Clone)]
+pub struct ToolCallInfo {
+    pub name: String,
+    pub arguments: String,
 }
 
 /// Bounds for regex input — DSML regex can be O(n²) on adversarial input.

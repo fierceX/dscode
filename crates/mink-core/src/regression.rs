@@ -282,8 +282,7 @@ async fn harness_with_config(
 
     let sid = "regression";
     let spaths = paths::paths_for(&home, &cwd, sid);
-    let (store, stats, artifacts) =
-        crate::session::init::init_session_base(&home, &cwd, sid).await?;
+    let (store, stats, artifacts) = crate::session::init::init_session_base_at(&spaths).await?;
     let mut cfg = Config {
         model: "flash".into(),
         api_key: "test-key".into(),

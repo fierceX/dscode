@@ -298,9 +298,6 @@ impl ModelToolSurface {
         names.iter().all(|name| self.has(name))
     }
 
-    pub fn has_any(&self, names: &[&str]) -> bool {
-        names.iter().any(|name| self.has(name))
-    }
 
     pub fn get(&self, name: &str) -> Option<&ModelTool> {
         self.by_name.get(name).map(|index| &self.ordered[*index])

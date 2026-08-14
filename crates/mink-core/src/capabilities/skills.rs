@@ -30,6 +30,19 @@ pub struct LoadedSkill {
     pub revision: String,
 }
 
+impl LoadedSkill {
+    /// Stable display label for the skill's source level, shared by the REPL
+    /// and TUI so both surfaces report the same provenance.
+    pub fn source_label(&self) -> &'static str {
+        match self.source.level {
+            crate::capabilities::SourceLevel::Runtime => "runtime",
+            crate::capabilities::SourceLevel::Project => "project",
+            crate::capabilities::SourceLevel::User => "user",
+            crate::capabilities::SourceLevel::BuiltIn => "built-in",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SkillSource {
     BuiltIn,
@@ -276,10 +289,6 @@ pub struct RuntimeSkillProvider {
 }
 
 impl RuntimeSkillProvider {
-    #[allow(dead_code)]
-    pub fn new(skills: Vec<LoadedSkill>) -> Self {
-        Self { skills }
-    }
 
     pub fn from_runtime_skills(skills: Vec<RuntimeSkill>) -> Self {
         Self {
