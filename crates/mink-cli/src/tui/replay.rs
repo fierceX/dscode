@@ -77,6 +77,8 @@ fn build_lines_from_events(events: &[serde_json::Value]) -> Vec<TranscriptItem> 
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
         match t {
+            // 前缀快照只用于离线重建，重放不渲染。
+            "prefix_snapshot" => {}
             "user_input" | "user_message" => {
                 state.finalize_stream();
                 let preview = truncate_str(first_line(c), 77);

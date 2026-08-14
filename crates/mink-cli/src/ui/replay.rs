@@ -55,7 +55,7 @@ pub fn replay_last_turns(events_path: &Path) {
         let evt_type = evt.get("type").and_then(Value::as_str).unwrap_or("");
 
         match evt_type {
-            "session_start" | "usage" | "stop" | "retry" => continue,
+            "session_start" | "usage" | "stop" | "retry" | "prefix_snapshot" => continue,
             "user_input" | "user_message" => {
                 flush_newline(&mut stdout, &mut last_char, prev_was_thinking);
                 prev_was_thinking = false;
