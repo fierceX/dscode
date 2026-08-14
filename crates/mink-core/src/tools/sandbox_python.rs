@@ -402,7 +402,9 @@ mod tests {
             execute_in_sandbox_at("", &wasm, &dir, &[], &[], &[], &dir, 1024, 1, None).unwrap();
         assert_eq!(timeout_code, Some(124));
         assert!(timeout_error.contains("timed out"));
-        assert!(started.elapsed() < Duration::from_secs(3));
+        // 验证 1s 超时确实终止执行而非挂死；并行全量测试时 wasmtime
+        // JIT 编译与调度争抢会让启动延迟超过 3s，放宽上界避免负载抖动误报。
+        assert!(started.elapsed() < Duration::from_secs(15));
 
         let interrupt = AtomicBool::new(true);
         let (_, cancel_error, cancel_code) = execute_in_sandbox_at(

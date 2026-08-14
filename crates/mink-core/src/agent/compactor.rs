@@ -102,6 +102,9 @@ mod tests {
         let ctx =
             crate::regression::test_context_for_agent_with_config("compactor-success", |cfg| {
                 cfg.base_url = api_url.clone();
+                // 与其余 compaction 测试一致：热尾部目标压到 1，使小对话也能
+                // 通过"节省 ≥10%"门控（默认 256K 尾部对微型对话是恒等压缩）。
+                cfg.context_compact_tail_tokens = 1;
             })
             .await?;
         for idx in 0..3 {
