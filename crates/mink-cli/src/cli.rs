@@ -426,7 +426,6 @@ fn list_skills() {
     println!("Load with --skill NAME or Read skill://NAME.");
 }
 
-
 async fn run_interactive(cmd_tx: mpsc::UnboundedSender<RuntimeCmd>, home: &Path) -> Result<()> {
     #[cfg(feature = "repl")]
     let history_path = home.join(".mink/history");
@@ -631,7 +630,10 @@ fn dispatch_local_command(
         }
         "/flash" | "/pro" => {
             let model = line.trim_start_matches('/');
-            if cmd_tx.send(RuntimeCmd::SetModel(model.to_string())).is_err() {
+            if cmd_tx
+                .send(RuntimeCmd::SetModel(model.to_string()))
+                .is_err()
+            {
                 LocalCommandOutcome::Shutdown
             } else {
                 LocalCommandOutcome::Handled
@@ -641,7 +643,10 @@ fn dispatch_local_command(
             let model = line["/model ".len()..].trim();
             if model.is_empty() {
                 LocalCommandOutcome::Handled
-            } else if cmd_tx.send(RuntimeCmd::SetModel(model.to_string())).is_err() {
+            } else if cmd_tx
+                .send(RuntimeCmd::SetModel(model.to_string()))
+                .is_err()
+            {
                 LocalCommandOutcome::Shutdown
             } else {
                 LocalCommandOutcome::Handled

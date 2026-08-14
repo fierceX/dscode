@@ -680,7 +680,6 @@ mod tests {
         assert_eq!(store.lines().await.unwrap().len(), 2);
     }
 
-
     #[tokio::test]
     async fn cache_appended_not_invalidated() {
         let store = temp_store();

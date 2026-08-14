@@ -180,7 +180,6 @@ impl StatsTracker {
         self.dirty.store(true, Ordering::Release);
     }
 
-
     pub async fn snapshot(&self) -> Stats {
         self.stats.read().await.clone()
     }

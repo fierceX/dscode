@@ -9,10 +9,10 @@
 //! 场景覆盖：确认计划 + 工具循环 + 失败工具（可能触发轨迹证据注入，注入行
 //! 同样落在 conversation.jsonl，重建不受影响）。
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use mink::runtime::{
-    AgentOptions, AgentRuntime, LlmBackend, LlmEvent, LlmRequest, LlmResponseStream,
-    LlmStopEvent, LlmTextEvent, LlmToolCallEvent,
+    AgentOptions, AgentRuntime, LlmBackend, LlmEvent, LlmRequest, LlmResponseStream, LlmStopEvent,
+    LlmTextEvent, LlmToolCallEvent,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, VecDeque};
@@ -109,9 +109,7 @@ fn prefix_snapshots(events_path: &Path) -> Result<Vec<Value>> {
     Ok(text
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter(|evt| {
-            evt.get("type").and_then(Value::as_str) == Some("prefix_snapshot")
-        })
+        .filter(|evt| evt.get("type").and_then(Value::as_str) == Some("prefix_snapshot"))
         .collect())
 }
 
@@ -120,14 +118,14 @@ fn conversation_rows(path: &Path) -> Result<Vec<Value>> {
     text.lines()
         .filter(|line| !line.trim().is_empty())
         .map(|line| {
-            serde_json::from_str::<Value>(line)
-                .map_err(|e| anyhow!("bad conversation row: {e}"))
+            serde_json::from_str::<Value>(line).map_err(|e| anyhow!("bad conversation row: {e}"))
         })
         .collect()
 }
 
 fn temp_pair(name: &str) -> (PathBuf, PathBuf) {
-    let root = std::env::temp_dir().join(format!("mink-invariants-{}-{}", std::process::id(), name));
+    let root =
+        std::env::temp_dir().join(format!("mink-invariants-{}-{}", std::process::id(), name));
     let home = root.join("home");
     let cwd = root.join("cwd");
     let _ = std::fs::remove_dir_all(&root);
@@ -142,10 +140,20 @@ async fn requests_rebuild_from_durable_session_logs() -> Result<()> {
     std::fs::write(cwd.join("fixture.txt"), "alpha beta")?;
 
     let backend = Arc::new(ScriptedBackend::new(vec![
-        vec![read_tool_call("call_read", "fixture.txt"), LlmEvent::Stop(LlmStopEvent { reason: "tool_use".to_string() })],
+        vec![
+            read_tool_call("call_read", "fixture.txt"),
+            LlmEvent::Stop(LlmStopEvent {
+                reason: "tool_use".to_string(),
+            }),
+        ],
         text_stop("done", "end_turn"),
         text_stop("ok", "end_turn"),
-        vec![read_tool_call("call_missing", "missing.txt"), LlmEvent::Stop(LlmStopEvent { reason: "tool_use".to_string() })],
+        vec![
+            read_tool_call("call_missing", "missing.txt"),
+            LlmEvent::Stop(LlmStopEvent {
+                reason: "tool_use".to_string(),
+            }),
+        ],
         text_stop("recovered", "end_turn"),
     ]));
 
@@ -166,7 +174,11 @@ async fn requests_rebuild_from_durable_session_logs() -> Result<()> {
     }
 
     let captured = backend.captured();
-    assert_eq!(captured.len(), 5, "three turns consume exactly five requests");
+    assert_eq!(
+        captured.len(),
+        5,
+        "three turns consume exactly five requests"
+    );
 
     let snapshots = prefix_snapshots(&runtime.session_info().events_path)?;
     assert_eq!(snapshots.len(), 1, "one prefix build for the whole session");

@@ -741,4 +741,3 @@ fn set_todo_status(items: &mut [crate::ui::TodoItemDisplay], id: &str, status: T
         item.status = status;
     }
 }
-

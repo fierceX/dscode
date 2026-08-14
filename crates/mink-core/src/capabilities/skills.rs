@@ -289,7 +289,6 @@ pub struct RuntimeSkillProvider {
 }
 
 impl RuntimeSkillProvider {
-
     pub fn from_runtime_skills(skills: Vec<RuntimeSkill>) -> Self {
         Self {
             skills: skills.into_iter().map(runtime_skill_to_loaded).collect(),

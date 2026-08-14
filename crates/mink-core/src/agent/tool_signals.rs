@@ -318,10 +318,7 @@ mod tests {
             )
             .await;
         assert!(
-            result
-                .signals
-                .iter()
-                .any(|s| s.kind.is_hard()),
+            result.signals.iter().any(|s| s.kind.is_hard()),
             "content-tool failure must produce a hard signal even behind the summary header"
         );
         assert!(

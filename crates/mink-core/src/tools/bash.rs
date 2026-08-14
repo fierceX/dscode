@@ -445,7 +445,6 @@ mod tests {
         assert_eq!(code, Some(124));
     }
 
-
     #[test]
     fn background_daemon_does_not_hang() {
         let start = std::time::Instant::now();

@@ -565,7 +565,8 @@ impl TurnExecutor {
                         )
                     })
                     .collect();
-                let tool_results: Vec<ToolResult> = synthetic.iter().map(ToolResult::from).collect();
+                let tool_results: Vec<ToolResult> =
+                    synthetic.iter().map(ToolResult::from).collect();
                 self.ctx.store.add_tool_results(&tool_results).await?;
                 return Err(error);
             }
@@ -591,10 +592,8 @@ impl TurnExecutor {
                 .await;
         }
 
-        let tool_results: Vec<ToolResult> = processed_results
-            .iter()
-            .map(ToolResult::from)
-            .collect();
+        let tool_results: Vec<ToolResult> =
+            processed_results.iter().map(ToolResult::from).collect();
 
         self.ctx.store.add_tool_results(&tool_results).await?;
         self.observe_todo_progress(&processed_results);

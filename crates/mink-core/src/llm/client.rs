@@ -422,7 +422,6 @@ impl AsyncLlClient {
                     })
                 }
             } {
-
                 Ok(resp) => {
                     let code = resp.status().as_u16();
                     if code < 400 {
@@ -818,8 +817,7 @@ mod tests {
                 .await;
             let _ = tx.send(result);
         });
-        let result =
-            tokio::time::timeout(std::time::Duration::from_secs(2), rx).await?;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), rx).await?;
         match result {
             Ok(Err(failure)) => {
                 assert_eq!(failure.error.to_string(), "request cancelled");

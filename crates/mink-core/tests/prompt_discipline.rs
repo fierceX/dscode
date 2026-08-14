@@ -76,10 +76,7 @@ fn check_critical_blocks(path: &Path, text: &str) {
                 path.display()
             );
             for word in bullet.split_whitespace() {
-                let trimmed: String = word
-                    .chars()
-                    .filter(|c| c.is_ascii_alphanumeric())
-                    .collect();
+                let trimmed: String = word.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
                 let lower = trimmed.to_ascii_lowercase();
                 assert!(
                     !matches!(lower.as_str(), "token" | "budget" | "engine" | "internal"),
@@ -89,7 +86,11 @@ fn check_critical_blocks(path: &Path, text: &str) {
             }
         }
     }
-    assert!(block_count > 0, "{} has no <critical> block", path.display());
+    assert!(
+        block_count > 0,
+        "{} has no <critical> block",
+        path.display()
+    );
 }
 
 fn check_placeholders(path: &Path, text: &str) {

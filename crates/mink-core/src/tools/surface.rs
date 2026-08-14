@@ -298,7 +298,6 @@ impl ModelToolSurface {
         names.iter().all(|name| self.has(name))
     }
 
-
     pub fn get(&self, name: &str) -> Option<&ModelTool> {
         self.by_name.get(name).map(|index| &self.ordered[*index])
     }
@@ -342,7 +341,10 @@ pub fn render_description_templates(desc: &str, config: &ToolConfig) -> String {
         );
     if let Some(start) = rendered.find("{{") {
         let rest = &rendered[start..];
-        let end = rest.find("}}").map(|i| start + i + 2).unwrap_or(rendered.len());
+        let end = rest
+            .find("}}")
+            .map(|i| start + i + 2)
+            .unwrap_or(rendered.len());
         panic!(
             "unknown description template placeholder in tool description: {}; whitelist: {{CAP_TOOL_RESULT_MAX_BYTES}}, {{CAP_MAX_SEARCH_RESULTS}}, {{CAP_MAX_SEARCH_FILES}}",
             &rendered[start..end]
@@ -360,7 +362,10 @@ fn resolved_schema(
     // 保证"模型看到的描述"与"参与前缀指纹的描述"字节一致。
     if name == "Edit" {
         let mut schema = edit_schema(config);
-        if let Some(desc) = schema.get("description").and_then(serde_json::Value::as_str) {
+        if let Some(desc) = schema
+            .get("description")
+            .and_then(serde_json::Value::as_str)
+        {
             let rendered = render_description_templates(desc, config);
             schema["description"] = serde_json::Value::String(rendered);
         }
@@ -391,7 +396,10 @@ fn resolved_schema(
     if let Some(description) = description {
         schema["description"] = serde_json::Value::String(description.into());
     }
-    if let Some(desc) = schema.get("description").and_then(serde_json::Value::as_str) {
+    if let Some(desc) = schema
+        .get("description")
+        .and_then(serde_json::Value::as_str)
+    {
         let rendered = render_description_templates(desc, config);
         schema["description"] = serde_json::Value::String(rendered);
     }
@@ -694,7 +702,12 @@ mod tests {
         assert!(!glob_desc.contains("{{"));
         // 渲染后的描述必须参与前缀指纹（A2 注入点约束）。
         let other = ToolConfig::from_config(&Config::default());
-        assert_ne!(surface.fingerprint(), resolve(&other, AgentRole::Primary, false).unwrap().fingerprint());
+        assert_ne!(
+            surface.fingerprint(),
+            resolve(&other, AgentRole::Primary, false)
+                .unwrap()
+                .fingerprint()
+        );
     }
 
     #[test]

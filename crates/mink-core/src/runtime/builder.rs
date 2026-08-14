@@ -1353,7 +1353,12 @@ mod tests {
             assert!(plan_text.contains("<current-plan>\n# Verified plan"));
             // Tail projection: the plan must not sit before the conversation.
             let first = &messages[0];
-            assert!(!first["content"].as_str().unwrap().contains("<current-plan>"));
+            assert!(
+                !first["content"]
+                    .as_str()
+                    .unwrap()
+                    .contains("<current-plan>")
+            );
         }
 
         runtime.shutdown().await.unwrap();

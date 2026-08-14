@@ -381,7 +381,6 @@ impl Default for SandboxPythonConfig {
     }
 }
 
-
 /// 信号反馈系统全部可调参数（SIGNAL_RESPONSE_REDESIGN 设计 S1）。
 #[derive(Debug, Clone)]
 pub struct SignalConfig {
@@ -1343,7 +1342,6 @@ pub fn validate_runtime_config(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
-
 /// Resolve the display label for the title bar.
 pub fn resolve_model_label(model: &str) -> String {
     ModelResolver::new(&BTreeMap::new()).resolve(model).label
@@ -1977,8 +1975,7 @@ Read = "allow"
         apply_config_sources(&mut cfg, &defaults, None, None, None);
         assert!(cfg.plan_projection_tail);
 
-        let file: MinkConfigFile =
-            toml::from_str("plan_projection_tail = false").unwrap();
+        let file: MinkConfigFile = toml::from_str("plan_projection_tail = false").unwrap();
         assert_eq!(file.plan_projection_tail, Some(false));
 
         apply_config_sources(&mut cfg, &defaults, None, None, Some(&file));

@@ -24,7 +24,6 @@ pub fn execute_script_with_interrupt(
     execute_script_with_interrupt_in_dir(script, timeout_secs, interrupt, None)
 }
 
-
 fn execute_script_with_interrupt_in_dir(
     script: &str,
     timeout_secs: Option<u64>,
@@ -246,7 +245,6 @@ mod tests {
         assert!(stdout.contains("interrupted"));
         assert!(!stdout.contains("done"));
     }
-
 
     #[test]
     fn json_processing_works() {

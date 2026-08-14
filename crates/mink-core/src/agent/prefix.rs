@@ -144,15 +144,18 @@ mod tests {
                 .lines()
                 .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
                 .filter(|evt| {
-                    evt.get("type").and_then(serde_json::Value::as_str)
-                        == Some("prefix_snapshot")
+                    evt.get("type").and_then(serde_json::Value::as_str) == Some("prefix_snapshot")
                 })
                 .collect()
         };
 
         let events = tokio::fs::read_to_string(&ctx.events_path).await?;
         let snapshots = snapshot(&events);
-        assert_eq!(snapshots.len(), 1, "first build writes exactly one snapshot");
+        assert_eq!(
+            snapshots.len(),
+            1,
+            "first build writes exactly one snapshot"
+        );
         let evt = &snapshots[0];
         assert_eq!(evt["version"], 1);
         assert_eq!(

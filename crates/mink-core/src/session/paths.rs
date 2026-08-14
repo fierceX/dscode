@@ -206,7 +206,6 @@ pub async fn ensure_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-
 /// Generate a unique session ID: YYYYMMDD-HHmmss-XXXX.
 pub fn chrono_session_id() -> String {
     use time::format_description::FormatItem;
