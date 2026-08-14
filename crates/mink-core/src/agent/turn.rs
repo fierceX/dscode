@@ -546,10 +546,39 @@ impl TurnExecutor {
         self.tool_call_count += calls.len() as u32;
         let (calls_to_execute, mut guarded_results) =
             self.apply_signal_recovery_guard(calls, belief.as_deref_mut());
-        let mut results = if calls_to_execute.is_empty() {
-            Vec::new()
+        let executed = if calls_to_execute.is_empty() {
+            Ok(Vec::new())
         } else {
-            self.tools.execute_all(calls_to_execute).await?
+            self.tools.execute_all(calls_to_execute.clone()).await
+        };
+        let mut results = match executed {
+            Ok(results) => results,
+            Err(error) => {
+                let synthetic: Vec<crate::tools::runner::ToolRunResult> = calls_to_execute
+                    .into_iter()
+                    .map(|call| {
+                        crate::tools::runner::blocked_tool_result(
+                            call.id,
+                            call.name,
+                            call.fields,
+                            format!("tool execution failed: {error:#}"),
+                        )
+                    })
+                    .collect();
+                let tool_results: Vec<ToolResult> = synthetic
+                    .iter()
+                    .map(|r| ToolResult {
+                        tool_use_id: r.tool_use_id.clone(),
+                        tool_name: r.tool_name.clone(),
+                        tool_args: r.tool_args.clone(),
+                        content: r.content.clone(),
+                        conv_content: r.conv_content.clone(),
+                        state_metadata: r.state_metadata.clone(),
+                    })
+                    .collect();
+                self.ctx.store.add_tool_results(&tool_results).await?;
+                return Err(error);
+            }
         };
         guarded_results.append(&mut results);
         let results = guarded_results;
@@ -732,10 +761,11 @@ impl TurnExecutor {
                 allowed.extend(iter);
                 return (allowed, Vec::new());
             }
-            return (
-                Vec::new(),
-                vec![blocked_by_signal_recovery(first, guidance.content)],
-            );
+            let blocked: Vec<crate::tools::runner::ToolRunResult> = std::iter::once(first)
+                .chain(iter)
+                .map(|call| blocked_by_signal_recovery(call, guidance.content.clone()))
+                .collect();
+            return (Vec::new(), blocked);
         }
 
         self.signal_recovery_guard = false;
@@ -841,7 +871,7 @@ impl TurnExecutor {
         let mut child_cfg = self.sub_agent_config.clone();
         child_cfg.max_turns = s.replan_max_turns;
         child_cfg.max_tokens = child_cfg.max_tokens.min(s.replan_token_budget);
-        let session_id = format!("replan-{}", self.replan_attempts);
+        let session_id = format!("replan_{}", crate::session::paths::chrono_session_id());
         let report = self.build_replan_report(belief);
         // B3 修复：子代理初始化失败必须降级（返回 None），不得把整轮炸成 Err。
         let executor = match crate::agent::sub_executor::SubAgentExecutor::new(

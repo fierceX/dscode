@@ -109,6 +109,20 @@ where
     })
 }
 
+/// Join output readers with a bounded grace period. A background grandchild
+/// that inherited the stdout/stderr pipe can keep `read()` blocked after the
+/// child exits; joining without a deadline would hang the tool call and leak
+/// a blocking-pool thread. Blocked readers are detached (dropping the
+/// JoinHandle detaches the thread): they exit on their own when the pipe
+/// finally closes (grandchild exit). The rare case of a daemon that never
+/// exits leaks one plain OS thread; accepted tradeoff vs. hanging the turn.
+pub(crate) fn join_output_readers_bounded(readers: Vec<JoinHandle<()>>) {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while readers.iter().any(|r| !r.is_finished()) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// Put spawned Unix children in their own process group so timeout/cancel can
 /// clean up grandchildren that keep pipes or files open.
 #[cfg(unix)]

@@ -847,7 +847,7 @@ fn requires_sequential_execution(metadata: Option<ToolMetadata>) -> bool {
         )
 }
 
-fn blocked_tool_result(
+pub(crate) fn blocked_tool_result(
     id: String,
     name: String,
     args: BTreeMap<String, String>,

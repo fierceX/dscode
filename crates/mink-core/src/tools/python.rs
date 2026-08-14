@@ -66,35 +66,27 @@ fn execute_script_with_interrupt_in_dir(
     let start = Instant::now();
     let mut timed_out = false;
     let mut interrupted = false;
-    let mut exit_code: Option<i32> = None;
-
-    loop {
+    let exit_code = loop {
         match child.try_wait() {
-            Ok(Some(status)) => {
-                exit_code = status.code();
-                break;
-            }
+            Ok(Some(status)) => break status.code(),
             Ok(None) => {
                 if interrupt.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
                     crate::util::terminate_child_process_tree(&mut child);
                     interrupted = true;
-                    exit_code = Some(130);
-                    break;
+                    break Some(130);
                 }
                 if start.elapsed() >= timeout {
                     crate::util::terminate_child_process_tree(&mut child);
                     timed_out = true;
-                    break;
+                    break Some(124);
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
             Err(e) => bail!("Error: failed to wait for python3: {e}"),
         }
-    }
+    };
 
-    for reader in readers {
-        let _ = reader.join();
-    }
+    crate::util::join_output_readers_bounded(readers);
     let mut stdout = stdout_buf.to_string_lossy("stdout");
     let stderr = stderr_buf.to_string_lossy("stderr");
 
@@ -192,7 +184,7 @@ impl super::runner::ToolExec for PythonTool {
             conversation_content: String::new(),
             is_bash: false,
             exit_code,
-            success: exit_code.unwrap_or(0) == 0,
+            success: exit_code == Some(0),
             no_mutation: false,
             memo_candidate: None,
             diagnostics: Vec::new(),
@@ -231,8 +223,19 @@ mod tests {
 
     #[test]
     fn timeout_kills_long_script() {
-        let (stdout, _, _) = execute_script("import time; time.sleep(10)", Some(1)).unwrap();
+        let (stdout, _, code) = execute_script("import time; time.sleep(10)", Some(1)).unwrap();
         assert!(stdout.contains("timed out"));
+        assert_eq!(code, Some(124));
+    }
+
+    #[test]
+    fn signal_killed_script_fails() {
+        let (_, _, code) = execute_script(
+            "import os, signal; os.kill(os.getpid(), signal.SIGKILL)",
+            None,
+        )
+        .unwrap();
+        assert_eq!(code, None);
     }
 
     #[test]
@@ -257,6 +260,7 @@ mod tests {
         assert!(stdout.contains("interrupted"));
         assert!(!stdout.contains("done"));
     }
+
 
     #[test]
     fn json_processing_works() {

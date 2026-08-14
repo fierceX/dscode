@@ -235,7 +235,7 @@ impl LlmBackend for OpenAiCompatibleBackend {
         }
 
         let (resp, attempt_count) = client
-            .send_body_with_retry(request.display.as_ref(), body)
+            .send_body_with_retry(request.display.as_ref(), body, &request.cancel)
             .await
             .map_err(|failure| LlmRequestFailure {
                 attempt_count: failure.attempt_count,
@@ -393,13 +393,14 @@ impl AsyncLlClient {
         ctx: &AgentSharedContext,
         body: Vec<u8>,
     ) -> std::result::Result<(reqwest::Response, u32), SendFailure> {
-        self.send_body_with_retry(ctx.display.as_ref(), body).await
+        self.send_body_with_retry(ctx.display.as_ref(), body, &ctx.cancel)
+            .await
     }
-
     async fn send_body_with_retry(
         &self,
         display: &dyn crate::ui::Display,
         body: Vec<u8>,
+        cancel: &crate::cancel::CancellationToken,
     ) -> std::result::Result<(reqwest::Response, u32), SendFailure> {
         let start = std::time::Instant::now();
         let mut attempt: u32 = 0;
@@ -412,8 +413,16 @@ impl AsyncLlClient {
                 .body(body.clone())
                 .header("Content-Type", "application/json")
                 .header("Authorization", format!("Bearer {}", self.api_key));
+            match tokio::select! {
+                result = req.send() => result,
+                _ = cancel.cancelled() => {
+                    return Err(SendFailure {
+                        error: anyhow::anyhow!("request cancelled"),
+                        attempt_count,
+                    })
+                }
+            } {
 
-            match req.send().await {
                 Ok(resp) => {
                     let code = resp.status().as_u16();
                     if code < 400 {
@@ -434,10 +443,27 @@ impl AsyncLlClient {
                             .get("retry-after")
                             .and_then(|v| v.to_str().ok())
                             .and_then(|v| v.parse::<u64>().ok())
-                            .unwrap_or(2);
-                        tokio::time::sleep(Duration::from_secs(retry_after)).await;
+                            .unwrap_or(2)
+                            .min(10);
+                        tokio::select! {
+                            _ = tokio::time::sleep(Duration::from_secs(retry_after)) => {}
+                            _ = cancel.cancelled() => {
+                                return Err(SendFailure {
+                                    error: anyhow::anyhow!("request cancelled"),
+                                    attempt_count,
+                                })
+                            }
+                        }
                     } else {
-                        tokio::time::sleep(RETRY_DELAY * 2u32.pow(attempt)).await;
+                        tokio::select! {
+                            _ = tokio::time::sleep(RETRY_DELAY * 2u32.pow(attempt)) => {}
+                            _ = cancel.cancelled() => {
+                                return Err(SendFailure {
+                                    error: anyhow::anyhow!("request cancelled"),
+                                    attempt_count,
+                                })
+                            }
+                        }
                     }
                 }
                 Err(e) => {
@@ -449,7 +475,15 @@ impl AsyncLlClient {
                             attempt_count,
                         });
                     }
-                    tokio::time::sleep(RETRY_DELAY).await;
+                    tokio::select! {
+                        _ = tokio::time::sleep(RETRY_DELAY) => {}
+                        _ = cancel.cancelled() => {
+                            return Err(SendFailure {
+                                error: anyhow::anyhow!("request cancelled"),
+                                attempt_count,
+                            })
+                        }
+                    }
                 }
             }
             attempt += 1;
@@ -734,6 +768,67 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    #[ignore = "requires local loopback sockets"]
+    async fn retry_after_is_capped() -> anyhow::Result<()> {
+        let responses = vec![
+            http_response(429, &[("retry-after", "10000")], "rate limited"),
+            http_response(429, &[("retry-after", "10000")], "rate limited"),
+            http_response(429, &[("retry-after", "10000")], "rate limited"),
+        ];
+        let (api_url, seen, _server) = start_http_server(responses).await?;
+        let ctx = test_context("client-retry-cap", &api_url).await?;
+        let client = AsyncLlClient::new("secret-key", &api_url)?;
+
+        let start = std::time::Instant::now();
+        let err = client
+            .send_with_retry(&ctx, br#"{"ping":true}"#.to_vec())
+            .await
+            .unwrap_err()
+            .to_string();
+        // Uncapped, retry-after 10000 would park each attempt for hours;
+        // capped at 10s the failure arrives after ~2 sleeps + the 20s budget.
+        assert!(err.contains("HTTP 429"), "{err}");
+        assert!(start.elapsed() < std::time::Duration::from_secs(30));
+        assert_eq!(seen.load(Ordering::SeqCst), 3);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires local loopback sockets"]
+    async fn send_is_cancellable() -> anyhow::Result<()> {
+        let responses = vec![http_response(200, &[], "ok")];
+        let (api_url, _seen, _server) = start_http_server(responses).await?;
+        let ctx = test_context("client-cancel", &api_url).await?;
+        let client = AsyncLlClient::new("secret-key", &api_url)?;
+
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let ctx_clone = ctx.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            // Bypass ctx.cancel (not cancelled) to exercise the param wiring:
+            // send_body_with_retry must select on the token it receives.
+            let result = client
+                .send_body_with_retry(
+                    ctx_clone.display.as_ref(),
+                    br#"{"ping":true}"#.to_vec(),
+                    &cancel,
+                )
+                .await;
+            let _ = tx.send(result);
+        });
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(2), rx).await?;
+        match result {
+            Ok(Err(failure)) => {
+                assert_eq!(failure.error.to_string(), "request cancelled");
+            }
+            Ok(Ok(_)) => panic!("send unexpectedly succeeded"),
+            Err(e) => panic!("task join failed: {e}"),
+        }
+        Ok(())
+    }
     #[tokio::test]
     #[ignore = "requires local loopback sockets"]
     async fn stream_parses_sse_text_usage_and_stop() -> anyhow::Result<()> {

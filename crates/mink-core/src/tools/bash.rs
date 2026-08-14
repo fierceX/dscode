@@ -102,33 +102,27 @@ fn execute_sync(
 
     let start_sync = Instant::now();
     let mut timed_out = false;
-    let mut exit_code: Option<i32> = None;
-    loop {
+    let exit_code = loop {
         match child.try_wait() {
-            Ok(Some(status)) => {
-                exit_code = status.code();
-                break;
-            }
+            Ok(Some(status)) => break status.code(),
             Ok(None) => {
                 if interrupt.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
                     crate::util::terminate_child_process_tree(&mut child);
-                    exit_code = Some(130);
-                    break;
+                    break Some(130);
                 }
                 if start_sync.elapsed() >= timeout {
                     crate::util::terminate_child_process_tree(&mut child);
                     timed_out = true;
-                    break;
+                    break Some(124);
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
             Err(e) => bail!("Error: failed to wait on child process: {e}"),
         }
-    }
+    };
 
-    for reader in readers {
-        let _ = reader.join();
-    }
+
+    crate::util::join_output_readers_bounded(readers);
 
     let mut out = stdout_buf.to_string_lossy("stdout");
     let stderr_out = stderr_buf.to_string_lossy("stderr");
@@ -295,7 +289,7 @@ impl BashTool {
             conversation_content: String::new(),
             is_bash: true,
             exit_code: code,
-            success: code.unwrap_or(0) == 0,
+            success: code == Some(0),
             no_mutation: false,
             memo_candidate: None,
             diagnostics: Vec::new(),
@@ -456,6 +450,22 @@ mod tests {
         let (result, _) = execute("sleep 10; echo done", Some(1), 600).unwrap();
         assert!(result.contains("timed out"));
         assert!(!result.contains("done"));
+    }
+
+    #[test]
+    fn timeout_reports_exit_124() {
+        let (result, code) = execute("sleep 5", Some(1), 600).unwrap();
+        assert!(result.contains("timed out"));
+        assert_eq!(code, Some(124));
+    }
+
+
+    #[test]
+    fn background_daemon_does_not_hang() {
+        let start = std::time::Instant::now();
+        let result = execute("sleep 2 &", None, 600);
+        assert!(result.is_ok());
+        assert!(start.elapsed() < std::time::Duration::from_secs(3));
     }
 
     #[test]

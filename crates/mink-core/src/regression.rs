@@ -1068,6 +1068,88 @@ async fn signal_recovery_guard_blocks_first_write() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn signal_recovery_guard_blocks_whole_batch() -> anyhow::Result<()> {
+    let h = harness("guard-blocks-batch").await?;
+    let llm = Arc::new(MockLlmClient::new(
+        "flash",
+        vec![
+            vec![
+                Ok(Event::ToolCall(tool_call(
+                    "Bash",
+                    "call_fail_1",
+                    json!({"command":"false"}),
+                ))),
+                Ok(Event::ToolCall(tool_call(
+                    "Bash",
+                    "call_fail_2",
+                    json!({"command":"false"}),
+                ))),
+                Ok(Event::ToolCall(tool_call(
+                    "Bash",
+                    "call_fail_3",
+                    json!({"command":"false"}),
+                ))),
+                Ok(Event::Stop(StopEvent {
+                    reason: "tool_calls".into(),
+                })),
+            ],
+            vec![
+                Ok(Event::ToolCall(tool_call(
+                    "Write",
+                    "call_write_a",
+                    json!({"path":"blocked.txt","content":"nope"}),
+                ))),
+                Ok(Event::ToolCall(tool_call(
+                    "Write",
+                    "call_write_b",
+                    json!({"path":"blocked2.txt","content":"nope"}),
+                ))),
+                Ok(Event::Stop(StopEvent {
+                    reason: "tool_calls".into(),
+                })),
+            ],
+            vec![
+                Ok(Event::Text(TextEvent {
+                    content: "done".into(),
+                })),
+                Ok(Event::Stop(StopEvent {
+                    reason: "end_turn".into(),
+                })),
+            ],
+        ],
+    ));
+    let mut executor = TurnExecutor::new(h.ctx.clone(), llm_client_from_mock(llm));
+    let mut belief = BeliefTracker::new(16);
+    let (decision, effects) = executor
+        .execute("fail then write twice", Some(&mut belief))
+        .await?;
+
+    assert_eq!(decision, TurnDecision::Stop);
+    assert!(effects.is_empty());
+    assert!(!h.cwd.join("blocked.txt").exists());
+    assert!(!h.cwd.join("blocked2.txt").exists());
+    let lines = h.ctx.store.lines().await?;
+    let serialized = serde_json::to_string(&lines)?;
+    assert_eq!(
+        serialized.matches("SIGNAL_RECOVERY guard").count(),
+        2,
+        "{}",
+        serde_json::to_string_pretty(&lines)?
+    );
+    assert!(
+        serialized.contains(r#""tool_use_id":"call_write_a""#),
+        "{}",
+        serde_json::to_string_pretty(&lines)?
+    );
+    assert!(
+        serialized.contains(r#""tool_use_id":"call_write_b""#),
+        "{}",
+        serde_json::to_string_pretty(&lines)?
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn signal_recovery_guard_allows_first_read() -> anyhow::Result<()> {
     let h = harness("guard-allows-read").await?;
     tokio::fs::write(h.cwd.join("ok.txt"), "ok\n").await?;
@@ -1897,7 +1979,9 @@ async fn clean_calls_do_not_open_soft_failure_gate() -> anyhow::Result<()> {
 async fn replan_setup_failure_degrades_to_handover() -> anyhow::Result<()> {
     // B3 修复目标：R3 子代理初始化失败必须降级为接管/失败，而不是整轮 Err。
     let h = harness("replan-setup-failure").await?;
-    // 预置 child home 使 SubAgentExecutor::new 失败（home 已存在）。
+    // 预置冲突使 SubAgentExecutor::new 失败：subagents 路径是普通文件而非
+    // 目录时，任何 child home 都无法创建（replan id 唯一化后无法预知具体
+    // 目录名，用父目录类型冲突作为确定性故障注入点）。
     let parent_session_dir = h
         .ctx
         .store
@@ -1905,7 +1989,7 @@ async fn replan_setup_failure_degrades_to_handover() -> anyhow::Result<()> {
         .parent()
         .expect("parent conversation has a session directory")
         .to_path_buf();
-    tokio::fs::create_dir_all(parent_session_dir.join("subagents").join("replan-1")).await?;
+    tokio::fs::write(parent_session_dir.join("subagents"), b"").await?;
     let calls = (0..8)
         .map(|idx| {
             Ok(Event::ToolCall(tool_call(

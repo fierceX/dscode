@@ -17,6 +17,7 @@ use anyhow::Result;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 
 pub(crate) enum RuntimeCmd {
@@ -26,8 +27,8 @@ pub(crate) enum RuntimeCmd {
     },
     Compact,
     SetModel(String),
-    #[cfg_attr(not(feature = "tui"), allow(dead_code))]
     Interrupt,
+    Exit,
 }
 
 fn start_runtime_broker(
@@ -53,6 +54,7 @@ fn start_runtime_broker(
                 RuntimeCmd::Compact => work_handle.compact().await.map(|_| ()),
                 RuntimeCmd::SetModel(model) => work_handle.set_model(model).await,
                 RuntimeCmd::Interrupt => unreachable!("interrupts bypass the work queue"),
+                RuntimeCmd::Exit => unreachable!("exit bypasses the work queue"),
             };
             if let Err(error) = result {
                 display.render_error(&error.to_string());
@@ -62,6 +64,7 @@ fn start_runtime_broker(
     tokio::spawn(async move {
         while let Some(command) = rx.recv().await {
             match command {
+                RuntimeCmd::Exit => break,
                 RuntimeCmd::Interrupt => handle.interrupt_current_turn(),
                 command => {
                     if work_tx.send(command).is_err() {
@@ -437,7 +440,31 @@ async fn run_interactive(cmd_tx: mpsc::UnboundedSender<RuntimeCmd>, home: &Path)
     let history_path = home.join(".mink/history");
     #[cfg(not(feature = "repl"))]
     let _ = home;
+    let (exit_tx, exit_rx) = tokio::sync::mpsc::channel::<()>(1);
+    {
+        let sig_tx = cmd_tx.clone();
+        let sig_exit_tx = exit_tx;
+        tokio::spawn(async move {
+            let mut last: Option<Instant> = None;
+            loop {
+                if tokio::signal::ctrl_c().await.is_err() {
+                    return;
+                }
+                let now = Instant::now();
+                if let Some(prev) = last
+                    && now.duration_since(prev) < Duration::from_secs(2)
+                {
+                    let _ = sig_tx.send(RuntimeCmd::Exit);
+                    let _ = sig_exit_tx.send(()).await;
+                    return;
+                }
+                last = Some(now);
+                let _ = sig_tx.send(RuntimeCmd::Interrupt);
+            }
+        });
+    }
     tokio::task::spawn_blocking(move || {
+        let mut exit_rx = exit_rx;
         #[cfg(feature = "repl")]
         {
             if let Some(parent) = history_path.parent() {
@@ -447,19 +474,27 @@ async fn run_interactive(cmd_tx: mpsc::UnboundedSender<RuntimeCmd>, home: &Path)
                 Ok(r) => r,
                 Err(_) => {
                     eprintln!("Failed to initialize readline. Running in simple mode.");
-                    simple_stdin_loop(&cmd_tx);
+                    simple_stdin_loop(&cmd_tx, exit_rx);
                     return;
                 }
             };
 
             let _ = rl.load_history(&history_path);
             let history_file = history_path.clone();
+            let mut last_interrupt: Option<Instant> = None;
 
             loop {
                 let line = match rl.readline("> ") {
                     Ok(s) => s.trim_end().to_string(),
                     Err(rustyline::error::ReadlineError::Eof) => break,
                     Err(rustyline::error::ReadlineError::Interrupted) => {
+                        if last_interrupt
+                            .is_some_and(|prev| prev.elapsed() < Duration::from_secs(2))
+                        {
+                            let _ = cmd_tx.send(RuntimeCmd::Exit);
+                            break;
+                        }
+                        last_interrupt = Some(Instant::now());
                         let _ = cmd_tx.send(RuntimeCmd::Interrupt);
                         continue;
                     }
@@ -527,12 +562,16 @@ async fn run_interactive(cmd_tx: mpsc::UnboundedSender<RuntimeCmd>, home: &Path)
                 {
                     break;
                 }
-                // 轮询等待完成，同时检查中断标志
+                // 轮询等待完成，同时检查中断与退出信号
                 let mut done_rx = done_rx;
                 loop {
                     match done_rx.try_recv() {
                         Ok(_) | Err(tokio::sync::oneshot::error::TryRecvError::Closed) => break,
                         Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                            if exit_rx.try_recv().is_ok() {
+                                let _ = cmd_tx.send(RuntimeCmd::Exit);
+                                return;
+                            }
                             std::thread::sleep(std::time::Duration::from_millis(100));
                         }
                     }
@@ -543,7 +582,7 @@ async fn run_interactive(cmd_tx: mpsc::UnboundedSender<RuntimeCmd>, home: &Path)
         #[cfg(not(feature = "repl"))]
         {
             eprintln!("Readline support is disabled; running in simple stdin mode.");
-            simple_stdin_loop(&cmd_tx);
+            simple_stdin_loop(&cmd_tx, exit_rx);
         }
     })
     .await?;
@@ -551,10 +590,17 @@ async fn run_interactive(cmd_tx: mpsc::UnboundedSender<RuntimeCmd>, home: &Path)
     Ok(())
 }
 
-fn simple_stdin_loop(cmd_tx: &mpsc::UnboundedSender<RuntimeCmd>) {
+fn simple_stdin_loop(
+    cmd_tx: &mpsc::UnboundedSender<RuntimeCmd>,
+    mut exit_rx: tokio::sync::mpsc::Receiver<()>,
+) {
     use std::io::BufRead;
     let stdin = std::io::stdin();
     for line in stdin.lock().lines() {
+        if exit_rx.try_recv().is_ok() {
+            break;
+        }
+
         let line = match line {
             Ok(l) => l.trim().to_string(),
             Err(_) => break,
@@ -595,6 +641,9 @@ fn simple_stdin_loop(cmd_tx: &mpsc::UnboundedSender<RuntimeCmd>) {
             break;
         }
         let _ = done_rx.blocking_recv();
+        if exit_rx.try_recv().is_ok() {
+            break;
+        }
     }
 }
 

@@ -58,6 +58,7 @@ pub async fn init_session_base_at(
 
     let store = Arc::new(ConversationStore::new(paths.conversation.clone()));
     store.ensure().await?;
+    store.repair_dangling_tool_uses().await?;
 
     let stats = StatsTracker::load(&paths.stats).await?;
     let artifacts = Arc::new(ArtifactManager::new(paths.artifacts.clone()));

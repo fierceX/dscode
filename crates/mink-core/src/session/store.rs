@@ -332,6 +332,62 @@ impl ConversationStore {
         }
         Ok(())
     }
+
+    /// Append synthetic tool_result blocks for every assistant tool_use id
+    /// that has no matching tool_result anywhere in the file. Called once at
+    /// session init (single-writer startup, before any turn task exists), so
+    /// no lock is held across the scan; the append itself takes the write
+    /// lock internally. Restores message pairing after a turn was interrupted
+    /// or aborted between persisting tool_calls and their results.
+    pub async fn repair_dangling_tool_uses(&self) -> Result<()> {
+        let lines = self.lines_lossy_with_warnings(|_| {}).await?;
+        let mut pending: Vec<String> = Vec::new();
+        let mut resolved: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for line in &lines {
+            let Some(content) = line.get("content").and_then(serde_json::Value::as_array) else {
+                continue;
+            };
+            for block in content {
+                match block.get("type").and_then(serde_json::Value::as_str) {
+                    Some("tool_use") => {
+                        if let Some(id) = block.get("id").and_then(serde_json::Value::as_str) {
+                            let id = id.to_string();
+                            if !resolved.contains(&id) && !pending.contains(&id) {
+                                pending.push(id);
+                            }
+                        }
+                    }
+                    Some("tool_result") => {
+                        if let Some(id) =
+                            block.get("tool_use_id").and_then(serde_json::Value::as_str)
+                        {
+                            resolved.insert(id.to_string());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let dangling: Vec<String> = pending
+            .into_iter()
+            .filter(|id| !resolved.contains(id))
+            .collect();
+        if dangling.is_empty() {
+            return Ok(());
+        }
+        let content: Vec<serde_json::Value> = dangling
+            .iter()
+            .map(|id| {
+                serde_json::json!({
+                    "type": "tool_result",
+                    "tool_use_id": id,
+                    "content": "[mink] tool execution did not complete before the session was interrupted; this synthetic result was appended on load to restore message pairing.",
+                })
+            })
+            .collect();
+        self.append_line(&serde_json::json!({"role": "user", "content": content}))
+            .await
+    }
 }
 
 async fn repair_unterminated_tail(file: &mut tokio::fs::File) -> Result<()> {
@@ -555,6 +611,75 @@ mod tests {
             Some(3)
         );
     }
+
+    fn tool_call_event(id: &str) -> ToolCallEvent {
+        ToolCallEvent {
+            name: "Bash".into(),
+            id: id.into(),
+            input_json: json!({"command": "false"}),
+            fields: Default::default(),
+            order: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn repair_dangling_tool_uses_appends_synthetic_results() {
+        let store = temp_store();
+        store.ensure().await.unwrap();
+        store.add_user("hi").await.unwrap();
+        store
+            .add_assistant("r", "", &[tool_call_event("id_a"), tool_call_event("id_b")])
+            .await
+            .unwrap();
+        let results = vec![ToolResult {
+            tool_use_id: "id_a".into(),
+            tool_name: "Bash".into(),
+            tool_args: Default::default(),
+            content: "Error: exit 1".into(),
+            conv_content: "".into(),
+            state_metadata: None,
+        }];
+        store.add_tool_results(&results).await.unwrap();
+
+        store.repair_dangling_tool_uses().await.unwrap();
+        let lines = store.lines().await.unwrap();
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[3]["role"], "user");
+        let content = lines[3]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "tool_result");
+        assert_eq!(content[0]["tool_use_id"], "id_b");
+
+        // Idempotent: a second repair appends nothing.
+        store.repair_dangling_tool_uses().await.unwrap();
+        assert_eq!(store.lines().await.unwrap().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn repair_dangling_tool_uses_noop_when_paired() {
+        let store = temp_store();
+        store.ensure().await.unwrap();
+        store
+            .add_assistant("r", "", &[tool_call_event("id_a"), tool_call_event("id_b")])
+            .await
+            .unwrap();
+        let results: Vec<ToolResult> = ["id_a", "id_b"]
+            .iter()
+            .map(|id| ToolResult {
+                tool_use_id: (*id).into(),
+                tool_name: "Bash".into(),
+                tool_args: Default::default(),
+                content: "ok".into(),
+                conv_content: "".into(),
+                state_metadata: None,
+            })
+            .collect();
+        store.add_tool_results(&results).await.unwrap();
+
+        store.repair_dangling_tool_uses().await.unwrap();
+        assert_eq!(store.lines().await.unwrap().len(), 2);
+    }
+
 
     #[tokio::test]
     async fn cache_appended_not_invalidated() {

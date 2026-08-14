@@ -159,7 +159,13 @@ impl ToolSignalProcessor {
             );
         }
 
-        if let Some(bt) = belief {
+        // 守卫拦截结果不得作为"干净调用"喂入信念：拦截本身已由
+        // apply_signal_recovery_guard 以合成失败信号喂回一次，这里若把
+        // signals 为空的拦截结果当作完整成功观察（Observation::from_signals
+        // 对空信号给出 success_weight=1.0），会抬升信念、压制 Warning 升级。
+        if let Some(bt) = belief
+            && result.tool_name != "SignalRecoveryGuard"
+        {
             bt.observe(&result.signals);
             crate::ui::render_title_snapshot(ctx, model_label, bt.belief()).await;
         }
