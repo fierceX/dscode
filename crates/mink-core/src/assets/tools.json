@@ -18,7 +18,7 @@
   },
   {
     "name": "Glob",
-    "description": "Discover paths through the configured filesystem backend with ripgrep-style rg --files -g semantics. Patterns are passed as a single rg -g override glob: *.rs matches recursively by file name, src/*.rs matches one level under src, src/**/*.rs matches recursively, and !pattern excludes matches. Use multiple calls for independent patterns.",
+    "description": "Discover paths through the configured filesystem backend with ripgrep-style rg --files -g semantics. Patterns are passed as a single rg -g override glob: *.rs matches recursively by file name, src/*.rs matches one level under src, src/**/*.rs matches recursively, and !pattern excludes matches. Use multiple calls for independent patterns. Results over the output cap end with ... truncated: N files shown; a scan that stops after {{CAP_MAX_SEARCH_FILES}} files ends with ... search truncated. Use a narrower glob to converge.",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -107,7 +107,7 @@
   },
   {
     "name": "Bash",
-    "description": "Execute a focused shell command in the current session working directory for build, test, version-control, package-manager, server, or other shell-only tasks. Returns stdout and stderr. Commands classified as ordinary file reading, content search, or path discovery may be rejected by runtime policy.",
+    "description": "Execute a focused shell command in the current session working directory for build, test, version-control, package-manager, server, or other shell-only tasks. Returns stdout and stderr. The result starts with Exit code: N and Wall time: lines when the process reports an exit code. A command killed by its timeout ends with [... truncated, command timed out ...]. Outputs over {{CAP_TOOL_RESULT_MAX_BYTES}} bytes are truncated and end with [Full output: artifact://<id>]; read them back with Read artifact://<id>. Commands classified as ordinary file reading, content search, or path discovery may be rejected by runtime policy.",
     "input_schema": {
       "type": "object",
       "properties": {

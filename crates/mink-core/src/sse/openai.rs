@@ -81,13 +81,18 @@ impl OpenAIParser {
             || usage.get("cached_tokens").is_some()
             || usage.get("prompt_tokens_details").is_some()
             || usage.get("cache_creation_input_tokens").is_some()
+            || usage.get("prompt_cache_hit_tokens").is_some()
         {
             self.saw_usage = true;
         }
         if let Some(v) = usage.get("completion_tokens").and_then(Value::as_i64) {
             self.output_tokens = v;
         }
-        // cached_tokens may be at top level or nested under prompt_tokens_details (OpenAI/DeepSeek format)
+        // 缓存命中字段双拼写兜底（对齐 DSH translate.ts 的 disjoint 约定）：
+        // OpenAI 兼容拼写（顶层 cached_tokens 或 prompt_tokens_details.cached_tokens）
+        // 优先，DeepSeek 原生拼写 prompt_cache_hit_tokens 兜底。
+        // prompt_cache_miss_tokens 不单独记——它隐含在
+        // input_tokens = prompt_tokens - cache_read 的减法结果中。
         if let Some(v) = usage
             .get("cached_tokens")
             .or_else(|| {
@@ -95,6 +100,7 @@ impl OpenAIParser {
                     .get("prompt_tokens_details")
                     .and_then(|d| d.get("cached_tokens"))
             })
+            .or_else(|| usage.get("prompt_cache_hit_tokens"))
             .and_then(Value::as_i64)
         {
             self.cache_read_input_tokens = v;
@@ -609,6 +615,25 @@ mod tests {
             .unwrap();
         assert_eq!(usage.cache_creation_input_tokens, 48);
         assert_eq!(usage.cache_read_input_tokens, 150);
+    }
+
+    #[test]
+    fn cached_tokens_from_native_deepseek_spelling() {
+        let mut p = OpenAIParser::new();
+        let lines = [
+            "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":1,\"prompt_cache_hit_tokens\":70,\"prompt_cache_miss_tokens\":30}}",
+            "data: [DONE]",
+        ];
+        let events = collect_lines(&mut p, &lines);
+        let usage = events
+            .iter()
+            .find_map(|e| match e {
+                Event::Usage(u) => Some(u),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(usage.cache_read_input_tokens, 70);
+        assert_eq!(usage.input_tokens, 30); // 100 - 70（miss 隐含在减法中）
     }
 
     #[test]

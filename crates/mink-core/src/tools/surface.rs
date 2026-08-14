@@ -326,37 +326,77 @@ impl ModelToolSurface {
     }
 }
 
+/// A2：caps 占位符渲染——把真实配置值注入工具描述。
+/// 占位符白名单见下；tools.json 与运行时描述字符串中的未知 {{...}} 一律
+/// fail-fast（提示词纪律，tests/prompt_discipline.rs 同步执行）。
+pub fn render_description_templates(desc: &str, config: &ToolConfig) -> String {
+    let rendered = desc
+        .replace(
+            "{{CAP_TOOL_RESULT_MAX_BYTES}}",
+            &config.tool_result_max_bytes.to_string(),
+        )
+        .replace(
+            "{{CAP_MAX_SEARCH_RESULTS}}",
+            &config.max_search_results.to_string(),
+        )
+        .replace(
+            "{{CAP_MAX_SEARCH_FILES}}",
+            &config.max_search_files.to_string(),
+        );
+    if let Some(start) = rendered.find("{{") {
+        let rest = &rendered[start..];
+        let end = rest.find("}}").map(|i| start + i + 2).unwrap_or(rendered.len());
+        panic!(
+            "unknown description template placeholder in tool description: {}; whitelist: {{CAP_TOOL_RESULT_MAX_BYTES}}, {{CAP_MAX_SEARCH_RESULTS}}, {{CAP_MAX_SEARCH_FILES}}",
+            &rendered[start..end]
+        );
+    }
+    rendered
+}
+
 fn resolved_schema(
     mut schema: serde_json::Value,
     name: &str,
     config: &ToolConfig,
 ) -> serde_json::Value {
+    // 注入点说明（A2）：渲染必须在 surface_fingerprint 计算之前完成，
+    // 保证"模型看到的描述"与"参与前缀指纹的描述"字节一致。
     if name == "Edit" {
-        return edit_schema(config);
+        let mut schema = edit_schema(config);
+        if let Some(desc) = schema.get("description").and_then(serde_json::Value::as_str) {
+            let rendered = render_description_templates(desc, config);
+            schema["description"] = serde_json::Value::String(rendered);
+        }
+        return schema;
     }
+    // A1：结果标记协议——把"如何读结果"教给模型（全部来自现有实现行为）。
     let description = match (name, config.edit_mode) {
         ("Read", crate::config::EditMode::Hashline) => Some(
-            "Read a local path or registered resource. Editable local non-raw output uses [PATH#TAG] plus numbered lines; raw output omits the header but still marks only its actual range as seen. Resource/VFS reads stay read-only and never mint tags.",
+            "Read a local path or registered resource. Editable local non-raw output uses [PATH#TAG] plus numbered lines; raw output omits the header but still marks only its actual range as seen. Resource/VFS reads stay read-only and never mint tags. Output over {{CAP_TOOL_RESULT_MAX_BYTES}} bytes is rejected with an Error asking for a narrower line range; line numbers anchor later Edit or Read ranges.",
         ),
         ("Read", crate::config::EditMode::Replace) => Some(
-            "Read a local path or registered resource using ordinary numbered output. Resource/VFS reads remain read-only.",
+            "Read a local path or registered resource using ordinary numbered output. Resource/VFS reads remain read-only. Output over {{CAP_TOOL_RESULT_MAX_BYTES}} bytes is rejected with an Error asking for a narrower line range; line numbers anchor later Edit or Read ranges.",
         ),
         ("Grep", crate::config::EditMode::Hashline) => Some(
-            "Search local content or registered resources. Editable local results are grouped per file under [PATH#TAG], and only complete displayed match/context lines become seen. Read-only results retain ordinary search formatting.",
+            "Search local content or registered resources. Editable local results are grouped per file under [PATH#TAG], and only complete displayed match/context lines become seen. Read-only results retain ordinary search formatting. Results truncate at {{CAP_MAX_SEARCH_RESULTS}} matches or the output cap and end with a \"... truncated\" notice; use a narrower glob to converge.",
         ),
         ("Grep", crate::config::EditMode::Replace) => Some(
-            "Search local content or registered resources using ordinary ripgrep-style path:line output.",
+            "Search local content or registered resources using ordinary ripgrep-style path:line output. Results truncate at {{CAP_MAX_SEARCH_RESULTS}} matches or the output cap and end with a \"... truncated\" notice; use a narrower glob to converge.",
         ),
         ("Write", crate::config::EditMode::Hashline) => Some(
-            "Create or fully overwrite a local file. A successful editable-size write records a new Hashline version and returns its [PATH#TAG] header without discarding older history.",
+            "Create or fully overwrite a local file. A successful editable-size write records a new Hashline version and returns its [PATH#TAG] header without discarding older history. Failures return an Error line stating the reason (missing path, size limit, or write error).",
         ),
         ("Write", crate::config::EditMode::Replace) => Some(
-            "Create or fully overwrite a local file while preserving the configured write-size and result-display protections.",
+            "Create or fully overwrite a local file while preserving the configured write-size and result-display protections. Failures return an Error line stating the reason (missing path, size limit, or write error).",
         ),
         _ => None,
     };
     if let Some(description) = description {
         schema["description"] = serde_json::Value::String(description.into());
+    }
+    if let Some(desc) = schema.get("description").and_then(serde_json::Value::as_str) {
+        let rendered = render_description_templates(desc, config);
+        schema["description"] = serde_json::Value::String(rendered);
     }
     schema
 }
@@ -365,7 +405,7 @@ fn edit_schema(config: &ToolConfig) -> serde_json::Value {
     match config.edit_mode {
         crate::config::EditMode::Hashline => serde_json::json!({
             "name": "Edit",
-            "description": format!("Apply Hashline sections to existing local files. Each section starts with [PATH#TAG], where TAG comes from a current-session Read/Grep/Write or successful Edit response. PUT N.=M replaces original snapshot lines, gap PUT inserts, CUT deletes/captures, bodyless @register PUT pastes, REM removes, and MV moves. Literal body lines start with + and are final file content. Every successful content change returns a new tag for the next Edit. Unknown or ambiguous stale tags require a fresh Read/Grep header. Seen-line enforcement is {}. Legacy path/patch inputs and syntactic-block locators are unsupported.", if config.edit_enforce_seen_lines { "enabled" } else { "disabled" }),
+            "description": format!("Apply Hashline sections to existing local files. Each section starts with [PATH#TAG], where TAG comes from a current-session Read/Grep/Write or successful Edit response. PUT N.=M replaces original snapshot lines, gap PUT inserts, CUT deletes/captures, bodyless @register PUT pastes, REM removes, and MV moves. Literal body lines start with + and are final file content. Every successful content change returns a new tag for the next Edit. Unknown or ambiguous stale tags require a fresh Read/Grep header. Seen-line enforcement is {}. Failures return an Error line with structured diagnostics (stale tag, ambiguous anchors, or permission reasons) and never apply partial sections. Legacy path/patch inputs and syntactic-block locators are unsupported.", if config.edit_enforce_seen_lines { "enabled" } else { "disabled" }),
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -381,7 +421,7 @@ fn edit_schema(config: &ToolConfig) -> serde_json::Value {
         crate::config::EditMode::Replace => serde_json::json!({
             "name": "Edit",
             "description": format!(
-                "Replace content in one existing local file using ordered old_text/new_text edits. Matching is unique by default; all=true replaces every occurrence. Fuzzy matching is {} at threshold {:.3}.",
+                "Replace content in one existing local file using ordered old_text/new_text edits. Matching is unique by default; all=true replaces every occurrence. Fuzzy matching is {} at threshold {:.3}. Failures return an Error line with structured diagnostics (ambiguous matches, missing file, or size limits) and never apply partial edits.",
                 if config.edit_fuzzy_match { "enabled" } else { "disabled" },
                 config.edit_fuzzy_threshold
             ),
@@ -625,6 +665,46 @@ mod tests {
                 .unwrap()
                 .has("PythonSandbox")
         );
+    }
+
+    #[test]
+    fn caps_placeholders_render_real_config_values_into_descriptions() {
+        let mut config = ToolConfig::from_config(&Config::default());
+        config.tool_result_max_bytes = 12_345;
+        config.max_search_results = 77;
+        config.max_search_files = 4321;
+        let surface = resolve(&config, AgentRole::Primary, false).unwrap();
+        let bash_desc = surface.get("Bash").unwrap().schema["description"]
+            .as_str()
+            .unwrap();
+        assert!(
+            bash_desc.contains("12345 bytes"),
+            "Bash description must render the configured result cap: {bash_desc}"
+        );
+        assert!(!bash_desc.contains("{{"));
+        let read_desc = surface.get("Read").unwrap().schema["description"]
+            .as_str()
+            .unwrap();
+        assert!(read_desc.contains("12345 bytes"), "{read_desc}");
+        let grep_desc = surface.get("Grep").unwrap().schema["description"]
+            .as_str()
+            .unwrap();
+        assert!(grep_desc.contains("77 matches"), "{grep_desc}");
+        let glob_desc = surface.get("Glob").unwrap().schema["description"]
+            .as_str()
+            .unwrap();
+        assert!(glob_desc.contains("4321 files"), "{glob_desc}");
+        assert!(!glob_desc.contains("{{"));
+        // 渲染后的描述必须参与前缀指纹（A2 注入点约束）。
+        let other = ToolConfig::from_config(&Config::default());
+        assert_ne!(surface.fingerprint(), resolve(&other, AgentRole::Primary, false).unwrap().fingerprint());
+    }
+
+    #[test]
+    #[should_panic(expected = "unknown description template placeholder")]
+    fn unknown_description_placeholder_fails_fast() {
+        let config = ToolConfig::from_config(&Config::default());
+        render_description_templates("uses {{CAP_UNKNOWN}} here", &config);
     }
 
     #[cfg(feature = "python-sandbox")]

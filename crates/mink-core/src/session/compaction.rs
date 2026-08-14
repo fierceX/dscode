@@ -309,8 +309,9 @@ impl CompactionEngine {
             "Merge the conversation turns above with the previous context snapshot below.\n\
              Preserve current facts, decisions, constraints, progress, and blockers.\n\
              Previous context snapshot: {previous}\n\n\
-             Output these five non-empty fields:\n\
-             Task focus:\nLatest request:\nProgress:\nTool evidence:\nReflections:\n\
+             Output these seven non-empty fields:\n\
+             Task focus:\nLatest request:\nProgress:\nErrors:\nDecisions:\nTool evidence:\nReflections:\n\
+             Write (none) for any field without content.\n\
              Start directly with Task focus: and do not use code fences."
         );
         let mut messages = if self.config.context_compact_input_reduction {
@@ -651,7 +652,7 @@ mod tests {
             Ok(crate::llm::client::LlmResponseStream {
                 events: Box::pin(futures::stream::iter(vec![
                     Ok(Event::Text(TextEvent {
-                        content: "Task focus: test\nLatest request: compact\nProgress: retained\nTool evidence: cargo test\nReflections: none".into(),
+                        content: "Task focus: test\nLatest request: compact\nProgress: retained\nErrors: (none)\nDecisions: use cargo test\nTool evidence: cargo test\nReflections: none".into(),
                     })),
                     Ok(Event::Stop(StopEvent {
                         reason: "end_turn".into(),
@@ -667,7 +668,7 @@ mod tests {
             "summary-model",
             vec![vec![
                 Ok(Event::Text(TextEvent {
-                    content: "Task focus: test\nLatest request: compact\nProgress: retained\nTool evidence: none\nReflections: none".into(),
+                    content: "Task focus: test\nLatest request: compact\nProgress: retained\nErrors: (none)\nDecisions: (none)\nTool evidence: none\nReflections: none".into(),
                 })),
                 Ok(Event::Stop(StopEvent {
                     reason: "end_turn".into(),
@@ -1016,6 +1017,12 @@ mod tests {
         assert!(serialized.contains("command=cargo test"));
         assert!(serialized.contains("Process completed with exit code 1."));
         assert!(!serialized.contains("private reasoning"));
+        // A5：摘要指令必须是 7 字段并含空字段指引。
+        assert!(serialized.contains("seven non-empty fields"));
+        for field in ["Task focus:", "Errors:", "Decisions:", "Reflections:"] {
+            assert!(serialized.contains(field), "instruction missing {field}");
+        }
+        assert!(serialized.contains("Write (none) for any field without content."));
         Ok(())
     }
 
@@ -1167,7 +1174,7 @@ mod tests {
             "summary-model",
             vec![vec![
                 Ok(Event::Text(TextEvent {
-                    content: "Task focus: fix build\nLatest request: continue\nProgress: Read(src/lib.rs)\nTool evidence: Bash(cargo test) failed\nReflections: none".into(),
+                    content: "Task focus: fix build\nLatest request: continue\nProgress: Read(src/lib.rs)\nErrors: Bash(cargo test) failed\nDecisions: (none)\nTool evidence: Bash(cargo test) failed\nReflections: none".into(),
                 })),
                 Ok(Event::Stop(StopEvent {
                     reason: "end_turn".into(),
