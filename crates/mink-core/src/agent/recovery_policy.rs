@@ -1,4 +1,3 @@
-use crate::agent::decision::{RecoveryDirective, RecoverySeverity};
 use crate::tools::catalog::ToolCatalog;
 use crate::tools::runtime_guidance::RenderedRuntimeGuidance;
 use crate::tools::semantic_capabilities::{
@@ -57,57 +56,6 @@ impl RecoveryPolicy {
             }
         }
         Self { inspection_actions }
-    }
-
-    pub fn render(&self, directive: &RecoveryDirective) -> RenderedRuntimeGuidance {
-        let severity = match directive.severity {
-            RecoverySeverity::Reminder => "is below the recovery threshold",
-            RecoverySeverity::Warning => "indicates repeated tool failure",
-        };
-        let errors = if directive.errors.is_empty() {
-            String::new()
-        } else {
-            format!(
-                "\nRecent reliability signals:\n{}",
-                directive
-                    .errors
-                    .iter()
-                    .map(|error| format!("- {error}"))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            )
-        };
-        if self.inspection_actions.is_empty() {
-            return RenderedRuntimeGuidance {
-                content: format!(
-                    "[System note: belief {:.2} {severity}. Enter SIGNAL_RECOVERY mode. \
-                     No active tool can perform an approved first-step inspection. Do not call \
-                     any tool; report this limitation and stop the current turn.{errors}]",
-                    directive.belief
-                ),
-                referenced_tools: BTreeSet::new(),
-            };
-        }
-        let referenced_tools: BTreeSet<_> = self
-            .inspection_actions
-            .iter()
-            .map(|action| action.provider.tool.clone())
-            .collect();
-        let actions = referenced_tools
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(", ");
-        RenderedRuntimeGuidance {
-            content: format!(
-                "[System note: belief {:.2} {severity}. Enter SIGNAL_RECOVERY mode. \
-                 Your next tool call must be a current-state inspection using one of these active \
-                 providers: {actions}. Calls that do not satisfy an approved inspection scope \
-                 will be blocked.{errors}]",
-                directive.belief
-            ),
-            referenced_tools,
-        }
     }
 
     pub fn classify_first_call(

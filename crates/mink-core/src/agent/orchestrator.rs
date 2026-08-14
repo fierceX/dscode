@@ -135,10 +135,15 @@ impl TurnRunResult {
 
 impl OrchActor {
     pub fn new(ctx: Arc<AgentSharedContext>, cmd_rx: mpsc::UnboundedReceiver<OrchCmd>) -> Self {
+        let (window, alpha, beta) = (
+            ctx.config.signal.window_size,
+            ctx.config.signal.alpha_prior,
+            ctx.config.signal.beta_prior,
+        );
         Self {
             ctx,
             cmd_rx,
-            belief: BeliefTracker::new(16),
+            belief: BeliefTracker::new_with_priors(window, alpha, beta),
             forced_model: None,
         }
     }
@@ -221,7 +226,9 @@ impl OrchActor {
     async fn handle_user_input(&mut self, input: String, reset_interrupt: bool) -> TurnRunResult {
         let started_at = Instant::now();
         let billing_turn_id = self.ctx.usage.begin_turn();
-        self.belief.reset();
+        // 跨输入衰减替代硬重置（SIGNAL_RESPONSE_REDESIGN S3c）：
+        // 跨轮重复失败可累积升级，单次偶然失败自然消退。
+        self.belief.decay(self.ctx.config.signal.decay_per_input);
         if reset_interrupt {
             self.ctx.interrupt.store(false, Ordering::SeqCst);
         }
@@ -412,7 +419,7 @@ impl OrchActor {
         } else {
             self.forced_model = Some(model.to_string());
         }
-        self.belief.reset();
+        self.belief.decay(self.ctx.config.signal.decay_per_input);
         let resolved = self.resolve_active();
         self.ctx
             .display

@@ -18,6 +18,111 @@ pub enum ToolResultKind {
     SubAgent,
 }
 
+/// 结构化工具错误码（稳定枚举，SIGNAL_RESPONSE_REDESIGN S1）。
+///
+/// 模型可见文本仍以 `Error[kind]: ...` 人读形态呈现；策略/信号/UI 按本枚举
+/// 路由，不再依赖 `Error:` 前缀与 regex 嗅探。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolErrorKind {
+    /// 执行超时（Bash/Python/工具 deadline）。
+    Timeout,
+    /// 引用的快照 tag 已过期或不可复用。
+    StaleTag,
+    /// 匹配目标不唯一（锚点/replace 多候选）。
+    AmbiguousMatch,
+    /// 路径越权或超出允许范围。
+    PathOutOfScope,
+    /// 被 bash/python 安全策略拦截。
+    SafetyBlocked,
+    /// 参数缺失或非法。
+    ArgumentInvalid,
+    /// 进程非零退出。
+    ProcessFailed,
+    /// 被用户或运行时中断。
+    Aborted,
+    /// 无法归类到稳定码的失败。
+    Unknown,
+}
+
+impl ToolErrorKind {
+    /// 硬错误 = 确定性失败（超时/进程失败/安全拦截/中断），单独出现即参与决策。
+    pub fn is_hard(&self) -> bool {
+        matches!(
+            self,
+            ToolErrorKind::Timeout
+                | ToolErrorKind::ProcessFailed
+                | ToolErrorKind::SafetyBlocked
+                | ToolErrorKind::Aborted
+        )
+    }
+}
+
+impl ToolErrorKind {
+    /// 模型可见的稳定标签。
+    pub fn label(&self) -> &'static str {
+        match self {
+            ToolErrorKind::Timeout => "Timeout",
+            ToolErrorKind::StaleTag => "StaleTag",
+            ToolErrorKind::AmbiguousMatch => "AmbiguousMatch",
+            ToolErrorKind::PathOutOfScope => "PathOutOfScope",
+            ToolErrorKind::SafetyBlocked => "SafetyBlocked",
+            ToolErrorKind::ArgumentInvalid => "ArgumentInvalid",
+            ToolErrorKind::ProcessFailed => "ProcessFailed",
+            ToolErrorKind::Aborted => "Aborted",
+            ToolErrorKind::Unknown => "Unknown",
+        }
+    }
+}
+
+/// 从失败结果文本 + 退出码分类出稳定错误码。
+///
+/// 兜底分类只服务展示与统计；确定性错误码应尽早由执行路径显式携带
+/// （见 `ToolRunResult.error_code`），避免依赖文本嗅探。
+pub fn classify_error_kind(content: &str, exit_code: Option<i32>) -> Option<ToolErrorKind> {
+    if let Some(code) = exit_code
+        && code != 0
+    {
+        return Some(ToolErrorKind::ProcessFailed);
+    }
+    let lower = content.to_lowercase();
+    if lower.contains("timed out") || lower.contains("timeout") {
+        return Some(ToolErrorKind::Timeout);
+    }
+    if lower.contains("safety policy") || lower.contains("blocked by bash") {
+        return Some(ToolErrorKind::SafetyBlocked);
+    }
+    if lower.contains("stale") || lower.contains("invalid tag") {
+        return Some(ToolErrorKind::StaleTag);
+    }
+    if lower.contains("not unique")
+        || lower.contains("ambiguous")
+        || lower.contains("multiple matches")
+    {
+        return Some(ToolErrorKind::AmbiguousMatch);
+    }
+    if lower.contains("outside")
+        || lower.contains("beyond allowed")
+        || lower.contains("permission denied")
+    {
+        return Some(ToolErrorKind::PathOutOfScope);
+    }
+    if lower.contains("no command provided")
+        || lower.contains("no path provided")
+        || lower.contains("invalid todo status")
+        || lower.contains("invalid argument")
+    {
+        return Some(ToolErrorKind::ArgumentInvalid);
+    }
+    if lower.contains("interrupted") || lower.contains("aborted") {
+        return Some(ToolErrorKind::Aborted);
+    }
+    if content.starts_with("Error:") || content.starts_with("error:") {
+        return Some(ToolErrorKind::Unknown);
+    }
+    None
+}
+
 #[derive(Debug, Clone)]
 pub struct ToolMetadata {
     pub name: std::borrow::Cow<'static, str>,

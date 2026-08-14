@@ -552,7 +552,21 @@ impl super::runner::ToolExec for ReadTool {
                 debug_assert_eq!(snapshot.tag, tag);
                 rendered
             }
-            None => format_numbered_read(start_line, &content),
+            None => {
+                // Replace 模式（或超限文件）：无 hashline 快照语义，但仍为 R2 回滚
+                // 记录完整内容基线（B1 修复的对称面——回滚目标=模型最后读到的全文）。
+                if let Ok(meta) = std::fs::metadata(&path)
+                    && meta.len() as u128
+                        <= editable_limit.min(ctx.tool_config.file_write_max_bytes) as u128
+                    && let Ok(full) = std::fs::read_to_string(&path)
+                {
+                    ctx.snapshots
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .record(&path, &full, start_line..start_line + visible_count);
+                }
+                format_numbered_read(start_line, &content)
+            }
         };
         // Offer the memo candidate; the runner records it only when the final
         // composed output (rendered content plus its summary line) fits the

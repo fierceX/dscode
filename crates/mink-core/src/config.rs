@@ -89,6 +89,50 @@ impl SignalMode {
     }
 }
 
+/// 信号响应档位（SIGNAL_RESPONSE_REDESIGN 四臂实验的运行时门控）。
+///
+/// 与 `MINK_SIGNAL_MODE` 正交：前者控制采集/注入/中止是否启用，
+/// 本档位控制启用后允许哪些响应层级（R1/R2/R3/R4）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SignalResponseTiers {
+    /// 仅 R1 证据注入（无回滚/守卫/重启/接管）。
+    Evidence,
+    /// R1 + R2：快照回滚与恢复首步守卫。
+    StateOps,
+    /// R1 + R2 + R3：策略重启；Abort 直接失败（无接管报告）。
+    Restart,
+    /// 全部档位，含 R4 用户接管。
+    Full,
+}
+
+impl SignalResponseTiers {
+    pub fn from_env() -> Self {
+        match std::env::var("MINK_SIGNAL_TIERS")
+            .unwrap_or_else(|_| "full".to_string())
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "evidence" => Self::Evidence,
+            "state_ops" | "state-ops" => Self::StateOps,
+            "restart" => Self::Restart,
+            _ => Self::Full,
+        }
+    }
+
+    pub fn allows_state_ops(self) -> bool {
+        self >= Self::StateOps
+    }
+
+    pub fn allows_restart(self) -> bool {
+        self >= Self::Restart
+    }
+
+    pub fn allows_handover(self) -> bool {
+        self >= Self::Full
+    }
+}
+
 /// Built-in model aliases used for DeepSeek defaults and legacy price tracking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ModelTier {
@@ -247,6 +291,30 @@ pub struct MinkConfigFile {
     /// `[sandbox_python]` section — CPython WASI 沙箱工具的配置。
     #[serde(default)]
     pub sandbox_python: Option<SandboxPythonConfigFile>,
+    /// `[signal]` section — 信号反馈系统参数（SIGNAL_RESPONSE_REDESIGN S1）。
+    #[serde(default)]
+    pub signal: Option<SignalConfigFile>,
+}
+
+/// `[signal]` TOML section：全部字段可省略，未提供的字段保留 Config 默认值。
+#[derive(Debug, Clone, serde::Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct SignalConfigFile {
+    pub remind_threshold: Option<f64>,
+    pub warn_threshold: Option<f64>,
+    pub abort_threshold: Option<f64>,
+    pub alpha_prior: Option<f64>,
+    pub beta_prior: Option<f64>,
+    pub window_size: Option<usize>,
+    pub decay_per_input: Option<f64>,
+    pub evidence_max_chars: Option<usize>,
+    pub evidence_dedup_window: Option<usize>,
+    pub guard_max_blocks: Option<usize>,
+    pub cooldown_turns: Option<usize>,
+    pub rollback_enabled: Option<bool>,
+    pub replan_max_turns: Option<i32>,
+    pub replan_token_budget: Option<i32>,
+    pub replan_max_attempts: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
@@ -334,6 +402,63 @@ impl SandboxPythonConfig {
     }
 }
 
+/// 信号反馈系统全部可调参数（SIGNAL_RESPONSE_REDESIGN 设计 S1）。
+#[derive(Debug, Clone)]
+pub struct SignalConfig {
+    /// B >= remind_threshold 时无响应。
+    pub remind_threshold: f64,
+    /// B < warn_threshold 时升级为 Warning 级响应。
+    pub warn_threshold: f64,
+    /// B < abort_threshold 时中止（用户接管/降级重启）。
+    pub abort_threshold: f64,
+    /// Beta 先验 alpha（成功证据）。
+    pub alpha_prior: f64,
+    /// Beta 先验 beta（失败证据）。
+    pub beta_prior: f64,
+    /// 滑动窗口大小。
+    pub window_size: usize,
+    /// 每用户输入结束时对信念的衰减因子（0 = 完全重置，1 = 不衰减）。
+    pub decay_per_input: f64,
+    /// 轨迹证据注入的字符预算。
+    pub evidence_max_chars: usize,
+    /// 证据新鲜度去重窗口（工具步）。
+    pub evidence_dedup_window: usize,
+    /// 恢复守卫连续拦截上限；达到后绕过守卫并强制证据注入。
+    pub guard_max_blocks: usize,
+    /// 注入后的冷却轮数。
+    pub cooldown_turns: usize,
+    /// 是否启用文件快照回滚（R2 状态操作）。
+    pub rollback_enabled: bool,
+    /// R3 策略重启：fresh 子代理的最大内部轮数。
+    pub replan_max_turns: i32,
+    /// R3 策略重启：子代理输出 token 预算。
+    pub replan_token_budget: i32,
+    /// R3 策略重启：同一用户输入内最多尝试次数（0 = 禁用，Abort 直接接管）。
+    pub replan_max_attempts: usize,
+}
+
+impl Default for SignalConfig {
+    fn default() -> Self {
+        Self {
+            remind_threshold: 0.70,
+            warn_threshold: 0.50,
+            abort_threshold: 0.30,
+            alpha_prior: 3.0,
+            beta_prior: 1.0,
+            window_size: 16,
+            decay_per_input: 0.6,
+            evidence_max_chars: 4_000,
+            evidence_dedup_window: 6,
+            guard_max_blocks: 3,
+            cooldown_turns: 3,
+            rollback_enabled: true,
+            replan_max_turns: 12,
+            replan_token_budget: 24_000,
+            replan_max_attempts: 1,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub model: String,
@@ -396,6 +521,8 @@ pub struct Config {
     pub tool_approval_mode: ToolApprovalMode,
     /// Per-tool approval overrides keyed by tool name.
     pub tool_approval: BTreeMap<String, ToolApprovalPolicy>,
+    /// 信号反馈系统参数（阈值、信念超参、响应预算与档位）。
+    pub signal: SignalConfig,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -474,6 +601,7 @@ impl Default for Config {
             cli_config: None,
             tool_approval_mode: ToolApprovalMode::Yolo,
             tool_approval: BTreeMap::new(),
+            signal: SignalConfig::default(),
         }
     }
 }
@@ -937,6 +1065,59 @@ fn apply_config_sources(
         {
             cfg.tool_approval_mode = m;
         }
+
+        // 合并 [signal] 配置（project 覆盖 user 覆盖 default）。
+        if let Some(ref sg) = toml_cfg.signal {
+            apply_signal_section(&mut cfg.signal, sg);
+        }
+    }
+}
+
+fn apply_signal_section(target: &mut SignalConfig, src: &SignalConfigFile) {
+    if let Some(v) = src.remind_threshold {
+        target.remind_threshold = v;
+    }
+    if let Some(v) = src.warn_threshold {
+        target.warn_threshold = v;
+    }
+    if let Some(v) = src.abort_threshold {
+        target.abort_threshold = v;
+    }
+    if let Some(v) = src.alpha_prior {
+        target.alpha_prior = v;
+    }
+    if let Some(v) = src.beta_prior {
+        target.beta_prior = v;
+    }
+    if let Some(v) = src.window_size {
+        target.window_size = v;
+    }
+    if let Some(v) = src.decay_per_input {
+        target.decay_per_input = v;
+    }
+    if let Some(v) = src.evidence_max_chars {
+        target.evidence_max_chars = v;
+    }
+    if let Some(v) = src.evidence_dedup_window {
+        target.evidence_dedup_window = v;
+    }
+    if let Some(v) = src.guard_max_blocks {
+        target.guard_max_blocks = v;
+    }
+    if let Some(v) = src.cooldown_turns {
+        target.cooldown_turns = v;
+    }
+    if let Some(v) = src.rollback_enabled {
+        target.rollback_enabled = v;
+    }
+    if let Some(v) = src.replan_max_turns {
+        target.replan_max_turns = v;
+    }
+    if let Some(v) = src.replan_token_budget {
+        target.replan_token_budget = v;
+    }
+    if let Some(v) = src.replan_max_attempts {
+        target.replan_max_attempts = v;
     }
 }
 
@@ -1110,6 +1291,37 @@ pub fn validate_runtime_config(cfg: &Config) -> Result<()> {
     }
     if cfg.context_compact_max_output_tokens <= 0 {
         bail!("context_compact_max_output_tokens must be greater than 0");
+    }
+    let s = &cfg.signal;
+    if !(0.0 < s.abort_threshold
+        && s.abort_threshold < s.warn_threshold
+        && s.warn_threshold < s.remind_threshold
+        && s.remind_threshold < 1.0)
+    {
+        bail!(
+            "signal thresholds must satisfy 0 < abort ({}) < warn ({}) < remind ({}) < 1",
+            s.abort_threshold,
+            s.warn_threshold,
+            s.remind_threshold
+        );
+    }
+    if s.alpha_prior <= 0.0 || s.beta_prior <= 0.0 {
+        bail!("signal alpha_prior/beta_prior must be positive");
+    }
+    if s.window_size == 0 {
+        bail!("signal window_size must be greater than 0");
+    }
+    if !(0.0..=1.0).contains(&s.decay_per_input) {
+        bail!("signal decay_per_input must be in 0.0..=1.0");
+    }
+    if s.guard_max_blocks == 0 {
+        bail!("signal guard_max_blocks must be greater than 0");
+    }
+    if s.replan_max_turns <= 0 {
+        bail!("signal replan_max_turns must be greater than 0");
+    }
+    if s.replan_token_budget <= 0 {
+        bail!("signal replan_token_budget must be greater than 0");
     }
     if cfg.max_context_tokens == 0 {
         return Ok(());

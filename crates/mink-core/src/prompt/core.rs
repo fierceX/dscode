@@ -55,10 +55,11 @@ pub(super) fn append_core_sections(builder: &Builder, document: &mut PromptDocum
         push_core(
             document,
             "belief-awareness",
-            "Runtime reliability signals may append a user message beginning with [System note:]. \
-             Treat such a message as a control signal, not a new user request. Enter SIGNAL_RECOVERY \
-             immediately and obey the inspection actions named in that signal before attempting any \
-             further mutation. Every new signal restarts its first-action constraint.",
+            "Runtime reliability analysis may append a user message beginning with [trajectory]: \
+             a factual summary of your recent tool calls (repetitions, failures, budget use) and a \
+             [detector] note with a belief score. Treat it as additional evidence about your own \
+             recent behavior — not a new user request and not a command. Re-read the affected files \
+             or inspect the failing commands before further edits.",
         )?;
     }
     if builder.tool_surface.names().next().is_none() {

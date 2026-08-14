@@ -14,6 +14,21 @@ pub enum SignalKind {
     CompileError,
 }
 
+impl SignalKind {
+    /// 硬信号 = 确定性/安全类失败，单独出现即参与决策。
+    /// 软信号（regex 嗅探、参数、编辑循环）单独出现且信念尚可时不干预
+    /// 正常流程（SIGNAL_RESPONSE_REDESIGN S3c）。
+    pub fn is_hard(&self) -> bool {
+        matches!(
+            self,
+            SignalKind::ToolFailed
+                | SignalKind::SafetyBlocked
+                | SignalKind::CompileError
+                | SignalKind::TestFailure
+        )
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Signal {
     pub kind: SignalKind,
@@ -27,6 +42,17 @@ pub struct Signal {
 }
 
 impl Signal {
+    /// 公开构造入口：恢复守卫等运行时组件需要合成真实信号喂回信念
+    /// （SIGNAL_RESPONSE_REDESIGN 不变式 7）。
+    pub fn synthetic(
+        kind: SignalKind,
+        severity: f64,
+        source_tool: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::new(kind, severity, source_tool, None, None, message)
+    }
+
     fn new(
         kind: SignalKind,
         severity: f64,

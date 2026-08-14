@@ -1012,7 +1012,17 @@ async fn signal_recovery_guard_blocks_first_write() -> anyhow::Result<()> {
             vec![
                 Ok(Event::ToolCall(tool_call(
                     "Bash",
-                    "call_fail",
+                    "call_fail_1",
+                    json!({"command":"false"}),
+                ))),
+                Ok(Event::ToolCall(tool_call(
+                    "Bash",
+                    "call_fail_2",
+                    json!({"command":"false"}),
+                ))),
+                Ok(Event::ToolCall(tool_call(
+                    "Bash",
+                    "call_fail_3",
                     json!({"command":"false"}),
                 ))),
                 Ok(Event::Stop(StopEvent {
@@ -1067,7 +1077,17 @@ async fn signal_recovery_guard_allows_first_read() -> anyhow::Result<()> {
             vec![
                 Ok(Event::ToolCall(tool_call(
                     "Bash",
-                    "call_fail",
+                    "call_fail_1",
+                    json!({"command":"false"}),
+                ))),
+                Ok(Event::ToolCall(tool_call(
+                    "Bash",
+                    "call_fail_2",
+                    json!({"command":"false"}),
+                ))),
+                Ok(Event::ToolCall(tool_call(
+                    "Bash",
+                    "call_fail_3",
                     json!({"command":"false"}),
                 ))),
                 Ok(Event::Stop(StopEvent {
@@ -1198,8 +1218,10 @@ async fn clean_tool_call_with_belief_takes_decision_none_path() -> anyhow::Resul
 }
 
 #[tokio::test]
-async fn signal_injection_without_recent_errors_uses_empty_recent_suffix() -> anyhow::Result<()> {
-    let h = harness("inject-no-recent-errors").await?;
+async fn soft_only_editloop_does_not_inject_above_warn_zone() -> anyhow::Result<()> {
+    // SIGNAL_RESPONSE_REDESIGN S3c：软信号单独出现且信念仍在提醒区之上时，
+    // 不注入任何消息（记录但不干预），避免打断正常的写->编译->修流程。
+    let h = harness("soft-only-no-inject").await?;
     let llm = Arc::new(MockLlmClient::new(
         "flash",
         vec![
@@ -1230,14 +1252,24 @@ async fn signal_injection_without_recent_errors_uses_empty_recent_suffix() -> an
     assert_eq!(decision, TurnDecision::Stop);
     assert!(effects.is_empty());
     assert!(
-        h.display
+        !h.display
             .info
             .lock()
             .unwrap()
             .iter()
-            .any(|msg| msg.starts_with("Injecting hint") && !msg.contains("recent issues")),
+            .any(|msg| msg.starts_with("Injecting")),
         "{:?}",
         h.display.info.lock().unwrap()
+    );
+    let lines = h.ctx.store.lines().await?;
+    assert!(
+        !lines.iter().any(|line| {
+            line["role"] == "user"
+                && line["content"]
+                    .as_str()
+                    .is_some_and(|content| content.contains("[trajectory]"))
+        }),
+        "soft-only signal must not inject evidence",
     );
     Ok(())
 }
@@ -1281,9 +1313,9 @@ async fn turn_injects_hint_after_failed_tool_and_continues() -> anyhow::Result<(
     assert!(
         lines.iter().any(|line| {
             line["role"] == "user"
-                && line["content"]
-                    .as_str()
-                    .is_some_and(|content| content.contains("[System note:"))
+                && line["content"].as_str().is_some_and(|content| {
+                    content.contains("[trajectory]") && content.contains("[detector]")
+                })
         }),
         "{}",
         serde_json::to_string_pretty(&lines)?
@@ -1294,7 +1326,7 @@ async fn turn_injects_hint_after_failed_tool_and_continues() -> anyhow::Result<(
             .lock()
             .unwrap()
             .iter()
-            .any(|msg| msg.starts_with("Injecting hint (belief ")),
+            .any(|msg| msg.starts_with("Injecting trajectory evidence")),
         "{:?}",
         h.display.info.lock().unwrap()
     );
@@ -1303,7 +1335,15 @@ async fn turn_injects_hint_after_failed_tool_and_continues() -> anyhow::Result<(
 
 #[tokio::test]
 async fn turn_aborts_when_tool_failures_push_belief_too_low() -> anyhow::Result<()> {
-    let h = harness("turn-abort-after-failures").await?;
+    // R3 被禁用时（replan_max_attempts=0），Abort 直接进入 R4 用户接管。
+    let h = harness_with_config(
+        "turn-abort-after-failures",
+        false,
+        300,
+        |cfg| cfg.signal.replan_max_attempts = 0,
+        None,
+    )
+    .await?;
     let calls = (0..8)
         .map(|idx| {
             Ok(Event::ToolCall(tool_call(
@@ -1325,7 +1365,9 @@ async fn turn_aborts_when_tool_failures_push_belief_too_low() -> anyhow::Result<
 
     assert_eq!(
         decision,
-        TurnDecision::Failed("aborted by DecisionEngine".into())
+        TurnDecision::Failed(
+            "signal handover: reliability belief fell below the abort threshold".into()
+        )
     );
     assert!(effects.is_empty());
     assert!(belief.belief() < 0.30, "belief={}", belief.belief());
@@ -1335,9 +1377,560 @@ async fn turn_aborts_when_tool_failures_push_belief_too_low() -> anyhow::Result<
             .lock()
             .unwrap()
             .iter()
-            .any(|msg| msg.starts_with("error:DecisionEngine: aborting")),
+            .any(|msg| msg.starts_with("error:DecisionEngine: handing over")),
         "{:?}",
         h.display.info.lock().unwrap()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn abort_degrades_to_replan_then_continues() -> anyhow::Result<()> {
+    // SIGNAL_RESPONSE_REDESIGN R4 降级链：非交互环境 Abort 先尝试 R3 策略重启，
+    // fresh 子代理产出新计划后父代理继续本轮（不再直接失败）。
+    let h = harness("abort-degrade-to-replan").await?;
+    let parent_failures = (0..8)
+        .map(|idx| {
+            Ok(Event::ToolCall(tool_call(
+                "Bash",
+                &format!("call_fail_{idx}"),
+                json!({"command":format!("false # {idx}")}),
+            )))
+        })
+        .chain(std::iter::once(Ok(Event::Stop(StopEvent {
+            reason: "tool_use".into(),
+        }))))
+        .collect::<Vec<_>>();
+    let replan_child = vec![
+        Ok(Event::Text(TextEvent {
+            content: "Plan: re-read the failing module, add a unit test, then fix the root cause."
+                .into(),
+        })),
+        Ok(Event::Stop(StopEvent {
+            reason: "end_turn".into(),
+        })),
+    ];
+    let parent_continue = vec![
+        Ok(Event::Text(TextEvent {
+            content: "recovered".into(),
+        })),
+        Ok(Event::Stop(StopEvent {
+            reason: "end_turn".into(),
+        })),
+    ];
+    let llm = Arc::new(MockLlmClient::new(
+        "flash",
+        vec![parent_failures, replan_child, parent_continue],
+    ));
+    let ctx = test_context_with_llm_backend(h.ctx.clone(), llm.clone());
+    let mut executor = TurnExecutor::new(ctx, llm_client_from_mock(llm));
+    let mut belief = BeliefTracker::new(16);
+    let (decision, effects) = executor
+        .execute("run many failing commands", Some(&mut belief))
+        .await?;
+
+    assert_eq!(decision, TurnDecision::Stop);
+    assert!(effects.is_empty());
+    // R3 成功后信念被重置为新证据基线。
+    assert!(
+        (belief.belief() - 0.75).abs() < 1e-10,
+        "belief={}",
+        belief.belief()
+    );
+    let lines = h.ctx.store.lines().await?;
+    assert!(
+        lines.iter().any(|line| {
+            line["role"] == "user"
+                && line["content"]
+                    .as_str()
+                    .is_some_and(|content| content.contains("[replan]"))
+        }),
+        "{}",
+        serde_json::to_string_pretty(&lines)?
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn second_warning_triggers_replan() -> anyhow::Result<()> {
+    // SIGNAL_RESPONSE_REDESIGN R3 升级路径：同一输入内连续第 2 次 Warning
+    // 触发 fresh 子代理重新规划，成功后跳过恢复守卫。
+    // （cooldown_turns=0 让两次 Warning 相邻出现，精确锻炼该升级路径。）
+    let h = harness_with_config(
+        "second-warning-replan",
+        false,
+        300,
+        |cfg| cfg.signal.cooldown_turns = 0,
+        None,
+    )
+    .await?;
+    let failing_batch = |prefix: &str| {
+        (0..3)
+            .map(|idx| {
+                Ok(Event::ToolCall(tool_call(
+                    "Bash",
+                    &format!("{prefix}_{idx}"),
+                    json!({"command":format!("false # {prefix} {idx}")}),
+                )))
+            })
+            .chain(std::iter::once(Ok(Event::Stop(StopEvent {
+                reason: "tool_use".into(),
+            }))))
+            .collect::<Vec<_>>()
+    };
+    let replan_child = vec![
+        Ok(Event::Text(TextEvent {
+            content: "Plan: isolate the failing change and verify with one focused command.".into(),
+        })),
+        Ok(Event::Stop(StopEvent {
+            reason: "end_turn".into(),
+        })),
+    ];
+    let parent_finish = vec![
+        Ok(Event::Text(TextEvent {
+            content: "done".into(),
+        })),
+        Ok(Event::Stop(StopEvent {
+            reason: "end_turn".into(),
+        })),
+    ];
+    let llm = Arc::new(MockLlmClient::new(
+        "flash",
+        vec![
+            failing_batch("a"),
+            failing_batch("b"),
+            replan_child,
+            parent_finish,
+        ],
+    ));
+    let ctx = test_context_with_llm_backend(h.ctx.clone(), llm.clone());
+    let mut executor = TurnExecutor::new(ctx, llm_client_from_mock(llm));
+    let mut belief = BeliefTracker::new(16);
+    let (decision, effects) = executor
+        .execute("recover via replan", Some(&mut belief))
+        .await?;
+
+    assert_eq!(decision, TurnDecision::Stop);
+    assert!(effects.is_empty());
+    let lines = h.ctx.store.lines().await?;
+    assert!(
+        lines.iter().any(|line| {
+            line["role"] == "user"
+                && line["content"]
+                    .as_str()
+                    .is_some_and(|content| content.contains("[replan]"))
+        }),
+        "{}",
+        serde_json::to_string_pretty(&lines)?
+    );
+    Ok(())
+}
+
+/// 构造"读取 -> 编辑 -> 三次失败"的 mock 脚本，返回 (脚本, 原文件内容, 编辑后内容)。
+/// 失败批：5 个互不相同的失败 Bash（2 次干净调用后 α=5，5 次失败使
+/// β=6 → B≈0.455 < warn，确保触发 Warning 级回滚）。
+fn failing_batch_n(n: usize, prefix: &str) -> Vec<anyhow::Result<Event>> {
+    let mut batch: Vec<anyhow::Result<Event>> = (0..n)
+        .map(|idx| {
+            Ok(Event::ToolCall(tool_call(
+                "Bash",
+                &format!("{prefix}_{idx}"),
+                json!({"command": format!("false {prefix} {idx}")}),
+            )))
+        })
+        .collect();
+    batch.push(Ok(Event::Stop(StopEvent {
+        reason: "tool_use".into(),
+    })));
+    batch
+}
+
+fn rollback_script_after_edit(tag: &str) -> Vec<Vec<anyhow::Result<Event>>> {
+    vec![
+        vec![
+            Ok(Event::ToolCall(tool_call(
+                "Read",
+                "call_read",
+                // 范围读走快照记录路径（无选择器的 Read 是 full_read_preview，
+                // 不记录回滚基线）。
+                json!({"path":"a.rs:1-10"}),
+            ))),
+            Ok(Event::Stop(StopEvent {
+                reason: "tool_use".into(),
+            })),
+        ],
+        vec![
+            Ok(Event::ToolCall(tool_call(
+                "Edit",
+                "call_edit",
+                json!({"input": format!("[a.rs#{tag}]\nPUT 1.=1:\n+lineX\n")}),
+            ))),
+            Ok(Event::Stop(StopEvent {
+                reason: "tool_use".into(),
+            })),
+        ],
+        failing_batch_n(5, "fail"),
+        vec![
+            Ok(Event::Text(TextEvent {
+                content: "done".into(),
+            })),
+            Ok(Event::Stop(StopEvent {
+                reason: "end_turn".into(),
+            })),
+        ],
+    ]
+}
+
+#[tokio::test]
+async fn hashline_rollback_restores_last_read_baseline() -> anyhow::Result<()> {
+    // B1 修复目标：Warning 级回滚必须把编辑循环窗口内的文件恢复到
+    // 最后一次 Read 记录的基线（而不是 record_edit 记录的编辑后内容）。
+    let h = harness("hashline-rollback").await?;
+    let original = "line1\nline2\nline3\n";
+    tokio::fs::write(h.cwd.join("a.rs"), original).await?;
+    let tag = crate::tools::snapshot::compute_file_tag(original);
+    let llm = Arc::new(MockLlmClient::new(
+        "flash",
+        rollback_script_after_edit(&tag),
+    ));
+    let ctx = test_context_with_llm_backend(h.ctx.clone(), llm.clone());
+    let mut executor = TurnExecutor::new(ctx, llm_client_from_mock(llm));
+    let mut belief = BeliefTracker::new(16);
+    let (decision, _) = executor
+        .execute("edit then fail", Some(&mut belief))
+        .await?;
+    assert_eq!(decision, TurnDecision::Stop);
+    let on_disk = tokio::fs::read_to_string(h.cwd.join("a.rs")).await?;
+    assert_eq!(
+        on_disk, original,
+        "hashline rollback must restore the last READ baseline"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn rollback_preserves_executable_permissions() -> anyhow::Result<()> {
+    // N2 修复：回滚经 atomic_replace 换文件，必须保留原权限（可执行脚本 +x）。
+    use std::os::unix::fs::PermissionsExt;
+    let h = harness("rollback-perms").await?;
+    let original = "#!/bin/sh\necho hi\n";
+    tokio::fs::write(h.cwd.join("a.rs"), original).await?;
+    tokio::fs::set_permissions(h.cwd.join("a.rs"), std::fs::Permissions::from_mode(0o755)).await?;
+    let tag = crate::tools::snapshot::compute_file_tag(original);
+    let llm = Arc::new(MockLlmClient::new(
+        "flash",
+        rollback_script_after_edit(&tag),
+    ));
+    let ctx = test_context_with_llm_backend(h.ctx.clone(), llm.clone());
+    let mut executor = TurnExecutor::new(ctx, llm_client_from_mock(llm));
+    let mut belief = BeliefTracker::new(16);
+    let (decision, _) = executor
+        .execute("edit then fail", Some(&mut belief))
+        .await?;
+    assert_eq!(decision, TurnDecision::Stop);
+    let meta = tokio::fs::metadata(h.cwd.join("a.rs")).await?;
+    assert_eq!(
+        meta.permissions().mode() & 0o777,
+        0o755,
+        "rollback must preserve executable permissions"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn replace_mode_rollback_restores_last_read_baseline() -> anyhow::Result<()> {
+    // B1 修复目标（Replace 模式）：Replace 编辑不记录快照，回滚目标即最后一次 Read。
+    let h = harness_with_config(
+        "replace-rollback",
+        false,
+        300,
+        |cfg| cfg.edit_mode = crate::config::EditMode::Replace,
+        None,
+    )
+    .await?;
+    let original = "line1\nline2\nline3\n";
+    tokio::fs::write(h.cwd.join("a.rs"), original).await?;
+    let llm = Arc::new(MockLlmClient::new(
+        "flash",
+        vec![
+            vec![
+                Ok(Event::ToolCall(tool_call(
+                    "Read",
+                    "call_read",
+                    json!({"path":"a.rs:1-10"}),
+                ))),
+                Ok(Event::Stop(StopEvent {
+                    reason: "tool_use".into(),
+                })),
+            ],
+            vec![
+                Ok(Event::ToolCall(tool_call(
+                    "Edit",
+                    "call_edit",
+                    json!({
+                        "path": "a.rs",
+                        "edits": [{"old_text": "line1", "new_text": "lineX", "all": false}],
+                    }),
+                ))),
+                Ok(Event::Stop(StopEvent {
+                    reason: "tool_use".into(),
+                })),
+            ],
+            failing_batch_n(5, "fail"),
+            vec![
+                Ok(Event::Text(TextEvent {
+                    content: "done".into(),
+                })),
+                Ok(Event::Stop(StopEvent {
+                    reason: "end_turn".into(),
+                })),
+            ],
+        ],
+    ));
+    let ctx = test_context_with_llm_backend(h.ctx.clone(), llm.clone());
+    let mut executor = TurnExecutor::new(ctx, llm_client_from_mock(llm));
+    let mut belief = BeliefTracker::new(16);
+    let (decision, _) = executor
+        .execute("edit then fail", Some(&mut belief))
+        .await?;
+    assert_eq!(decision, TurnDecision::Stop);
+    let on_disk = tokio::fs::read_to_string(h.cwd.join("a.rs")).await?;
+    assert_eq!(
+        on_disk, original,
+        "replace rollback must restore the read baseline"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn rollback_scope_limited_to_recent_edit_window() -> anyhow::Result<()> {
+    // D2 修复目标：只回滚最近窗口内的编辑；窗口之前的编辑保持不动。
+    let h = harness("rollback-scope").await?;
+    let original = "line1\nline2\nline3\n";
+    tokio::fs::write(h.cwd.join("a.rs"), original).await?;
+    let tag = crate::tools::snapshot::compute_file_tag(original);
+    let mut script = vec![
+        vec![
+            Ok(Event::ToolCall(tool_call(
+                "Read",
+                "call_read",
+                json!({"path":"a.rs:1-10"}),
+            ))),
+            Ok(Event::Stop(StopEvent {
+                reason: "tool_use".into(),
+            })),
+        ],
+        vec![
+            Ok(Event::ToolCall(tool_call(
+                "Edit",
+                "call_edit",
+                json!({"input": format!("[a.rs#{tag}]\nPUT 1.=1:\n+lineX\n")}),
+            ))),
+            Ok(Event::Stop(StopEvent {
+                reason: "tool_use".into(),
+            })),
+        ],
+    ];
+    // 6 个成功的 Bash（互不相同，避免 StormBreaker 抑制）把编辑挤出回滚窗口。
+    let mut clean_batch: Vec<anyhow::Result<Event>> = (0..6)
+        .map(|idx| {
+            Ok(Event::ToolCall(tool_call(
+                "Bash",
+                &format!("clean_{idx}"),
+                json!({"command": format!("echo ok {idx}")}),
+            )))
+        })
+        .collect();
+    clean_batch.push(Ok(Event::Stop(StopEvent {
+        reason: "tool_use".into(),
+    })));
+    script.push(clean_batch);
+    // 11 次失败（α=11 由 8 次干净调用推高；β=12 > α 才进入警告区）。
+    script.push(failing_batch_n(11, "fail"));
+    script.push(vec![
+        Ok(Event::Text(TextEvent {
+            content: "done".into(),
+        })),
+        Ok(Event::Stop(StopEvent {
+            reason: "end_turn".into(),
+        })),
+    ]);
+    let llm = Arc::new(MockLlmClient::new("flash", script));
+    let ctx = test_context_with_llm_backend(h.ctx.clone(), llm.clone());
+    let mut executor = TurnExecutor::new(ctx, llm_client_from_mock(llm));
+    let mut belief = BeliefTracker::new(16);
+    let (decision, _) = executor
+        .execute("edit then fail", Some(&mut belief))
+        .await?;
+    assert_eq!(decision, TurnDecision::Stop);
+    let on_disk = tokio::fs::read_to_string(h.cwd.join("a.rs")).await?;
+    assert_eq!(
+        on_disk, "lineX\nline2\nline3\n",
+        "edits outside the rollback window must survive"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn repeated_soft_failures_trigger_evidence_injection() -> anyhow::Result<()> {
+    // D1 修复目标：单次软失败不干预；累计 >= 2 次软失败必须触发 R1 证据注入。
+    let h = harness("repeated-soft-failures").await?;
+    let soft_failure_batch = |n: usize| {
+        vec![
+            Ok(Event::ToolCall(tool_call(
+                "Bash",
+                &format!("soft_{n}"),
+                json!({"command": format!("echo 'Traceback (most recent call last): fake {n}'")}),
+            ))),
+            Ok(Event::Stop(StopEvent {
+                reason: "tool_use".into(),
+            })),
+        ]
+    };
+    let llm = Arc::new(MockLlmClient::new(
+        "flash",
+        vec![
+            soft_failure_batch(1),
+            soft_failure_batch(2),
+            vec![
+                Ok(Event::Text(TextEvent {
+                    content: "done".into(),
+                })),
+                Ok(Event::Stop(StopEvent {
+                    reason: "end_turn".into(),
+                })),
+            ],
+        ],
+    ));
+    let ctx = test_context_with_llm_backend(h.ctx.clone(), llm.clone());
+    let mut executor = TurnExecutor::new(ctx, llm_client_from_mock(llm));
+    let mut belief = BeliefTracker::new(16);
+    let (decision, _) = executor.execute("soft failures", Some(&mut belief)).await?;
+    assert_eq!(decision, TurnDecision::Stop);
+    let lines = h.ctx.store.lines().await?;
+    assert!(
+        lines.iter().any(|line| {
+            line["role"] == "user"
+                && line["content"]
+                    .as_str()
+                    .is_some_and(|content| content.contains("[trajectory]"))
+        }),
+        "{}",
+        serde_json::to_string_pretty(&lines)?
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn clean_calls_do_not_open_soft_failure_gate() -> anyhow::Result<()> {
+    // N1 修复目标：成功调用不得推高 soft_failures 计数。14 次干净调用 + 1 次软失败
+    // 使 B≈0.905 落在 [warn=0.90, remind=0.95) 区间，门控成为唯一决定因素：
+    // 计数正确（soft=1）→ 沉默；计数被干净调用污染（=15）→ 误注入。
+    let h = harness_with_config(
+        "soft-gate-clean",
+        false,
+        300,
+        |cfg| {
+            cfg.signal.remind_threshold = 0.95;
+            cfg.signal.warn_threshold = 0.90;
+        },
+        None,
+    )
+    .await?;
+    let mut clean_batch: Vec<anyhow::Result<Event>> = (0..14)
+        .map(|idx| {
+            Ok(Event::ToolCall(tool_call(
+                "Bash",
+                &format!("clean_{idx}"),
+                json!({"command": format!("echo ok {idx}")}),
+            )))
+        })
+        .collect();
+    clean_batch.push(Ok(Event::Stop(StopEvent {
+        reason: "tool_use".into(),
+    })));
+    let llm = Arc::new(MockLlmClient::new(
+        "flash",
+        vec![
+            clean_batch,
+            vec![
+                Ok(Event::ToolCall(tool_call(
+                    "Bash",
+                    "soft_1",
+                    json!({"command": "echo 'Traceback (most recent call last): fake'"}),
+                ))),
+                Ok(Event::Stop(StopEvent {
+                    reason: "tool_use".into(),
+                })),
+            ],
+            vec![
+                Ok(Event::Text(TextEvent {
+                    content: "done".into(),
+                })),
+                Ok(Event::Stop(StopEvent {
+                    reason: "end_turn".into(),
+                })),
+            ],
+        ],
+    ));
+    let ctx = test_context_with_llm_backend(h.ctx.clone(), llm.clone());
+    let mut executor = TurnExecutor::new(ctx, llm_client_from_mock(llm));
+    let mut belief = BeliefTracker::new(16);
+    let (decision, _) = executor.execute("mostly clean", Some(&mut belief)).await?;
+    assert_eq!(decision, TurnDecision::Stop);
+    let lines = h.ctx.store.lines().await?;
+    assert!(
+        !lines.iter().any(|line| {
+            line["role"] == "user"
+                && line["content"]
+                    .as_str()
+                    .is_some_and(|content| content.contains("[trajectory]"))
+        }),
+        "clean calls must not open the soft-failure gate; store: {}",
+        serde_json::to_string_pretty(&lines)?
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn replan_setup_failure_degrades_to_handover() -> anyhow::Result<()> {
+    // B3 修复目标：R3 子代理初始化失败必须降级为接管/失败，而不是整轮 Err。
+    let h = harness("replan-setup-failure").await?;
+    // 预置 child home 使 SubAgentExecutor::new 失败（home 已存在）。
+    let parent_session_dir = h
+        .ctx
+        .store
+        .path()
+        .parent()
+        .expect("parent conversation has a session directory")
+        .to_path_buf();
+    tokio::fs::create_dir_all(parent_session_dir.join("subagents").join("replan-1")).await?;
+    let calls = (0..8)
+        .map(|idx| {
+            Ok(Event::ToolCall(tool_call(
+                "Bash",
+                &format!("call_fail_{idx}"),
+                json!({"command":format!("false # {idx}")}),
+            )))
+        })
+        .chain(std::iter::once(Ok(Event::Stop(StopEvent {
+            reason: "tool_use".into(),
+        }))))
+        .collect::<Vec<_>>();
+    let llm = Arc::new(MockLlmClient::new("flash", vec![calls]));
+    let ctx = test_context_with_llm_backend(h.ctx.clone(), llm.clone());
+    let mut executor = TurnExecutor::new(ctx, llm_client_from_mock(llm));
+    let mut belief = BeliefTracker::new(16);
+    let outcome = executor
+        .execute("many failing commands", Some(&mut belief))
+        .await;
+    let (decision, _) = outcome.expect("replan setup failure must not fail the whole turn");
+    assert_eq!(
+        decision,
+        TurnDecision::Failed(
+            "signal handover: reliability belief fell below the abort threshold".into()
+        )
     );
     Ok(())
 }
@@ -2548,6 +3141,7 @@ fn internal_result(name: &str) -> ToolRunResult {
         sub_agent_fork: false,
         exit_code: None,
         success: true,
+        error_code: None,
         result_kind: crate::tools::metadata::ToolResultKind::Control,
         presentation: None,
         artifacts: Vec::new(),

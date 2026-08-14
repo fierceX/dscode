@@ -1,5 +1,6 @@
 use crate::context::AgentSharedContext;
 use crate::guard::collector::{Signal, SignalCollector, SignalKind};
+use crate::guard::evidence::EvidenceTracker;
 use crate::tools::runner::ToolRunResult;
 use std::sync::Arc;
 
@@ -7,6 +8,7 @@ pub struct ToolSignalProcessor {
     collector: SignalCollector,
     tool_error_count: u32,
     signals: Vec<Signal>,
+    evidence: EvidenceTracker,
 }
 
 impl ToolSignalProcessor {
@@ -15,12 +17,14 @@ impl ToolSignalProcessor {
             collector: SignalCollector::new(),
             tool_error_count: 0,
             signals: Vec::new(),
+            evidence: EvidenceTracker::default(),
         }
     }
 
     pub fn reset(&mut self) {
         self.tool_error_count = 0;
         self.signals.clear();
+        self.evidence.reset();
     }
 
     pub fn tool_error_count(&self) -> u32 {
@@ -29,6 +33,25 @@ impl ToolSignalProcessor {
 
     pub fn collected_signals(&self) -> &[Signal] {
         &self.signals
+    }
+
+    /// 本输入累计硬失败数（供 DecisionEngine::decide_with_signals）。
+    pub fn hard_failures(&self) -> u32 {
+        self.evidence.hard_failures
+    }
+
+    /// 本输入累计软失败数（供 DecisionEngine::decide_with_signals 的软失败阈值）。
+    pub fn soft_failures(&self) -> u32 {
+        self.evidence.soft_failures
+    }
+
+    /// 轨迹证据跟踪器（SIGNAL_RESPONSE_REDESIGN R1）。
+    pub fn evidence(&self) -> &EvidenceTracker {
+        &self.evidence
+    }
+
+    pub fn evidence_mut(&mut self) -> &mut EvidenceTracker {
+        &mut self.evidence
     }
 
     pub async fn process(
@@ -74,6 +97,42 @@ impl ToolSignalProcessor {
         result.signals = new_signals;
         self.signals.extend(result.signals.clone());
 
+        // 轨迹证据（SIGNAL_RESPONSE_REDESIGN R1/S2）：把本批调用压缩成统计事实。
+        let hard_count = result.signals.iter().filter(|s| s.kind.is_hard()).count();
+        let hard = hard_count > 0 || result.error_code.is_some_and(|kind| kind.is_hard());
+        let summary = result
+            .error_code
+            .map(|kind| kind.label().to_string())
+            .or_else(|| {
+                if !result.success {
+                    result
+                        .signals
+                        .first()
+                        .map(|s| s.message.clone())
+                        .or_else(|| result.content.lines().next().map(|line| line.to_string()))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default();
+        // C4 清理：恢复守卫的拦截结果是运行时内部反馈（拦截本身已由
+        // apply_signal_recovery_guard 合成真实信号喂回信念），不得再进证据统计——
+        // 否则一次拦截被双重计为硬失败，污染失败聚类与 hard/soft 计数。
+        if result.tool_name != "SignalRecoveryGuard" {
+            let paths = edited_paths(&result.tool_name, &result.tool_args);
+            // failed 权威判定：success=false 或存在信号或存在结构化错误码。
+            let failed =
+                !result.success || !result.signals.is_empty() || result.error_code.is_some();
+            self.evidence.record(
+                &result.tool_name,
+                &result.tool_args,
+                &summary,
+                hard,
+                failed,
+                paths,
+            );
+        }
+
         if let Some(bt) = belief {
             bt.observe(&result.signals);
             crate::ui::render_title_snapshot(ctx, model_label, bt.belief()).await;
@@ -113,6 +172,38 @@ impl Default for ToolSignalProcessor {
     }
 }
 
+/// 提取一次写类调用涉及的路径（R2 回滚定位用）。
+fn edited_paths(tool_name: &str, args: &std::collections::BTreeMap<String, String>) -> Vec<String> {
+    let mut paths = Vec::new();
+    match tool_name {
+        "Write" => {
+            if let Some(path) = args.get("path") {
+                paths.push(path.clone());
+            }
+        }
+        "Edit" => {
+            if let Some(path) = args.get("path") {
+                paths.push(path.clone());
+            } else if let Some(input) = args.get("input") {
+                // Hashline 形态：解析每个 section 头 [PATH#TAG]。
+                for line in input.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with('[')
+                        && let Some(close) = trimmed.find('#')
+                    {
+                        let path = trimmed[1..close].to_string();
+                        if !path.is_empty() {
+                            paths.push(path);
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    paths
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,6 +223,7 @@ mod tests {
             sub_agent_fork: false,
             exit_code: None,
             success: false,
+            error_code: Some(crate::tools::metadata::ToolErrorKind::ProcessFailed),
             result_kind: crate::tools::metadata::ToolResultKind::Command,
             presentation: None,
             artifacts: Vec::new(),

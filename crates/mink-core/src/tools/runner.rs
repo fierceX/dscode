@@ -131,6 +131,8 @@ pub struct ToolRunResult {
     pub sub_agent_fork: bool,
     pub exit_code: Option<i32>,
     pub success: bool,
+    /// 结构化错误码（失败时按稳定枚举分类；成功为 None）。
+    pub error_code: Option<crate::tools::metadata::ToolErrorKind>,
     pub result_kind: ToolResultKind,
     pub presentation: Option<ToolPresentation>,
     pub artifacts: Vec<ArtifactDisplay>,
@@ -622,6 +624,14 @@ fn format_dispatched_result(
     if let Some(note) = json_note {
         composed.push_str(&note);
     }
+    // Structured error code: classify the failure text once, before composed
+    // is moved into the finalization branch, so signals/logs/UI always route
+    // on a stable code rather than re-sniffing prose.
+    let error_code = if success {
+        None
+    } else {
+        crate::tools::metadata::classify_error_kind(&composed, exit_code)
+    };
     // Record the read memo only when the *final* composed output (content +
     // summary line + JSON note) fits the budget, so a later hit can never ask
     // the model to reuse content that was truncated or spilled.
@@ -706,6 +716,7 @@ fn format_dispatched_result(
         sub_agent_fork,
         exit_code,
         success,
+        error_code,
         result_kind,
         presentation,
         artifacts: formatted.artifacts,
@@ -854,6 +865,7 @@ fn blocked_tool_result(
         sub_agent_fork: false,
         exit_code: None,
         success: false,
+        error_code: crate::tools::metadata::classify_error_kind(&format!("Error: {reason}"), None),
         result_kind: ToolResultKind::Text,
         presentation: None,
         artifacts: Vec::new(),

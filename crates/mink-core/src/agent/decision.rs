@@ -22,36 +22,55 @@ pub enum RecoverySeverity {
 pub struct RecoveryDirective {
     pub belief: f64,
     pub severity: RecoverySeverity,
-    pub errors: Vec<String>,
 }
 
 pub struct DecisionEngine {
     abort_threshold: f64,
     warn_threshold: f64,
     remind_threshold: f64,
+    cooldown_turns: usize,
     /// 剩余冷却轮数，由引擎内部管理。
     cooldown_remaining: usize,
 }
 
 impl DecisionEngine {
     pub fn new() -> Self {
+        Self::from_config(&crate::config::SignalConfig::default())
+    }
+
+    /// 全参数构造（阈值与冷却来自 SignalConfig）。
+    pub fn from_config(s: &crate::config::SignalConfig) -> Self {
         Self {
-            abort_threshold: 0.30,
-            warn_threshold: 0.50,
-            remind_threshold: 0.70,
+            abort_threshold: s.abort_threshold,
+            warn_threshold: s.warn_threshold,
+            remind_threshold: s.remind_threshold,
+            cooldown_turns: s.cooldown_turns,
             cooldown_remaining: 0,
         }
     }
 
-    /// 决策入口。
+    /// 决策入口（兼容旧签名：假定存在硬信号且无软失败累计）。
+    pub fn decide(&mut self, belief: f64) -> Decision {
+        self.decide_with_signals(belief, 1, 0)
+    }
+
+    /// 决策入口（SIGNAL_RESPONSE_REDESIGN S3c）。
     ///
-    /// - `belief` — 当前信念度 [0.0, 1.0]
-    /// - `errors` — 最近的错误列表（用于注入内容）
+    /// - `hard_signals` — 本批工具调用中硬信号的数量（ToolFailed/SafetyBlocked/
+    ///   CompileError/TestFailure）。
+    /// - `soft_failures` — 本用户输入内累计软失败次数（regex 嗅探类）。单次软失败
+    ///   且信念仍在提醒区上方时不触发注入（记录不干预）；累计 >= 2 次软失败说明
+    ///   模式持续出现，参与决策（D1 修复）。
     ///
     /// 冷却逻辑：引擎内部维护 `cooldown_remaining` 计数器。
     /// 每次调用递减，>0 时跳过注入（但保留 Abort）。
     /// Inject 发生后重置计数器。
-    pub fn decide(&mut self, belief: f64, errors: &[String]) -> Decision {
+    pub fn decide_with_signals(
+        &mut self,
+        belief: f64,
+        hard_signals: usize,
+        soft_failures: usize,
+    ) -> Decision {
         // Abort 是安全机制，始终绕过冷却
         if belief < self.abort_threshold {
             self.cooldown_remaining = 0; // 中止后清除冷却
@@ -64,20 +83,23 @@ impl DecisionEngine {
             return Decision::None;
         }
 
+        // 仅单次软失败：提醒区之上不响应（记录但不干预）。
+        if hard_signals == 0 && soft_failures <= 1 && belief >= self.warn_threshold {
+            return Decision::None;
+        }
+
         if belief < self.warn_threshold {
-            self.cooldown_remaining = DEFAULT_COOLDOWN_TURNS;
+            self.cooldown_remaining = self.cooldown_turns;
             return Decision::Inject(RecoveryDirective {
                 belief,
                 severity: RecoverySeverity::Warning,
-                errors: errors.iter().rev().take(5).cloned().collect(),
             });
         }
         if belief < self.remind_threshold {
-            self.cooldown_remaining = DEFAULT_COOLDOWN_TURNS;
+            self.cooldown_remaining = self.cooldown_turns;
             return Decision::Inject(RecoveryDirective {
                 belief,
                 severity: RecoverySeverity::Reminder,
-                errors: errors.iter().rev().take(3).cloned().collect(),
             });
         }
         Decision::None
@@ -107,24 +129,23 @@ mod tests {
     #[test]
     fn good_belief_does_nothing() {
         let mut de = DecisionEngine::new();
-        assert!(matches!(de.decide(0.9, &[]), Decision::None));
+        assert!(matches!(de.decide(0.9), Decision::None));
     }
 
     #[test]
     fn warn_belief_injects() {
         let mut de = DecisionEngine::new();
-        let d = de.decide(0.4, &["Rust error".into()]);
+        let d = de.decide(0.4);
         assert!(matches!(d, Decision::Inject(_)));
     }
 
     #[test]
     fn injected_message_triggers_signal_recovery_mode() {
         let mut de = DecisionEngine::new();
-        let d = de.decide(0.4, &["Rust error".into()]);
+        let d = de.decide(0.4);
         assert!(matches!(d, Decision::Inject(_)));
         if let Decision::Inject(directive) = d {
             assert_eq!(directive.severity, RecoverySeverity::Warning);
-            assert_eq!(directive.errors, vec!["Rust error"]);
             assert_eq!(directive.belief, 0.4);
         }
     }
@@ -132,7 +153,7 @@ mod tests {
     #[test]
     fn bad_belief_aborts() {
         let mut de = DecisionEngine::new();
-        let d = de.decide(0.2, &["error".into()]);
+        let d = de.decide(0.2);
         assert!(matches!(d, Decision::Abort));
     }
 
@@ -140,12 +161,9 @@ mod tests {
     fn cooldown_suppresses_inject() {
         let mut de = DecisionEngine::new();
         // 第一次调用：注入，设置冷却
-        assert!(matches!(
-            de.decide(0.4, &["err".into()]),
-            Decision::Inject(_)
-        ));
+        assert!(matches!(de.decide(0.4), Decision::Inject(_)));
         // 第二次调用：冷却期内，应返回 None
-        assert!(matches!(de.decide(0.4, &["err".into()]), Decision::None));
+        assert!(matches!(de.decide(0.4), Decision::None));
         assert_eq!(de.cooldown_remaining(), 2); // 3→递减→2
     }
 
@@ -155,7 +173,7 @@ mod tests {
         // 设置冷却
         de.cooldown_remaining = 5;
         // Abort 应绕过冷却
-        let d = de.decide(0.2, &["error".into()]);
+        let d = de.decide(0.2);
         assert!(matches!(d, Decision::Abort));
         // Abort 后冷却应清零
         assert_eq!(de.cooldown_remaining(), 0);
@@ -165,19 +183,13 @@ mod tests {
     fn cooldown_expires_after_enough_calls() {
         let mut de = DecisionEngine::new();
         // 注入，冷却设为 3
-        assert!(matches!(
-            de.decide(0.4, &["err".into()]),
-            Decision::Inject(_)
-        ));
+        assert!(matches!(de.decide(0.4), Decision::Inject(_)));
         // 冷却期内：3→2→1→0，共 3 次 None
-        assert!(matches!(de.decide(0.4, &["err".into()]), Decision::None));
-        assert!(matches!(de.decide(0.4, &["err".into()]), Decision::None));
-        assert!(matches!(de.decide(0.4, &["err".into()]), Decision::None));
+        assert!(matches!(de.decide(0.4), Decision::None));
+        assert!(matches!(de.decide(0.4), Decision::None));
+        assert!(matches!(de.decide(0.4), Decision::None));
         // 冷却结束，可再次注入
-        assert!(matches!(
-            de.decide(0.4, &["err".into()]),
-            Decision::Inject(_)
-        ));
+        assert!(matches!(de.decide(0.4), Decision::Inject(_)));
         // 再次进入冷却
         assert!(de.cooldown_remaining() == DEFAULT_COOLDOWN_TURNS);
     }
@@ -185,10 +197,7 @@ mod tests {
     #[test]
     fn reset_clears_cooldown() {
         let mut de = DecisionEngine::new();
-        assert!(matches!(
-            de.decide(0.4, &["err".into()]),
-            Decision::Inject(_)
-        ));
+        assert!(matches!(de.decide(0.4), Decision::Inject(_)));
         assert!(de.cooldown_remaining() > 0);
         de.reset();
         assert_eq!(de.cooldown_remaining(), 0);
@@ -200,12 +209,13 @@ mod tests {
     }
 
     #[test]
-    fn warning_without_errors_omits_error_section() {
+    fn warning_carries_only_belief_and_severity() {
         let mut de = DecisionEngine::new();
-        let d = de.decide(0.4, &[]);
+        let d = de.decide(0.4);
         assert!(matches!(d, Decision::Inject(_)));
         if let Decision::Inject(directive) = d {
-            assert!(directive.errors.is_empty());
+            assert_eq!(directive.severity, RecoverySeverity::Warning);
+            assert_eq!(directive.belief, 0.4);
         }
     }
 
@@ -213,5 +223,62 @@ mod tests {
     fn default_engine_starts_without_cooldown() {
         let de = DecisionEngine::default();
         assert_eq!(de.cooldown_remaining(), 0);
+    }
+
+    #[test]
+    fn soft_only_signals_do_not_inject_above_warn_zone() {
+        let mut de = DecisionEngine::new();
+        // 提醒区（0.65）且无硬信号、仅 1 次软失败：不响应（SIGNAL_RESPONSE_REDESIGN S3c）。
+        assert!(matches!(de.decide_with_signals(0.65, 0, 1), Decision::None));
+        // 累计 >= 2 次软失败：即使无硬信号也注入（D1 修复）。
+        let mut de = DecisionEngine::new();
+        assert!(matches!(
+            de.decide_with_signals(0.65, 0, 2),
+            Decision::Inject(_)
+        ));
+        // 同信念但有硬信号：注入。
+        let mut de = DecisionEngine::new();
+        assert!(matches!(
+            de.decide_with_signals(0.65, 1, 0),
+            Decision::Inject(_)
+        ));
+        // 警告区（0.4）即使仅软信号也注入。
+        let mut de = DecisionEngine::new();
+        assert!(matches!(
+            de.decide_with_signals(0.4, 0, 0),
+            Decision::Inject(_)
+        ));
+    }
+
+    #[test]
+    fn config_thresholds_are_honored() {
+        let cfg = crate::config::SignalConfig {
+            remind_threshold: 0.9,
+            warn_threshold: 0.8,
+            abort_threshold: 0.2,
+            ..Default::default()
+        };
+        // 独立引擎逐项断言，避免冷却串扰。
+        let mut above = DecisionEngine::from_config(&cfg);
+        assert!(matches!(above.decide(0.95), Decision::None));
+        let mut remind = DecisionEngine::from_config(&cfg);
+        assert!(matches!(remind.decide(0.85), Decision::Inject(_)));
+        let mut warn = DecisionEngine::from_config(&cfg);
+        assert!(matches!(warn.decide(0.5), Decision::Inject(_)));
+        let mut abort = DecisionEngine::from_config(&cfg);
+        assert!(matches!(abort.decide(0.1), Decision::Abort));
+    }
+
+    #[test]
+    fn config_cooldown_is_honored() {
+        let cfg = crate::config::SignalConfig {
+            cooldown_turns: 1,
+            ..Default::default()
+        };
+        let mut de = DecisionEngine::from_config(&cfg);
+        assert!(matches!(de.decide(0.4), Decision::Inject(_)));
+        // 冷却 1 轮：下一次 decide 立即允许注入。
+        assert!(matches!(de.decide(0.4), Decision::None));
+        assert!(matches!(de.decide(0.4), Decision::Inject(_)));
     }
 }

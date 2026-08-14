@@ -34,17 +34,25 @@ pub struct BeliefTracker {
     window_size: usize,
     alpha_sum: f64,
     beta_sum: f64,
-    pub recent_errors: Vec<String>,
+    /// 构造时配置的先验，reset/decay 时回拉到该值。
+    alpha_prior: f64,
+    beta_prior: f64,
 }
 
 impl BeliefTracker {
     pub fn new(window_size: usize) -> Self {
+        Self::new_with_priors(window_size, 3.0, 1.0)
+    }
+
+    /// 全参数构造（SIGNAL_RESPONSE_REDESIGN S1：先验/窗口来自 SignalConfig）。
+    pub fn new_with_priors(window_size: usize, alpha_prior: f64, beta_prior: f64) -> Self {
         Self {
             window: VecDeque::with_capacity(window_size),
             window_size,
-            alpha_sum: 3.0,
-            beta_sum: 1.0,
-            recent_errors: Vec::new(),
+            alpha_sum: alpha_prior,
+            beta_sum: beta_prior,
+            alpha_prior,
+            beta_prior,
         }
     }
 
@@ -62,12 +70,6 @@ impl BeliefTracker {
         self.alpha_sum += obs.success_weight;
         self.beta_sum += obs.failure_weight;
         self.window.push_back(obs);
-
-        for s in signals {
-            if !matches!(s.kind, SignalKind::EditLoop) {
-                self.recent_errors.push(s.message.clone());
-            }
-        }
     }
 
     /// 当前信念度 [0.0, 1.0]
@@ -78,9 +80,19 @@ impl BeliefTracker {
     /// 新用户输入时清空窗口
     pub fn reset(&mut self) {
         self.window.clear();
-        self.alpha_sum = 3.0;
-        self.beta_sum = 1.0;
-        self.recent_errors.clear();
+        self.alpha_sum = self.alpha_prior;
+        self.beta_sum = self.beta_prior;
+    }
+
+    /// 跨用户输入的衰减（SIGNAL_RESPONSE_REDESIGN S3c）：把累计证据向先验
+    /// 回拉 factor 比例，替代硬重置——跨轮重复失败可累积升级，单次偶然失败
+    /// 自然消退。factor = 0 等价于完全重置，factor = 1 不衰减。
+    pub fn decay(&mut self, factor: f64) {
+        let (alpha_prior, beta_prior) = (self.alpha_prior, self.beta_prior);
+        let (a, b) = (self.alpha_sum, self.beta_sum);
+        self.alpha_sum = a * factor + alpha_prior * (1.0 - factor);
+        self.beta_sum = b * factor + beta_prior * (1.0 - factor);
+        self.window.clear();
     }
 }
 
@@ -150,6 +162,25 @@ mod tests {
         bt.observe(&[sig(SignalKind::ToolError, 1.0)]);
         bt.reset();
         assert!((bt.belief() - 0.75).abs() < 1e-10);
-        assert!(bt.recent_errors.is_empty());
+    }
+
+    #[test]
+    fn decay_pulls_belief_toward_prior() {
+        let mut bt = BeliefTracker::new(4);
+        bt.observe(&[sig(SignalKind::ToolError, 1.0)]);
+        let failed = bt.belief();
+        assert!(failed < 0.75);
+        bt.decay(0.6);
+        let decayed = bt.belief();
+        assert!(decayed > failed, "decay must pull belief back toward prior");
+        assert!(decayed < 0.75);
+        // 完全衰减因子 1.0 保持不变，0.0 等价完全重置。
+        let mut keep = BeliefTracker::new(4);
+        keep.observe(&[sig(SignalKind::ToolError, 1.0)]);
+        let before = keep.belief();
+        keep.decay(1.0);
+        assert!((keep.belief() - before).abs() < 1e-12);
+        keep.decay(0.0);
+        assert!((keep.belief() - 0.75).abs() < 1e-10);
     }
 }

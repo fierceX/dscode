@@ -31,6 +31,12 @@ struct NoopState {
 #[derive(Debug, Default)]
 pub struct FileSnapshotStore {
     by_path: HashMap<PathBuf, VecDeque<FileSnapshot>>,
+    /// 每路径最近一次 **完整内容记录**（Read/Write 基线；不含 record_edit 的编辑结果）。
+    /// R2 回滚的目标必须来自这里——record_edit 记录的是编辑后内容，回滚到它会变成
+    /// 空操作（SIGNAL_RESPONSE_REDESIGN B1 修复）。
+    /// 以 read_latest_order 做 LRU 淘汰（上限 MAX_PATHS），防止长会话无界增长（N3 修复）。
+    read_latest: HashMap<PathBuf, FileSnapshot>,
+    read_latest_order: VecDeque<PathBuf>,
     path_recency: VecDeque<PathBuf>,
     total_bytes: usize,
     sequence: u64,
@@ -40,7 +46,21 @@ pub struct FileSnapshotStore {
 }
 
 impl FileSnapshotStore {
+    /// 记录完整内容并**更新回滚基线**（Read/Write 语义：模型亲眼看到的完整状态）。
     pub fn record<I>(&mut self, path: &Path, content: &str, visible_lines: I) -> FileSnapshot
+    where
+        I: IntoIterator<Item = usize>,
+    {
+        self.record_impl(path, content, visible_lines, true)
+    }
+
+    fn record_impl<I>(
+        &mut self,
+        path: &Path,
+        content: &str,
+        visible_lines: I,
+        update_read_latest: bool,
+    ) -> FileSnapshot
     where
         I: IntoIterator<Item = usize>,
     {
@@ -62,6 +82,10 @@ impl FileSnapshotStore {
             existing.sequence = self.sequence;
             let snapshot = existing.clone();
             versions.push_front(existing);
+            // versions 借用在 push_front 后结束，才能更新基线映射。
+            if update_read_latest {
+                self.touch_read_latest(&path, &snapshot);
+            }
             self.touch_path(&path);
             return snapshot;
         }
@@ -80,6 +104,9 @@ impl FileSnapshotStore {
                 self.total_bytes = self.total_bytes.saturating_sub(removed.text.len());
             }
         }
+        if update_read_latest {
+            self.touch_read_latest(&path, &snapshot);
+        }
         self.touch_path(&path);
         self.evict();
         snapshot
@@ -95,7 +122,9 @@ impl FileSnapshotStore {
         I: IntoIterator<Item = usize>,
     {
         let path = canonical_snapshot_path(path);
-        let snapshot = self.record(&path, content, visible_lines);
+        // 编辑结果不得更新回滚基线：R2 回滚目标是"模型最后读到的完整内容"，
+        // 若基线被编辑后内容覆盖，回滚会退化为恒等 no-op（B1 修复）。
+        let snapshot = self.record_impl(&path, content, visible_lines, false);
         let retained = self
             .by_path
             .get(&path)
@@ -133,6 +162,37 @@ impl FileSnapshotStore {
             .filter(|snapshot| snapshot.tag.eq_ignore_ascii_case(tag))
             .cloned()
             .collect()
+    }
+
+    /// 回滚原料（SIGNAL_RESPONSE_REDESIGN R2）：返回 (tag, text) 的最近一次
+    /// Read/Write 完整内容基线。**不含** record_edit 的编辑后内容——回滚目标是
+    /// 循环起点（模型最后一次亲自读到的完整文件），不是最近一次编辑结果。
+    /// 调用方负责原子写回与 mutation bump。
+    pub fn latest_read_snapshot(&self, path: &Path) -> Option<(String, String)> {
+        let path = canonical_snapshot_path(path);
+        self.read_latest
+            .get(&path)
+            .map(|version| (version.tag.clone(), version.text.clone()))
+    }
+
+    /// 更新回滚基线并按 MAX_PATHS 做 LRU 淘汰（N3 修复：防止长会话无界增长）。
+    fn touch_read_latest(&mut self, path: &Path, snapshot: &FileSnapshot) {
+        self.read_latest_order.retain(|existing| existing != path);
+        self.read_latest_order.push_back(path.to_path_buf());
+        self.read_latest
+            .insert(path.to_path_buf(), snapshot.clone());
+        while self.read_latest_order.len() > MAX_PATHS {
+            let Some(oldest) = self.read_latest_order.pop_front() else {
+                break;
+            };
+            self.read_latest.remove(&oldest);
+        }
+    }
+
+    /// 测试专用：当前回滚基线条目数（上限 MAX_PATHS）。
+    #[cfg(test)]
+    pub(crate) fn read_latest_len(&self) -> usize {
+        self.read_latest.len()
     }
 
     pub fn unique_path_for_tag_and_name(
@@ -211,6 +271,14 @@ impl FileSnapshotStore {
         let Some(mut source_versions) = self.by_path.remove(&source) else {
             return;
         };
+        // read_latest 基线随路径迁移（R2 回滚目标跟随 MV）。
+        if let Some(mut baseline) = self.read_latest.remove(&source) {
+            baseline.path = destination.clone();
+            self.read_latest.insert(destination.clone(), baseline);
+        }
+        if let Some(position) = self.read_latest_order.iter().position(|p| p == &source) {
+            self.read_latest_order[position] = destination.clone();
+        }
         for snapshot in &mut source_versions {
             snapshot.path = destination.clone();
         }
@@ -356,6 +424,40 @@ pub fn split_content_lines(content: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_baseline_is_lru_capped_at_max_paths() {
+        // N3 修复：read_latest 基线按 MAX_PATHS 淘汰，长会话不得无界增长。
+        let mut store = FileSnapshotStore::default();
+        for idx in 0..(MAX_PATHS + 10) {
+            let path = PathBuf::from(format!("missing-cap-{idx}.rs"));
+            store.record(&path, &format!("content {idx}\n"), [1]);
+        }
+        assert!(store.read_latest_len() <= MAX_PATHS);
+        // 最老的条目已被淘汰：基线查询返回 None。
+        let oldest = PathBuf::from("missing-cap-0.rs");
+        assert!(store.latest_read_snapshot(&oldest).is_none());
+        // 最新的条目仍在。
+        let newest = PathBuf::from(format!("missing-cap-{}.rs", MAX_PATHS + 9));
+        assert!(store.latest_read_snapshot(&newest).is_some());
+    }
+
+    #[test]
+    fn record_edit_does_not_update_read_baseline() {
+        // B1 修复：编辑结果不得覆盖回滚基线。
+        let mut store = FileSnapshotStore::default();
+        let path = PathBuf::from("missing-baseline.rs");
+        let read_snapshot = store.record(&path, "original\n", [1]);
+        let (tag, text) = store.latest_read_snapshot(&path).expect("baseline exists");
+        assert_eq!(text, "original\n");
+        assert_eq!(tag, read_snapshot.tag);
+        store.record_edit(&path, "edited\n", [1]);
+        let (_, text_after_edit) = store.latest_read_snapshot(&path).expect("baseline kept");
+        assert_eq!(
+            text_after_edit, "original\n",
+            "edit must not clobber baseline"
+        );
+    }
 
     #[test]
     fn identical_content_reuses_version_and_merges_seen_lines() {

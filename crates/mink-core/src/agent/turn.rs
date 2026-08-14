@@ -51,6 +51,18 @@ pub struct TurnExecutor {
     recovery_policy: crate::agent::recovery_policy::RecoveryPolicy,
     /// Set after a signal injection. The next tool batch must observe before mutating.
     signal_recovery_guard: bool,
+    /// 恢复守卫连续拦截计数（达到 guard_max_blocks 后绕过守卫并强制证据注入）。
+    guard_blocks: usize,
+    /// 守卫已达上限被绕过：下一次决策强制注入证据（即使处于冷却）。
+    guard_bypassed: bool,
+    /// 本输入内 Warning 级响应的累计次数（连续 2 次触发 R3 策略重启）。
+    warning_count: usize,
+    /// 本输入内已尝试的 R3 策略重启次数。
+    replan_attempts: usize,
+    /// 当前用户输入原文（R3 任务报告引用）。
+    current_user_input: String,
+    /// 子代理配置副本（R3 用，含当前活动模型）。
+    sub_agent_config: crate::config::Config,
     todo_final_reminder_sent: bool,
     todo_progress_reminder_sent: bool,
     successful_work_calls_since_todo_advance: u32,
@@ -99,16 +111,24 @@ impl TurnExecutor {
             plan_actions: crate::agent::plan_actions::PlanActionHandler,
             sub_agents: crate::agent::sub_coordinator::SubAgentCoordinator::new(
                 ctx.clone(),
-                sub_agent_config,
+                sub_agent_config.clone(),
             ),
+            sub_agent_config,
             tool_call_count: 0,
-            decision_engine: crate::agent::decision::DecisionEngine::new(),
+            decision_engine: crate::agent::decision::DecisionEngine::from_config(
+                &ctx.config.signal,
+            ),
             recovery_policy: crate::agent::recovery_policy::RecoveryPolicy::from_resolved(
                 &ctx.tool_capabilities,
                 crate::tools::catalog::ToolCatalog::builtin()
                     .expect("built-in tool catalog was validated during context construction"),
             ),
             signal_recovery_guard: false,
+            guard_blocks: 0,
+            guard_bypassed: false,
+            warning_count: 0,
+            replan_attempts: 0,
+            current_user_input: String::new(),
             todo_final_reminder_sent: false,
             todo_progress_reminder_sent: false,
             successful_work_calls_since_todo_advance: 0,
@@ -520,7 +540,8 @@ impl TurnExecutor {
         effects: &mut Vec<TurnEffect>,
     ) -> Result<Option<&'static str>> {
         self.tool_call_count += calls.len() as u32;
-        let (calls_to_execute, mut guarded_results) = self.apply_signal_recovery_guard(calls);
+        let (calls_to_execute, mut guarded_results) =
+            self.apply_signal_recovery_guard(calls, belief.as_deref_mut());
         let mut results = if calls_to_execute.is_empty() {
             Vec::new()
         } else {
@@ -651,6 +672,7 @@ impl TurnExecutor {
     fn apply_signal_recovery_guard(
         &mut self,
         calls: Vec<ToolCallEvent>,
+        mut belief: Option<&mut crate::agent::belief::BeliefTracker>,
     ) -> (Vec<ToolCallEvent>, Vec<crate::tools::runner::ToolRunResult>) {
         if !self.signal_recovery_guard || calls.is_empty() {
             return (calls, Vec::new());
@@ -677,13 +699,35 @@ impl TurnExecutor {
             guidance
                 .validate(&self.ctx.tool_surface)
                 .expect("RecoveryPolicy emitted an inactive tool reference");
+            // 拦截必须喂回信念（不变式 7）：顽固循环才能升级，而非无限拦截。
+            if let Some(bt) = belief.as_mut() {
+                let guard_signal = crate::guard::collector::Signal::synthetic(
+                    crate::guard::collector::SignalKind::ToolFailed,
+                    0.9,
+                    "SignalRecoveryGuard",
+                    format!("recovery guard blocked non-inspection call {}", first.name),
+                );
+                bt.observe(std::slice::from_ref(&guard_signal));
+            }
+            self.guard_blocks += 1;
+            let max_blocks = self.ctx.config.signal.guard_max_blocks;
             self.ctx.log_event(serde_json::json!({
                 "type": "signal_recovery_guard",
                 "action": "blocked_non_inspection",
                 "tool": first.name.clone(),
                 "tool_use_id": first.id.clone(),
                 "reason": guidance.content,
+                "guard_blocks": self.guard_blocks,
             }));
+            if self.guard_blocks >= max_blocks {
+                // 达到上限：绕过守卫放行调用，并强制下一次决策注入证据。
+                self.signal_recovery_guard = false;
+                self.guard_bypassed = true;
+                let mut allowed = Vec::new();
+                allowed.push(first);
+                allowed.extend(iter);
+                return (allowed, Vec::new());
+            }
             return (
                 Vec::new(),
                 vec![blocked_by_signal_recovery(first, guidance.content)],
@@ -695,6 +739,169 @@ impl TurnExecutor {
         allowed.push(first);
         allowed.extend(iter);
         (allowed, Vec::new())
+    }
+
+    /// R2 状态操作：把**循环窗口内**（最近 ROLLBACK_WINDOW_STEPS 步）被编辑过的
+    /// 路径回滚到**最后一次 Read/Write 基线**（SIGNAL_RESPONSE_REDESIGN S4，B1/B2/D2 修复）：
+    /// - 回滚目标是 read 基线而非 record_edit 的编辑后内容（否则恒等 no-op）；
+    /// - 只回滚窗口内路径，窗口之前的合法编辑保持不动；
+    /// - 写回经 atomic_replace（同目录临时文件 + rename），失败只记录不中断 turn。
+    async fn apply_rollback(&mut self) -> Result<()> {
+        const ROLLBACK_WINDOW_STEPS: usize = 6; // 与 guard/collector 的 seq_window 对齐。
+        let paths = self
+            .signal_processor
+            .evidence()
+            .edited_paths_since(ROLLBACK_WINDOW_STEPS);
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let mut rolled_back: Vec<serde_json::Value> = Vec::new();
+        for raw in paths {
+            let path = std::path::PathBuf::from(&raw);
+            let full = if path.is_absolute() {
+                path.clone()
+            } else {
+                self.ctx.cwd.join(&path)
+            };
+            let candidate = {
+                let snapshots = self
+                    .ctx
+                    .snapshots
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                snapshots.latest_read_snapshot(&full)
+            };
+            let Some((tag, snapshot_text)) = candidate else {
+                continue;
+            };
+            let Ok(current) = tokio::fs::read_to_string(&full).await else {
+                continue;
+            };
+            let normalized = crate::tools::snapshot::normalize_snapshot_text(&current);
+            if normalized == snapshot_text {
+                continue; // 幂等：磁盘内容已与基线一致。
+            }
+            // N2 修复：atomic_replace 以新临时文件替换，会丢失原文件权限
+            // （可执行脚本会丢 +x）。先取权限，替换后恢复。
+            let original_permissions = std::fs::metadata(&full).map(|meta| meta.permissions()).ok();
+            if let Err(error) =
+                crate::session::atomic_file::atomic_replace(&full, snapshot_text.as_bytes())
+            {
+                self.ctx.log_event(serde_json::json!({
+                    "type": "signal_rollback_error",
+                    "path": full.display().to_string(),
+                    "error": error.to_string(),
+                }));
+                continue;
+            }
+            if let Some(permissions) = original_permissions {
+                let _ = std::fs::set_permissions(&full, permissions);
+            }
+            self.ctx
+                .memo_mutation
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            rolled_back.push(serde_json::json!({
+                "path": full.display().to_string(),
+                "to_tag": tag,
+            }));
+        }
+        if !rolled_back.is_empty() {
+            self.ctx.log_event(serde_json::json!({
+                "type": "signal_rollback",
+                "files": rolled_back,
+            }));
+            self.ctx.display.render_info(&format!(
+                "Signal rollback: restored {} file(s) to their last read snapshot",
+                rolled_back.len()
+            ));
+        }
+        Ok(())
+    }
+
+    /// R3 策略重启（SIGNAL_RESPONSE_REDESIGN S5）：以 fork=false 启动 fresh 子代理，
+    /// 只继承有界任务报告（目标/编辑路径/失败证据），用全新上下文重新规划。
+    /// 成功返回子代理文本；不可用或失败返回 None（调用方降级为既有响应）。
+    /// `belief` 为当前信念度，如实写入报告（禁止用占位值误导子代理）。
+    async fn run_replan(&mut self, belief: f64) -> Result<Option<String>> {
+        if !crate::config::SignalResponseTiers::from_env().allows_restart() {
+            return Ok(None);
+        }
+        let s = self.ctx.config.signal.clone();
+        if self.replan_attempts >= s.replan_max_attempts {
+            return Ok(None);
+        }
+        if !self.ctx.tool_surface.has("SubAgent") {
+            return Ok(None);
+        }
+        self.replan_attempts += 1;
+        let mut child_cfg = self.sub_agent_config.clone();
+        child_cfg.max_turns = s.replan_max_turns;
+        child_cfg.max_tokens = child_cfg.max_tokens.min(s.replan_token_budget);
+        let session_id = format!("replan-{}", self.replan_attempts);
+        let report = self.build_replan_report(belief);
+        // B3 修复：子代理初始化失败必须降级（返回 None），不得把整轮炸成 Err。
+        let executor = match crate::agent::sub_executor::SubAgentExecutor::new(
+            self.ctx.clone(),
+            session_id.clone(),
+            false,
+            child_cfg,
+        )
+        .await
+        {
+            Ok(executor) => executor,
+            Err(error) => {
+                self.ctx.log_event(serde_json::json!({
+                    "type": "signal_replan_error",
+                    "attempts": self.replan_attempts,
+                    "session_id": session_id,
+                    "error": error.to_string(),
+                }));
+                self.ctx.display.render_info(&format!(
+                    "Signal replan unavailable: {error}; falling back to evidence/guard",
+                ));
+                return Ok(None);
+            }
+        };
+        let result = executor.execute(report).await;
+        self.ctx.log_event(serde_json::json!({
+            "type": "signal_replan",
+            "attempts": self.replan_attempts,
+            "session_id": session_id,
+            "status": result.status,
+            "text_len": result.text.len(),
+        }));
+        if result.status != "ok" || result.text.trim().is_empty() {
+            return Ok(None);
+        }
+        let injection = format!(
+            "[replan] A fresh sub-agent re-analyzed the task with a clean context and produced \
+             this revised plan. Treat it as new evidence, not a user request.\n{}",
+            result.text
+        );
+        self.ctx.store.add_runtime_user(&injection).await?;
+        self.ctx
+            .display
+            .render_info("Signal replan: fresh sub-agent produced a revised plan");
+        Ok(Some(result.text))
+    }
+
+    /// 构造 R3 的有界任务报告：原始目标 + 编辑路径 + 失败证据（无父对话历史）。
+    fn build_replan_report(&self, belief: f64) -> String {
+        let budget = self.ctx.config.signal.evidence_max_chars.min(2_000);
+        let evidence = self.signal_processor.evidence().render(budget, belief).text;
+        let paths = self.signal_processor.evidence().edited_paths.join(", ");
+        format!(
+            "You are re-planning for a parent coding agent that is stuck in a failure loop.\n\
+             Original user goal: {}\n\
+             Files edited this turn: {}\n\
+             Failure evidence:\n{}\n\
+             Produce a short revised plan: diagnose the most likely root cause, then list the \
+             next 3 concrete verification-first steps. Output the plan only; do not continue \
+             the parent's work.",
+            self.current_user_input,
+            if paths.is_empty() { "(none)" } else { &paths },
+            evidence,
+        )
     }
 
     /// Phase 4: 根据 stop reason 决策本轮是否结束。
@@ -713,10 +920,7 @@ impl TurnExecutor {
             "tool_use" | "tool_calls" => {
                 // DecisionEngine 决策是否注入（含内部冷却逻辑）
                 let signal_enabled = crate::config::SignalMode::from_env().enabled();
-                if let Some(decision) = self
-                    .decide_signal_recovery(signal_enabled, belief.as_deref())
-                    .await?
-                {
+                if let Some(decision) = self.decide_signal_recovery(signal_enabled, belief).await? {
                     return Ok(Some(decision));
                 }
                 Ok(None) // 继续循环
@@ -758,43 +962,117 @@ impl TurnExecutor {
     async fn decide_signal_recovery(
         &mut self,
         signal_enabled: bool,
-        belief: Option<&crate::agent::belief::BeliefTracker>,
+        belief: Option<&mut crate::agent::belief::BeliefTracker>,
     ) -> Result<Option<TurnDecision>> {
         if !signal_enabled {
             return Ok(None);
         }
         if let Some(bt) = belief {
             let b = bt.belief();
-            match self.decision_engine.decide(b, &bt.recent_errors) {
+            let hard = self.signal_processor.hard_failures() as usize;
+            let soft = self.signal_processor.soft_failures() as usize;
+            let decision = if self.guard_bypassed {
+                // 守卫达到上限被绕过：强制一次证据注入，即使处于冷却。
+                self.guard_bypassed = false;
+                crate::agent::decision::Decision::Inject(
+                    crate::agent::decision::RecoveryDirective {
+                        belief: b,
+                        severity: crate::agent::decision::RecoverySeverity::Warning,
+                    },
+                )
+            } else {
+                self.decision_engine.decide_with_signals(b, hard, soft)
+            };
+            match decision {
                 crate::agent::decision::Decision::Inject(directive) => {
-                    let recent = if bt.recent_errors.is_empty() {
-                        String::new()
+                    // R1 证据注入（SIGNAL_RESPONSE_REDESIGN）：注入轨迹事实而非命令。
+                    let budget = self.ctx.config.signal.evidence_max_chars;
+                    let batch = self.signal_processor.evidence().render(budget, b);
+                    let fresh = self.signal_processor.evidence().is_fresh(batch.hash);
+                    if fresh {
+                        self.signal_processor
+                            .evidence_mut()
+                            .mark_injected(batch.hash);
+                    }
+                    let text = if fresh {
+                        batch.text
                     } else {
                         format!(
-                            ": recent issues: {}",
-                            bt.recent_errors
-                                .iter()
-                                .rev()
-                                .take(3)
-                                .cloned()
-                                .collect::<Vec<_>>()
-                                .join("; ")
+                            "[trajectory]
+- no new evidence since the last injection
+[detector] belief {b:.2} (reference only)"
                         )
                     };
                     self.ctx
                         .display
-                        .render_info(&format!("Injecting hint (belief {:.2}){}", b, recent));
-                    let guidance = self.recovery_policy.render(&directive);
-                    guidance.validate(&self.ctx.tool_surface)?;
-                    self.ctx.store.add_runtime_user(&guidance.content).await?;
-                    self.signal_recovery_guard = true;
+                        .render_info(&format!("Injecting trajectory evidence (belief {b:.2})"));
+                    self.ctx.store.add_runtime_user(&text).await?;
+                    let tiers = crate::config::SignalResponseTiers::from_env();
+                    // R2 状态操作：Warning 级先回滚循环窗口内的编辑（state-ops 档及以上）。
+                    if directive.severity == crate::agent::decision::RecoverySeverity::Warning
+                        && self.ctx.config.signal.rollback_enabled
+                        && tiers.allows_state_ops()
+                    {
+                        self.apply_rollback().await?;
+                    }
+                    // R3 策略重启：同一输入内连续第 2 次 Warning 时，用 fresh 子代理
+                    // 重新规划；成功则注入新计划并跳过守卫（新证据重置策略）。
+                    let is_warning =
+                        directive.severity == crate::agent::decision::RecoverySeverity::Warning;
+                    if is_warning {
+                        self.warning_count += 1;
+                    }
+                    let mut replanned = false;
+                    if is_warning && self.warning_count >= 2 && tiers.allows_restart() {
+                        replanned = self.run_replan(b).await?.is_some();
+                        if replanned {
+                            // 新上下文 = 新证据基线（SIGNAL_RESPONSE_REDESIGN R3）。
+                            bt.reset();
+                        }
+                    }
+                    // 恢复守卫降级为状态门：仅在 Warning 级启用且未成功重规划时。
+                    self.signal_recovery_guard =
+                        is_warning && !replanned && tiers.allows_state_ops();
                 }
                 crate::agent::decision::Decision::Abort => {
-                    self.ctx
-                        .display
-                        .render_error(&format!("DecisionEngine: aborting (belief {:.2}).", b));
+                    let tiers = crate::config::SignalResponseTiers::from_env();
+                    // 非交互环境先降级为 R3 策略重启（restart 档及以上）。
+                    if tiers.allows_restart()
+                        && !self.ctx.config.interactive
+                        && self.run_replan(b).await?.is_some()
+                    {
+                        // 策略重启成功：重置信念并继续本轮（新证据基线）。
+                        bt.reset();
+                        self.ctx.display.render_info(&format!(
+                            "DecisionEngine: belief {b:.2} — retrying with a fresh replan instead of handing over",
+                        ));
+                        return Ok(None);
+                    }
+                    // R4 用户接管仅在全档位启用；低档位直接失败。
+                    if !tiers.allows_handover() {
+                        self.ctx
+                            .display
+                            .render_error(&format!("DecisionEngine: aborting (belief {b:.2})."));
+                        return Ok(Some(TurnDecision::Failed(
+                            "aborted by DecisionEngine".into(),
+                        )));
+                    }
+                    let budget = self.ctx.config.signal.evidence_max_chars;
+                    let batch = self.signal_processor.evidence().render(budget, b);
+                    let report = serde_json::json!({
+                        "type": "signal_handover",
+                        "belief": b,
+                        "edited_paths": self.signal_processor.evidence().edited_paths,
+                        "evidence": batch.text,
+                        "options": ["retry", "rollback_and_retry", "replan", "abandon"],
+                    });
+                    self.ctx.log_event(report);
+                    self.ctx.display.render_error(&format!(
+                        "DecisionEngine: handing over (belief {b:.2}).\n{}",
+                        batch.text
+                    ));
                     return Ok(Some(TurnDecision::Failed(
-                        "aborted by DecisionEngine".into(),
+                        "signal handover: reliability belief fell below the abort threshold".into(),
                     )));
                 }
                 _ => {}
@@ -816,6 +1094,11 @@ impl TurnExecutor {
         self.signal_processor.reset();
         self.decision_engine.reset();
         self.signal_recovery_guard = false;
+        self.guard_blocks = 0;
+        self.guard_bypassed = false;
+        self.warning_count = 0;
+        self.replan_attempts = 0;
+        self.current_user_input = user_input.to_string();
         self.todo_final_reminder_sent = false;
         self.todo_progress_reminder_sent = false;
         self.successful_work_calls_since_todo_advance = 0;
@@ -1007,6 +1290,7 @@ fn blocked_by_signal_recovery(
         sub_agent_fork: false,
         exit_code: None,
         success: false,
+        error_code: Some(crate::tools::metadata::ToolErrorKind::Aborted),
         result_kind: crate::tools::metadata::ToolResultKind::Control,
         presentation: None,
         artifacts: Vec::new(),
@@ -1080,7 +1364,7 @@ mod tests {
         }]);
 
         let decision = executor
-            .decide_signal_recovery(false, Some(&belief))
+            .decide_signal_recovery(false, Some(&mut belief))
             .await
             .unwrap();
         assert!(decision.is_none());

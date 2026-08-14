@@ -82,6 +82,3 @@ pub mod util;
 
 #[cfg(test)]
 pub mod regression;
-
-#[cfg(test)]
-pub mod test_mock;
