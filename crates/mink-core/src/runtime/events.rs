@@ -1,8 +1,8 @@
 use crate::runtime::{TurnId, TurnOutcome};
-use crate::tools::metadata::ToolResultKind;
+use crate::tools::metadata::{ToolResultKind, ToolStatus};
 use crate::ui::{
     ArtifactDisplay, Display, PresentedToolResultDisplay, StatsSnapshot, ToolCallDisplay,
-    ToolPresentation, ToolResultDisplay,
+    ToolPresentation,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -37,7 +37,7 @@ pub enum AgentEventKind {
         tool_name: String,
         content_preview: String,
         content: String,
-        success: bool,
+        status: ToolStatus,
         exit_code: Option<i32>,
         result_kind: ToolResultKind,
         presentation: Option<ToolPresentation>,
@@ -182,8 +182,7 @@ impl EventDispatcher {
     }
 }
 
-#[doc(hidden)]
-pub struct TurnEventEmitter {
+pub(crate) struct TurnEventEmitter {
     turn_id: TurnId,
     next_sequence: AtomicU64,
     tx: Option<tokio::sync::mpsc::UnboundedSender<AgentEvent>>,
@@ -220,19 +219,14 @@ impl TurnEventEmitter {
 }
 
 pub(crate) struct EventDisplay {
-    delegate: Option<Arc<dyn Display>>,
     dispatcher: Option<Arc<EventDispatcher>>,
     next_control_sequence: AtomicU64,
     current_turn: Mutex<Option<Arc<TurnEventEmitter>>>,
 }
 
 impl EventDisplay {
-    pub(crate) fn new(
-        delegate: Option<Arc<dyn Display>>,
-        dispatcher: Option<Arc<EventDispatcher>>,
-    ) -> Self {
+    pub(crate) fn new(dispatcher: Option<Arc<EventDispatcher>>) -> Self {
         Self {
-            delegate,
             dispatcher,
             next_control_sequence: AtomicU64::new(1),
             current_turn: Mutex::new(None),
@@ -280,87 +274,32 @@ impl Display for EventDisplay {
         self.emit(AgentEventKind::Thinking {
             content: content.into(),
         });
-        if let Some(d) = &self.delegate {
-            d.render_thinking(content);
-        }
     }
     fn render_text(&self, content: &str) {
         self.emit(AgentEventKind::Text {
             content: content.into(),
         });
-        if let Some(d) = &self.delegate {
-            d.render_text(content);
-        }
     }
-    fn render_tool_call(&self, name: &str, summary: &str) {
-        self.emit(AgentEventKind::ToolCall {
-            id: String::new(),
-            name: name.into(),
-            summary: summary.into(),
-            input: serde_json::Value::Null,
-        });
-        if let Some(d) = &self.delegate {
-            d.render_tool_call(name, summary);
-        }
-    }
-    fn render_tool_call_detail(&self, call: &ToolCallDisplay<'_>) {
+    fn render_tool_call(&self, call: &ToolCallDisplay<'_>) {
         self.emit(AgentEventKind::ToolCall {
             id: call.tool_use_id.into(),
             name: call.tool_name.into(),
             summary: call.summary.into(),
             input: call.input.cloned().unwrap_or(serde_json::Value::Null),
         });
-        if let Some(d) = &self.delegate {
-            d.render_tool_call_detail(call);
-        }
     }
-    fn render_tool_result(&self, tool_name: &str, content_preview: &str) {
-        self.emit(AgentEventKind::ToolResult {
-            tool_use_id: None,
-            tool_name: tool_name.into(),
-            content_preview: content_preview.into(),
-            content: content_preview.into(),
-            success: true,
-            exit_code: None,
-            result_kind: ToolResultKind::Text,
-            presentation: None,
-            artifacts: Vec::new(),
-        });
-        if let Some(d) = &self.delegate {
-            d.render_tool_result(tool_name, content_preview);
-        }
-    }
-    fn render_tool_result_detail(&self, result: &ToolResultDisplay<'_>) {
-        self.emit(AgentEventKind::ToolResult {
-            tool_use_id: result.tool_use_id.map(Into::into),
-            tool_name: result.tool_name.into(),
-            content_preview: result.content_preview.into(),
-            content: result.content.into(),
-            success: result.exit_code.is_none_or(|code| code == 0),
-            exit_code: result.exit_code,
-            result_kind: ToolResultKind::Text,
-            presentation: None,
-            artifacts: Vec::new(),
-        });
-        if let Some(d) = &self.delegate {
-            d.render_tool_result_detail(result);
-        }
-    }
-    fn render_tool_result_presented(&self, result: &PresentedToolResultDisplay<'_>) {
+    fn render_tool_result(&self, result: &PresentedToolResultDisplay<'_>) {
         self.emit(AgentEventKind::ToolResult {
             tool_use_id: result.base.tool_use_id.map(Into::into),
             tool_name: result.base.tool_name.into(),
             content_preview: result.base.content_preview.into(),
             content: result.base.content.into(),
-            success: result.success,
+            status: result.status,
             exit_code: result.base.exit_code,
             result_kind: result.result_kind,
             presentation: result.presentation.cloned(),
             artifacts: result.artifacts.to_vec(),
         });
-        if let Some(d) = &self.delegate {
-            d.render_tool_result_presented(result);
-        }
     }
     fn render_signal(&self, signal_kind: &str, severity: f64, message: &str) {
         self.emit(AgentEventKind::Signal {
@@ -369,52 +308,29 @@ impl Display for EventDisplay {
             message: message.into(),
         });
     }
-    fn render_stop(&self) {
-        self.emit(AgentEventKind::Stop {
-            reason: "end_turn".into(),
-        });
-        if let Some(d) = &self.delegate {
-            d.render_stop();
-        }
-    }
-    fn render_stop_with_reason(&self, reason: &str) {
+    fn render_stop(&self, reason: &str) {
         self.emit(AgentEventKind::Stop {
             reason: reason.into(),
         });
-        if let Some(d) = &self.delegate {
-            d.render_stop_with_reason(reason);
-        }
     }
     fn render_error(&self, message: &str) {
         self.emit(AgentEventKind::Error {
             message: message.into(),
         });
-        if let Some(d) = &self.delegate {
-            d.render_error(message);
-        }
     }
     fn render_retry(&self) {
         self.emit(AgentEventKind::Retry);
-        if let Some(d) = &self.delegate {
-            d.render_retry();
-        }
     }
     fn render_info(&self, msg: &str) {
         self.emit(AgentEventKind::Info {
             message: msg.into(),
         });
-        if let Some(d) = &self.delegate {
-            d.render_info(msg);
-        }
     }
     fn render_title_update(&self, model: &str, stats: &StatsSnapshot) {
         self.emit(AgentEventKind::TitleUpdate {
             model: model.into(),
             stats: stats.clone(),
         });
-        if let Some(d) = &self.delegate {
-            d.render_title_update(model, stats);
-        }
     }
     fn render_sub_agent_status(
         &self,
@@ -429,9 +345,6 @@ impl Display for EventDisplay {
             in_tokens,
             out_tokens,
         });
-        if let Some(d) = &self.delegate {
-            d.render_sub_agent_status(session_id, status, in_tokens, out_tokens);
-        }
     }
     fn render_sub_agent_output(
         &self,
@@ -450,21 +363,12 @@ impl Display for EventDisplay {
             in_tokens,
             out_tokens,
         });
-        if let Some(d) = &self.delegate {
-            d.render_sub_agent_output(session_id, status, thinking, text, in_tokens, out_tokens);
-        }
     }
     fn render_prompt(&self) {
         self.emit(AgentEventKind::Prompt);
-        if let Some(d) = &self.delegate {
-            d.render_prompt();
-        }
     }
     fn render_clear_line(&self) {
         self.emit(AgentEventKind::ClearLine);
-        if let Some(d) = &self.delegate {
-            d.render_clear_line();
-        }
     }
 }
 

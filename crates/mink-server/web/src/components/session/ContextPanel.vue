@@ -74,7 +74,7 @@ const usage = computed(() => {
     ctx: fmtK(stt?.contextTokens ?? 0),
     ctxPct: maxCtx ? Math.round(((stt?.contextTokens ?? 0) / maxCtx) * 100) : null,
     maxCtx: maxCtx ? fmtK(maxCtx) : null,
-    cost: `¥${((stt?.costMicros ?? 0) / 1_000_000).toFixed(4)}`,
+    cost: `¥${((stt?.costMicros ?? 0) / 1_000_000).toFixed(4)}${(stt?.unpricedRequests ?? 0) > 0 ? ` + ${stt?.unpricedRequests} 未计价` : ""}`,
     belief: (stt?.belief ?? 0).toFixed(2),
   };
 });

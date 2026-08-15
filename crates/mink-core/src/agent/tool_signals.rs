@@ -1,7 +1,7 @@
 use crate::context::AgentSharedContext;
 use crate::guard::collector::{Signal, SignalCollector, SignalKind};
 use crate::guard::evidence::EvidenceTracker;
-use crate::tools::runner::ToolRunResult;
+use crate::tools::runner::ToolExecution;
 use std::sync::Arc;
 
 pub struct ToolSignalProcessor {
@@ -31,6 +31,7 @@ impl ToolSignalProcessor {
         self.tool_error_count
     }
 
+    #[cfg(test)]
     pub fn collected_signals(&self) -> &[Signal] {
         &self.signals
     }
@@ -45,7 +46,7 @@ impl ToolSignalProcessor {
         self.evidence.soft_failures
     }
 
-    /// 轨迹证据跟踪器（SIGNAL_RESPONSE_REDESIGN R1）。
+    /// Trajectory evidence accumulated during this input.
     pub fn evidence(&self) -> &EvidenceTracker {
         &self.evidence
     }
@@ -56,19 +57,19 @@ impl ToolSignalProcessor {
 
     pub async fn process(
         &mut self,
-        result: &mut ToolRunResult,
+        result: &mut ToolExecution,
         belief: Option<&mut crate::agent::belief::BeliefTracker>,
         ctx: &Arc<AgentSharedContext>,
         model_label: &str,
     ) {
-        let signal_enabled = crate::config::SignalMode::from_env().enabled();
+        let signal_enabled = ctx.config.signal_policy.enabled();
         self.process_with_mode(result, belief, ctx, model_label, signal_enabled)
             .await;
     }
 
     async fn process_with_mode(
         &mut self,
-        result: &mut ToolRunResult,
+        result: &mut ToolExecution,
         belief: Option<&mut crate::agent::belief::BeliefTracker>,
         ctx: &Arc<AgentSharedContext>,
         model_label: &str,
@@ -79,93 +80,59 @@ impl ToolSignalProcessor {
             return;
         }
 
-        // 正则错误模式只适用于命令/诊断输出（Bash/Python 等 Command 结果）。
-        // 内容返回型工具（Read/Glob/Grep 等 FileRead/Search）的输出是文件内容或
-        // 搜索结果，对其做模式匹配会产生误报（源码中的 "timeout"、"error[E0425]"
-        // 等字样），因此只保留 exit_code 和 "Error:" 前缀检测。
+        // 编译与测试诊断只扫描命令输出；执行状态已经由 ToolStatus 给出。
         let scan_error_patterns = matches!(
             result.result_kind,
             crate::tools::metadata::ToolResultKind::Command
         );
         let new_signals = self.collector.collect(
             &result.tool_name,
+            result.status,
             &result.content,
             result.exit_code,
-            &result.content,
             scan_error_patterns,
         );
         result.signals = new_signals;
-        // 内容型工具（Read/Write）失败文本是 "Error: ..." 形态，但结果摘要头
-        //（"Read(path)"）会挡住收集器的 "Error:" 前缀检测；success=false 与
-        // exit_code=None 组合是执行路径的权威判定。此处补一条硬信号，恢复
-        // "Error 前缀 = ToolFailed" 的设计意图，保证信念随确定性失败下降
-        //（B2 invariant 测试暴露：失败 Read 曾被信念当作成功观察）。
-        // SignalRecoveryGuard 的拦截已由 apply_signal_recovery_guard 单独喂回
-        // 信念，这里排除以免双重计数。
-        if !result.success
-            && result.exit_code.is_none()
-            && result.tool_name != "SignalRecoveryGuard"
-            && !result.signals.iter().any(|s| s.kind.is_hard())
-        {
-            let message = result
-                .content
-                .lines()
-                .find(|line| line.starts_with("Error:"))
-                .or_else(|| result.content.lines().next())
-                .unwrap_or("Error")
-                .to_string();
-            result.signals.push(Signal::synthetic(
-                SignalKind::ToolFailed,
-                1.0,
-                result.tool_name.clone(),
-                message,
-            ));
-        }
         self.signals.extend(result.signals.clone());
 
-        // 轨迹证据（SIGNAL_RESPONSE_REDESIGN R1/S2）：把本批调用压缩成统计事实。
         let hard_count = result.signals.iter().filter(|s| s.kind.is_hard()).count();
-        let hard = hard_count > 0 || result.error_code.is_some_and(|kind| kind.is_hard());
+        let hard = hard_count > 0
+            || result
+                .status
+                .failure_kind()
+                .is_some_and(|kind| kind.is_hard());
         let summary = result
-            .error_code
+            .status
+            .failure_kind()
             .map(|kind| kind.label().to_string())
             .or_else(|| {
-                if !result.success {
-                    result
-                        .signals
-                        .first()
-                        .map(|s| s.message.clone())
-                        .or_else(|| result.content.lines().next().map(|line| line.to_string()))
-                } else {
-                    None
-                }
+                result
+                    .signals
+                    .first()
+                    .map(|signal| signal.message.clone())
+                    .or_else(|| {
+                        (!result.succeeded()).then(|| {
+                            result
+                                .content
+                                .lines()
+                                .next()
+                                .unwrap_or_default()
+                                .to_string()
+                        })
+                    })
             })
             .unwrap_or_default();
-        // C4 清理：恢复守卫的拦截结果是运行时内部反馈（拦截本身已由
-        // apply_signal_recovery_guard 合成真实信号喂回信念），不得再进证据统计——
-        // 否则一次拦截被双重计为硬失败，污染失败聚类与 hard/soft 计数。
-        if result.tool_name != "SignalRecoveryGuard" {
-            let paths = edited_paths(&result.tool_name, &result.tool_args);
-            // failed 权威判定：success=false 或存在信号或存在结构化错误码。
-            let failed =
-                !result.success || !result.signals.is_empty() || result.error_code.is_some();
-            self.evidence.record(
-                &result.tool_name,
-                &result.tool_args,
-                &summary,
-                hard,
-                failed,
-                paths,
-            );
-        }
+        let paths = edited_paths(&result.tool_name, &result.tool_args);
+        self.evidence.record(
+            &result.tool_name,
+            &result.tool_args,
+            &summary,
+            hard,
+            !result.succeeded() || !result.signals.is_empty(),
+            paths,
+        );
 
-        // 守卫拦截结果不得作为"干净调用"喂入信念：拦截本身已由
-        // apply_signal_recovery_guard 以合成失败信号喂回一次，这里若把
-        // signals 为空的拦截结果当作完整成功观察（Observation::from_signals
-        // 对空信号给出 success_weight=1.0），会抬升信念、压制 Warning 升级。
-        if let Some(bt) = belief
-            && result.tool_name != "SignalRecoveryGuard"
-        {
+        if let Some(bt) = belief {
             bt.observe(&result.signals);
             crate::ui::render_title_snapshot(ctx, model_label, bt.belief()).await;
         }
@@ -204,7 +171,7 @@ impl Default for ToolSignalProcessor {
     }
 }
 
-/// 提取一次写类调用涉及的路径（R2 回滚定位用）。
+/// 提取一次写类调用涉及的路径，供窗口化回滚定位。
 fn edited_paths(tool_name: &str, args: &std::collections::BTreeMap<String, String>) -> Vec<String> {
     let mut paths = Vec::new();
     match tool_name {
@@ -239,11 +206,11 @@ fn edited_paths(tool_name: &str, args: &std::collections::BTreeMap<String, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::runner::ToolRunResult;
+    use crate::tools::runner::ToolExecution;
     use std::collections::BTreeMap;
 
-    fn tool_result(content: &str) -> ToolRunResult {
-        ToolRunResult {
+    fn tool_result(content: &str) -> ToolExecution {
+        ToolExecution {
             tool_use_id: "call".into(),
             tool_name: "Bash".into(),
             tool_args: BTreeMap::new(),
@@ -254,8 +221,9 @@ mod tests {
             sub_agent_description: None,
             sub_agent_fork: false,
             exit_code: None,
-            success: false,
-            error_code: Some(crate::tools::metadata::ToolErrorKind::ProcessFailed),
+            status: crate::tools::metadata::ToolStatus::Failed(
+                crate::tools::metadata::ToolFailureKind::ProcessFailed,
+            ),
             result_kind: crate::tools::metadata::ToolResultKind::Command,
             presentation: None,
             artifacts: Vec::new(),
@@ -296,11 +264,13 @@ mod tests {
     #[tokio::test]
     async fn content_tool_failure_with_summary_header_still_produces_hard_signal() {
         let mut processor = ToolSignalProcessor::new();
-        let mut result = ToolRunResult {
+        let mut result = ToolExecution {
             tool_name: "Read".into(),
             content: "Read(missing.txt)\nError: tool execution failed: Error: file not found or unreadable: missing.txt".into(),
             exit_code: None,
-            error_code: None,
+            status: crate::tools::metadata::ToolStatus::Failed(
+                crate::tools::metadata::ToolFailureKind::Unknown,
+            ),
             result_kind: crate::tools::metadata::ToolResultKind::FileRead,
             signals: Vec::new(),
             ..tool_result("unused")

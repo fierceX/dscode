@@ -161,68 +161,63 @@ prompt 为空且 stdin 是终端时自动进入交互模式。非终端 stdin �
 中低频参数通过 `--config` 传递：
 
 ```toml
-# 标量字段
+[provider]
+model = "flash"
+api_key = "sk-xxx"
+base_url = "https://api.deepseek.com/v1"
+openai_reasoning_effort = "max"
+openai_include_usage = true
+openai_token_param = "max_tokens"
+openai_tool_choice = "auto"
+
+[provider.model_aliases]
+flash = "deepseek-v4-flash"
+pro = "deepseek-v4-pro"
+
+[provider.openai_extra_body]
+custom_boolean = true
+custom_budget = 8192
+
+[generation]
 max_tokens = 4096
 max_turns = 20
+llm_first_event_timeout = 60
+llm_idle_timeout = 90
+llm_wait_heartbeat = 30
+output_format = "stream-json"
+
+[context]
 max_context = "500K"
 context_compact_pct = 94
 context_reserve_tokens = 64000
 context_compact_tail_tokens = 256000
 context_compact_max_output_tokens = 8192
 context_compact_input_reduction = false
+
+[tools]
 tool_timeout = 300
 sub_agent_timeout = 120
-llm_first_event_timeout = 60
-llm_idle_timeout = 90
-llm_wait_heartbeat = 30
 max_search_files = 5000
 max_search_results = 1000
-output_format = "stream-json"
 enabled_tools = ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]
-edit_mode = "hashline"
-edit_fuzzy_match = true
-edit_fuzzy_threshold = 0.95
-edit_enforce_seen_lines = false
 approval_mode = "write"
 skills = ["python", "debugging"]
-openai_reasoning_effort = "max"          # "off" 表示不发送
-openai_include_usage = true
-openai_token_param = "max_tokens"        # 或 max_completion_tokens
-openai_tool_choice = "auto"              # auto / none / required，或 JSON 对象
 
-[openai_extra_body]
-custom_boolean = true
-custom_budget = 8192
+[tools.edit]
+mode = "hashline"
+fuzzy_match = true
+fuzzy_threshold = 0.95
+enforce_seen_lines = false
 
-[model_aliases]
-flash = "deepseek-v4-flash"
-pro = "deepseek-v4-pro"
-local = "private-model-v1"
+[signal]
+policy = "full" # off / evidence / state_ops / restart / full
 
 [sandbox_python]
 wasm_path = "/path/to/python.wasm"
 read_dirs = ["./data"]
-
-[signal]
-# 信号反馈系统：全部可省略，未提供则用默认值
-remind_threshold = 0.70        # B >= 此值不响应
-warn_threshold = 0.50          # B < 此值：证据注入 + 快照回滚 + 恢复守卫
-abort_threshold = 0.30         # B < 此值：用户接管（非交互环境先降级策略重启）
-alpha_prior = 3.0              # Beta 先验（成功证据）
-beta_prior = 1.0               # Beta 先验（失败证据）
-window_size = 16               # 滑动窗口
-decay_per_input = 0.6          # 跨输入信念衰减（0 = 完全重置，1 = 不衰减）
-evidence_max_chars = 4000      # 轨迹证据注入的字符预算
-evidence_dedup_window = 6      # 证据新鲜度去重窗口（工具步）
-guard_max_blocks = 3           # 守卫连续拦截上限，达到后绕过并强制证据注入
-cooldown_turns = 3             # 注入后的冷却轮数
-rollback_enabled = true        # Warning 级快照回滚开关
-replan_max_turns = 12          # 策略重启子代理的最大轮数
-replan_token_budget = 24000    # 策略重启子代理输出预算
-replan_max_attempts = 1        # 每次用户输入内最多重启次数（0 = 禁用）
 ```
 
-`model_aliases` 可覆盖默认别名；未命中别名的 `model` 作为真实模型名原样发送。
+旧的顶层扁平字段不再接受；解析器会报告 unknown field。算法阈值、先验、衰减、证据长度、冷却和恢复限制是内部策略，不属于配置协议。
 `--agent-jsonl` 模式不会读取 `.minkrc`，但仍应用命令行 `--config`。
 
 #### 信号系统（分层响应模型）
@@ -239,7 +234,7 @@ replan_max_attempts = 1        # 每次用户输入内最多重启次数（0 = �
 - **用户接管**：交互环境下信念跌破 abort 阈值时，输出结构化接管报告
   （证据/编辑路径/选项）并返回失败，等待用户重锚定。
 
-`MINK_SIGNAL_MODE=off` 关闭全部信号采集、证据注入、回滚、接管与守卫。
+`MINK_SIGNAL_POLICY=off` 关闭全部信号采集、证据注入、回滚、接管与守卫。
 
 ### 配置文件
 
@@ -248,42 +243,49 @@ replan_max_attempts = 1        # 每次用户输入内最多重启次数（0 = �
 
 ```toml
 # ~/.minkrc
+[provider]
 api_key = "sk-xxx"
 base_url = "https://api.deepseek.com/v1"
 model = "flash"
-max_tokens = 81920
-max_turns = 40
-max_context = "1M"
-tool_timeout = 600
-sub_agent_timeout = 120
-llm_first_event_timeout = 60
-llm_idle_timeout = 90
-llm_wait_heartbeat = 30
-context_compact_pct = 94
-context_reserve_tokens = 64000
-context_compact_tail_tokens = 256000
-context_compact_max_output_tokens = 8192
-context_compact_input_reduction = false
-plan_projection_tail = true          # 计划尾置投影（最后一条消息），保住前缀缓存命中率；false 回退前置投影
-log_events = true
-max_search_files = 5000
-max_search_results = 1000
-enabled_tools = ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]
-edit_mode = "hashline"
-edit_fuzzy_match = true
-edit_fuzzy_threshold = 0.95
-edit_enforce_seen_lines = false
 openai_reasoning_effort = "max"
 openai_include_usage = true
 openai_token_param = "max_tokens"
 openai_tool_choice = "auto"
 
-[model_aliases]
+[provider.model_aliases]
 flash = "deepseek-v4-flash"
 pro = "deepseek-v4-pro"
 
+[generation]
+max_tokens = 81920
+max_turns = 40
+llm_first_event_timeout = 60
+llm_idle_timeout = 90
+llm_wait_heartbeat = 30
+log_events = true
+
+[context]
+max_context = "1M"
+context_compact_pct = 94
+context_reserve_tokens = 64000
+context_compact_tail_tokens = 256000
+context_compact_max_output_tokens = 8192
+context_compact_input_reduction = false
+plan_projection_tail = true
+
 [tools]
+tool_timeout = 600
+sub_agent_timeout = 120
+max_search_files = 5000
+max_search_results = 1000
+enabled_tools = ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]
 approval_mode = "yolo"               # yolo | write | always-ask
+
+[tools.edit]
+mode = "hashline"
+fuzzy_match = true
+fuzzy_threshold = 0.95
+enforce_seen_lines = false
 
 [tools.approval]
 Bash = "prompt"                      # allow | deny | prompt
@@ -306,7 +308,7 @@ Read = "allow"
 | `MAX_SEARCH_FILES` | `5000` | Glob/Grep 最大遍历文件数 |
 | `MAX_SEARCH_RESULTS` | `1000` | Grep 最大匹配结果行数 |
 | `LOG_EVENTS` | `true` | 设为 `0`/`false` 关闭 events.jsonl |
-| `MINK_SIGNAL_MODE` | `full` | 信号模式：`full` 启用信念跟踪和注入；`off` 关闭 |
+| `MINK_SIGNAL_POLICY` | `full` | `off` / `evidence` / `state_ops` / `restart` / `full` |
 | `MINK_EDIT_MODE` | `hashline` | Edit 协议：`hashline` / `replace` |
 | `MINK_EDIT_FUZZY_MATCH` | `true` | Replace 模糊匹配开关 |
 | `MINK_EDIT_FUZZY_THRESHOLD` | `0.95` | Replace 模糊阈值，`0.0..=1.0` |
@@ -319,7 +321,7 @@ Read = "allow"
 `scanned first N files` = 文件数上限触发，`truncated at N results` = 匹配数上限触发，
 `output > 100000 bytes` 或 artifact 提示 = 字节数保护触发。
 
-`MINK_SIGNAL_MODE=full` 时，低 belief 注入会要求 Recovery 首步先检查状态。Recovery 首步资格是独立的参数级能力判断，不等同于普通 Bash 安全策略。
+`MINK_SIGNAL_POLICY=full` 时，低 belief 注入会要求 Recovery 首步先检查状态。Recovery 首步资格是独立的参数级能力判断，不等同于普通 Bash 安全策略。
 
 ---
 
@@ -397,6 +399,7 @@ cpython-wasi/
 配置：
 
 ```toml
+[tools]
 enabled_tools = ["Read", "Write", "Bash", "PythonSandbox", ...]
 
 [sandbox_python]
@@ -528,6 +531,7 @@ PlanConfirm/PlanClear 的压缩请求服从 TurnCompactor 同轮一次守卫，�
 
 ```toml
 # 1M DeepSeek
+[context]
 max_context = "1M"
 context_compact_pct = 94
 context_reserve_tokens = 64000
@@ -699,7 +703,7 @@ Python SDK 使用 `SandboxConfig(mission_file=...)` 或内联 `mission_content`�
 - 不再支持 `using-your-tools`、`anchored-edit-protocol`、`rationalization-table` 等旧 alias
 - section ID 必须唯一；重复 heading 或占用 runtime-reserved ID 导致启动失败
 - MISSION 只影响 prompt 文本，不改变工具 surface（工具选择仍用 `enabled_tools`）
-- `MINK_SIGNAL_MODE=off` 时 prompt 不存在 `belief-awareness`，MISSION 也不能创建它
+- `MINK_SIGNAL_POLICY=off` 时 prompt 不存在 `belief-awareness`，MISSION 也不能创建它
 
 ---
 
@@ -743,7 +747,7 @@ curl -H "Authorization: Bearer $DEEPSEEK_API_KEY" https://api.deepseek.com/v1/mo
 mink -m flash -v "hello"
 
 # 扩大上下文窗口避免溢出
-mink -m flash --config 'max_context="1M"' -i
+mink -m flash --config $'[context]\nmax_context="1M"' -i
 
 # 查看 session 列表
 mink --list-sessions

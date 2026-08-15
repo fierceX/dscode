@@ -22,12 +22,12 @@ const openFiles = () => {
 // 数值定宽格式化（输入/输出：k 单位一位小数，宽度恒定）
 const cost = computed(() => ((st.value?.costMicros ?? 0) / 1_000_000).toFixed(4));
 const belief = computed(() => (st.value?.belief ?? 0).toFixed(2));
-// 移动端费用紧凑：$0.021 / $0.5 / $1.23
+// 移动端费用紧凑显示人民币已知成本。
 const costMicrosCompact = computed(() => {
-  const usd = (st.value?.costMicros ?? 0) / 1_000_000;
-  if (usd >= 1) return usd.toFixed(2);
-  if (usd >= 0.01) return usd.toFixed(3).replace(/0$/, "");
-  return usd.toFixed(4).replace(/0+$/, "") || "0";
+  const cny = (st.value?.costMicros ?? 0) / 1_000_000;
+  if (cny >= 1) return cny.toFixed(2);
+  if (cny >= 0.01) return cny.toFixed(3).replace(/0$/, "");
+  return cny.toFixed(4).replace(/0+$/, "") || "0";
 });
 
 // Agent 状态徽标（TUI WorkState 全称 + 色）
@@ -70,13 +70,13 @@ const reconnect = async () => {
       <span class="sm sm-full">输入 <b>{{ fmtK(st?.tokensIn ?? 0) }}</b><em v-if="cachePct > 0">缓存{{ cachePct }}%</em></span>
       <span class="sm sm-full">输出 <b>{{ fmtK(st?.tokensOut ?? 0) }}</b></span>
       <span v-if="(st?.contextTokens ?? 0) > 0" class="sm sm-full">上下文 <b>{{ fmtK(st?.contextTokens ?? 0) }}</b><em v-if="ctxPct !== null">（{{ ctxPct }}%）</em></span>
-      <span v-if="(st?.costMicros ?? 0) > 0" class="sm sm-full">费用 <b>¥{{ cost }}</b></span>
+      <span v-if="(st?.costMicros ?? 0) > 0 || (st?.unpricedRequests ?? 0) > 0" class="sm sm-full">费用 <b>¥{{ cost }}</b><em v-if="(st?.unpricedRequests ?? 0) > 0">+{{ st?.unpricedRequests }} 未计价</em></span>
       <span v-if="(st?.belief ?? 0) > 0" class="sm sm-full">信念度 <b>{{ belief }}</b></span>
       <!-- 移动端：字母标识（TUI 风格缩写，数值向上换算） -->
       <span class="sm sm-abbr">I<b>{{ fmtK(st?.tokensIn ?? 0) }}</b><em v-if="cachePct > 0">C{{ cachePct }}%</em></span>
       <span class="sm sm-abbr">O<b>{{ fmtK(st?.tokensOut ?? 0) }}</b></span>
       <span v-if="(st?.contextTokens ?? 0) > 0" class="sm sm-abbr">Ctx<b>{{ fmtK(st?.contextTokens ?? 0) }}</b><em v-if="ctxPct !== null">({{ ctxPct }}%)</em></span>
-      <span v-if="(st?.costMicros ?? 0) > 0" class="sm sm-abbr">¥<b>{{ costMicrosCompact }}</b></span>
+      <span v-if="(st?.costMicros ?? 0) > 0 || (st?.unpricedRequests ?? 0) > 0" class="sm sm-abbr">¥<b>{{ costMicrosCompact }}</b><em v-if="(st?.unpricedRequests ?? 0) > 0">+{{ st?.unpricedRequests }}?</em></span>
       <span v-if="(st?.belief ?? 0) > 0" class="sm sm-abbr">B<b>{{ belief }}</b></span>
       <span class="sm-ops">
         <button class="op-desktop" title="计划" @click="openCtx('plan')">计划</button>

@@ -553,8 +553,7 @@ impl super::runner::ToolExec for ReadTool {
                 rendered
             }
             None => {
-                // Replace 模式（或超限文件）：无 hashline 快照语义，但仍为 R2 回滚
-                // 记录完整内容基线（B1 修复的对称面——回滚目标=模型最后读到的全文）。
+                // Replace 模式（或超限文件）无 hashline 快照语义，但仍记录回滚基线。
                 if let Ok(meta) = std::fs::metadata(&path)
                     && meta.len() as u128
                         <= editable_limit.min(ctx.tool_config.file_write_max_bytes) as u128
@@ -1091,8 +1090,7 @@ fn execute_hashline_edit(
                             authored.path
                         );
                     }
-                    // P0-D: explainable no-op — the requested final content is
-                    // already present at the exact target positions.
+                    // The requested final content is already present at the exact target positions.
                     if crate::tools::hashline::already_applied(
                         &normalized,
                         &patch.sections[0].operations,

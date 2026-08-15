@@ -1,4 +1,4 @@
-pub use crate::tools::metadata::ToolResultKind;
+pub use crate::tools::metadata::{ToolResultKind, ToolStatus};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,7 +101,7 @@ pub struct ToolResultDisplay<'a> {
 
 pub struct PresentedToolResultDisplay<'a> {
     pub base: ToolResultDisplay<'a>,
-    pub success: bool,
+    pub status: ToolStatus,
     pub result_kind: ToolResultKind,
     pub presentation: Option<&'a ToolPresentation>,
     pub artifacts: &'a [ArtifactDisplay],
@@ -110,26 +110,10 @@ pub struct PresentedToolResultDisplay<'a> {
 pub trait Display: Send + Sync {
     fn render_thinking(&self, content: &str);
     fn render_text(&self, content: &str);
-    fn render_tool_call(&self, name: &str, summary: &str);
-    fn render_tool_call_detail(&self, call: &ToolCallDisplay<'_>) {
-        self.render_tool_call(call.tool_name, call.summary);
-    }
-    fn render_tool_result(&self, tool_name: &str, content_preview: &str);
-    fn render_tool_result_detail(&self, result: &ToolResultDisplay<'_>) {
-        self.render_tool_result(result.tool_name, result.content_preview);
-    }
-    fn render_tool_result_presented(&self, result: &PresentedToolResultDisplay<'_>) {
-        self.render_tool_result_detail(&result.base);
-    }
-    fn render_stop(&self);
-    /// 带结束原因的 stop（interrupted 等）。默认退化为 render_stop——
-    /// 需要区分中断语义的实现（SDK）覆盖。
-    fn render_stop_with_reason(&self, _reason: &str) {
-        self.render_stop();
-    }
-    /// 信号（信念系统：工具失败/编辑循环检测等）。默认空实现——
-    /// 需要实时信号的实现（SDK）覆盖。
-    fn render_signal(&self, _signal_kind: &str, _severity: f64, _message: &str) {}
+    fn render_tool_call(&self, call: &ToolCallDisplay<'_>);
+    fn render_tool_result(&self, result: &PresentedToolResultDisplay<'_>);
+    fn render_stop(&self, reason: &str);
+    fn render_signal(&self, signal_kind: &str, severity: f64, message: &str);
     fn render_error(&self, message: &str);
     fn render_retry(&self);
     fn render_info(&self, msg: &str);
@@ -141,18 +125,15 @@ pub trait Display: Send + Sync {
         in_tokens: u64,
         out_tokens: u64,
     );
-    /// Sub-agent complete output (thinking + text), sent after execution.
-    /// Implementations: TUI stores for click-to-view detail; REPL prints directly.
     fn render_sub_agent_output(
         &self,
-        _session_id: &str,
-        _status: &str,
-        _thinking: &str,
-        _text: &str,
-        _in_tokens: u64,
-        _out_tokens: u64,
-    ) {
-    }
+        session_id: &str,
+        status: &str,
+        thinking: &str,
+        text: &str,
+        in_tokens: u64,
+        out_tokens: u64,
+    );
     fn render_prompt(&self);
     fn render_clear_line(&self);
 }
@@ -177,16 +158,12 @@ pub struct StatsSnapshot {
     pub max_context_tokens: u64,
     pub total_cache_read_tokens: u64,
     pub total_cache_creation_tokens: u64,
-    pub flash_cost_micros: u64,
-    pub pro_cost_micros: u64,
+    pub cost: crate::session::usage::UsageCost,
     /// 信念度 B ∈ [0, 1]。0.0 表示未追踪
     pub belief: f64,
 }
 
 impl StatsSnapshot {
-    fn cost_micros(&self) -> u64 {
-        self.flash_cost_micros + self.pro_cost_micros
-    }
     pub fn cache_pct(&self) -> String {
         let total = self.total_input_tokens + self.total_cache_read_tokens;
         self.total_cache_read_tokens
@@ -203,13 +180,18 @@ impl StatsSnapshot {
     }
 
     pub fn format_cost(&self) -> String {
-        let micros = self.cost_micros();
-        if micros < 1_000 {
+        let nano = self.cost.known_nano_cny;
+        let known = if nano < 1_000_000 {
             "¥0.00".to_string()
-        } else if micros < 1_000_000 {
-            format!("¥{:.3}", micros as f64 / 1_000_000.0)
+        } else if nano < 1_000_000_000 {
+            format!("¥{:.3}", nano as f64 / 1_000_000_000.0)
         } else {
-            format!("¥{:.2}", micros as f64 / 1_000_000.0)
+            format!("¥{:.2}", nano as f64 / 1_000_000_000.0)
+        };
+        if self.cost.unpriced_requests == 0 {
+            known
+        } else {
+            format!("{known} + {} unpriced", self.cost.unpriced_requests)
         }
     }
 
@@ -233,6 +215,7 @@ pub async fn render_title_snapshot(
     belief: f64,
 ) {
     let stats = ctx.stats.snapshot().await;
+    let usage = ctx.usage.summary();
     let snapshot = StatsSnapshot {
         current_turn_count: stats.current_turn_count,
         agent_request_count: stats.agent_request_count,
@@ -242,8 +225,7 @@ pub async fn render_title_snapshot(
         max_context_tokens: ctx.config.max_context_tokens as u64,
         total_cache_read_tokens: stats.total_cache_read_tokens,
         total_cache_creation_tokens: stats.total_cache_creation_tokens,
-        flash_cost_micros: stats.flash_cost_micros,
-        pro_cost_micros: stats.pro_cost_micros,
+        cost: usage.cost,
         belief,
     };
     ctx.display.render_title_update(model_label, &snapshot);

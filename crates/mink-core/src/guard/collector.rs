@@ -1,5 +1,6 @@
 //! 信号采集器 — 自维护调用历史。
 
+use crate::tools::metadata::{ToolBlocker, ToolFailureKind, ToolStatus};
 use std::collections::VecDeque;
 use std::sync::OnceLock;
 
@@ -17,7 +18,7 @@ pub enum SignalKind {
 impl SignalKind {
     /// 硬信号 = 确定性/安全类失败，单独出现即参与决策。
     /// 软信号（regex 嗅探、参数、编辑循环）单独出现且信念尚可时不干预
-    /// 正常流程（SIGNAL_RESPONSE_REDESIGN S3c）。
+    /// normal flow.
     pub fn is_hard(&self) -> bool {
         matches!(
             self,
@@ -42,8 +43,7 @@ pub struct Signal {
 }
 
 impl Signal {
-    /// 公开构造入口：恢复守卫等运行时组件需要合成真实信号喂回信念
-    /// （SIGNAL_RESPONSE_REDESIGN 不变式 7）。
+    /// Construct a signal for runtime observations that are not tool results.
     pub fn synthetic(
         kind: SignalKind,
         severity: f64,
@@ -165,37 +165,54 @@ impl SignalCollector {
     pub fn collect(
         &mut self,
         tool_name: &str,
+        status: ToolStatus,
         output: &str,
         exit_code: Option<i32>,
-        full_content: &str,
         scan_error_patterns: bool,
     ) -> Vec<Signal> {
         let mut signals = Vec::new();
 
-        if let Some(code) = exit_code {
-            if code != 0 {
-                signals.push(Signal::new(
+        let status_signal = match status {
+            ToolStatus::Succeeded => None,
+            ToolStatus::Failed(kind) => Some((
+                match kind {
+                    ToolFailureKind::SafetyBlocked => SignalKind::SafetyBlocked,
+                    ToolFailureKind::ArgumentInvalid
+                    | ToolFailureKind::StaleTag
+                    | ToolFailureKind::AmbiguousMatch
+                    | ToolFailureKind::PathOutOfScope => SignalKind::ArgumentError,
+                    ToolFailureKind::Timeout
+                    | ToolFailureKind::ProcessFailed
+                    | ToolFailureKind::Aborted
+                    | ToolFailureKind::Unknown => SignalKind::ToolFailed,
+                },
+                kind.label().to_string(),
+                1.0,
+            )),
+            ToolStatus::Blocked(blocker) => {
+                // RecoveryGuard is a strong corrective signal, but not an
+                // actual executor failure. Preserve its established 0.9 weight.
+                let severity = match blocker {
+                    ToolBlocker::RecoveryGuard => 0.9,
+                    ToolBlocker::ToolSurface | ToolBlocker::StormBreaker => 1.0,
+                };
+                Some((
                     SignalKind::ToolFailed,
-                    1.0,
-                    tool_name,
-                    Some(code),
-                    None,
-                    format!("process exited with code {}", code),
-                ));
+                    format!("blocked by {blocker:?}"),
+                    severity,
+                ))
             }
-        } else if full_content.starts_with("Error:") {
-            let first_line = full_content.lines().next().unwrap_or("Error").to_string();
-            let kind = if full_content.contains("command blocked by bash safety policy") {
-                SignalKind::SafetyBlocked
-            } else if full_content.contains("no command provided")
-                || full_content.contains("no path provided")
-                || full_content.contains("invalid todo status")
-            {
-                SignalKind::ArgumentError
-            } else {
-                SignalKind::ToolFailed
-            };
-            signals.push(Signal::new(kind, 1.0, tool_name, None, None, first_line));
+            ToolStatus::Interrupted => Some((SignalKind::ToolFailed, "interrupted".into(), 1.0)),
+        };
+        if let Some((kind, default_message, severity)) = status_signal {
+            let message = output
+                .lines()
+                .next()
+                .unwrap_or(&default_message)
+                .to_string();
+            signals.push(Signal::new(
+                kind, severity, tool_name, exit_code, None, message,
+            ));
         }
 
         // 正则模式检测只适用于命令/诊断输出（Bash/Python 等）。
@@ -318,7 +335,13 @@ mod tests {
     #[test]
     fn detects_rust_error() {
         let mut c = SignalCollector::new();
-        let sigs = c.collect("Bash", "error[E0425]: cannot find value", None, "", true);
+        let sigs = c.collect(
+            "Bash",
+            ToolStatus::Succeeded,
+            "error[E0425]: cannot find value",
+            None,
+            true,
+        );
         assert!(
             sigs.iter()
                 .any(|s| matches!(s.kind, SignalKind::CompileError))
@@ -327,9 +350,32 @@ mod tests {
     }
 
     #[test]
+    fn command_test_failure_is_a_diagnostic_signal() {
+        let mut collector = SignalCollector::new();
+        let signals = collector.collect(
+            "Bash",
+            ToolStatus::Failed(ToolFailureKind::ProcessFailed),
+            "FAILED tests/runtime.rs::recovers_after_failure",
+            Some(1),
+            true,
+        );
+        assert!(
+            signals
+                .iter()
+                .any(|signal| matches!(signal.kind, SignalKind::TestFailure))
+        );
+    }
+
+    #[test]
     fn clean_output_no_signals() {
         let mut c = SignalCollector::new();
-        let sigs = c.collect("Read", "everything is fine", None, "", false);
+        let sigs = c.collect(
+            "Read",
+            ToolStatus::Succeeded,
+            "everything is fine",
+            None,
+            false,
+        );
         assert!(sigs.is_empty());
     }
 
@@ -338,9 +384,9 @@ mod tests {
         let mut c = SignalCollector::new();
         let sigs = c.collect(
             "Read",
+            ToolStatus::Succeeded,
             "209:        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), self)",
             None,
-            "",
             false,
         );
         assert!(
@@ -352,7 +398,13 @@ mod tests {
     #[test]
     fn command_tool_output_with_timeout_keyword_emits_pattern_signal() {
         let mut c = SignalCollector::new();
-        let sigs = c.collect("Bash", "Timed out after 60s", None, "", true);
+        let sigs = c.collect(
+            "Bash",
+            ToolStatus::Succeeded,
+            "Timed out after 60s",
+            None,
+            true,
+        );
         assert!(
             sigs.iter().any(|s| matches!(s.kind, SignalKind::ToolError)),
             "Bash diagnostics containing 'Timed out' must produce a ToolError signal"
@@ -364,9 +416,9 @@ mod tests {
         let mut c = SignalCollector::new();
         let sigs = c.collect(
             "Read",
+            ToolStatus::Succeeded,
             "\"error[E0425]: cannot find value\" // test fixture string",
             None,
-            "",
             false,
         );
         assert!(
@@ -384,14 +436,20 @@ mod tests {
             c.call_history.push_back("Edit".into());
         }
         c.call_history.push_back("Read".into());
-        let sigs = c.collect("Edit", "ok", None, "", false);
+        let sigs = c.collect("Edit", ToolStatus::Succeeded, "ok", None, false);
         assert!(sigs.iter().any(|s| matches!(s.kind, SignalKind::EditLoop)));
     }
 
     #[test]
     fn detects_tool_failed_via_exit_code() {
         let mut c = SignalCollector::new();
-        let sigs = c.collect("Bash", "output", Some(1), "output", false);
+        let sigs = c.collect(
+            "Bash",
+            ToolStatus::Failed(ToolFailureKind::ProcessFailed),
+            "output",
+            Some(1),
+            false,
+        );
         assert!(
             sigs.iter()
                 .any(|s| matches!(s.kind, SignalKind::ToolFailed))
@@ -399,13 +457,16 @@ mod tests {
     }
 
     #[test]
-    fn detects_tool_failed_via_error_prefix() {
+    fn display_error_prefix_does_not_define_status() {
         let mut c = SignalCollector::new();
-        let sigs = c.collect("Read", "", None, "Error: file not found", false);
-        assert!(
-            sigs.iter()
-                .any(|s| matches!(s.kind, SignalKind::ToolFailed))
+        let sigs = c.collect(
+            "Read",
+            ToolStatus::Succeeded,
+            "Error: file not found",
+            None,
+            false,
         );
+        assert!(sigs.is_empty());
     }
 
     #[test]
@@ -413,9 +474,9 @@ mod tests {
         let mut c = SignalCollector::new();
         let sigs = c.collect(
             "Bash",
-            "",
+            ToolStatus::Failed(ToolFailureKind::SafetyBlocked),
+            "command blocked by bash safety policy (sudo)",
             None,
-            "Error: tool execution failed: Error: command blocked by bash safety policy (sudo)",
             false,
         );
         assert!(
@@ -425,9 +486,25 @@ mod tests {
     }
 
     #[test]
+    fn recovery_guard_preserves_non_extreme_failure_weight() {
+        let mut collector = SignalCollector::new();
+        let signals = collector.collect(
+            "Edit",
+            ToolStatus::Blocked(ToolBlocker::RecoveryGuard),
+            "recovery guard blocked Edit",
+            None,
+            false,
+        );
+
+        assert_eq!(signals.len(), 1);
+        assert_eq!(signals[0].severity, 0.9);
+        assert!(matches!(signals[0].kind, SignalKind::ToolFailed));
+    }
+
+    #[test]
     fn exit_code_zero_does_not_fail() {
         let mut c = SignalCollector::new();
-        let sigs = c.collect("Bash", "ok", Some(0), "ok", false);
+        let sigs = c.collect("Bash", ToolStatus::Succeeded, "ok", Some(0), false);
         assert!(
             !sigs
                 .iter()

@@ -22,12 +22,12 @@ ToolCallEvent
   -> StormBreaker 检查
   -> repair_tool_input() 非 fallback 输入守卫
   -> ToolExec::execute()
-  -> format_dispatched_result() 生成 ToolRunResult
+  -> format_dispatched_result() 生成 ToolExecution
      -> 普通结果执行大小保护、Bash noise filter、Read-Write summary、Edit conv_content
      -> Plan/SubAgent 结果标记为待定稿
   -> PlanActionHandler 生成 Plan effect / 压缩请求；SubAgentCoordinator 完成延迟工作
   -> finalize_deferred_results() 对延迟结果执行大小保护
-  -> SignalCollector 只观察最终 ToolRunResult
+  -> SignalCollector 只观察最终 ToolExecution.status；Command 正文只用于诊断 regex
 ```
 
 OpenAI SSE parser 在生成 `ToolCallEvent` 前合并碎片化 arguments，并要求输入是 JSON object。

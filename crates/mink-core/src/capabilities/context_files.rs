@@ -55,7 +55,7 @@ pub fn build_default_context_file_snapshot(
             continue;
         }
         all.push(LoadedContextFile {
-            revision: crate::util::sha256_hex(&content),
+            revision: crate::capabilities::fingerprint::sha256_hex(&content),
             context_file: ContextFileCapability {
                 name: name.to_string(),
                 content,
@@ -127,7 +127,7 @@ fn compute_dependency_fingerprint(always_apply: &[LoadedContextFile]) -> String 
         input.push_str(&file.revision);
         input.push('\0');
     }
-    crate::util::sha256_hex(&input)
+    crate::capabilities::fingerprint::sha256_hex(&input)
 }
 
 #[cfg(test)]

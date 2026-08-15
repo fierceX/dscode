@@ -7,7 +7,6 @@ use std::sync::LazyLock;
 pub struct TruncationResult {
     pub repaired: String,
     pub changed: bool,
-    pub notes: Vec<String>,
     pub fallback: bool,
 }
 
@@ -105,14 +104,15 @@ pub fn scavenge_combined(
                 let sig = format!("{}::{}", name, args);
                 if seen.insert(sig) && !name.is_empty() {
                     if calls.len() >= max_calls {
-                        notes.push(format!("scavenge reached max {} calls", max_calls));
+                        notes.push(format!(
+                            "{source} reached max recovered calls ({max_calls})"
+                        ));
                         break;
                     }
                     calls.push(ToolCallInfo {
                         name: name.clone(),
                         arguments: args,
                     });
-                    notes.push(format!("scavenged {} from {}", name, source));
                 }
             }
         }
@@ -270,7 +270,7 @@ fn coerce_to_tool_call(v: &Value) -> Option<Value> {
         return Some(serde_json::json!({"name": name, "arguments": args}));
     }
 
-    // Shape 3: { "tool_name": "...", "tool_args": {...} } (R1 free-form variant)
+    // Shape 3: { "tool_name": "...", "tool_args": {...} } (free-form variant)
     if let Some(name) = v.get("tool_name").and_then(Value::as_str)
         && !name.is_empty()
     {
@@ -299,14 +299,10 @@ fn extract_name_args(v: &Value) -> (String, String) {
 
 /// Repair truncated JSON (unclosed braces, unterminated strings, trailing commas).
 pub fn repair_truncated_json(input: &str) -> TruncationResult {
-    let mut notes = Vec::new();
-
     if input.trim().is_empty() {
-        notes.push("empty input -> {}".to_string());
         return TruncationResult {
             repaired: "{}".to_string(),
             changed: input != "{}",
-            notes,
             fallback: false,
         };
     }
@@ -316,7 +312,6 @@ pub fn repair_truncated_json(input: &str) -> TruncationResult {
         return TruncationResult {
             repaired: input.to_string(),
             changed: false,
-            notes,
             fallback: false,
         };
     }
@@ -368,26 +363,22 @@ pub fn repair_truncated_json(input: &str) -> TruncationResult {
             break;
         }
         s = next;
-        notes.push("trimmed trailing comma".to_string());
     }
 
     if s.ends_with(',') {
         s.pop();
-        notes.push("trimmed trailing comma".to_string());
     }
 
     // Fill dangling key with null
     let trimmed = s.trim_end().to_string();
     if trimmed.ends_with(':') {
         s.push_str(" null");
-        notes.push("filled dangling key with null".to_string());
     }
 
     // Close unterminated string
     if in_string {
         s.push('"');
         stack.pop();
-        notes.push("closed unterminated string".to_string());
     }
 
     // Close remaining open structures in reverse
@@ -406,19 +397,14 @@ pub fn repair_truncated_json(input: &str) -> TruncationResult {
             TruncationResult {
                 repaired: s,
                 changed,
-                notes,
                 fallback: false,
             }
         }
-        Err(e) => {
-            notes.push(format!("fallback to {{}}: {}", e));
-            TruncationResult {
-                repaired: "{}".to_string(),
-                changed: true,
-                notes,
-                fallback: true,
-            }
-        }
+        Err(_) => TruncationResult {
+            repaired: "{}".to_string(),
+            changed: true,
+            fallback: true,
+        },
     }
 }
 #[cfg(test)]

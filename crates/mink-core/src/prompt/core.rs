@@ -51,7 +51,7 @@ pub(super) fn append_core_sections(builder: &Builder, document: &mut PromptDocum
          BEFORE claiming work complete, identify an appropriate verification, run it, read its full result, and report the evidence.\n\
          Stop and re-analyze after repeated failures, unexplained output, or any assumption that has not been checked.",
     )?;
-    if crate::config::SignalMode::from_env().enabled() {
+    if builder.signal_policy.enabled() {
         push_core(
             document,
             "belief-awareness",

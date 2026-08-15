@@ -5,7 +5,6 @@ use crate::sse::toolcall::build_tool_call_event;
 use anyhow::Result;
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader, Read};
 
 // ---- SSE frame parsing (reuses extract_frames from claude module) ----
 // OpenAI SSE also uses `data:` lines delimited by `\n\n`.
@@ -289,27 +288,6 @@ impl OpenAIParser {
 
 fn strip_reasoning_think_tags(content: &str) -> String {
     content.replace("<think>", "").replace("</think>", "")
-}
-
-// ---- Legacy synchronous parse ----
-
-pub fn parse<R: Read>(reader: R, mut emit: impl FnMut(Event) -> Result<()>) -> Result<()> {
-    let mut parser = OpenAIParser::new();
-    let mut br = BufReader::new(reader);
-    let mut line = String::new();
-    loop {
-        line.clear();
-        let n = br.read_line(&mut line)?;
-        if n == 0 {
-            break;
-        }
-        if parser.process_line(&line, &mut emit)? {
-            break;
-        }
-    }
-    parser.finish_eof(&mut emit)?;
-    parser.flush(&mut emit)?;
-    Ok(())
 }
 
 #[cfg(test)]

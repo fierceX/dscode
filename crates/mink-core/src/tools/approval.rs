@@ -48,6 +48,7 @@ pub fn authorize_tool(metadata: &ToolMetadata, config: &ToolConfig) -> ToolAutho
     }
 }
 
+#[cfg(test)]
 pub fn denied_message(metadata: &ToolMetadata, reason: ToolAuthorizationDeniedReason) -> String {
     match reason {
         ToolAuthorizationDeniedReason::ExplicitDeny => {
@@ -63,7 +64,7 @@ pub fn denied_message(metadata: &ToolMetadata, reason: ToolAuthorizationDeniedRe
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, ToolApprovalMode, ToolApprovalPolicy};
+    use crate::config::{ResolvedConfig as Config, ToolApprovalMode, ToolApprovalPolicy};
     use crate::context::ToolConfig;
     use crate::tools::metadata::{ApprovalTier, ToolMetadata, ToolResultKind};
 

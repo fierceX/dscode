@@ -323,7 +323,7 @@ fn runtime_skill_to_loaded(skill: RuntimeSkill) -> LoadedSkill {
     let content = skill.content.replace("${MINK_SKILL_DIR}", "<runtime>");
     let revision = skill
         .revision
-        .unwrap_or_else(|| crate::util::sha256_hex(&content));
+        .unwrap_or_else(|| crate::capabilities::fingerprint::sha256_hex(&content));
     LoadedSkill {
         skill: SkillCapability {
             name: skill.name,
@@ -433,7 +433,7 @@ impl SkillProvider for FileSystemSkillProvider {
                 CapabilityExposure::ModelDiscoverable
             };
             out.push(LoadedSkill {
-                revision: crate::util::sha256_hex(&content),
+                revision: crate::capabilities::fingerprint::sha256_hex(&content),
                 skill: SkillCapability {
                     name,
                     description: frontmatter
@@ -478,7 +478,7 @@ impl SkillProvider for BuiltInSkillProvider {
             .map(|skill| {
                 let content = skill.content.replace("${MINK_SKILL_DIR}", "<built-in>");
                 LoadedSkill {
-                    revision: crate::util::sha256_hex(&content),
+                    revision: crate::capabilities::fingerprint::sha256_hex(&content),
                     skill: SkillCapability {
                         name: skill.name.to_string(),
                         description: skill.description.to_string(),
@@ -633,10 +633,12 @@ fn compute_dependency_fingerprint(
             input.push_str(&loaded.revision);
         }
         input.push('\0');
-        input.push_str(&crate::util::sha256_hex(&skill.content));
+        input.push_str(&crate::capabilities::fingerprint::sha256_hex(
+            &skill.content,
+        ));
         input.push('\0');
     }
-    crate::util::sha256_hex(&input)
+    crate::capabilities::fingerprint::sha256_hex(&input)
 }
 
 fn exposure_label(exposure: &CapabilityExposure) -> &'static str {

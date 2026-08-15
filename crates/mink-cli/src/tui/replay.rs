@@ -133,9 +133,10 @@ fn build_lines_from_events(events: &[serde_json::Value]) -> Vec<TranscriptItem> 
                     tool_name: tool_name.to_string(),
                     content: c.to_string(),
                     success: evt
-                        .get("success")
-                        .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(true),
+                        .get("status")
+                        .and_then(|status| status.get("state"))
+                        .and_then(serde_json::Value::as_str)
+                        .is_none_or(|state| state == "succeeded"),
                     exit_code: evt
                         .get("exit_code")
                         .and_then(serde_json::Value::as_i64)

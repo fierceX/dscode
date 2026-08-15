@@ -46,69 +46,57 @@ mink -m flash --print "fix the bug" | jq 'select(.type=="text") | .content'
 ## Agent JSONL（`--agent-jsonl`）
 
 SDK 专用 single-shot 协议：stdin 读入一个 versioned JSON request，stdout 输出事件流，
-最后以 `final` 结束。协议版本为 **2**；v2 对未知字段直接拒绝（`deny_unknown_fields`），
-不提供 v1 双格式兼容。
+最后以 `final` 结束。协议版本为 **3**；v3 对未知字段直接拒绝（`deny_unknown_fields`），
+不兼容 v2 的扁平 options。
 
 ```bash
 # 最小请求
-echo '{"version":2,"prompt":"scan this repo"}' | mink-core --agent-jsonl
+echo '{"version":3,"prompt":"scan this repo"}' | mink-core --agent-jsonl
 ```
 
 ### Request
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `version` | `u32` | 协议版本（当前 `2`） |
+| `version` | `u32` | 协议版本（当前 `3`） |
 | `prompt` | `string` | 用户输入（**必需**） |
 | `session_id` | `string?` | session 引用（alias / id / 前缀 / title） |
 | `mission` | `string?` | MISSION.md 内联内容（避免临时文件 I/O） |
 | `options` | object | 见下 |
 
-### Options
+### Grouped options
 
-| 字段 | 类型 | 说明 |
+| 分组 | 主要字段 | 说明 |
 |------|------|------|
-| `model` | `string?` | 模型名（别名或真实名） |
-| `max_tokens` / `max_turns` | `int?` | 输出上限与最大轮次 |
-| `max_context` | `int?` | 上下文窗口；`0` 禁用自动压缩 |
-| `context_compact_pct` | `int?` | 压缩百分比（1-100） |
-| `context_reserve_tokens` | `int?` | 响应预留 |
-| `context_compact_tail_tokens` | `int?` | 压缩后热尾部 |
-| `context_compact_max_output_tokens` | `int?` | 摘要输出上限 |
-| `context_compact_input_reduction` | `bool?` | 摘要输入降噪 |
-| `tool_timeout` / `sub_agent_timeout` | `int?` | 工具/子代理超时（秒） |
-| `llm_first_event_timeout` / `llm_idle_timeout` / `llm_wait_heartbeat` | `int?` | LLM 流超时 |
-| `verbose` | `bool?` | 详细日志 |
-| `stream_events` | `bool?` | `false` 时只输出最终 `final`，不输出过程事件 |
-| `enabled_tools` | `string[]?` | 精确工具选择（唯一工具入口） |
-| `edit_mode` | `string?` | `hashline`（默认）/ `replace`；本 runtime 固定 |
-| `edit_fuzzy_match` | `bool?` | Replace 行窗口模糊匹配开关 |
-| `edit_fuzzy_threshold` | `number?` | Replace 阈值，有限数且为 `0.0..=1.0` |
-| `edit_enforce_seen_lines` | `bool?` | Hashline seen-line 守卫 |
-| `skills` | `string[]?` | 选中技能 |
-| `inline_skills` | `object[]?` | 内联技能（`name`/`description`/`content`/`exposure`/`revision`） |
-| `skill_discovery_policy` | `string?` | `defaults` / `runtime_only` / `explicit_only` |
-| `session_id` | `string?` | 覆盖外层 session_id |
-| `session_layout` | `string?` | `project` / `home` / `direct` / `isolated` |
+| `provider` | `model` | 模型名（别名或真实名） |
+| `generation` | `max_tokens`, `max_turns`, `llm_*_timeout` | 生成和流超时 |
+| `context` | `max_context`, `context_compact_*`, `context_reserve_tokens` | 上下文与压缩；`max_context=0` 禁用自动压缩 |
+| `tools` | `enabled_tools`, `tool_timeout`, `sub_agent_timeout`, edit 和 skill 字段 | 工具 surface 与执行策略 |
+| `session` | `session_id`, `session_layout` | session 引用与布局 |
+| `output` | `verbose`, `stream_events` | 输出策略 |
+| `signal` | `policy` | `off` / `evidence` / `state_ops` / `restart` / `full` |
 
 示例：
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "prompt": "scan this repo and summarize",
   "session_id": "work-001",
   "options": {
-    "model": "flash",
-    "max_tokens": 8192,
-    "max_turns": 20,
-    "max_context": 64000,
-    "context_compact_pct": 65,
-    "context_reserve_tokens": 12000,
-    "edit_mode": "hashline",
-    "edit_enforce_seen_lines": false,
-    "enabled_tools": ["Read", "Write", "Edit", "Grep", "Glob", "Bash"],
-    "stream_events": false
+    "provider": {"model": "flash"},
+    "generation": {"max_tokens": 8192, "max_turns": 20},
+    "context": {
+      "max_context": 64000,
+      "context_compact_pct": 65,
+      "context_reserve_tokens": 12000
+    },
+    "tools": {
+      "edit_mode": "hashline",
+      "edit_enforce_seen_lines": false,
+      "enabled_tools": ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]
+    },
+    "output": {"stream_events": false}
   }
 }
 ```
@@ -123,7 +111,7 @@ echo '{"version":2,"prompt":"scan this repo"}' | mink-core --agent-jsonl
 ```json
 {
   "type": "final",
-  "version": 2,
+  "version": 3,
   "status": "ok",
   "billing_turn_id": "turn-...",
   "session_id": "session-...",

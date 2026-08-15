@@ -1,7 +1,6 @@
 use crate::agent::turn::{TurnDecision, TurnExecutor};
-use crate::config::Config;
+use crate::config::ResolvedConfig as Config;
 use crate::context::AgentSharedContext;
-use crate::llm::client::{BackendLlmClient, LlmClient};
 use crate::runtime::context_build::{AgentContextBuild, build_agent_context};
 use crate::session::metadata::SessionSeed;
 use crate::session::paths::SessionLayout;
@@ -60,14 +59,25 @@ impl Display for CaptureDisplay {
             sink.render_sub_agent_stream(&self.session_id, SubAgentStreamKind::Text, c);
         }
     }
-    fn render_tool_call(&self, _n: &str, _s: &str) {}
-    fn render_tool_result(&self, _n: &str, _c: &str) {}
-    fn render_stop(&self) {}
+    fn render_tool_call(&self, _call: &crate::ui::ToolCallDisplay<'_>) {}
+    fn render_tool_result(&self, _result: &crate::ui::PresentedToolResultDisplay<'_>) {}
+    fn render_stop(&self, _reason: &str) {}
+    fn render_signal(&self, _kind: &str, _severity: f64, _message: &str) {}
     fn render_error(&self, _m: &str) {}
     fn render_retry(&self) {}
     fn render_info(&self, _m: &str) {}
     fn render_title_update(&self, _m: &str, _s: &crate::ui::StatsSnapshot) {}
     fn render_sub_agent_status(&self, _sid: &str, _st: &str, _it: u64, _ot: u64) {}
+    fn render_sub_agent_output(
+        &self,
+        _sid: &str,
+        _status: &str,
+        _thinking: &str,
+        _text: &str,
+        _in_tokens: u64,
+        _out_tokens: u64,
+    ) {
+    }
     fn render_prompt(&self) {}
     fn render_clear_line(&self) {}
 }
@@ -227,17 +237,14 @@ impl SubAgentExecutor {
     async fn run_impl(self, prompt: String) -> Result<(String, String)> {
         let resolved = crate::config::model_resolver(&self.child_ctx.config)
             .resolve(&self.child_ctx.config.model);
-        let llm: Arc<dyn LlmClient> = Arc::new(BackendLlmClient::new(
-            self.child_ctx.llm_backend.clone(),
-            resolved.actual,
-            resolved.alias,
-        ));
-        // 子代理内部也可调用 SubAgent，用独立池（容量1，结果丢弃）
-        let mut executor = TurnExecutor::new(self.child_ctx.clone(), llm);
+        let executor =
+            TurnExecutor::new(self.child_ctx.clone(), self.child_ctx.llm_backend.clone())
+                .with_model_target(resolved.actual, resolved.alias);
+        let mut executor = executor;
         let (decision, _effects) = Box::pin(executor.execute(&prompt, None)).await?;
 
         match decision {
-            TurnDecision::Stop | TurnDecision::Continue => {
+            TurnDecision::Stop => {
                 // Read back the assistant text from the CHILD store
                 let mut result_thinking = String::new();
                 let mut result_text = String::new();
@@ -358,7 +365,7 @@ fn copy_session_entries(source: &Path, destination: &Path, root: bool) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::mock::MockLlmClient;
+    use crate::llm::mock::MockLlmBackend;
     use crate::protocol::{Event, StopEvent, TextEvent};
 
     #[tokio::test]
@@ -463,7 +470,7 @@ mod tests {
 
     #[tokio::test]
     async fn fork_inherits_full_history_and_compacted_projection() -> anyhow::Result<()> {
-        let summary_backend = Arc::new(MockLlmClient::new(
+        let summary_backend = Arc::new(MockLlmBackend::new(
             "summary-model",
             vec![vec![
                 Ok(Event::Text(TextEvent {

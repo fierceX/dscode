@@ -1,8 +1,7 @@
-//! 轨迹证据跟踪器 — SIGNAL_RESPONSE_REDESIGN R1/S2。
 //!
 //! 运行时相对模型的唯一信息优势在于它持有完整的结构化轨迹。本模块把滑动窗口
 //! 内的工具调用压缩成"模型无法从已有上下文推导的统计事实"（重复调用、失败聚
-//! 类、预算消耗），供证据注入（R1）与状态操作（R2 的编辑路径定位）使用。
+//! 类、预算消耗），供证据注入与状态操作的编辑路径定位使用。
 //! 证据必须逐条可回溯到 conversation.jsonl 的工具调用记录。
 
 use std::collections::{BTreeMap, VecDeque};
@@ -14,11 +13,7 @@ pub struct CallRecord {
     pub tool: String,
     /// 规范参数串（tool_args 为 BTreeMap，键序天然稳定）。
     pub canonical_args: String,
-    /// 结果摘要：成功为空串；失败为稳定错误码或首行。
-    pub summary: String,
-    /// 是否为硬失败（结构化错误码或非零退出）。
-    pub hard: bool,
-    /// 该调用编辑过的路径（Edit/Write 的 path 参数），供 R2 回滚定位。
+    /// 该调用编辑过的路径（Edit/Write 的 path 参数），供回滚定位。
     pub paths: Vec<String>,
 }
 
@@ -59,7 +54,7 @@ impl EvidenceTracker {
 
     /// 记录一次工具调用的结果。`summary` 为空且 `failed` 为 false 表示成功。
     /// `failed` 是调用方对失败状态的权威判定（success=false / 有信号 / 有错误码），
-    /// 用于软失败计数——成功调用不得推高 soft_failures（N1 修复）。
+    /// 用于软失败计数；成功调用不得推高 soft_failures。
     pub fn record(
         &mut self,
         tool: &str,
@@ -76,8 +71,6 @@ impl EvidenceTracker {
         self.records.push_back(CallRecord {
             tool: tool.to_string(),
             canonical_args: canonical_args.clone(),
-            summary: summary.to_string(),
-            hard,
             paths: paths.clone(),
         });
         for path in paths {
@@ -213,7 +206,6 @@ impl EvidenceTracker {
     }
 
     /// 最近 `steps` 条记录内被编辑过的路径（去重、保序）。
-    /// R2 回滚的窗口定位（D2 修复）：只回滚循环窗口内的编辑，窗口之前的
     /// 合法编辑保持不动。
     pub fn edited_paths_since(&self, steps: usize) -> Vec<String> {
         let skip = self.records.len().saturating_sub(steps);
@@ -344,7 +336,7 @@ mod tests {
 
     #[test]
     fn clean_records_do_not_count_as_soft_failures() {
-        // N1 修复：soft_failures 只计软失败，成功调用不得推高计数。
+        // soft_failures 只计软失败，成功调用不得推高计数。
         let mut t = EvidenceTracker::new(8, 2);
         t.record("Read", &args(&[("path", "a.rs")]), "", false, false, vec![]);
         t.record(

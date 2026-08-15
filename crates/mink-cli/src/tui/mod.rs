@@ -398,12 +398,18 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let display = TuiDisplay::new(tx);
 
-        display.render_tool_result_detail(&ToolResultDisplay {
-            tool_name: "Bash",
-            content_preview: "short preview\n",
-            content: "full output\nwith more detail",
-            tool_use_id: Some("toolu_1"),
-            exit_code: Some(0),
+        display.render_tool_result(&crate::ui::PresentedToolResultDisplay {
+            base: ToolResultDisplay {
+                tool_name: "Bash",
+                content_preview: "short preview\n",
+                content: "full output\nwith more detail",
+                tool_use_id: Some("toolu_1"),
+                exit_code: Some(0),
+            },
+            status: crate::runtime::ToolStatus::Succeeded,
+            result_kind: crate::ui::ToolResultKind::Text,
+            presentation: None,
+            artifacts: &[],
         });
 
         match rx.recv().unwrap() {

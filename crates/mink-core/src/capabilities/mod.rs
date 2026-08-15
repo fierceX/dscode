@@ -1,4 +1,5 @@
 pub mod context_files;
+pub(crate) mod fingerprint;
 pub mod rules;
 pub mod skills;
 pub mod source;
@@ -6,15 +7,17 @@ pub mod source;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
-use crate::util::hex_lower;
+use crate::capabilities::fingerprint::hex_lower;
 
 pub use context_files::{ContextFileSnapshot, build_default_context_file_snapshot};
 pub use rules::{RuleSnapshot, build_default_rule_snapshot};
 pub use skills::{
-    LoadContext as SkillLoadContext, LoadedSkill, ResolvedSkill, RuntimeSkill, SkillCapability,
-    SkillDiscoveryPolicy, SkillInfo, SkillProvider, SkillSnapshot, SkillSource,
-    build_default_skill_snapshot, skill_providers_for_policy,
+    LoadContext as SkillLoadContext, LoadedSkill, RuntimeSkill, SkillCapability,
+    SkillDiscoveryPolicy, SkillProvider, SkillSnapshot, build_default_skill_snapshot,
+    skill_providers_for_policy,
 };
+#[cfg(test)]
+pub use skills::{ResolvedSkill, SkillInfo, SkillSource};
 pub use source::{CapabilityExposure, SourceLevel, SourceMeta};
 
 #[derive(Debug, Clone, Default)]

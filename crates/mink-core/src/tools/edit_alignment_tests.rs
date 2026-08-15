@@ -1,4 +1,4 @@
-use mink::tools::{hashline, replace};
+use super::{hashline, replace};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -53,7 +53,7 @@ struct Expected {
 }
 
 fn corpus() -> Corpus {
-    serde_json::from_str(include_str!("fixtures/edit_alignment.json"))
+    serde_json::from_str(include_str!("../../tests/fixtures/edit_alignment.json"))
         .expect("edit alignment fixture must be valid JSON")
 }
 
@@ -77,7 +77,7 @@ fn fixture_is_pinned_to_an_upstream_commit() {
 fn snapshot_hash_matches_upstream_goldens() {
     for case in corpus().hashes {
         assert_eq!(
-            mink::tools::snapshot::compute_file_tag(&case.content),
+            super::snapshot::compute_file_tag(&case.content),
             case.expected,
             "{}",
             case.id

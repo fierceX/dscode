@@ -1,9 +1,11 @@
 use crate::config::{
-    apply_config_file, apply_provider_defaults, parse_args, validate_runtime_config,
+    apply_config_file, apply_provider_defaults, apply_sdk_request_options, parse_args,
+    validate_runtime_config,
 };
 use crate::runtime::{
-    AgentOptions, AgentRuntime, AgentRuntimeHandle, RuntimeResult, TurnOutcome,
-    apply_sdk_request_options, exit_code_from_turn, final_from_outcome,
+    AgentEventKind, AgentOptions, AgentRuntime, AgentRuntimeHandle, ContextPolicy,
+    GenerationOptions, PresentedToolResultDisplay, ProviderOptions, RuntimeResult, ToolCallDisplay,
+    ToolOptions, ToolResultDisplay, TurnOutcome, exit_code_from_turn, final_from_outcome,
     runtime_skills_from_sdk_request, skill_discovery_policy_from_sdk_request,
 };
 use crate::sdk_protocol::{
@@ -31,6 +33,93 @@ pub(crate) enum RuntimeCmd {
     Exit,
 }
 
+fn render_agent_event(display: &dyn Display, kind: AgentEventKind) {
+    match kind {
+        AgentEventKind::Thinking { content } => display.render_thinking(&content),
+        AgentEventKind::Text { content } => display.render_text(&content),
+        AgentEventKind::ToolCall {
+            id,
+            name,
+            summary,
+            input,
+        } => display.render_tool_call(&ToolCallDisplay {
+            tool_use_id: &id,
+            tool_name: &name,
+            summary: &summary,
+            input: Some(&input),
+        }),
+        AgentEventKind::ToolResult {
+            tool_use_id,
+            tool_name,
+            content_preview,
+            content,
+            status,
+            exit_code,
+            result_kind,
+            presentation,
+            artifacts,
+        } => display.render_tool_result(&PresentedToolResultDisplay {
+            base: ToolResultDisplay {
+                tool_name: &tool_name,
+                content_preview: &content_preview,
+                content: &content,
+                tool_use_id: tool_use_id.as_deref(),
+                exit_code,
+            },
+            status,
+            result_kind,
+            presentation: presentation.as_ref(),
+            artifacts: &artifacts,
+        }),
+        AgentEventKind::Signal {
+            signal_kind,
+            severity,
+            message,
+        } => display.render_signal(&signal_kind, severity, &message),
+        AgentEventKind::Stop { reason } => display.render_stop(&reason),
+        AgentEventKind::Retry => display.render_retry(),
+        AgentEventKind::Error { message } => display.render_error(&message),
+        AgentEventKind::Info { message } => display.render_info(&message),
+        AgentEventKind::TitleUpdate { model, stats } => display.render_title_update(&model, &stats),
+        AgentEventKind::SubAgentStatus {
+            session_id,
+            status,
+            in_tokens,
+            out_tokens,
+        } => display.render_sub_agent_status(&session_id, &status, in_tokens, out_tokens),
+        AgentEventKind::SubAgentOutput {
+            session_id,
+            status,
+            thinking,
+            text,
+            in_tokens,
+            out_tokens,
+        } => display.render_sub_agent_output(
+            &session_id,
+            &status,
+            &thinking,
+            &text,
+            in_tokens,
+            out_tokens,
+        ),
+        AgentEventKind::Prompt => display.render_prompt(),
+        AgentEventKind::ClearLine => display.render_clear_line(),
+        AgentEventKind::TurnStarted | AgentEventKind::Final { .. } => {}
+    }
+}
+
+async fn run_turn_rendered(
+    handle: &AgentRuntimeHandle,
+    input: String,
+    display: &dyn Display,
+) -> RuntimeResult<TurnOutcome> {
+    let mut stream = handle.stream_turn(input)?;
+    while let Some(event) = stream.recv().await {
+        render_agent_event(display, event.kind);
+    }
+    stream.outcome().await
+}
+
 fn start_runtime_broker(
     handle: AgentRuntimeHandle,
     display: Arc<dyn Display>,
@@ -42,7 +131,7 @@ fn start_runtime_broker(
         while let Some(command) = work_rx.recv().await {
             let result = match command {
                 RuntimeCmd::Run { input, done } => {
-                    let result = work_handle.run_turn(input).await;
+                    let result = run_turn_rendered(&work_handle, input, display.as_ref()).await;
                     if let Err(error) = &result {
                         display.render_error(&error.to_string());
                     }
@@ -169,16 +258,6 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
         }
         return Err(error);
     }
-    if let Err(error) =
-        mink::tools::catalog::validate_tool_config(&mink::context::ToolConfig::from_config(&cfg))
-    {
-        if cfg.agent_jsonl {
-            emit_failed_parse(&format!("invalid SDK request: {error}"));
-            return Ok(CliExit { code: 1 });
-        }
-        return Err(error);
-    }
-
     let prompt_for_title = sdk_request
         .as_ref()
         .map(|r| r.prompt.clone())
@@ -223,15 +302,14 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
     #[cfg(not(feature = "tui"))]
     let sub_stream_tx: Option<Arc<dyn SubAgentStreamSink>> = None;
 
-    let mut runtime_options = AgentOptions::from_config(cfg.clone(), home.clone(), cwd.clone())
-        .with_project_scoped_sessions()
-        .with_display(display.clone());
+    let mut runtime_options =
+        assemble_runtime_options(&cfg, home.clone(), cwd.clone()).with_project_scoped_sessions();
     if let Some(prompt) = prompt_for_title {
         runtime_options = runtime_options.with_first_prompt(prompt);
     }
     if let Some(layout) = sdk_request
         .as_ref()
-        .and_then(|request| request.options.session_layout)
+        .and_then(|request| request.options.session.session_layout)
     {
         runtime_options = runtime_options.with_session_layout(layout);
     }
@@ -252,9 +330,14 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
 
     let mut process_exit_code = 0i32;
     if cfg.agent_jsonl {
-        let outcome = runtime
-            .run_turn(sdk_request.map(|r| r.prompt).unwrap_or_default())
-            .await?;
+        let outcome = run_turn_rendered(
+            &runtime_handle,
+            sdk_request
+                .map(|request| request.prompt)
+                .unwrap_or_default(),
+            display.as_ref(),
+        )
+        .await?;
         crate::sdk_protocol::emit_json_line(&final_from_outcome(&outcome));
         process_exit_code = exit_code_from_turn(outcome.status);
     } else if cfg.tui_mode.enabled() {
@@ -285,13 +368,14 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
         }
         run_interactive(cmd_tx, &home).await?;
     } else if !cfg.prompt.is_empty() {
-        let outcome = runtime.run_turn(cfg.prompt.clone()).await?;
+        let outcome =
+            run_turn_rendered(&runtime_handle, cfg.prompt.clone(), display.as_ref()).await?;
         emit_stream_json_final_if_needed(&cfg, &outcome);
         process_exit_code = exit_code_from_turn(outcome.status);
     } else {
         let mut input = String::new();
         tokio::io::AsyncReadExt::read_to_string(&mut tokio::io::stdin(), &mut input).await?;
-        let outcome = runtime.run_turn(input).await?;
+        let outcome = run_turn_rendered(&runtime_handle, input, display.as_ref()).await?;
         emit_stream_json_final_if_needed(&cfg, &outcome);
         process_exit_code = exit_code_from_turn(outcome.status);
     }
@@ -313,6 +397,83 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
     Ok(CliExit {
         code: process_exit_code,
     })
+}
+
+fn assemble_runtime_options(
+    cfg: &crate::config::CliConfig,
+    home: PathBuf,
+    cwd: PathBuf,
+) -> AgentOptions {
+    let session = if !cfg.session_id.trim().is_empty() {
+        crate::runtime::SessionPolicy::UseOrCreate(cfg.session_id.trim().to_string())
+    } else if cfg.continue_session {
+        crate::runtime::SessionPolicy::ContinueLatest
+    } else {
+        crate::runtime::SessionPolicy::New
+    };
+    let mut options = AgentOptions::new(home, cwd)
+        .with_provider_options(ProviderOptions {
+            model: cfg.model.clone(),
+            model_aliases: cfg.model_aliases.clone(),
+            api_key: cfg.api_key.clone(),
+            base_url: cfg.base_url.clone(),
+            reasoning_effort: cfg.openai_reasoning_effort.clone(),
+            include_usage: cfg.openai_include_usage,
+            token_param: cfg.openai_token_param,
+            tool_choice: cfg.openai_tool_choice.clone(),
+            extra_body: cfg.openai_extra_body.clone(),
+        })
+        .with_generation_options(GenerationOptions {
+            max_tokens: cfg.max_tokens,
+            max_turns: cfg.max_turns,
+            first_event_timeout_secs: cfg.llm_first_event_timeout_secs,
+            idle_timeout_secs: cfg.llm_idle_timeout_secs,
+            wait_heartbeat_secs: cfg.llm_wait_heartbeat_secs,
+        })
+        .with_context_policy(ContextPolicy {
+            max_context_tokens: cfg.max_context_tokens,
+            compact_pct: cfg.context_compact_pct,
+            reserve_tokens: cfg.context_reserve_tokens,
+            compact_tail_tokens: cfg.context_compact_tail_tokens,
+            compact_max_output_tokens: cfg.context_compact_max_output_tokens,
+            compact_input_reduction: cfg.context_compact_input_reduction,
+            plan_projection_tail: cfg.plan_projection_tail,
+        })
+        .with_tool_options(ToolOptions {
+            timeout_secs: cfg.tool_timeout_secs,
+            sub_agent_timeout_secs: cfg.sub_agent_timeout_secs,
+            result_max_bytes: cfg.tool_result_max_bytes,
+            file_write_max_bytes: cfg.file_write_max_bytes,
+            edit_mode: cfg.edit_mode,
+            edit_fuzzy_match: cfg.edit_fuzzy_match,
+            edit_fuzzy_threshold: cfg.edit_fuzzy_threshold,
+            edit_enforce_seen_lines: cfg.edit_enforce_seen_lines,
+            max_search_files: cfg.max_search_files,
+            max_search_results: cfg.max_search_results,
+            enabled_tools: cfg.enabled_tools.clone(),
+            approval_mode: cfg.tool_approval_mode,
+            approval: cfg.tool_approval.clone(),
+        })
+        .with_signal_policy(cfg.signal_policy)
+        .with_session(session)
+        .with_output_format(cfg.output_format)
+        .with_verbose(cfg.verbose)
+        .with_log_events(cfg.log_events)
+        .with_selected_skills(cfg.skills.clone())
+        .with_sandbox(cfg.sandbox.clone())
+        .with_sandbox_python(cfg.sandbox_python.clone())
+        .with_interactive(cfg.interactive)
+        .with_agent_jsonl(cfg.agent_jsonl);
+    if !cfg.prompt.trim().is_empty() {
+        options = options.with_first_prompt(cfg.prompt.clone());
+    }
+    if let Some(path) = &cfg.mission_file {
+        options = options.with_mission_file(path.clone());
+    }
+    if let Some(content) = &cfg.mission_content {
+        options = options.with_mission_content(content.clone());
+    }
+    options
 }
 
 async fn read_session_alias(session: &crate::runtime::SessionInfo) -> Option<String> {
@@ -378,15 +539,25 @@ async fn auto_set_session_title(session: &crate::runtime::SessionInfo) {
     }
 }
 
-fn reexec_if_sandbox(cfg: &crate::config::Config) {
+fn reexec_if_sandbox(cfg: &crate::config::CliConfig) {
     if cfg.sandbox.is_active() {
         let current_exe = std::env::current_exe().unwrap_or_default();
         let args: Vec<String> = std::env::args().collect();
-        crate::sandbox::reexec_in_sandbox(&cfg.sandbox, &current_exe, &args);
+        let sandbox = crate::runtime::SandboxConfig {
+            enabled: cfg.sandbox.enabled,
+            backend: cfg.sandbox.backend.clone(),
+            read_dirs: cfg.sandbox.read_dirs.clone(),
+            write_dirs: cfg.sandbox.write_dirs.clone(),
+            allow_network: cfg.sandbox.allow_network,
+            max_memory_mb: cfg.sandbox.max_memory_mb,
+            max_pids: cfg.sandbox.max_pids,
+            timeout_secs: cfg.sandbox.timeout_secs,
+        };
+        crate::sandbox::reexec_in_sandbox(&sandbox, &current_exe, &args);
     }
 }
 
-fn emit_stream_json_final_if_needed(cfg: &crate::config::Config, outcome: &TurnOutcome) {
+fn emit_stream_json_final_if_needed(cfg: &crate::config::CliConfig, outcome: &TurnOutcome) {
     if cfg.output_format != crate::config::OutputFormat::StreamJson || cfg.agent_jsonl {
         return;
     }
@@ -673,8 +844,8 @@ async fn list_sessions(home: &Path, cwd: &Path) -> Result<()> {
     let title_width = 32;
     let updated_width = 16;
     for row in rows {
-        let alias = row.metadata.alias.as_deref().unwrap_or("-");
-        let title = resolve_session_title(&row.path, &row.metadata).await;
+        let alias = row.alias.as_deref().unwrap_or("-");
+        let title = resolve_session_title(&row.path, &row).await;
         let alias = truncate_display(alias, alias_width);
         let title = truncate_display(&title, title_width);
         let dt: time::OffsetDateTime = row.modified.into();
@@ -702,7 +873,7 @@ async fn list_sessions(home: &Path, cwd: &Path) -> Result<()> {
 /// preserved untouched.
 async fn resolve_session_title(
     session_dir: &Path,
-    meta: &crate::session::metadata::SessionMetadata,
+    meta: &crate::session::metadata::SessionRecord,
 ) -> String {
     // Fast path: title already in metadata
     if let Some(title) = meta.title.as_deref().filter(|t| !t.is_empty()) {
@@ -839,7 +1010,9 @@ fn print_usage() {
     println!("  DEEPSEEK_API_KEY        DeepSeek API key");
     println!("  DEEPSEEK_BASE_URL       DeepSeek base URL");
     println!("  LOG_EVENTS              Enable event logging (default: true)");
-    println!("  MINK_SIGNAL_MODE        Signal system mode: off | full (default: full)");
+    println!(
+        "  MINK_SIGNAL_POLICY      Signal policy: off | evidence | state_ops | restart | full"
+    );
     println!("  MINK_EDIT_MODE          Edit protocol: hashline | replace");
     println!("  MINK_EDIT_FUZZY_MATCH   Replace fuzzy matching: true | false");
     println!("  MINK_EDIT_FUZZY_THRESHOLD Replace fuzzy threshold, 0.0..=1.0");

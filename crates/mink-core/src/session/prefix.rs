@@ -1,7 +1,7 @@
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::util::hex_lower;
+use crate::capabilities::fingerprint::hex_lower;
 
 /// ImmutablePrefix holds content that cannot change during a session.
 /// This is the foundation for prefix-cache alignment: the system prompt

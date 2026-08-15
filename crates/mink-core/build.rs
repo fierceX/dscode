@@ -58,7 +58,8 @@ fn main() {
 
     // Generate find function
     code.push_str(
-        "pub fn find(name: &str) -> Option<Skill> {\n\
+        "#[cfg(test)]\n\
+         pub fn find(name: &str) -> Option<Skill> {\n\
          all().into_iter().find(|s| s.name == name)\n\
          }\n",
     );

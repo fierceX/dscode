@@ -88,21 +88,27 @@ fn execute_sync(
     if let Some(cwd) = cwd {
         cmd.current_dir(cwd);
     }
-    crate::util::configure_child_process_group(&mut cmd);
+    crate::tools::process::configure_child_process_group(&mut cmd);
     let mut child = cmd.spawn()?;
 
-    let stdout_buf = crate::util::ProcessOutputBuffer::default();
-    let stderr_buf = crate::util::ProcessOutputBuffer::default();
+    let stdout_buf = crate::tools::process::ProcessOutputBuffer::default();
+    let stderr_buf = crate::tools::process::ProcessOutputBuffer::default();
     let mut readers = Vec::new();
 
     if let Some(stdout) = child.stdout.take() {
-        readers.push(crate::util::spawn_output_reader(stdout, stdout_buf.clone()));
+        readers.push(crate::tools::process::spawn_output_reader(
+            stdout,
+            stdout_buf.clone(),
+        ));
     }
     if let Some(stderr) = child.stderr.take() {
-        readers.push(crate::util::spawn_output_reader(stderr, stderr_buf.clone()));
+        readers.push(crate::tools::process::spawn_output_reader(
+            stderr,
+            stderr_buf.clone(),
+        ));
     }
 
-    let completion = crate::util::wait_child_with_output(
+    let completion = crate::tools::process::wait_child_with_output(
         &mut child,
         readers,
         timeout,
@@ -355,7 +361,8 @@ mod tests {
         crate::tools::surface::ModelToolSurface,
         crate::tools::semantic_capabilities::ResolvedToolCapabilities,
     ) {
-        let mut config = crate::context::ToolConfig::from_config(&crate::config::Config::default());
+        let mut config =
+            crate::context::ToolConfig::from_config(&crate::config::ResolvedConfig::default());
         config.enabled_tools = Some(names.iter().map(|name| (*name).to_string()).collect());
         let resolution = crate::tools::surface::ToolResolutionContext::from_runtime(
             crate::tools::surface::AgentRole::Primary,

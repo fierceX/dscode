@@ -6,12 +6,11 @@
 
 use crate::session::runtime::SessionRuntime;
 use anyhow::{Result, anyhow};
+use mink::runtime::session::{self as runtime_session, SessionMetadata, UsageCost};
 use mink::runtime::{AgentOptions, SessionPolicy};
-use mink::session::metadata::SessionMetadata;
-use mink::session::usage::UsageRecord;
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Seek, Write};
+use std::io::{Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -91,49 +90,25 @@ pub struct SessionSummary {
     pub tokens_out: u64,
     pub cache_read_tokens: u64,
     pub cost_nano_cny: u64,
+    pub unpriced_requests: u64,
     /// 最近一次请求的上下文估计（usage.jsonl 最后记录 input+cache），0 表示无记录
     pub last_context_tokens: u64,
 }
 
 /// 逐行读取 usage.jsonl 并汇总 tokens/费用。缺失表示尚无用量，其他 I/O 错误传播。
-fn summarize_usage(dir: &Path) -> Result<(u64, u64, u64, u64, u64)> {
-    let path = dir.join("usage.jsonl");
-    let file = match File::open(&path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((0, 0, 0, 0, 0));
-        }
-        Err(error) => return Err(error.into()),
-    };
-    let mut input = 0u64;
-    let mut output = 0u64;
-    let mut cache = 0u64;
-    let mut cost = 0u64;
-    let mut last_context = 0u64;
-    for line in BufReader::new(file).lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let Ok(record) = serde_json::from_str::<UsageRecord>(&line) else {
-            continue;
-        };
-        if let Some(tokens) = record.tokens {
-            // 输入不含缓存（与实时 usage 事件语义一致；缓存单独统计）
-            input = input.saturating_add(tokens.input_tokens);
-            output = output.saturating_add(tokens.output_tokens);
-            cache = cache
-                .saturating_add(tokens.cache_read_tokens)
-                .saturating_add(tokens.cache_creation_tokens);
-            // 最后一条记录 = 最近一次请求的上下文（当前上下文，含缓存）
-            last_context = tokens
-                .input_tokens
-                .saturating_add(tokens.cache_read_tokens)
-                .saturating_add(tokens.cache_creation_tokens);
-        }
-        cost = cost.saturating_add(record.cost_nano_cny.unwrap_or(0));
-    }
-    Ok((input, output, cache, cost, last_context))
+fn summarize_usage(dir: &Path) -> Result<(u64, u64, u64, UsageCost, u64)> {
+    let usage = runtime_session::SessionReader::new(dir).usage_snapshot()?;
+    Ok((
+        usage.summary.tokens.input_tokens,
+        usage.summary.tokens.output_tokens,
+        usage
+            .summary
+            .tokens
+            .cache_read_tokens
+            .saturating_add(usage.summary.tokens.cache_creation_tokens),
+        usage.summary.cost,
+        usage.last_context_tokens,
+    ))
 }
 
 struct ActiveSession {
@@ -267,20 +242,20 @@ impl Registry {
         if name.is_empty() {
             anyhow::bail!("session name must not be empty");
         }
-        let alias = mink::session::metadata::sanitize_alias(name)
+        let alias = runtime_session::sanitize_alias(name)
             .ok_or_else(|| anyhow!("invalid session name: {name}"))?;
         let locator = CreateLocator {
-            project_key: mink::session::paths::project_key(cwd),
+            project_key: runtime_session::project_key(cwd),
             alias,
         };
         let create_lock = self.create_lock(&locator);
         let _create = create_lock.lock().await;
 
-        if let Some(record) = mink::session::metadata::resolve_session_record_with_layout(
+        if let Some(record) = runtime_session::resolve_record(
             &self.home,
             cwd,
             &locator.alias,
-            mink::session::paths::SessionLayout::ProjectScoped,
+            mink::runtime::SessionLayout::ProjectScoped,
         )
         .await?
         {
@@ -303,8 +278,8 @@ impl Registry {
             return Ok(summary);
         }
 
-        let session_id = mink::session::paths::chrono_session_id();
-        let paths = mink::session::paths::paths_for(&self.home, cwd, &session_id);
+        let session_id = runtime_session::new_session_id();
+        let paths = runtime_session::paths_for(&self.home, cwd, &session_id);
         std::fs::create_dir_all(&paths.base_dir)?;
         std::fs::create_dir(&paths.session_dir).map_err(|error| {
             anyhow!(
@@ -317,10 +292,10 @@ impl Registry {
         let _operation = operation_lock.lock().await;
         let result = async {
             let _lease = SessionLease::acquire(paths.session_dir.join(LOCK_FILE))?;
-            mink::session::metadata::ensure_metadata(
+            runtime_session::ensure_metadata(
                 &paths,
                 cwd,
-                mink::session::metadata::SessionSeed {
+                runtime_session::SessionSeed {
                     alias: Some(locator.alias.clone()),
                     title: Some(name.to_string()),
                     first_prompt: Some(name.to_string()),
@@ -735,21 +710,18 @@ impl Registry {
         first_prompt: Option<&str>,
         cwd: &Path,
     ) -> AgentOptions {
-        let mut cfg = mink::config::Config::default();
-        if let Ok(k) = std::env::var("DEEPSEEK_API_KEY") {
-            cfg.api_key = k;
-        }
-        if let Ok(u) = std::env::var("DEEPSEEK_BASE_URL") {
-            cfg.base_url = u;
-        }
-        if let Ok(m) = std::env::var("MODEL") {
-            cfg.model = m;
-        }
-        cfg.log_events = true;
-        cfg.interactive = false;
-        let mut options = AgentOptions::from_config(cfg, &self.home, cwd)
+        let mut options = AgentOptions::new(&self.home, cwd)
             .with_model(&self.model)
             .with_session(SessionPolicy::UseOrCreate(session_ref.to_string()));
+        if let Ok(key) = std::env::var("DEEPSEEK_API_KEY") {
+            options = options.with_api_key(key);
+        }
+        if let Ok(url) = std::env::var("DEEPSEEK_BASE_URL") {
+            options = options.with_base_url(url);
+        }
+        if let Ok(model) = std::env::var("MODEL") {
+            options = options.with_model(model);
+        }
         if let Some(prompt) = first_prompt {
             options = options.with_first_prompt(prompt);
         }
@@ -765,7 +737,7 @@ fn summary_from_metadata(
     metadata: Option<SessionMetadata>,
     modified: Option<SystemTime>,
     dir: &Path,
-    usage: (u64, u64, u64, u64, u64),
+    usage: (u64, u64, u64, UsageCost, u64),
 ) -> SessionSummary {
     let corrupt = dir.join("session.json").exists() && metadata.is_none();
     let fallback_id = dir
@@ -783,7 +755,7 @@ fn summary_from_metadata(
         first_prompt: None,
         summary: None,
     });
-    let (tokens_in, tokens_out, cache_read_tokens, cost_nano_cny, last_context_tokens) = usage;
+    let (tokens_in, tokens_out, cache_read_tokens, cost, last_context_tokens) = usage;
     SessionSummary {
         project_key: project_key_from_dir(dir),
         corrupt,
@@ -801,7 +773,8 @@ fn summary_from_metadata(
         tokens_in,
         tokens_out,
         cache_read_tokens,
-        cost_nano_cny,
+        cost_nano_cny: cost.known_nano_cny,
+        unpriced_requests: cost.unpriced_requests,
         last_context_tokens,
     }
 }

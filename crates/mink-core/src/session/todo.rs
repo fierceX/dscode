@@ -323,8 +323,8 @@ impl TodoStore {
             );
         }
 
-        // P0-3 容错：模型常直接 complete 一个 pending 条目。pending 条目
-        // 自动先激活再完成（不报错），in_progress 正常完成，已完成的
+        // 模型常直接 complete 一个 pending 条目，因此自动先激活再完成；
+        // in_progress 正常完成，已完成的
         // 重复 complete 仍拒绝。
         let mut complete_ids = Vec::new();
         let mut auto_activated = Vec::new();
@@ -602,7 +602,7 @@ mod tests {
 
     #[test]
     fn complete_pending_item_auto_activates() {
-        // P0-3 容错：直接 complete 一个 pending 条目时自动先激活再完成。
+        // 直接 complete 一个 pending 条目时自动先激活再完成。
         let (root, store) = store("autoactivate");
         let result = store
             .apply_structure(

@@ -40,7 +40,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use mink::config::SandboxConfig;
+use mink::runtime::SandboxConfig;
 use mink::runtime::{AgentOptions, AgentRuntime, SessionPolicy, TurnStatus};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -424,7 +424,7 @@ async fn run_hidden_worker() -> Result<(), String> {
         allow_network: true,
         ..Default::default()
     };
-    mink::sandbox::reexec_in_sandbox(
+    mink::runtime::reexec_in_sandbox(
         &sandbox,
         &std::env::current_exe().unwrap_or_default(),
         &args,

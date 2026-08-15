@@ -1,21 +1,19 @@
 use crate::capabilities::{RuntimeSkill, SkillDiscoveryPolicy, SkillProvider};
-use crate::config::Config;
+use crate::config::ResolvedConfig as Config;
 use crate::llm::client::LlmBackend;
 use crate::resources::ResourceHandler;
 use crate::runtime::EventSink;
 use crate::session::paths::Paths;
 use crate::session::paths::SessionLayout;
 use crate::tools::vfs::ReadOnlyFileSystem;
-use crate::ui::{Display, SubAgentStreamSink};
+use crate::ui::SubAgentStreamSink;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// Configuration required to embed mink as a Rust runtime.
+/// Fully resolved, runtime-only configuration assembled from grouped options.
 ///
-/// The contained [`Config`] is the same configuration type consumed by the
-/// CLI. The runtime builder derives `ToolConfig`, session paths, API URL,
-/// compaction state, and the orchestrator from this value so that embedded
-/// callers and the `mink`/`mink-core` binaries share the same execution logic.
+/// CLI parsing and configuration-source precedence live in `mink-cli`; core
+/// receives only the resolved values needed to build a runtime.
 pub(crate) struct AgentRuntimeConfig {
     pub config: Config,
     pub home: PathBuf,
@@ -23,7 +21,6 @@ pub(crate) struct AgentRuntimeConfig {
     pub session: SessionPolicy,
     pub session_layout: SessionLayout,
     pub first_prompt: Option<String>,
-    pub display: Option<Arc<dyn Display>>,
     pub event_sink: Option<Arc<dyn EventSink>>,
     pub sub_stream_tx: Option<Arc<dyn SubAgentStreamSink>>,
     pub read_only_fs: Option<Arc<dyn ReadOnlyFileSystem>>,
@@ -57,7 +54,6 @@ impl AgentRuntimeConfig {
             session,
             session_layout: SessionLayout::ProjectScoped,
             first_prompt,
-            display: None,
             event_sink: None,
             sub_stream_tx: None,
             read_only_fs: None,

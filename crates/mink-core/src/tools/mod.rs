@@ -5,6 +5,7 @@ pub mod file;
 pub mod hashline;
 pub mod metadata;
 pub mod plan;
+pub(crate) mod process;
 pub mod python;
 pub mod read_memo;
 pub mod replace;
@@ -18,3 +19,6 @@ pub mod snapshot;
 pub mod surface;
 pub mod todo;
 pub mod vfs;
+
+#[cfg(test)]
+mod edit_alignment_tests;

@@ -1,13 +1,13 @@
 use crate::agent::turn::TurnEffect;
 use crate::tools::plan::PlanCommand;
-use crate::tools::runner::ToolRunResult;
+use crate::tools::runner::ToolExecution;
 
 pub struct PlanActionHandler;
 
 impl PlanActionHandler {
     pub fn handle(
         &self,
-        result: &mut ToolRunResult,
+        result: &mut ToolExecution,
         effects: &mut Vec<TurnEffect>,
     ) -> Option<&'static str> {
         let command = result.plan_command.take()?;

@@ -204,11 +204,10 @@ class SandboxConfig:
         DeepSeek API base URL.  Also read from ``DEEPSEEK_BASE_URL``.
     model:
         Model name override (e.g. ``"deepseek-chat"``).
-    signal_mode:
-        Signal system mode override: ``"full"`` enables belief tracking,
-        injection, and recovery guards; ``"off"`` disables signal prompt and
-        runtime signal intervention.  ``None`` inherits ``MINK_SIGNAL_MODE``;
-        if unset, mink defaults to ``"full"``.
+    signal_policy:
+        Signal response policy: ``"off"``, ``"evidence"``, ``"state_ops"``,
+        ``"restart"``, or ``"full"``. ``None`` inherits
+        ``MINK_SIGNAL_POLICY``; if unset, mink defaults to ``"full"``.
     cwd:
         Working directory for the agent (default: current working directory).
     session_layout:
@@ -279,7 +278,7 @@ class SandboxConfig:
     session_layout: str = "home"
 
     # Signal system
-    signal_mode: Optional[str] = None
+    signal_policy: Optional[str] = None
 
     # Working directory
     cwd: Optional[str] = None
@@ -657,7 +656,7 @@ class AgentSession:
                     error_text = f"agent exited with code {proc.returncode}"
                 final_event = {
                     "type": "final",
-                    "version": 2,
+                    "version": 3,
                     "status": "failed" if proc.returncode else "ok",
                     "error": error_text,
                 }
@@ -726,11 +725,13 @@ class AgentSession:
         """Build environment variables for the agent process."""
         env = os.environ.copy()
         env["MINK_HOME"] = self._home or _default_home()
-        if self._config.signal_mode is not None:
-            signal_mode = self._config.signal_mode.strip().lower()
-            if signal_mode not in ("full", "off"):
-                raise ValueError("signal_mode must be 'full' or 'off'")
-            env["MINK_SIGNAL_MODE"] = signal_mode
+        if self._config.signal_policy is not None:
+            signal_policy = self._config.signal_policy.strip().lower()
+            if signal_policy not in ("off", "evidence", "state_ops", "restart", "full"):
+                raise ValueError(
+                    "signal_policy must be one of: off, evidence, state_ops, restart, full"
+                )
+            env["MINK_SIGNAL_POLICY"] = signal_policy
         if self._config.api_key:
             env["DEEPSEEK_API_KEY"] = self._config.api_key
         if self._config.api_url:
@@ -767,66 +768,85 @@ class AgentSession:
     def _build_request(self, prompt: str, extra_options: Optional[dict]) -> str:
         """Build the Agent JSONL request string."""
         self._validate_request_config()
-        options: dict[str, Any] = {}
+        provider: dict[str, Any] = {}
+        generation: dict[str, Any] = {}
+        context: dict[str, Any] = {}
+        tools: dict[str, Any] = {}
+        session: dict[str, Any] = {}
+        output: dict[str, Any] = {}
         if self._config.model:
-            options["model"] = self._config.model
+            provider["model"] = self._config.model
         if self._config.max_tokens != 81920:
-            options["max_tokens"] = self._config.max_tokens
+            generation["max_tokens"] = self._config.max_tokens
         if self._config.max_turns != 40:
-            options["max_turns"] = self._config.max_turns
+            generation["max_turns"] = self._config.max_turns
         if self._config.max_context != 1_000_000:
-            options["max_context"] = self._config.max_context
+            context["max_context"] = self._config.max_context
         if self._config.context_compact_pct != 94:
-            options["context_compact_pct"] = self._config.context_compact_pct
+            context["context_compact_pct"] = self._config.context_compact_pct
         if self._config.context_reserve_tokens != 64_000:
-            options["context_reserve_tokens"] = self._config.context_reserve_tokens
+            context["context_reserve_tokens"] = self._config.context_reserve_tokens
         if self._config.context_compact_tail_tokens != 256_000:
-            options["context_compact_tail_tokens"] = self._config.context_compact_tail_tokens
+            context["context_compact_tail_tokens"] = self._config.context_compact_tail_tokens
         if self._config.context_compact_max_output_tokens != 8_192:
-            options["context_compact_max_output_tokens"] = (
+            context["context_compact_max_output_tokens"] = (
                 self._config.context_compact_max_output_tokens
             )
         if self._config.context_compact_input_reduction:
-            options["context_compact_input_reduction"] = True
+            context["context_compact_input_reduction"] = True
         if self._config.tool_timeout != 600:
-            options["tool_timeout"] = self._config.tool_timeout
+            tools["tool_timeout"] = self._config.tool_timeout
         if self._config.sub_agent_timeout != 300:
-            options["sub_agent_timeout"] = self._config.sub_agent_timeout
+            tools["sub_agent_timeout"] = self._config.sub_agent_timeout
         if self._config.llm_first_event_timeout != 60:
-            options["llm_first_event_timeout"] = self._config.llm_first_event_timeout
+            generation["llm_first_event_timeout"] = self._config.llm_first_event_timeout
         if self._config.llm_idle_timeout != 90:
-            options["llm_idle_timeout"] = self._config.llm_idle_timeout
+            generation["llm_idle_timeout"] = self._config.llm_idle_timeout
         if self._config.llm_wait_heartbeat != 30:
-            options["llm_wait_heartbeat"] = self._config.llm_wait_heartbeat
+            generation["llm_wait_heartbeat"] = self._config.llm_wait_heartbeat
         if self._config.verbose:
-            options["verbose"] = True
+            output["verbose"] = True
         if not self._config.stream_events:
-            options["stream_events"] = False
+            output["stream_events"] = False
         if self._config.enabled_tools is not None:
-            options["enabled_tools"] = self._config.enabled_tools
+            tools["enabled_tools"] = self._config.enabled_tools
         if self._config.edit_mode != "hashline":
-            options["edit_mode"] = self._config.edit_mode
+            tools["edit_mode"] = self._config.edit_mode
         if not self._config.edit_fuzzy_match:
-            options["edit_fuzzy_match"] = False
+            tools["edit_fuzzy_match"] = False
         if self._config.edit_fuzzy_threshold != 0.95:
-            options["edit_fuzzy_threshold"] = self._config.edit_fuzzy_threshold
+            tools["edit_fuzzy_threshold"] = self._config.edit_fuzzy_threshold
         if self._config.edit_enforce_seen_lines:
-            options["edit_enforce_seen_lines"] = True
+            tools["edit_enforce_seen_lines"] = True
         if self._config.skills:
-            options["skills"] = self._config.skills
+            tools["skills"] = self._config.skills
         if self._config.inline_skills:
-            options["inline_skills"] = [
+            tools["inline_skills"] = [
                 self._inline_skill_to_dict(skill)
                 for skill in self._config.inline_skills
             ]
         if self._config.skill_discovery_policy != "defaults":
-            options["skill_discovery_policy"] = self._config.skill_discovery_policy
+            tools["skill_discovery_policy"] = self._config.skill_discovery_policy
         if self._config.session_layout:
-            options["session_layout"] = self._config.session_layout
+            session["session_layout"] = self._config.session_layout
+        options: dict[str, Any] = {
+            name: group
+            for name, group in (
+                ("provider", provider),
+                ("generation", generation),
+                ("context", context),
+                ("tools", tools),
+                ("session", session),
+                ("output", output),
+            )
+            if group
+        }
+        if self._config.signal_policy is not None:
+            options["signal"] = {"policy": self._config.signal_policy}
         if extra_options:
             options.update(extra_options)
 
-        req: dict[str, Any] = {"version": 2, "prompt": prompt}
+        req: dict[str, Any] = {"version": 3, "prompt": prompt}
         if self._config.mission_content:
             req["mission"] = self._config.mission_content
         if self._config.session_id:

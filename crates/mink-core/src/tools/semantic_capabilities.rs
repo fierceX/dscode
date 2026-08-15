@@ -318,6 +318,7 @@ impl ToolCapabilityRegistry {
         &BUILTIN
     }
 
+    #[cfg(test)]
     pub fn resolve(
         &self,
         surface: &ModelToolSurface,
@@ -552,7 +553,7 @@ fn capability_fingerprint(
             );
         }
     }
-    crate::util::hex_lower(hasher.finalize())
+    crate::capabilities::fingerprint::hex_lower(hasher.finalize())
 }
 
 pub struct CapabilityCallContext<'a> {
@@ -647,7 +648,7 @@ fn classify_path_input(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
+    use crate::config::ResolvedConfig as Config;
     use crate::context::ToolConfig;
     use crate::tools::surface::{AgentRole, ModelToolSurface, ToolResolutionContext};
 

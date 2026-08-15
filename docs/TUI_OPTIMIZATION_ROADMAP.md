@@ -4,7 +4,7 @@
 
 ## 定位
 
-TUI 是 `Display` 结构化协议的两种终端 surface：
+TUI 是 `AgentEventStream` 结构化事件的两种终端 surface：
 
 - `--tui` / `--tui=full`：全屏应用内 transcript，保留鼠标滚动、卡片点击、可逆折叠和详情视图。
 - `--tui=inline`：原生 terminal scrollback，完成内容不可修改，面向 SSH 和长日志。
@@ -17,7 +17,7 @@ TUI 是 `Display` 结构化协议的两种终端 surface：
 
 ```text
 LLM / ToolRunner
-  -> Display structured event
+  -> AgentEvent
   -> TuiSignal
   -> shared transcript reducer
   -> TranscriptItem / Plan / Todo / Artifact / SubAgent state
@@ -85,7 +85,7 @@ Inline 写入不额外插入 item 间空行；Markdown parser 只保留原始内
 
 - 实时和 replay 必须经过同一个 reducer。
 - 工具 call/result 必须按稳定 `tool_use_id` 合并。
-- Display 包装层必须保留详细调用 ID 和结构化 result presentation；缺少或不匹配
+- AgentEvent 投影必须保留详细调用 ID 和结构化 result presentation；缺少或不匹配
   `tool_use_id` 时不得根据工具名推断关联。
 - Todo mutation presentation 必须归并到当前完整 Todo 状态。
 - 缺失结果的 replay 工具调用和终止信号前的未完成项必须封口。

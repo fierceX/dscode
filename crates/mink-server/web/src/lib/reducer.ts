@@ -142,7 +142,7 @@ export function reduceEvent(state: SessionState, raw: RawEvent): SessionState {
     case "tool_result": {
       // Realtime AgentEvent always carries tool_use_id. Only legacy conversation
       // replay may omit it and fall back to the nearest pending tool.
-      const liveRequired = ["tool_use_id", "tool_name", "presentation", "artifacts", "success", "exit_code", "result_kind"];
+      const liveRequired = ["tool_use_id", "tool_name", "presentation", "artifacts", "status", "exit_code", "result_kind"];
       if (raw.stream_sequence != null && liveRequired.some((field) => !Object.hasOwn(raw, field))) break;
       if (raw.stream_sequence != null && raw.tool_use_id == null) break;
       const toolUseId = raw.tool_use_id == null ? undefined : String(raw.tool_use_id);
@@ -151,16 +151,18 @@ export function reduceEvent(state: SessionState, raw: RawEvent): SessionState {
       const item = next.items[idx] as ToolItem;
       const toolName = raw.tool_name == null ? item.name : String(raw.tool_name);
       const content = stripAnsi(String(raw.content ?? ""));
+      const status = raw.status as Record<string, unknown> | undefined;
+      const succeeded = status?.state === "succeeded";
       const updated: ToolItem = {
         ...item,
         name: toolName,
         result: content,
         resultKind: kindBadge(String(raw.result_kind ?? ""), toolName),
         rawResultKind: raw.result_kind == null ? undefined : String(raw.result_kind),
-        success: typeof raw.success === "boolean" ? raw.success : undefined,
+        success: status == null ? undefined : succeeded,
         exitCode: typeof raw.exit_code === "number" ? raw.exit_code : raw.exit_code === null ? null : undefined,
         artifact: extractArtifact(content),
-        failed: isFailed(typeof raw.success === "boolean" ? raw.success : undefined, content),
+        failed: isFailed(status == null ? undefined : succeeded, content),
         presentation: raw.presentation,
         artifacts: Array.isArray(raw.artifacts) ? raw.artifacts : undefined,
       };
@@ -182,9 +184,11 @@ export function reduceEvent(state: SessionState, raw: RawEvent): SessionState {
       if (typeof stats.total_cache_read_tokens === "number") next.cacheReadTokens = stats.total_cache_read_tokens;
       if (typeof stats.current_context_tokens === "number") next.contextTokens = stats.current_context_tokens;
       if (typeof stats.max_context_tokens === "number") next.maxContextTokens = stats.max_context_tokens;
-      if (typeof stats.flash_cost_micros === "number" || typeof stats.pro_cost_micros === "number") {
-        next.costMicros = Number(stats.flash_cost_micros ?? 0) + Number(stats.pro_cost_micros ?? 0);
+      const cost = stats.cost as Record<string, unknown> | undefined;
+      if (typeof cost?.known_nano_cny === "number") {
+        next.costMicros = Math.round(cost.known_nano_cny / 1000);
       }
+      if (typeof cost?.unpriced_requests === "number") next.unpricedRequests = cost.unpriced_requests;
       if (typeof stats.belief === "number") next.belief = stats.belief;
       break;
     }

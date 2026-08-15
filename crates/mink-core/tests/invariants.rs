@@ -1,4 +1,3 @@
-//! B2：模型可见 = 日志可重建（DSH invariant 的 Mink 形态）。
 //!
 //! ScriptedBackend 捕获每一个 LlmRequest，断言任意请求的模型可见输入都能从
 //! 会话耐久产物离线重建：
@@ -201,7 +200,7 @@ async fn requests_rebuild_from_durable_session_logs() -> Result<()> {
     });
     assert!(
         has_trajectory,
-        "failed tool must trigger trajectory evidence injection (MINK_SIGNAL_MODE=off breaks this scenario)"
+        "failed tool must trigger trajectory evidence injection when signal policy is enabled"
     );
 
     let nl = std::char::from_u32(10).unwrap().to_string();

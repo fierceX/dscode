@@ -87,7 +87,7 @@ impl Display for TerminalDisplay {
         self.lock_state().prev_was_thinking = false;
     }
 
-    fn render_tool_call(&self, _name: &str, summary: &str) {
+    fn render_tool_call(&self, call: &crate::ui::ToolCallDisplay<'_>) {
         {
             let state = self.lock_state();
             if state.last_char != "\n" {
@@ -96,12 +96,12 @@ impl Display for TerminalDisplay {
                 self.lock_state().last_char = "\n".into();
             }
         }
-        self.write_out(&format!("\x1b[33m[tool] {}\x1b[0m\n", summary));
+        self.write_out(&format!("\x1b[33m[tool] {}\x1b[0m\n", call.summary));
         self.lock_state().last_char = "\n".into();
         self.lock_state().prev_was_thinking = false;
     }
 
-    fn render_tool_result(&self, _tool_name: &str, content_preview: &str) {
+    fn render_tool_result(&self, result: &crate::ui::PresentedToolResultDisplay<'_>) {
         {
             let state = self.lock_state();
             if state.prev_was_thinking && state.last_char != "\n" {
@@ -111,13 +111,13 @@ impl Display for TerminalDisplay {
             }
         }
         self.lock_state().prev_was_thinking = false;
-        if !content_preview.is_empty() {
-            self.write_out(content_preview);
-            self.update_last_char(content_preview);
+        if !result.base.content_preview.is_empty() {
+            self.write_out(result.base.content_preview);
+            self.update_last_char(result.base.content_preview);
         }
     }
 
-    fn render_stop(&self) {
+    fn render_stop(&self, _reason: &str) {
         let state = self.lock_state();
         if state.last_char != "\n" {
             drop(state);
@@ -138,6 +138,8 @@ impl Display for TerminalDisplay {
     fn render_retry(&self) {
         self.write_err("RETRY\n");
     }
+
+    fn render_signal(&self, _signal_kind: &str, _severity: f64, _message: &str) {}
 
     fn render_info(&self, msg: &str) {
         self.write_err(&format!("\x1b[36m{msg}\x1b[0m\n"));

@@ -40,11 +40,11 @@ pub struct BeliefTracker {
 }
 
 impl BeliefTracker {
+    #[cfg(test)]
     pub fn new(window_size: usize) -> Self {
         Self::new_with_priors(window_size, 3.0, 1.0)
     }
 
-    /// 全参数构造（SIGNAL_RESPONSE_REDESIGN S1：先验/窗口来自 SignalConfig）。
     pub fn new_with_priors(window_size: usize, alpha_prior: f64, beta_prior: f64) -> Self {
         Self {
             window: VecDeque::with_capacity(window_size),
@@ -84,7 +84,6 @@ impl BeliefTracker {
         self.beta_sum = self.beta_prior;
     }
 
-    /// 跨用户输入的衰减（SIGNAL_RESPONSE_REDESIGN S3c）：把累计证据向先验
     /// 回拉 factor 比例，替代硬重置——跨轮重复失败可累积升级，单次偶然失败
     /// 自然消退。factor = 0 等价于完全重置，factor = 1 不衰减。
     pub fn decay(&mut self, factor: f64) {

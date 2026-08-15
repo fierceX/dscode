@@ -1,6 +1,6 @@
 use crate::capabilities::{CapabilityExposure, RuntimeSkill, SkillDiscoveryPolicy, SkillProvider};
 use crate::config::{
-    Config, EditMode, OpenAiTokenParamConfig, OutputFormat, SandboxConfig, SandboxPythonConfig,
+    EditMode, OutputFormat, ResolvedConfig as Config, SandboxConfig, SandboxPythonConfig,
     ToolApprovalMode, ToolApprovalPolicy,
 };
 use crate::llm::client::{LlmBackend, TokenParamKind};
@@ -11,16 +11,131 @@ use crate::runtime::config::{
 use crate::runtime::{EventSink, SessionPolicy};
 use crate::session::paths::SessionLayout;
 use crate::tools::vfs::ReadOnlyFileSystem;
-use crate::ui::{Display, SubAgentStreamSink};
+use crate::ui::SubAgentStreamSink;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+#[derive(Debug, Clone)]
+pub struct ProviderOptions {
+    pub model: String,
+    pub model_aliases: BTreeMap<String, String>,
+    pub api_key: String,
+    pub base_url: String,
+    pub reasoning_effort: Option<String>,
+    pub include_usage: bool,
+    pub token_param: TokenParamKind,
+    pub tool_choice: Option<serde_json::Value>,
+    pub extra_body: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone)]
+pub struct GenerationOptions {
+    pub max_tokens: i32,
+    pub max_turns: i32,
+    pub first_event_timeout_secs: i32,
+    pub idle_timeout_secs: i32,
+    pub wait_heartbeat_secs: i32,
+}
+
+#[derive(Debug, Clone)]
+pub struct ContextPolicy {
+    pub max_context_tokens: usize,
+    pub compact_pct: u8,
+    pub reserve_tokens: usize,
+    pub compact_tail_tokens: usize,
+    pub compact_max_output_tokens: i32,
+    pub compact_input_reduction: bool,
+    pub plan_projection_tail: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolOptions {
+    pub timeout_secs: i32,
+    pub sub_agent_timeout_secs: i32,
+    pub result_max_bytes: usize,
+    pub file_write_max_bytes: usize,
+    pub edit_mode: EditMode,
+    pub edit_fuzzy_match: bool,
+    pub edit_fuzzy_threshold: f64,
+    pub edit_enforce_seen_lines: bool,
+    pub max_search_files: usize,
+    pub max_search_results: usize,
+    pub enabled_tools: Option<Vec<String>>,
+    pub approval_mode: ToolApprovalMode,
+    pub approval: BTreeMap<String, ToolApprovalPolicy>,
+}
+
+impl Default for ProviderOptions {
+    fn default() -> Self {
+        let config = Config::default();
+        Self {
+            model: config.model,
+            model_aliases: config.model_aliases,
+            api_key: config.api_key,
+            base_url: config.base_url,
+            reasoning_effort: config.openai_reasoning_effort,
+            include_usage: config.openai_include_usage,
+            token_param: config.openai_token_param,
+            tool_choice: config.openai_tool_choice,
+            extra_body: config.openai_extra_body,
+        }
+    }
+}
+
+impl Default for GenerationOptions {
+    fn default() -> Self {
+        let config = Config::default();
+        Self {
+            max_tokens: config.max_tokens,
+            max_turns: config.max_turns,
+            first_event_timeout_secs: config.llm_first_event_timeout_secs,
+            idle_timeout_secs: config.llm_idle_timeout_secs,
+            wait_heartbeat_secs: config.llm_wait_heartbeat_secs,
+        }
+    }
+}
+
+impl Default for ContextPolicy {
+    fn default() -> Self {
+        let config = Config::default();
+        Self {
+            max_context_tokens: config.max_context_tokens,
+            compact_pct: config.context_compact_pct,
+            reserve_tokens: config.context_reserve_tokens,
+            compact_tail_tokens: config.context_compact_tail_tokens,
+            compact_max_output_tokens: config.context_compact_max_output_tokens,
+            compact_input_reduction: config.context_compact_input_reduction,
+            plan_projection_tail: config.plan_projection_tail,
+        }
+    }
+}
+
+impl Default for ToolOptions {
+    fn default() -> Self {
+        let config = Config::default();
+        Self {
+            timeout_secs: config.tool_timeout_secs,
+            sub_agent_timeout_secs: config.sub_agent_timeout_secs,
+            result_max_bytes: config.tool_result_max_bytes,
+            file_write_max_bytes: config.file_write_max_bytes,
+            edit_mode: config.edit_mode,
+            edit_fuzzy_match: config.edit_fuzzy_match,
+            edit_fuzzy_threshold: config.edit_fuzzy_threshold,
+            edit_enforce_seen_lines: config.edit_enforce_seen_lines,
+            max_search_files: config.max_search_files,
+            max_search_results: config.max_search_results,
+            enabled_tools: config.enabled_tools,
+            approval_mode: config.tool_approval_mode,
+            approval: config.tool_approval,
+        }
+    }
+}
+
 /// Ergonomic builder for embedding mink from Rust.
 ///
 /// This is the single public configuration entry point for [`AgentRuntime`](crate::runtime::AgentRuntime).
-/// It owns a complete [`Config`]; callers can use the typed setters below or
-/// mutate the underlying config directly through [`AgentOptions::config_mut`].
+/// Runtime policy is applied through grouped option values and typed extension methods.
 pub struct AgentOptions {
     config: Config,
     home: PathBuf,
@@ -30,7 +145,6 @@ pub struct AgentOptions {
     session_overridden: bool,
     first_prompt: Option<String>,
     first_prompt_overridden: bool,
-    display: Option<Arc<dyn Display>>,
     event_sink: Option<Arc<dyn EventSink>>,
     sub_stream_tx: Option<Arc<dyn SubAgentStreamSink>>,
     read_only_fs: Option<Arc<dyn ReadOnlyFileSystem>>,
@@ -54,16 +168,9 @@ impl AgentOptions {
     /// [`AgentOptions::with_project_scoped_sessions`] for SDK/CLI-compatible
     /// layouts.
     ///
-    /// Provider defaults, config files, and environment merging are not applied
-    /// here. CLI callers should keep using the CLI adapter; embedded callers
-    /// that want those effects can call the existing config helpers before
-    /// constructing options with [`AgentOptions::from_config`].
+    /// Provider defaults, config files, and environment merging are not applied here.
     pub fn new(home: impl Into<PathBuf>, cwd: impl Into<PathBuf>) -> Self {
-        Self::from_config(Config::default(), home, cwd)
-    }
-
-    /// Create options from a complete mink [`Config`].
-    pub fn from_config(config: Config, home: impl Into<PathBuf>, cwd: impl Into<PathBuf>) -> Self {
+        let config = Config::default();
         let first_prompt = first_prompt_from_config(&config);
         let session = session_policy_from_config(&config);
         Self {
@@ -75,7 +182,6 @@ impl AgentOptions {
             session_overridden: false,
             first_prompt,
             first_prompt_overridden: false,
-            display: None,
             event_sink: None,
             sub_stream_tx: None,
             read_only_fs: None,
@@ -89,25 +195,73 @@ impl AgentOptions {
         }
     }
 
-    /// Inspect the complete underlying mink config.
-    pub fn config(&self) -> &Config {
-        &self.config
+    pub fn with_provider_options(mut self, options: ProviderOptions) -> Self {
+        self.config.model = options.model;
+        self.config.model_aliases = options.model_aliases;
+        self.config.api_key = options.api_key;
+        self.config.base_url = options.base_url;
+        self.config.openai_reasoning_effort = options.reasoning_effort;
+        self.config.openai_include_usage = options.include_usage;
+        self.config.openai_token_param = options.token_param;
+        self.config.openai_tool_choice = options.tool_choice;
+        self.config.openai_extra_body = options.extra_body;
+        self
     }
 
-    /// Mutate any config field that does not have a dedicated convenience
-    /// setter. This is the supported escape hatch for full Config coverage.
-    pub fn config_mut(&mut self) -> &mut Config {
-        &mut self.config
+    pub fn with_generation_options(mut self, options: GenerationOptions) -> Self {
+        self.config.max_tokens = options.max_tokens;
+        self.config.max_turns = options.max_turns;
+        self.config.llm_first_event_timeout_secs = options.first_event_timeout_secs;
+        self.config.llm_idle_timeout_secs = options.idle_timeout_secs;
+        self.config.llm_wait_heartbeat_secs = options.wait_heartbeat_secs;
+        self
     }
 
-    pub fn with_config(mut self, config: Config) -> Self {
-        if !self.first_prompt_overridden {
-            self.first_prompt = first_prompt_from_config(&config);
-        }
-        if !self.session_overridden {
-            self.session = session_policy_from_config(&config);
-        }
-        self.config = config;
+    pub fn with_context_policy(mut self, policy: ContextPolicy) -> Self {
+        self.config.max_context_tokens = policy.max_context_tokens;
+        self.config.context_compact_pct = policy.compact_pct;
+        self.config.context_reserve_tokens = policy.reserve_tokens;
+        self.config.context_compact_tail_tokens = policy.compact_tail_tokens;
+        self.config.context_compact_max_output_tokens = policy.compact_max_output_tokens;
+        self.config.context_compact_input_reduction = policy.compact_input_reduction;
+        self.config.plan_projection_tail = policy.plan_projection_tail;
+        self
+    }
+
+    pub fn with_tool_options(mut self, options: ToolOptions) -> Self {
+        self.config.tool_timeout_secs = options.timeout_secs;
+        self.config.sub_agent_timeout_secs = options.sub_agent_timeout_secs;
+        self.config.tool_result_max_bytes = options.result_max_bytes;
+        self.config.file_write_max_bytes = options.file_write_max_bytes;
+        self.config.edit_mode = options.edit_mode;
+        self.config.edit_fuzzy_match = options.edit_fuzzy_match;
+        self.config.edit_fuzzy_threshold = options.edit_fuzzy_threshold;
+        self.config.edit_enforce_seen_lines = options.edit_enforce_seen_lines;
+        self.config.max_search_files = options.max_search_files;
+        self.config.max_search_results = options.max_search_results;
+        self.config.enabled_tools = options.enabled_tools;
+        self.config.tool_approval_mode = options.approval_mode;
+        self.config.tool_approval = options.approval;
+        self
+    }
+
+    pub fn with_signal_policy(mut self, policy: crate::config::SignalPolicy) -> Self {
+        self.config.signal_policy = policy;
+        self
+    }
+
+    pub fn with_interactive(mut self, interactive: bool) -> Self {
+        self.config.interactive = interactive;
+        self
+    }
+
+    pub fn with_agent_jsonl(mut self, enabled: bool) -> Self {
+        self.config.agent_jsonl = enabled;
+        self
+    }
+
+    pub fn with_model_alias(mut self, alias: impl Into<String>, model: impl Into<String>) -> Self {
+        self.config.model_aliases.insert(alias.into(), model.into());
         self
     }
 
@@ -151,11 +305,6 @@ impl AgentOptions {
         self.with_session_layout(SessionLayout::Isolated)
     }
 
-    pub fn with_display(mut self, display: Arc<dyn Display>) -> Self {
-        self.display = Some(display);
-        self
-    }
-
     pub fn with_event_sink(mut self, event_sink: Arc<dyn EventSink>) -> Self {
         self.event_sink = Some(event_sink);
         self
@@ -188,10 +337,7 @@ impl AgentOptions {
     }
 
     pub fn with_openai_token_param(mut self, token_param: TokenParamKind) -> Self {
-        self.config.openai_token_param = match token_param {
-            TokenParamKind::MaxTokens => OpenAiTokenParamConfig::MaxTokens,
-            TokenParamKind::MaxCompletionTokens => OpenAiTokenParamConfig::MaxCompletionTokens,
-        };
+        self.config.openai_token_param = token_param;
         self
     }
 
@@ -495,7 +641,6 @@ impl AgentOptions {
             session: self.session,
             session_layout: self.session_layout,
             first_prompt: self.first_prompt,
-            display: self.display,
             event_sink: self.event_sink,
             sub_stream_tx: self.sub_stream_tx,
             read_only_fs: self.read_only_fs,
@@ -597,10 +742,7 @@ mod tests {
         assert!(!cfg.log_events);
         assert_eq!(cfg.openai_reasoning_effort.as_deref(), Some("high"));
         assert!(!cfg.openai_include_usage);
-        assert_eq!(
-            cfg.openai_token_param,
-            OpenAiTokenParamConfig::MaxCompletionTokens
-        );
+        assert_eq!(cfg.openai_token_param, TokenParamKind::MaxCompletionTokens);
         assert_eq!(cfg.openai_tool_choice, Some(serde_json::json!("auto")));
         assert_eq!(
             cfg.openai_extra_body["enable_thinking"],
@@ -626,22 +768,18 @@ mod tests {
     }
 
     #[test]
-    fn options_config_mut_is_lossless_escape_hatch() {
-        let mut options = AgentOptions::new("/tmp/mink-home", "/tmp/project");
-        options.config_mut().prompt = "from config mut".to_string();
-        options.config_mut().agent_jsonl = true;
-        options.config_mut().session_id = "via-config-mut".to_string();
-        let runtime_config = options.into_runtime_config();
+    fn options_use_typed_runtime_controls() {
+        let runtime_config = AgentOptions::new("/tmp/mink-home", "/tmp/project")
+            .with_first_prompt("metadata")
+            .with_agent_jsonl(true)
+            .with_session(SessionPolicy::UseOrCreate("typed-session".into()))
+            .into_runtime_config();
 
-        assert_eq!(runtime_config.config.prompt, "from config mut");
-        assert_eq!(
-            runtime_config.first_prompt.as_deref(),
-            Some("from config mut")
-        );
+        assert_eq!(runtime_config.first_prompt.as_deref(), Some("metadata"));
         assert!(runtime_config.config.agent_jsonl);
         assert!(matches!(
             runtime_config.session,
-            SessionPolicy::UseOrCreate(ref value) if value == "via-config-mut"
+            SessionPolicy::UseOrCreate(ref value) if value == "typed-session"
         ));
     }
 
@@ -655,13 +793,12 @@ mod tests {
     }
 
     #[test]
-    fn options_explicit_first_prompt_overrides_config_prompt() {
-        let mut options =
-            AgentOptions::new("/tmp/mink-home", "/tmp/project").with_first_prompt("metadata only");
-        options.config_mut().prompt = "turn prompt".to_string();
-        let runtime_config = options.into_runtime_config();
+    fn options_explicit_first_prompt_is_metadata_only() {
+        let runtime_config = AgentOptions::new("/tmp/mink-home", "/tmp/project")
+            .with_first_prompt("metadata only")
+            .into_runtime_config();
 
-        assert_eq!(runtime_config.config.prompt, "turn prompt");
+        assert!(runtime_config.config.prompt.is_empty());
         assert_eq!(
             runtime_config.first_prompt.as_deref(),
             Some("metadata only")
@@ -669,24 +806,18 @@ mod tests {
     }
 
     #[test]
-    fn options_from_config_preserves_session_selection_semantics() {
-        let cfg = Config {
-            session_id: "existing-or-alias".to_string(),
-            ..Config::default()
-        };
-        let runtime_config =
-            AgentOptions::from_config(cfg, "/tmp/mink-home", "/tmp/project").into_runtime_config();
+    fn options_preserve_session_selection_semantics() {
+        let runtime_config = AgentOptions::new("/tmp/mink-home", "/tmp/project")
+            .with_session(SessionPolicy::UseOrCreate("existing-or-alias".into()))
+            .into_runtime_config();
         assert!(matches!(
             runtime_config.session,
             SessionPolicy::UseOrCreate(ref value) if value == "existing-or-alias"
         ));
 
-        let cfg = Config {
-            continue_session: true,
-            ..Config::default()
-        };
-        let runtime_config =
-            AgentOptions::from_config(cfg, "/tmp/mink-home", "/tmp/project").into_runtime_config();
+        let runtime_config = AgentOptions::new("/tmp/mink-home", "/tmp/project")
+            .with_session(SessionPolicy::ContinueLatest)
+            .into_runtime_config();
         assert!(matches!(
             runtime_config.session,
             SessionPolicy::ContinueLatest
@@ -694,12 +825,8 @@ mod tests {
     }
 
     #[test]
-    fn options_explicit_session_overrides_config_session_fields() {
-        let cfg = Config {
-            session_id: "from-config".to_string(),
-            ..Config::default()
-        };
-        let runtime_config = AgentOptions::from_config(cfg, "/tmp/mink-home", "/tmp/project")
+    fn options_explicit_session_is_authoritative() {
+        let runtime_config = AgentOptions::new("/tmp/mink-home", "/tmp/project")
             .with_session(SessionPolicy::New)
             .into_runtime_config();
 

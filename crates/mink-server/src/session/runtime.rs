@@ -457,7 +457,10 @@ fn publish_forced_timeout_final(
                         "cache_creation_tokens": 0,
                         "output_tokens": 0
                     },
-                    "cost_nano_cny": 0
+                    "cost": {
+                        "known_nano_cny": 0,
+                        "unpriced_requests": 0
+                    }
                 }
             }
             })

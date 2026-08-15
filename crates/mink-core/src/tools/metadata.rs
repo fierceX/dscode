@@ -18,13 +18,10 @@ pub enum ToolResultKind {
     SubAgent,
 }
 
-/// 结构化工具错误码（稳定枚举，SIGNAL_RESPONSE_REDESIGN S1）。
-///
-/// 模型可见文本仍以 `Error[kind]: ...` 人读形态呈现；策略/信号/UI 按本枚举
-/// 路由，不再依赖 `Error:` 前缀与 regex 嗅探。
+/// Stable failure classification for tool executions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ToolErrorKind {
+pub enum ToolFailureKind {
     /// 执行超时（Bash/Python/工具 deadline）。
     Timeout,
     /// 引用的快照 tag 已过期或不可复用。
@@ -45,32 +42,32 @@ pub enum ToolErrorKind {
     Unknown,
 }
 
-impl ToolErrorKind {
+impl ToolFailureKind {
     /// 硬错误 = 确定性失败（超时/进程失败/安全拦截/中断），单独出现即参与决策。
     pub fn is_hard(&self) -> bool {
         matches!(
             self,
-            ToolErrorKind::Timeout
-                | ToolErrorKind::ProcessFailed
-                | ToolErrorKind::SafetyBlocked
-                | ToolErrorKind::Aborted
+            ToolFailureKind::Timeout
+                | ToolFailureKind::ProcessFailed
+                | ToolFailureKind::SafetyBlocked
+                | ToolFailureKind::Aborted
         )
     }
 }
 
-impl ToolErrorKind {
+impl ToolFailureKind {
     /// 模型可见的稳定标签。
     pub fn label(&self) -> &'static str {
         match self {
-            ToolErrorKind::Timeout => "Timeout",
-            ToolErrorKind::StaleTag => "StaleTag",
-            ToolErrorKind::AmbiguousMatch => "AmbiguousMatch",
-            ToolErrorKind::PathOutOfScope => "PathOutOfScope",
-            ToolErrorKind::SafetyBlocked => "SafetyBlocked",
-            ToolErrorKind::ArgumentInvalid => "ArgumentInvalid",
-            ToolErrorKind::ProcessFailed => "ProcessFailed",
-            ToolErrorKind::Aborted => "Aborted",
-            ToolErrorKind::Unknown => "Unknown",
+            ToolFailureKind::Timeout => "Timeout",
+            ToolFailureKind::StaleTag => "StaleTag",
+            ToolFailureKind::AmbiguousMatch => "AmbiguousMatch",
+            ToolFailureKind::PathOutOfScope => "PathOutOfScope",
+            ToolFailureKind::SafetyBlocked => "SafetyBlocked",
+            ToolFailureKind::ArgumentInvalid => "ArgumentInvalid",
+            ToolFailureKind::ProcessFailed => "ProcessFailed",
+            ToolFailureKind::Aborted => "Aborted",
+            ToolFailureKind::Unknown => "Unknown",
         }
     }
 }
@@ -78,49 +75,79 @@ impl ToolErrorKind {
 /// 从失败结果文本 + 退出码分类出稳定错误码。
 ///
 /// 兜底分类只服务展示与统计；确定性错误码应尽早由执行路径显式携带
-/// （见 `ToolRunResult.error_code`），避免依赖文本嗅探。
-pub fn classify_error_kind(content: &str, exit_code: Option<i32>) -> Option<ToolErrorKind> {
+/// （见 `ToolExecution.error_code`），避免依赖文本嗅探。
+pub fn classify_failure_kind(content: &str, exit_code: Option<i32>) -> ToolFailureKind {
     if let Some(code) = exit_code
         && code != 0
     {
-        return Some(ToolErrorKind::ProcessFailed);
+        return ToolFailureKind::ProcessFailed;
     }
     let lower = content.to_lowercase();
     if lower.contains("timed out") || lower.contains("timeout") {
-        return Some(ToolErrorKind::Timeout);
+        return ToolFailureKind::Timeout;
     }
     if lower.contains("safety policy") || lower.contains("blocked by bash") {
-        return Some(ToolErrorKind::SafetyBlocked);
+        return ToolFailureKind::SafetyBlocked;
     }
     if lower.contains("stale") || lower.contains("invalid tag") {
-        return Some(ToolErrorKind::StaleTag);
+        return ToolFailureKind::StaleTag;
     }
     if lower.contains("not unique")
         || lower.contains("ambiguous")
         || lower.contains("multiple matches")
     {
-        return Some(ToolErrorKind::AmbiguousMatch);
+        return ToolFailureKind::AmbiguousMatch;
     }
     if lower.contains("outside")
         || lower.contains("beyond allowed")
         || lower.contains("permission denied")
     {
-        return Some(ToolErrorKind::PathOutOfScope);
+        return ToolFailureKind::PathOutOfScope;
     }
     if lower.contains("no command provided")
         || lower.contains("no path provided")
         || lower.contains("invalid todo status")
         || lower.contains("invalid argument")
     {
-        return Some(ToolErrorKind::ArgumentInvalid);
+        return ToolFailureKind::ArgumentInvalid;
     }
     if lower.contains("interrupted") || lower.contains("aborted") {
-        return Some(ToolErrorKind::Aborted);
+        return ToolFailureKind::Aborted;
     }
-    if content.starts_with("Error:") || content.starts_with("error:") {
-        return Some(ToolErrorKind::Unknown);
+    ToolFailureKind::Unknown
+}
+
+/// Runtime reason for preventing an otherwise valid tool call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolBlocker {
+    RecoveryGuard,
+    ToolSurface,
+    StormBreaker,
+}
+
+/// Authoritative execution state. Display text is never used to recover it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "state", content = "reason", rename_all = "snake_case")]
+pub enum ToolStatus {
+    Succeeded,
+    Failed(ToolFailureKind),
+    Blocked(ToolBlocker),
+    Interrupted,
+}
+
+impl ToolStatus {
+    pub fn is_success(self) -> bool {
+        matches!(self, Self::Succeeded)
     }
-    None
+
+    pub fn failure_kind(self) -> Option<ToolFailureKind> {
+        match self {
+            Self::Failed(kind) => Some(kind),
+            Self::Interrupted => Some(ToolFailureKind::Aborted),
+            Self::Succeeded | Self::Blocked(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -179,5 +206,65 @@ impl ToolMetadata {
     pub const fn spawns_sub_agent(mut self) -> Self {
         self.spawns_sub_agent = true;
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failure_adapter_covers_stable_failure_kinds() {
+        let cases = [
+            ("operation timed out", None, ToolFailureKind::Timeout),
+            (
+                "invalid tag: stale snapshot",
+                None,
+                ToolFailureKind::StaleTag,
+            ),
+            (
+                "multiple matches found",
+                None,
+                ToolFailureKind::AmbiguousMatch,
+            ),
+            (
+                "path is outside workspace",
+                None,
+                ToolFailureKind::PathOutOfScope,
+            ),
+            (
+                "blocked by bash safety policy",
+                None,
+                ToolFailureKind::SafetyBlocked,
+            ),
+            ("invalid argument", None, ToolFailureKind::ArgumentInvalid),
+            ("interrupted by user", None, ToolFailureKind::Aborted),
+            (
+                "unclassified internal failure",
+                None,
+                ToolFailureKind::Unknown,
+            ),
+            ("command failed", Some(2), ToolFailureKind::ProcessFailed),
+        ];
+        for (content, exit_code, expected) in cases {
+            assert_eq!(classify_failure_kind(content, exit_code), expected);
+        }
+    }
+
+    #[test]
+    fn status_exposes_failure_without_reading_display_text() {
+        assert_eq!(
+            ToolStatus::Failed(ToolFailureKind::ArgumentInvalid).failure_kind(),
+            Some(ToolFailureKind::ArgumentInvalid)
+        );
+        assert_eq!(
+            ToolStatus::Interrupted.failure_kind(),
+            Some(ToolFailureKind::Aborted)
+        );
+        assert_eq!(ToolStatus::Succeeded.failure_kind(), None);
+        assert_eq!(
+            ToolStatus::Blocked(ToolBlocker::RecoveryGuard).failure_kind(),
+            None
+        );
     }
 }

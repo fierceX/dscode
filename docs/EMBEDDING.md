@@ -16,16 +16,15 @@ CLI 交互、配置和会话管理见 [使用手册](USAGE.md)；机器协议（
 ## Rust 库嵌入
 
 Rust 发布包为 `mink-core`，库 crate 名为 `mink`。发布包只包含可嵌入 runtime 和
-`Display` 协议层；终端 REPL/TUI 和二进制入口在 `mink-cli` workspace 包。
+`AgentEventStream` / `EventSink` 事件协议；终端 REPL/TUI 和二进制入口在 `mink-cli` workspace 包。
 服务端嵌入时推荐只启用 runtime：
 
 ```toml
 [dependencies]
-mink = { package = "mink-core", version = "0.4.0", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.5.0", default-features = false, features = ["runtime"] }
 ```
 
-稳定入口：`mink::prelude`、`mink::runtime`、`mink::config`、`mink::sandbox`、
-`mink::sdk_protocol`；其他公开模块不承诺稳定 API。
+公开入口仅为 `mink::prelude`、`mink::runtime` 和 `mink::sdk_protocol`。
 
 ### 最小示例
 
@@ -72,7 +71,7 @@ let outcome = stream.outcome().await?;
 需要从多个任务共享同一 runtime 时，调用 `rt.handle()` 获取可克隆的
 `AgentRuntimeHandle`。handle 只提供 `run_turn`、`stream_turn`、`compact`、`set_model`
 和 interrupt，所有克隆共享同一个 Busy 门禁；只有原始 `AgentRuntime` 拥有
-`shutdown()`。0.4.0 不再暴露 raw actor sender、cancel token 或 interrupt flag。
+`shutdown()`。0.5.0 不再暴露 raw actor sender、cancel token 或 interrupt flag。
 
 全局观察者实现异步 `EventSink`：
 
@@ -92,17 +91,17 @@ observer 通过固定容量队列与核心 turn 隔离；溢出或 observer 失�
 
 ### AgentOptions 配置速查
 
-`AgentOptions` 是 ergonomic builder，底层持有完整 `Config`，可通过 `config_mut()`
-逃生口访问任何未提供 builder 的字段。常用方法：
+`AgentOptions` 的字段保持私有。运行时策略通过 `ProviderOptions`、`GenerationOptions`、
+`ContextPolicy`、`ToolOptions` 和 `SessionPolicy` 分组传入；不存在公开 `Config` 或可变逃生口。
 
 | 类别 | 方法 |
 |------|------|
-| 基础 | `with_api_key()` / `with_base_url()` / `with_model()` / `with_session()` / `with_session_layout()`（或 `with_isolated_sessions()` 等快捷方法） |
-| 工具 | `with_enabled_tools()`（唯一工具选择入口；空列表禁用全部） |
-| Edit | `with_edit_mode()` / `with_edit_fuzzy_match()` / `with_edit_fuzzy_threshold()` / `with_edit_enforce_seen_lines()` |
-| 压缩 | `with_max_context_tokens()` / `with_context_compact_pct()` / `with_context_reserve_tokens()` / `with_context_compact_tail_tokens()` / `with_context_compact_max_output_tokens()` / `with_context_compact_input_reduction()` |
-| 超时 | `with_tool_timeout_secs()` / `with_sub_agent_timeout_secs()` / `with_llm_timeouts(first, idle, heartbeat)` |
-| 输出限制 | `with_tool_result_max_bytes()` / `with_file_write_max_bytes()` / `with_search_limits(max_files, max_results)` / `with_max_tokens()` / `with_max_turns()` |
+| Provider | `with_provider_options()`；另有 `with_api_key()` / `with_base_url()` / `with_model()` 快捷方法 |
+| Generation | `with_generation_options()` |
+| Context | `with_context_policy()` |
+| Tools | `with_tool_options()`；`enabled_tools=None` 用默认集合，空列表禁用全部 |
+| Session | `with_session()` / `with_session_layout()`（或布局快捷方法） |
+| Signal | `with_signal_policy(SignalPolicy)` |
 | OpenAI | `with_openai_reasoning_effort()` / `with_openai_tool_choice()` / `with_openai_extra_body()` / `with_openai_token_param()` / `with_openai_include_usage()` |
 | 能力 | `with_mission_content()` / `with_selected_skills()` / `with_runtime_skill_content()` / `with_skill_discovery_policy()` / `with_resource_handler()` / `with_read_only_file_system()` / `with_resource_session_id()` |
 | 后端 | `with_llm_backend()` / `with_sandbox()` / `with_sandbox_python()` |
@@ -181,7 +180,7 @@ let runtime = AgentRuntime::start(
 ### 沙箱
 
 同进程 `AgentRuntime` 不会自动 sandbox 当前进程。需要完整进程级沙箱时，由业务服务
-spawn 自身 worker 子进程：worker 先调用 `mink::sandbox::reexec_in_sandbox()` 进入沙箱，
+spawn 自身 worker 子进程：worker 先调用 `mink::runtime::reexec_in_sandbox()` 进入沙箱，
 再创建 `AgentRuntime`（hidden worker 模式，参考
 `crates/mink-core/examples/web_api.rs` 的完整实现）。
 
@@ -203,7 +202,7 @@ from mink_agent import AgentSession, SandboxConfig
 session = AgentSession(SandboxConfig(
     api_key="sk-...",               # 或设置 DEEPSEEK_API_KEY 环境变量
     read_dirs=["src"],
-    signal_mode="full",             # "full" 启用信号系统，"off" 关闭
+    signal_policy="full",             # off/evidence/state_ops/restart/full
 ))
 result = session.run("scan this repo and summarize")
 print(result["text"])
@@ -231,7 +230,7 @@ print(result["text"])
 | 文件系统 | `read_dirs` / `write_dirs` | agent 可读/可写目录 |
 | 工具 | `enabled_tools` | 精确工具选择；`None` 用默认集合，显式列出 `PythonSandbox` 才启用它 |
 | Edit | `edit_mode` / `edit_fuzzy_match` / `edit_fuzzy_threshold` / `edit_enforce_seen_lines` | 与 Rust/CLI 相同的双模式配置 |
-| 信号 | `signal_mode` | `"full"` / `"off"` / `None`（继承 `MINK_SIGNAL_MODE`） |
+| 信号 | `signal_policy` | `"off"` / `"evidence"` / `"state_ops"` / `"restart"` / `"full"` / `None`（继承 `MINK_SIGNAL_POLICY`） |
 | 提示词 | `mission_file` / `mission_content` | MISSION.md 文件或内联内容（二选一，内联避免临时文件） |
 | 技能 | `skills` / `inline_skills` / `skill_discovery_policy` | 技能选择与注入 |
 | 压缩 | `max_context` / `context_compact_*` | 与 Rust/CLI 同一组压缩参数 |

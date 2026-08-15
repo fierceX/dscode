@@ -100,7 +100,7 @@ TurnExecutor (agent/turn.rs)
 │ guard/storm.rs        │ 重复工具调用抑制
 │ agent/belief.rs       │ belief 滑动窗口和平滑
 │ agent/decision.rs     │ Inject / Abort / cooldown / recovery guard
- │ config.rs             │ MINK_SIGNAL_MODE 开关 / SignalMode 枚举
+ │ config.rs             │ MINK_SIGNAL_POLICY 覆盖 / SignalPolicy 枚举
 │ safety.rs             │ 危险 Bash 命令过滤
 └───────────────────────┘
          │
@@ -119,7 +119,7 @@ TurnExecutor (agent/turn.rs)
 └───────────────────────┘
          │
 ┌─────── UI 层 ─────────┐
-│ crates/mink-core/src/ui/mod.rs │ Display trait、结构化工具展示协议、StatsSnapshot
+│ crates/mink-core/src/runtime/events.rs │ AgentEventStream / EventSink 结构化事件协议
 │ crates/mink-cli/src/ui/engine.rs │ REPL / human 输出
 │ crates/mink-cli/src/ui/replay.rs │ REPL session 重放
 │ crates/mink-cli/src/tui/         │ ratatui Full / Inline 双 TUI surface
@@ -160,7 +160,7 @@ OrchActor.handle_user_input()
            ├── ToolRunner 统一定稿并保护延迟结果大小
            ├── ToolSignalProcessor 基于最终结果更新 belief
            ├── store.add_tool_results()
-           ├── Display.render_tool_result_presented()
+           ├── 发射 AgentEventKind::ToolResult
            ├── Plan 压缩请求交给 TurnCompactor
            └── 循环结束 → OrchActor::finish_usage() 汇总 billing_turn_id → TurnOutcome
 ```
@@ -170,7 +170,7 @@ OrchActor.handle_user_input()
 ```text
 ToolExec::execute()
   -> ToolOutcome { content, conversation_content, exit_code, ... }
-  -> format_dispatched_result() -> ToolRunResult
+  -> format_dispatched_result() -> ToolExecution
        普通结果立即执行大小保护、bash noise filter、Read/Write summary 和 Edit conv content
        Plan/SubAgent 结果保留待定稿标记
   -> PlanActionHandler / SubAgentCoordinator 完成延迟工作
@@ -179,7 +179,7 @@ ToolExec::execute()
   -> ToolSignalProcessor 采集最终结果
   -> ConversationStore::add_tool_results()
        使用 conv_content（若非空）否则使用 content
-  -> Display::render_tool_result_presented()
+  -> AgentEventKind::ToolResult
 ```
 `content` 受 `tool_result_max_bytes` 保护；`content_preview` 用于简短终端展示，presentation
 携带 Plan/Todo 结构化状态。LLM conversation 由 `ConversationStore::add_tool_results()` 写入，
@@ -190,7 +190,7 @@ ToolExec::execute()
 信号系统位于工具执行之后、下一轮 LLM 调用之前。`ToolSignalProcessor` 使用 `SignalCollector` 从工具结果中采集失败、错误模式和编辑循环信号，写入 `BeliefTracker`，再由 `DecisionEngine` 判断是否继续、注入恢复提示或中止当前 turn。
 
 ```text
-ToolRunResult
+ToolExecution
   -> SignalCollector
   -> BeliefTracker
   -> DecisionEngine
@@ -198,7 +198,7 @@ ToolRunResult
 ```
 
 每个用户输入开始时会重置 belief、ToolSignalProcessor、decision cooldown 和 StormBreaker
-窗口。`MINK_SIGNAL_MODE=off` 时，信号采集、belief 更新、注入和中止逻辑都关闭。
+窗口。`MINK_SIGNAL_POLICY=off` 时，信号采集、belief 更新、注入和中止逻辑都关闭。
 
 ---
 
@@ -269,7 +269,7 @@ Server 生命周期：Ctrl+C → axum serve 停止 → idle reaper abort → `re
 | `agent/belief.rs` | `BeliefTracker` |
 | `agent/decision.rs` | `DecisionEngine` |
 | `agent/recovery_policy.rs` | 基于已解析语义能力生成恢复提示并校验恢复首个调用；与普通 Bash 执行策略相互独立 |
- | `config.rs` | `SignalMode` / 信号系统开关 |
+| `config.rs` | `SignalPolicy` / 信号响应能力边界 |
 
 ### 工具系统
 
@@ -425,11 +425,11 @@ VFS 只接管普通路径。`artifact://`、`skill://`、`rule://` 和 `session:
 
 | 文件 | 职责 |
 |------|------|
-| `crates/mink-core/src/ui/mod.rs` | `Display`、结构化工具 presentation、`ToolResultDisplay`、`StatsSnapshot` |
+| `crates/mink-core/src/runtime/events.rs` | `AgentEventStream`、`EventSink`、结构化工具事件与 `StatsSnapshot` |
 | `crates/mink-cli/src/ui/engine.rs` | REPL 同步渲染 |
 | `crates/mink-cli/src/ui/replay.rs` | REPL replay |
 | `crates/mink-cli/src/tui/mod.rs` | TUI 入口和事件循环 |
-| `crates/mink-cli/src/tui/display.rs` | `Display` -> `TuiSignal` 适配 |
+| `crates/mink-cli/src/tui/display.rs` | CLI 事件投影 -> `TuiSignal` 适配 |
 | `crates/mink-cli/src/tui/signal.rs` | `TuiSignal` reducer |
 | `crates/mink-cli/src/tui/state.rs` | 共享 transcript、Full viewport/click state、Inline committed state、Plan/Todo/Artifact 和子代理状态 |
 | `crates/mink-cli/src/tui/input.rs` | 键盘、粘贴、历史、详情页滚动和命令输入 |
@@ -442,28 +442,12 @@ VFS 只接管普通路径。`artifact://`、`skill://`、`rule://` 和 `session:
 
 ---
 
-## Display 接口
+## Runtime 事件接口
 
-`Display` 是 runtime 与具体输出实现之间的共享抽象。`mink-core` 只定义 trait 和展示数据结构；
-REPL/TUI 的具体实现位于 `mink-cli`。基础工具结果通过 `ToolResultDisplay` 传递展示字段；
-`PresentedToolResultDisplay` 额外携带成功状态、结果类型、Plan/Todo presentation 和 artifact 元数据。
-工具调用通过 `ToolCallDisplay.tool_use_id` 与结果配对。TUI 实时路径与 replay 共用 reducer，不解析
-Todo XML 或 artifact 提示文本。
-
-```rust
-pub struct ToolResultDisplay<'a> {
-    pub tool_name: &'a str,
-    pub content_preview: &'a str,
-    pub content: &'a str,
-    pub tool_use_id: Option<&'a str>,
-    pub exit_code: Option<i32>,
-}
-```
-
-- `tool_name`：工具名。
-- `content_preview`：简短展示文本。
-- `content`：工具层截断/过滤后的展示内容。
-- `tool_use_id` / `exit_code`：工具结果元数据。
+`mink-core` 只公开 `AgentEventStream` 与 `EventSink`。工具结果事件直接携带原始
+`tool_name` / `tool_use_id`、`ToolStatus`、`ToolFailureKind`、presentation 和 artifact 元数据。
+REPL/TUI 在 `mink-cli` 内把同一事件流投影为终端输出或 `TuiSignal`；实时路径与 replay 共用 reducer，
+不从展示文本反推 Todo、artifact 或工具状态。
 
 ---
 
@@ -549,7 +533,7 @@ Session 目录保存 conversation、events、metadata、summary、stats 和 arti
 - VFS 后端必须使用 `resource_session_id` 隔离数据；`agent_session_id` 只标识具体调用代理。
 - Hashline Edit 必须从 session snapshot 解析 tag；stale 锚点仅在唯一映射且共享偏移时恢复。
 - Replace Edit 默认要求唯一候选；多个高置信度候选必须 fail closed。
-- Display 包装层必须保留详细 tool call/result 协议，不得在委托时丢失调用 ID 或 presentation。
+- AgentEvent 投影必须保留 tool call/result 的调用 ID、状态和 presentation。
 - TUI 输入 cursor 必须落在 UTF-8 char boundary。
 - TUI 初始化从当前 session 的 Plan/Todo 状态文件建立详情基线，实时 presentation 在该基线上更新。
 - Full TUI 使用应用内完整 transcript、mouse capture、click map 和可逆折叠。

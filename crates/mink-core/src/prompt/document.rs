@@ -77,6 +77,7 @@ impl PromptDocument {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn sections(&self) -> &[PromptSection] {
         &self.sections
     }

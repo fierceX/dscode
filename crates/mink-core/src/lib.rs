@@ -1,17 +1,10 @@
 //! Public library entry points for embedding mink.
 //!
-//! Stable embedding code should prefer `mink::runtime`, `mink::config`,
-//! `mink::sandbox`, `mink::sdk_protocol`, or `mink::prelude`. Other public
-//! modules are kept visible for the existing binaries and integration tests,
-//! but are internal implementation details and may change as the library API
-//! is tightened.
+//! The public surface is deliberately limited to [`runtime`], [`prelude`], and
+//! [`sdk_protocol`].
 
-// Stable and semi-stable public modules.
-pub mod config;
 pub mod runtime;
-pub mod sandbox;
 pub mod sdk_protocol;
-pub mod ui;
 
 /// Common imports for embedded Rust services.
 ///
@@ -20,65 +13,49 @@ pub mod ui;
 /// tool, session, and LLM modules remain implementation details shared by the
 /// CLI binaries and the library runtime.
 pub mod prelude {
+    pub use crate::runtime::session::{
+        PricingCatalog, TokenUsage, UsageCost, UsageKind, UsageRecord, UsageStatus, UsageSummary,
+    };
     pub use crate::runtime::{
         AgentEvent, AgentEventKind, AgentEventStream, AgentOptions, AgentRuntime,
-        AgentRuntimeHandle, AgentTool, ApprovalTier, CapabilityExposure, CompactOutcome, EditMode,
-        EventSink, LlmBackend, LlmCancelToken, LlmErrorEvent, LlmEvent, LlmEventStream, LlmPurpose,
-        LlmRequest, LlmRequestFailure, LlmResponseStream, LlmRetryEvent, LlmStopEvent,
-        LlmTextEvent, LlmThinkingEvent, LlmToolCallEvent, LlmUsageEvent, LoadedSkill,
-        OpenAiCompatibleBackend, OpenAiCompatibleOptions, ReadOnlyFileSystem, ResourceHandler,
-        RuntimeError, RuntimeSkill, SessionInfo, SessionLayout, SessionPolicy, SkillCapability,
+        AgentRuntimeHandle, AgentTool, ApprovalTier, CapabilityExposure, CompactOutcome,
+        ContextPolicy, EditMode, EventSink, GenerationOptions, LlmBackend, LlmCancelToken,
+        LlmErrorEvent, LlmEvent, LlmEventStream, LlmPurpose, LlmRequest, LlmRequestFailure,
+        LlmResponseStream, LlmRetryEvent, LlmStopEvent, LlmTextEvent, LlmThinkingEvent,
+        LlmToolCallEvent, LlmUsageEvent, LoadedSkill, ModelResolver, OpenAiCompatibleBackend,
+        OpenAiCompatibleOptions, OutputFormat, ProviderOptions, ReadOnlyFileSystem, ResolvedModel,
+        ResourceHandler, RuntimeError, RuntimeSkill, SandboxConfig, SandboxPythonConfig,
+        SessionInfo, SessionLayout, SessionPolicy, SignalPolicy, SkillCapability,
         SkillDiscoveryPolicy, SkillLoadContext, SkillProvider, SourceLevel, SourceMeta,
-        TokenParamKind, ToolActivation, ToolCapabilityOffer, ToolDefinition, ToolError,
-        ToolExecutionContext, ToolExecutionMode, ToolOutput, ToolSemanticCapability, TurnId,
-        TurnOutcome, TurnStatus, VfsGlobRequest, VfsGlobResult, VfsGrepEntry, VfsGrepRequest,
-        VfsGrepResult, VfsReadRequest, VfsReadResult, VfsScope,
-    };
-    pub use crate::session::usage::{
-        TokenUsage, UsageKind, UsageRecord, UsageStatus, UsageSummary,
+        TokenParamKind, ToolActivation, ToolApprovalMode, ToolApprovalPolicy, ToolCapabilityOffer,
+        ToolDefinition, ToolError, ToolExecutionContext, ToolExecutionMode, ToolOptions,
+        ToolOutput, ToolSemanticCapability, TurnId, TurnOutcome, TurnStatus, VfsGlobRequest,
+        VfsGlobResult, VfsGrepEntry, VfsGrepRequest, VfsGrepResult, VfsReadRequest, VfsReadResult,
+        VfsScope,
     };
 }
 
-// Internal modules kept public during the library transition.
-#[doc(hidden)]
-pub mod assets;
-#[doc(hidden)]
-pub mod errors;
-#[doc(hidden)]
-pub mod events;
-#[doc(hidden)]
-pub mod prompt;
-#[doc(hidden)]
-pub mod protocol;
-#[doc(hidden)]
-pub mod safety;
-#[doc(hidden)]
-pub mod sse;
-
-#[doc(hidden)]
-pub mod cancel;
-#[doc(hidden)]
-pub mod capabilities;
-#[doc(hidden)]
-pub mod context;
-#[doc(hidden)]
-pub mod llm;
-#[doc(hidden)]
-pub mod session;
-
-#[doc(hidden)]
-pub mod guard;
-#[doc(hidden)]
-pub mod repair;
-#[doc(hidden)]
-pub mod resources;
-#[doc(hidden)]
-pub mod tools;
-
-#[doc(hidden)]
-pub mod agent;
-#[doc(hidden)]
-pub mod util;
+mod agent;
+mod assets;
+mod cancel;
+mod capabilities;
+#[allow(dead_code)]
+mod config;
+mod context;
+mod errors;
+mod events;
+mod guard;
+mod llm;
+mod prompt;
+mod protocol;
+mod repair;
+mod resources;
+mod safety;
+mod sandbox;
+mod session;
+mod sse;
+mod tools;
+mod ui;
 
 #[cfg(test)]
-pub mod regression;
+mod regression;

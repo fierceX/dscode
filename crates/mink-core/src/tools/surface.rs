@@ -322,7 +322,7 @@ impl ModelToolSurface {
     }
 }
 
-/// A2：caps 占位符渲染——把真实配置值注入工具描述。
+/// 将真实配置值注入工具描述中的 caps 占位符。
 /// 占位符白名单见下；tools.json 与运行时描述字符串中的未知 {{...}} 一律
 /// fail-fast（提示词纪律，tests/prompt_discipline.rs 同步执行）。
 pub fn render_description_templates(desc: &str, config: &ToolConfig) -> String {
@@ -358,7 +358,7 @@ fn resolved_schema(
     name: &str,
     config: &ToolConfig,
 ) -> serde_json::Value {
-    // 注入点说明（A2）：渲染必须在 surface_fingerprint 计算之前完成，
+    // 渲染必须在 surface_fingerprint 计算之前完成，
     // 保证"模型看到的描述"与"参与前缀指纹的描述"字节一致。
     if name == "Edit" {
         let mut schema = edit_schema(config);
@@ -371,7 +371,7 @@ fn resolved_schema(
         }
         return schema;
     }
-    // A1：结果标记协议——把"如何读结果"教给模型（全部来自现有实现行为）。
+    // 将结果标记协议追加到工具描述，让模型正确读取现有输出。
     let description = match (name, config.edit_mode) {
         ("Read", crate::config::EditMode::Hashline) => Some(
             "Read a local path or registered resource. Editable local non-raw output uses [PATH#TAG] plus numbered lines; raw output omits the header but still marks only its actual range as seen. Resource/VFS reads stay read-only and never mint tags. Output over {{CAP_TOOL_RESULT_MAX_BYTES}} bytes is rejected with an Error asking for a narrower line range; line numbers anchor later Edit or Read ranges.",
@@ -516,13 +516,13 @@ fn surface_fingerprint(tools: &[ModelTool]) -> String {
         hasher.update(serde_json::to_vec(&tool.schema).unwrap_or_default());
         hasher.update(b"\0");
     }
-    crate::util::hex_lower(hasher.finalize())
+    crate::capabilities::fingerprint::hex_lower(hasher.finalize())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, ToolApprovalMode};
+    use crate::config::{ResolvedConfig as Config, ToolApprovalMode};
 
     fn resolve(config: &ToolConfig, role: AgentRole, vfs: bool) -> Result<ModelToolSurface> {
         let context = ToolResolutionContext::from_runtime(role, config, vfs);
@@ -700,7 +700,7 @@ mod tests {
             .unwrap();
         assert!(glob_desc.contains("4321 files"), "{glob_desc}");
         assert!(!glob_desc.contains("{{"));
-        // 渲染后的描述必须参与前缀指纹（A2 注入点约束）。
+        // 渲染后的描述必须参与前缀指纹。
         let other = ToolConfig::from_config(&Config::default());
         assert_ne!(
             surface.fingerprint(),

@@ -3,7 +3,7 @@ use crate::capabilities::{
     CapabilitySnapshot, RuntimeSkill, SkillDiscoveryPolicy, SkillProvider,
     skill_providers_for_policy,
 };
-use crate::config::Config;
+use crate::config::ResolvedConfig as Config;
 use crate::context::{AgentSharedContext, ToolConfig};
 use crate::llm::client::LlmBackend;
 use crate::resources::{ResourceHandler, ResourceRouter};

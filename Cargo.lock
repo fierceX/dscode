@@ -1972,7 +1972,7 @@ checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 
 [[package]]
 name = "mink-cli"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -1980,15 +1980,17 @@ dependencies = [
  "mink-core",
  "ratatui",
  "rustyline",
+ "serde",
  "serde_json",
  "time",
  "tokio",
+ "toml 1.1.2+spec-1.1.0",
  "unicode-width",
 ]
 
 [[package]]
 name = "mink-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2010,7 +2012,6 @@ dependencies = [
  "similar",
  "time",
  "tokio",
- "toml 1.1.2+spec-1.1.0",
  "unicode-normalization",
  "wasmtime",
  "wasmtime-wasi",
@@ -2020,7 +2021,7 @@ dependencies = [
 
 [[package]]
 name = "mink-server"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "async-stream",

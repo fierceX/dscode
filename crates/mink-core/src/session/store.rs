@@ -5,17 +5,6 @@ use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
 use tokio::sync::{Mutex, RwLock};
 
-/// Result of executing a single tool call, persisted in the conversation store.
-#[derive(Debug, Clone)]
-pub struct ToolResult {
-    pub tool_use_id: String,
-    pub tool_name: String,
-    pub tool_args: std::collections::BTreeMap<String, String>,
-    pub content: String,
-    pub conv_content: String,
-    pub state_metadata: Option<Value>,
-}
-
 /// ConversationStore provides async JSONL conversation persistence.
 pub struct ConversationStore {
     path: PathBuf,
@@ -82,7 +71,10 @@ impl ConversationStore {
             .await
     }
 
-    pub async fn add_tool_results(&self, results: &[ToolResult]) -> Result<()> {
+    pub async fn add_tool_results(
+        &self,
+        results: &[crate::tools::runner::ToolExecution],
+    ) -> Result<()> {
         let content: Vec<Value> = results
             .iter()
             .map(|r| {
@@ -591,17 +583,13 @@ mod tests {
     async fn add_tool_results_then_lines() {
         let store = temp_store();
         store.ensure().await.unwrap();
-        let results = vec![ToolResult {
-            tool_use_id: "id1".into(),
-            tool_name: "TodoAdvance".into(),
-            tool_args: Default::default(),
-            content: "output".into(),
-            conv_content: "".into(),
-            state_metadata: Some(json!({
-                "todo_revision": 3,
-                "todo_state_kind": "progress",
-            })),
-        }];
+        let mut result =
+            crate::tools::runner::ToolExecution::test_result("id1", "TodoAdvance", "output");
+        result.state_metadata = Some(json!({
+            "todo_revision": 3,
+            "todo_state_kind": "progress",
+        }));
+        let results = vec![result];
         store.add_tool_results(&results).await.unwrap();
         let lines = store.lines().await.unwrap();
         assert_eq!(lines.len(), 1);
@@ -631,14 +619,11 @@ mod tests {
             .add_assistant("r", "", &[tool_call_event("id_a"), tool_call_event("id_b")])
             .await
             .unwrap();
-        let results = vec![ToolResult {
-            tool_use_id: "id_a".into(),
-            tool_name: "Bash".into(),
-            tool_args: Default::default(),
-            content: "Error: exit 1".into(),
-            conv_content: "".into(),
-            state_metadata: None,
-        }];
+        let results = vec![crate::tools::runner::ToolExecution::test_result(
+            "id_a",
+            "Bash",
+            "Error: exit 1",
+        )];
         store.add_tool_results(&results).await.unwrap();
 
         store.repair_dangling_tool_uses().await.unwrap();
@@ -663,16 +648,9 @@ mod tests {
             .add_assistant("r", "", &[tool_call_event("id_a"), tool_call_event("id_b")])
             .await
             .unwrap();
-        let results: Vec<ToolResult> = ["id_a", "id_b"]
+        let results: Vec<crate::tools::runner::ToolExecution> = ["id_a", "id_b"]
             .iter()
-            .map(|id| ToolResult {
-                tool_use_id: (*id).into(),
-                tool_name: "Bash".into(),
-                tool_args: Default::default(),
-                content: "ok".into(),
-                conv_content: "".into(),
-                state_metadata: None,
-            })
+            .map(|id| crate::tools::runner::ToolExecution::test_result(*id, "Bash", "ok"))
             .collect();
         store.add_tool_results(&results).await.unwrap();
 

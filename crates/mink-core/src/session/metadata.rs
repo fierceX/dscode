@@ -77,6 +77,7 @@ pub async fn ensure_metadata(paths: &Paths, cwd: &Path, seed: SessionSeed) -> Re
     write_metadata(&paths.metadata, &metadata).await
 }
 
+#[cfg(test)]
 pub async fn resolve_session_reference(
     home: &Path,
     cwd: &Path,
@@ -85,6 +86,7 @@ pub async fn resolve_session_reference(
     resolve_session_reference_with_layout(home, cwd, reference, SessionLayout::ProjectScoped).await
 }
 
+#[cfg(test)]
 pub async fn resolve_session_reference_with_layout(
     home: &Path,
     cwd: &Path,
@@ -188,6 +190,7 @@ pub async fn resolve_session_record_with_layout(
     Ok(None)
 }
 
+#[cfg(test)]
 pub async fn list_project_sessions(home: &Path, cwd: &Path) -> Result<Vec<SessionRecord>> {
     list_sessions_with_layout(home, cwd, SessionLayout::ProjectScoped).await
 }

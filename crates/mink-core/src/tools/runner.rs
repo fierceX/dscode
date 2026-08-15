@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex};
 
 use super::bash;
 use super::file;
-use super::metadata::{ApprovalTier, ToolMetadata, ToolResultKind};
+use super::metadata::{
+    ApprovalTier, ToolBlocker, ToolFailureKind, ToolMetadata, ToolResultKind, ToolStatus,
+};
 use super::plan::{PlanClearTool, PlanCommand, PlanConfirmTool, PlanDraftTool};
 use super::python;
 #[cfg(feature = "python-sandbox")]
@@ -119,7 +121,7 @@ pub struct ToolRunner {
 }
 
 /// Result of executing a single tool call.
-pub struct ToolRunResult {
+pub struct ToolExecution {
     pub tool_use_id: String,
     pub tool_name: String,
     pub tool_args: BTreeMap<String, String>,
@@ -130,9 +132,7 @@ pub struct ToolRunResult {
     pub sub_agent_description: Option<String>,
     pub sub_agent_fork: bool,
     pub exit_code: Option<i32>,
-    pub success: bool,
-    /// 结构化错误码（失败时按稳定枚举分类；成功为 None）。
-    pub error_code: Option<crate::tools::metadata::ToolErrorKind>,
+    pub status: ToolStatus,
     pub result_kind: ToolResultKind,
     pub presentation: Option<ToolPresentation>,
     pub artifacts: Vec<ArtifactDisplay>,
@@ -142,25 +142,16 @@ pub struct ToolRunResult {
     pub(crate) state_metadata: Option<serde_json::Value>,
 }
 
-impl From<&ToolRunResult> for crate::session::store::ToolResult {
-    fn from(r: &ToolRunResult) -> Self {
-        crate::session::store::ToolResult {
-            tool_use_id: r.tool_use_id.clone(),
-            tool_name: r.tool_name.clone(),
-            tool_args: r.tool_args.clone(),
-            content: r.content.clone(),
-            conv_content: r.conv_content.clone(),
-            state_metadata: r.state_metadata.clone(),
-        }
-    }
-}
-
 pub struct SubAgentRequest {
     pub prompt: String,
     pub fork: bool,
 }
 
-impl ToolRunResult {
+impl ToolExecution {
+    pub fn succeeded(&self) -> bool {
+        self.status.is_success()
+    }
+
     pub(crate) fn take_sub_agent_request(&mut self) -> Option<SubAgentRequest> {
         if !self.spawns_sub_agent {
             return None;
@@ -171,11 +162,39 @@ impl ToolRunResult {
             fork: self.sub_agent_fork,
         })
     }
+
+    #[cfg(test)]
+    pub(crate) fn test_result(
+        tool_use_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        content: impl Into<String>,
+    ) -> Self {
+        Self {
+            tool_use_id: tool_use_id.into(),
+            tool_name: tool_name.into(),
+            tool_args: BTreeMap::new(),
+            content: content.into(),
+            conv_content: String::new(),
+            spawns_sub_agent: false,
+            sub_agent_prompt: None,
+            sub_agent_description: None,
+            sub_agent_fork: false,
+            exit_code: None,
+            status: ToolStatus::Succeeded,
+            result_kind: ToolResultKind::Text,
+            presentation: None,
+            artifacts: Vec::new(),
+            signals: Vec::new(),
+            plan_command: None,
+            needs_finalization: false,
+            state_metadata: None,
+        }
+    }
 }
 
 enum PreparedCall {
     Execute(ToolCallEvent),
-    Immediate(Box<ToolRunResult>),
+    Immediate(Box<ToolExecution>),
 }
 
 struct ToolPolicyGate<'a> {
@@ -183,8 +202,8 @@ struct ToolPolicyGate<'a> {
     storm: &'a Mutex<StormBreaker>,
 }
 
-struct RawToolResult {
-    output: std::result::Result<String, anyhow::Error>,
+struct ToolExecOutput {
+    content: String,
     is_bash: bool,
     conv_content: String,
     exit_code: Option<i32>,
@@ -192,7 +211,7 @@ struct RawToolResult {
     no_mutation: bool,
     memo_candidate: Option<MemoCandidate>,
     spawns_sub_agent: bool,
-    success: bool,
+    status: ToolStatus,
     diagnostics: Vec<String>,
     plan_command: Option<PlanCommand>,
     state_metadata: Option<serde_json::Value>,
@@ -239,7 +258,7 @@ impl ToolRunner {
         self.storm.lock().unwrap_or_else(|e| e.into_inner()).reset();
     }
 
-    pub async fn execute_all(&self, calls: Vec<ToolCallEvent>) -> Result<Vec<ToolRunResult>> {
+    pub async fn execute_all(&self, calls: Vec<ToolCallEvent>) -> Result<Vec<ToolExecution>> {
         let mut results = Vec::new();
         let mut read_batch = Vec::new();
 
@@ -263,7 +282,7 @@ impl ToolRunner {
         Ok(results)
     }
 
-    pub fn finalize_deferred_results(&self, results: &mut [ToolRunResult]) {
+    pub fn finalize_deferred_results(&self, results: &mut [ToolExecution]) {
         for result in results {
             if !result.needs_finalization {
                 continue;
@@ -280,7 +299,7 @@ impl ToolRunner {
         }
     }
 
-    async fn execute_read_batch(&self, calls: Vec<ToolCallEvent>) -> Result<Vec<ToolRunResult>> {
+    async fn execute_read_batch(&self, calls: Vec<ToolCallEvent>) -> Result<Vec<ToolExecution>> {
         if calls.is_empty() {
             return Ok(Vec::new());
         }
@@ -320,7 +339,7 @@ impl ToolRunner {
         Ok(results)
     }
 
-    async fn execute_prepared_call(&self, call: ToolCallEvent) -> Result<ToolRunResult> {
+    async fn execute_prepared_call(&self, call: ToolCallEvent) -> Result<ToolExecution> {
         match self.prepare_call(call) {
             PreparedCall::Immediate(result) => Ok(*result),
             PreparedCall::Execute(call) => {
@@ -359,7 +378,7 @@ impl ToolRunner {
         ctx: &ToolContext,
         call: &ToolCallEvent,
         tool_fn: Option<&dyn ToolExec>,
-    ) -> Result<ToolRunResult> {
+    ) -> Result<ToolExecution> {
         let raw = dispatch_tool(ctx, call, tool_fn);
         Ok(format_dispatched_result(ctx, call, raw))
     }
@@ -369,7 +388,7 @@ async fn execute_custom(
     ctx: &ToolContext,
     call: &ToolCallEvent,
     tool: crate::runtime::RegisteredCustomTool,
-) -> Result<ToolRunResult> {
+) -> Result<ToolExecution> {
     let definition = &tool.definition;
     let started = std::time::Instant::now();
     let timeout_secs = if ctx.tool_config.tool_timeout_secs > 0 {
@@ -404,41 +423,51 @@ async fn execute_custom(
         }
     };
     let raw = match result {
-        Ok(output) => RawToolResult {
-            output: Ok(output.content),
-            is_bash: false,
-            conv_content: output.conversation_content.unwrap_or_default(),
-            exit_code: output.exit_code,
-            wall_ms: Some(started.elapsed().as_millis()),
-            no_mutation: false,
-            memo_candidate: None,
-            spawns_sub_agent: false,
-            success: output.success,
-            diagnostics: Vec::new(),
-            plan_command: None,
-            state_metadata: None,
-            result_kind: definition.result_kind,
-            presentation: None,
-        },
-        Err(error) => RawToolResult {
-            output: Err(anyhow::anyhow!(error)),
-            is_bash: false,
-            conv_content: String::new(),
-            exit_code: None,
-            wall_ms: Some(started.elapsed().as_millis()),
-            no_mutation: false,
-            memo_candidate: None,
-            spawns_sub_agent: false,
-            success: false,
-            diagnostics: Vec::new(),
-            plan_command: None,
-            state_metadata: None,
-            result_kind: definition.result_kind,
-            presentation: None,
-        },
+        Ok(output) => {
+            let status = if output.success {
+                ToolStatus::Succeeded
+            } else {
+                failed_status(&output.content, output.exit_code)
+            };
+            ToolExecOutput {
+                content: output.content,
+                is_bash: false,
+                conv_content: output.conversation_content.unwrap_or_default(),
+                exit_code: output.exit_code,
+                wall_ms: Some(started.elapsed().as_millis()),
+                no_mutation: false,
+                memo_candidate: None,
+                spawns_sub_agent: false,
+                status,
+                diagnostics: Vec::new(),
+                plan_command: None,
+                state_metadata: None,
+                result_kind: definition.result_kind,
+                presentation: None,
+            }
+        }
+        Err(error) => {
+            let detail = error.to_string();
+            ToolExecOutput {
+                content: format!("Error: tool execution failed: {detail}"),
+                is_bash: false,
+                conv_content: String::new(),
+                exit_code: None,
+                wall_ms: Some(started.elapsed().as_millis()),
+                no_mutation: false,
+                memo_candidate: None,
+                spawns_sub_agent: false,
+                status: failed_status(&detail, None),
+                diagnostics: Vec::new(),
+                plan_command: None,
+                state_metadata: None,
+                result_kind: definition.result_kind,
+                presentation: None,
+            }
+        }
     };
     let formatted = format_dispatched_result(ctx, call, raw);
-    if definition.mutating && formatted.success {
+    if definition.mutating && formatted.succeeded() {
         ctx.bump_mutation();
     }
     Ok(formatted)
@@ -449,7 +478,7 @@ impl ToolPolicyGate<'_> {
         &self,
         call: &ToolCallEvent,
         metadata: Option<ToolMetadata>,
-    ) -> Option<ToolRunResult> {
+    ) -> Option<ToolExecution> {
         let metadata = metadata?;
         if !self.surface.has(&call.name) {
             let reason = self
@@ -466,6 +495,7 @@ impl ToolPolicyGate<'_> {
                     "Tool '{}' is unavailable in the resolved model tool surface{reason}.",
                     call.name
                 ),
+                ToolBlocker::ToolSurface,
             ));
         }
         if metadata.storm_exempt {
@@ -483,6 +513,7 @@ impl ToolPolicyGate<'_> {
                 call.name.clone(),
                 call.fields.clone(),
                 reason,
+                ToolBlocker::StormBreaker,
             )),
         }
     }
@@ -499,54 +530,73 @@ fn repair_tool_input(call: &mut ToolCallEvent) {
     }
 }
 
+fn failed_status(content: &str, exit_code: Option<i32>) -> ToolStatus {
+    let kind = crate::tools::metadata::classify_failure_kind(content, exit_code);
+    if kind == ToolFailureKind::Aborted && content.to_lowercase().contains("interrupt") {
+        ToolStatus::Interrupted
+    } else {
+        ToolStatus::Failed(kind)
+    }
+}
+
 fn dispatch_tool(
     ctx: &ToolContext,
     call: &ToolCallEvent,
     tool_fn: Option<&dyn ToolExec>,
-) -> RawToolResult {
+) -> ToolExecOutput {
     if let Some(t) = tool_fn {
         let metadata = t.metadata();
         let started = std::time::Instant::now();
         match t.execute(&call.input_json, ctx) {
-            Ok(outcome) => RawToolResult {
-                output: Ok(outcome.content),
-                is_bash: outcome.is_bash,
-                conv_content: outcome.conversation_content,
-                exit_code: outcome.exit_code,
-                wall_ms: Some(started.elapsed().as_millis()),
-                no_mutation: outcome.no_mutation,
-                memo_candidate: outcome.memo_candidate,
-                spawns_sub_agent: metadata.spawns_sub_agent,
-                success: outcome.success,
-                diagnostics: outcome.diagnostics,
-                plan_command: outcome.plan_command,
-                state_metadata: outcome.state_metadata,
-                result_kind: metadata.result_kind,
-                presentation: outcome.presentation,
-            },
-            Err(e) => RawToolResult {
-                output: Err(e),
-                is_bash: false,
-                conv_content: String::new(),
-                exit_code: None,
-                wall_ms: None,
-                no_mutation: false,
-                memo_candidate: None,
-                // A failed execute must never mark the call as spawning a
-                // sub-agent: the coordinator would launch a child with raw
-                // fields even though the executor rejected the input.
-                spawns_sub_agent: false,
-                success: false,
-                diagnostics: Vec::new(),
-                plan_command: None,
-                state_metadata: None,
-                result_kind: metadata.result_kind,
-                presentation: None,
-            },
+            Ok(outcome) => {
+                let status = if outcome.success {
+                    ToolStatus::Succeeded
+                } else {
+                    failed_status(&outcome.content, outcome.exit_code)
+                };
+                ToolExecOutput {
+                    content: outcome.content,
+                    is_bash: outcome.is_bash,
+                    conv_content: outcome.conversation_content,
+                    exit_code: outcome.exit_code,
+                    wall_ms: Some(started.elapsed().as_millis()),
+                    no_mutation: outcome.no_mutation,
+                    memo_candidate: outcome.memo_candidate,
+                    spawns_sub_agent: metadata.spawns_sub_agent,
+                    status,
+                    diagnostics: outcome.diagnostics,
+                    plan_command: outcome.plan_command,
+                    state_metadata: outcome.state_metadata,
+                    result_kind: metadata.result_kind,
+                    presentation: outcome.presentation,
+                }
+            }
+            Err(e) => {
+                let detail = e.to_string();
+                ToolExecOutput {
+                    content: format!("Error: tool execution failed: {detail}"),
+                    is_bash: false,
+                    conv_content: String::new(),
+                    exit_code: None,
+                    wall_ms: None,
+                    no_mutation: false,
+                    memo_candidate: None,
+                    // A failed execute must never mark the call as spawning a
+                    // sub-agent: the coordinator would launch a child with raw
+                    // fields even though the executor rejected the input.
+                    spawns_sub_agent: false,
+                    status: failed_status(&detail, None),
+                    diagnostics: Vec::new(),
+                    plan_command: None,
+                    state_metadata: None,
+                    result_kind: metadata.result_kind,
+                    presentation: None,
+                }
+            }
         }
     } else {
-        RawToolResult {
-            output: Err(anyhow::anyhow!("unknown tool: {}", call.name)),
+        ToolExecOutput {
+            content: format!("Error: tool execution failed: unknown tool: {}", call.name),
             is_bash: false,
             conv_content: String::new(),
             exit_code: None,
@@ -554,7 +604,7 @@ fn dispatch_tool(
             no_mutation: false,
             memo_candidate: None,
             spawns_sub_agent: false,
-            success: false,
+            status: ToolStatus::Failed(ToolFailureKind::Unknown),
             diagnostics: Vec::new(),
             plan_command: None,
             state_metadata: None,
@@ -567,10 +617,10 @@ fn dispatch_tool(
 fn format_dispatched_result(
     ctx: &ToolContext,
     call: &ToolCallEvent,
-    raw: RawToolResult,
-) -> ToolRunResult {
-    let RawToolResult {
-        output,
+    raw: ToolExecOutput,
+) -> ToolExecution {
+    let ToolExecOutput {
+        content: mut output,
         is_bash,
         mut conv_content,
         exit_code,
@@ -578,18 +628,15 @@ fn format_dispatched_result(
         no_mutation,
         memo_candidate,
         spawns_sub_agent,
-        success,
+        status,
         diagnostics,
         plan_command,
         state_metadata,
         result_kind,
         presentation,
     } = raw;
-    let mut output = match output {
-        Ok(v) => v,
-        Err(e) => format!("Error: tool execution failed: {e}"),
-    };
-    if !success && exit_code.is_none() && !output.starts_with("Error:") {
+    let success = status.is_success();
+    if !success && exit_code.is_none() {
         output = format!("Error: {output}");
     }
     if !diagnostics.is_empty() {
@@ -599,7 +646,6 @@ fn format_dispatched_result(
             output.push_str(&diagnostic);
         }
     }
-    // P0-B: exec metadata header (Exit code / Wall time) for command tools.
     if let Some(code) = exit_code {
         let mut header = format!("Exit code: {code}\n");
         if let Some(ms) = wall_ms {
@@ -623,7 +669,6 @@ fn format_dispatched_result(
     } else {
         None
     };
-    // A5: structured-file validity note for JSON/JSONL targets, so the model
     // notices immediately when an edit or write broke JSON syntax.
     let json_note = if success && (call.name == "Edit" || call.name == "Write") {
         json_validity_note(ctx, call)
@@ -637,14 +682,6 @@ fn format_dispatched_result(
     if let Some(note) = json_note {
         composed.push_str(&note);
     }
-    // Structured error code: classify the failure text once, before composed
-    // is moved into the finalization branch, so signals/logs/UI always route
-    // on a stable code rather than re-sniffing prose.
-    let error_code = if success {
-        None
-    } else {
-        crate::tools::metadata::classify_error_kind(&composed, exit_code)
-    };
     // Record the read memo only when the *final* composed output (content +
     // summary line + JSON note) fits the budget, so a later hit can never ask
     // the model to reuse content that was truncated or spilled.
@@ -717,7 +754,7 @@ fn format_dispatched_result(
             .map(|s| s == "true" || s == "1")
             .unwrap_or(false);
 
-    ToolRunResult {
+    ToolExecution {
         tool_use_id: call.id.clone(),
         tool_name: call.name.clone(),
         tool_args: call.fields.clone(),
@@ -728,8 +765,7 @@ fn format_dispatched_result(
         sub_agent_description,
         sub_agent_fork,
         exit_code,
-        success,
-        error_code,
+        status,
         result_kind,
         presentation,
         artifacts: formatted.artifacts,
@@ -865,8 +901,9 @@ pub(crate) fn blocked_tool_result(
     name: String,
     args: BTreeMap<String, String>,
     reason: String,
-) -> ToolRunResult {
-    ToolRunResult {
+    blocker: ToolBlocker,
+) -> ToolExecution {
+    ToolExecution {
         tool_use_id: id,
         tool_name: name,
         tool_args: args,
@@ -877,8 +914,7 @@ pub(crate) fn blocked_tool_result(
         sub_agent_description: None,
         sub_agent_fork: false,
         exit_code: None,
-        success: false,
-        error_code: crate::tools::metadata::classify_error_kind(&format!("Error: {reason}"), None),
+        status: ToolStatus::Blocked(blocker),
         result_kind: ToolResultKind::Text,
         presentation: None,
         artifacts: Vec::new(),
@@ -887,6 +923,18 @@ pub(crate) fn blocked_tool_result(
         needs_finalization: false,
         state_metadata: None,
     }
+}
+
+pub(crate) fn failed_tool_result(
+    id: String,
+    name: String,
+    args: BTreeMap<String, String>,
+    reason: String,
+) -> ToolExecution {
+    let mut result = blocked_tool_result(id, name, args, reason.clone(), ToolBlocker::ToolSurface);
+    result.status =
+        ToolStatus::Failed(crate::tools::metadata::classify_failure_kind(&reason, None));
+    result
 }
 
 fn resolve_summary_path(cwd: &Path, raw: &str) -> PathBuf {
@@ -973,6 +1021,7 @@ fn line_count(s: &[u8]) -> usize {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TruncationPolicy {
     Bytes(usize),
+    #[cfg(test)]
     Tokens(usize),
 }
 
@@ -982,6 +1031,7 @@ impl TruncationPolicy {
     fn byte_budget(&self) -> usize {
         match *self {
             Self::Bytes(bytes) => bytes,
+            #[cfg(test)]
             Self::Tokens(tokens) => tokens.saturating_mul(4),
         }
     }
@@ -1172,6 +1222,42 @@ mod tests {
     use crate::config::{ToolApprovalMode, ToolApprovalPolicy};
     use crate::context::ToolConfig;
     use crate::tools::approval::{ToolAuthorization, authorize_tool, denied_message};
+
+    #[tokio::test]
+    async fn successful_display_text_may_start_with_error_prefix() {
+        let shared = crate::regression::test_context_for_agent("runner-error-prefix-success")
+            .await
+            .unwrap();
+        let ctx = crate::context::ToolContext::from(shared.as_ref());
+        let call = ToolCallEvent {
+            name: "Grep".into(),
+            id: "call-error-prefix".into(),
+            input_json: serde_json::json!({}),
+            fields: BTreeMap::new(),
+            order: Vec::new(),
+        };
+        let result = format_dispatched_result(
+            &ctx,
+            &call,
+            ToolExecOutput {
+                content: "Error: this is literal file content".into(),
+                is_bash: false,
+                conv_content: String::new(),
+                exit_code: None,
+                wall_ms: None,
+                no_mutation: false,
+                memo_candidate: None,
+                spawns_sub_agent: false,
+                status: ToolStatus::Succeeded,
+                diagnostics: Vec::new(),
+                plan_command: None,
+                state_metadata: None,
+                result_kind: ToolResultKind::Search,
+                presentation: None,
+            },
+        );
+        assert_eq!(result.status, ToolStatus::Succeeded);
+    }
 
     #[test]
     fn format_tool_result_truncates_large() {

@@ -11,11 +11,8 @@
 ## 包内容
 
 - `mink::runtime` / `mink::prelude`：Rust 嵌入式入口，提供唯一 shutdown owner `AgentRuntime`、可克隆 `AgentRuntimeHandle`、异步 `EventSink`、流式事件和 turn outcome。
-- `mink::config`：与 CLI 共用的完整配置结构和解析辅助函数。
-- `mink::ui`：`Display` trait、结构化工具调用/结果 presentation 和状态快照协议。具体
-  REPL/TUI 渲染不在本包。
 - `mink::sdk_protocol`：Agent JSONL 协议类型和 SDK 适配。
-- `mink::sandbox`：进程级沙箱 re-exec 能力。
+- `mink::runtime::session`：只读 session 发现、读取与统一 usage 汇总。
 - `src/agent`、`src/tools`、`src/session`、`src/llm`：Mink 的主循环、工具、持久化和 LLM 流式客户端核心。
 
 ## 上下文与会话历史
@@ -46,7 +43,7 @@ revision 和稳定 ID 防止 stale write。
 
 ```toml
 [dependencies]
-mink = { package = "mink-core", version = "0.4.0", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.5.0", default-features = false, features = ["runtime"] }
 ```
 
 ```rust

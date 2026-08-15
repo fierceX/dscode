@@ -4,6 +4,7 @@
 //! 后续调用自动跳过注入直到冷却期结束。Abort 始终绕过冷却。
 
 /// 默认冷却轮数：注入后跳过多少次 `decide()` 调用再允许下一次注入。
+#[cfg(test)]
 pub const DEFAULT_COOLDOWN_TURNS: usize = 3;
 
 pub enum Decision {
@@ -20,7 +21,6 @@ pub enum RecoverySeverity {
 
 #[derive(Debug, Clone)]
 pub struct RecoveryDirective {
-    pub belief: f64,
     pub severity: RecoverySeverity,
 }
 
@@ -39,7 +39,7 @@ impl DecisionEngine {
     }
 
     /// 全参数构造（阈值与冷却来自 SignalConfig）。
-    pub fn from_config(s: &crate::config::SignalConfig) -> Self {
+    pub(crate) fn from_config(s: &crate::config::SignalConfig) -> Self {
         Self {
             abort_threshold: s.abort_threshold,
             warn_threshold: s.warn_threshold,
@@ -50,17 +50,16 @@ impl DecisionEngine {
     }
 
     /// 决策入口（兼容旧签名：假定存在硬信号且无软失败累计）。
+    #[cfg(test)]
     pub fn decide(&mut self, belief: f64) -> Decision {
         self.decide_with_signals(belief, 1, 0)
     }
 
-    /// 决策入口（SIGNAL_RESPONSE_REDESIGN S3c）。
     ///
     /// - `hard_signals` — 本批工具调用中硬信号的数量（ToolFailed/SafetyBlocked/
     ///   CompileError/TestFailure）。
     /// - `soft_failures` — 本用户输入内累计软失败次数（regex 嗅探类）。单次软失败
     ///   且信念仍在提醒区上方时不触发注入（记录不干预）；累计 >= 2 次软失败说明
-    ///   模式持续出现，参与决策（D1 修复）。
     ///
     /// 冷却逻辑：引擎内部维护 `cooldown_remaining` 计数器。
     /// 每次调用递减，>0 时跳过注入（但保留 Abort）。
@@ -91,14 +90,12 @@ impl DecisionEngine {
         if belief < self.warn_threshold {
             self.cooldown_remaining = self.cooldown_turns;
             return Decision::Inject(RecoveryDirective {
-                belief,
                 severity: RecoverySeverity::Warning,
             });
         }
         if belief < self.remind_threshold {
             self.cooldown_remaining = self.cooldown_turns;
             return Decision::Inject(RecoveryDirective {
-                belief,
                 severity: RecoverySeverity::Reminder,
             });
         }
@@ -111,6 +108,7 @@ impl DecisionEngine {
     }
 
     /// 当前剩余冷却轮数（用于调试和显示）。
+    #[cfg(test)]
     pub fn cooldown_remaining(&self) -> usize {
         self.cooldown_remaining
     }
@@ -146,7 +144,6 @@ mod tests {
         assert!(matches!(d, Decision::Inject(_)));
         if let Decision::Inject(directive) = d {
             assert_eq!(directive.severity, RecoverySeverity::Warning);
-            assert_eq!(directive.belief, 0.4);
         }
     }
 
@@ -215,7 +212,6 @@ mod tests {
         assert!(matches!(d, Decision::Inject(_)));
         if let Decision::Inject(directive) = d {
             assert_eq!(directive.severity, RecoverySeverity::Warning);
-            assert_eq!(directive.belief, 0.4);
         }
     }
 
@@ -228,9 +224,7 @@ mod tests {
     #[test]
     fn soft_only_signals_do_not_inject_above_warn_zone() {
         let mut de = DecisionEngine::new();
-        // 提醒区（0.65）且无硬信号、仅 1 次软失败：不响应（SIGNAL_RESPONSE_REDESIGN S3c）。
         assert!(matches!(de.decide_with_signals(0.65, 0, 1), Decision::None));
-        // 累计 >= 2 次软失败：即使无硬信号也注入（D1 修复）。
         let mut de = DecisionEngine::new();
         assert!(matches!(
             de.decide_with_signals(0.65, 0, 2),

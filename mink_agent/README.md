@@ -21,7 +21,7 @@ config = SandboxConfig(
     api_key="sk-...",                            # 或设置 DEEPSEEK_API_KEY 环境变量
     read_dirs=["/path/to/project/src"],           # agent 可读取的目录
     write_dirs=["/path/to/project/src"],          # agent 可写入的目录
-    signal_mode="full",                           # 可选："full" 启用信号系统，"off" 关闭
+    signal_policy="full",                           # off/evidence/state_ops/restart/full
     stream_events=True,                            # 可选：是否输出过程事件
 )
 
@@ -164,7 +164,7 @@ Rust core 会在 `conversation.jsonl` 中完整保留历史，并通过 `context
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `verbose` | `False` | 启用详细日志输出 |
-| `signal_mode` | `None`（实际默认 `full`） | 信号系统模式覆盖：`"full"` 启用信念跟踪、注入和恢复守卫；`"off"` 关闭信号提示词和运行时信号干预；`None` 继承 `MINK_SIGNAL_MODE` |
+| `signal_policy` | `None`（实际默认 `full`） | 信号策略：`off` / `evidence` / `state_ops` / `restart` / `full`；`None` 继承 `MINK_SIGNAL_POLICY` |
 | `stream_events` | `True` | 是否让 Rust 侧输出过程事件；设为 `False` 时仅输出最终 `final`，适合非流式长任务 |
 
 本地调试可以通过 `MINK_BINARY=/path/to/mink-core` 覆盖 SDK 使用的二进制。未设置时优先使用 wheel 内置二进制，然后查找 `PATH`。

@@ -58,7 +58,7 @@ from mink_agent import AgentSession, SandboxConfig
 session = AgentSession(SandboxConfig(
     api_key="sk-...",               # 或设置 DEEPSEEK_API_KEY 环境变量
     read_dirs=["src"],
-    signal_mode="full",             # "full" 启用信号系统，"off" 关闭
+    signal_policy="full",             # off/evidence/state_ops/restart/full
 ))
 result = session.run("scan this repo and summarize")
 print(result["text"])
@@ -69,7 +69,7 @@ session.close()
 
 ```toml
 [dependencies]
-mink = { package = "mink-core", version = "0.4.0", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.5.0", default-features = false, features = ["runtime"] }
 ```
 
 ```rust
@@ -107,7 +107,7 @@ async fn main() -> anyhow::Result<()> {
 
 - **OpenAI-compatible 默认后端** — 内置 DeepSeek / OpenAI 流式客户端，支持 reasoning、usage、工具调用和扩展参数（`openai_tool_choice`、`openai_extra_body`）
 - **可注入 LLM backend** — 实现 `mink::runtime::LlmBackend` trait，接入私有模型、内网网关、厂商 SDK 或非 HTTP transport
-- **信号驱动的信念系统** — 自动检测工具执行错误，低信念时注入修正提示并约束恢复首步；`MINK_SIGNAL_MODE=off` 可完全关闭
+- **信号驱动的信念系统** — 自动检测工具执行错误，低信念时注入修正提示并约束恢复首步；`MINK_SIGNAL_POLICY=off` 可完全关闭
 - **显式上下文压缩** — 百分比阈值、响应预留、热尾部和摘要输出预算全参数化；可选摘要输入降噪（过滤 thinking、压缩工具结果）
 - **三段维修流水线** — Scavenge（回收遗漏调用）→ Truncation（修复残缺消息）→ StormBreaker（抑制重复调用），自动闭环修复
 

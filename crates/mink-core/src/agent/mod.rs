@@ -7,5 +7,6 @@ pub mod prefix;
 pub mod recovery_policy;
 pub mod sub_coordinator;
 pub mod sub_executor;
+pub(crate) mod text;
 pub mod tool_signals;
 pub mod turn;

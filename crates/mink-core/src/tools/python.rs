@@ -49,23 +49,29 @@ fn execute_script_with_interrupt_in_dir(
     if let Some(cwd) = cwd {
         cmd.current_dir(cwd);
     }
-    crate::util::configure_child_process_group(&mut cmd);
+    crate::tools::process::configure_child_process_group(&mut cmd);
     let mut child = cmd
         .spawn()
         .map_err(|e| anyhow::anyhow!("Failed to start python3: {e}"))?;
 
-    let stdout_buf = crate::util::ProcessOutputBuffer::default();
-    let stderr_buf = crate::util::ProcessOutputBuffer::default();
+    let stdout_buf = crate::tools::process::ProcessOutputBuffer::default();
+    let stderr_buf = crate::tools::process::ProcessOutputBuffer::default();
     let mut readers = Vec::new();
     if let Some(stdout) = child.stdout.take() {
-        readers.push(crate::util::spawn_output_reader(stdout, stdout_buf.clone()));
+        readers.push(crate::tools::process::spawn_output_reader(
+            stdout,
+            stdout_buf.clone(),
+        ));
     }
     if let Some(stderr) = child.stderr.take() {
-        readers.push(crate::util::spawn_output_reader(stderr, stderr_buf.clone()));
+        readers.push(crate::tools::process::spawn_output_reader(
+            stderr,
+            stderr_buf.clone(),
+        ));
     }
 
     // Read output with timeout
-    let completion = crate::util::wait_child_with_output(
+    let completion = crate::tools::process::wait_child_with_output(
         &mut child,
         readers,
         timeout,

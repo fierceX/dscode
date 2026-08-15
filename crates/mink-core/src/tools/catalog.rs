@@ -258,7 +258,7 @@ pub(crate) fn validate_custom_tools(tools: &[crate::runtime::RegisteredCustomToo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
+    use crate::config::ResolvedConfig as Config;
     use std::sync::Arc;
 
     struct TestTool(crate::runtime::ToolDefinition);

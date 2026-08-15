@@ -4,12 +4,12 @@ use std::sync::Mutex;
 
 use super::client::{LlmBackend, LlmRequest, LlmResponseStream};
 
-pub struct MockLlmClient {
+pub struct MockLlmBackend {
     pub model_name: String,
     canned_events: Mutex<std::vec::IntoIter<Vec<Result<Event>>>>,
 }
 
-impl MockLlmClient {
+impl MockLlmBackend {
     pub fn new(model: &str, sequences: Vec<Vec<Result<Event>>>) -> Self {
         Self {
             model_name: model.to_string(),
@@ -19,7 +19,7 @@ impl MockLlmClient {
 }
 
 #[async_trait::async_trait]
-impl LlmBackend for MockLlmClient {
+impl LlmBackend for MockLlmBackend {
     fn name(&self) -> &str {
         "mock"
     }
@@ -41,7 +41,7 @@ mod tests {
 
     #[tokio::test]
     async fn mock_empty_sequence() {
-        let client = MockLlmClient::new("test-model", vec![vec![]]);
+        let client = MockLlmBackend::new("test-model", vec![vec![]]);
         assert_eq!(client.model_name, "test-model");
     }
 
@@ -55,7 +55,7 @@ mod tests {
                 reason: "end_turn".into(),
             })),
         ];
-        let client = MockLlmClient::new("m", vec![events]);
+        let client = MockLlmBackend::new("m", vec![events]);
         assert_eq!(client.model_name, "m");
     }
 }

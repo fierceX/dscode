@@ -91,6 +91,7 @@ function seedState(summary: SessionSummary): SessionState {
   state.cacheReadTokens = summary.cache_read_tokens ?? 0;
   state.contextTokens = summary.last_context_tokens ?? state.tokensIn;
   state.costMicros = Math.round((summary.cost_nano_cny ?? 0) / 1000);
+  state.unpricedRequests = summary.unpriced_requests ?? 0;
   state.desynced = true;
   return state;
 }

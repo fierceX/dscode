@@ -293,17 +293,7 @@ fn format_result_summary(content: &str) -> String {
     } else {
         content.lines().count().max(1)
     };
-    let status = if content.lines().any(|line| {
-        let line = line.trim();
-        line.starts_with("Error:")
-            || line.starts_with("Process completed with exit code ")
-            || line.starts_with("Python script exited with code ")
-    }) {
-        "error"
-    } else {
-        "ok"
-    };
-    format!("{status} - {line_count} lines")
+    format!("{line_count} lines")
 }
 
 fn primary_tool_arg(input: Option<&Value>) -> String {

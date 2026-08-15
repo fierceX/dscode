@@ -27,27 +27,6 @@ impl<'a> LlmModelTarget<'a> {
     }
 }
 
-#[async_trait::async_trait]
-pub trait LlmClient: Send + Sync {
-    fn model(&self) -> &str;
-    fn model_alias(&self) -> Option<&str> {
-        None
-    }
-    fn model_label(&self) -> &str {
-        self.model_alias().unwrap_or_else(|| self.model())
-    }
-    fn model_target(&self) -> LlmModelTarget<'_> {
-        LlmModelTarget::new(self.model(), self.model_alias())
-    }
-    async fn stream(
-        &self,
-        ctx: &AgentSharedContext,
-        messages_json: &[serde_json::Value],
-        tools_json: &[serde_json::Value],
-        system_prompt: &str,
-    ) -> Result<Box<dyn futures::Stream<Item = Result<Event>> + Unpin + Send>>;
-}
-
 pub type LlmEvent = Event;
 pub type LlmTextEvent = crate::protocol::TextEvent;
 pub type LlmThinkingEvent = crate::protocol::ThinkingEvent;
@@ -116,6 +95,16 @@ pub enum TokenParamKind {
     MaxCompletionTokens,
 }
 
+impl TokenParamKind {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "max_tokens" | "max-tokens" | "max_tokens_param" => Some(Self::MaxTokens),
+            "max_completion_tokens" | "max-completion-tokens" => Some(Self::MaxCompletionTokens),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct OpenAiCompatibleOptions {
     pub send_reasoning_effort: bool,
@@ -165,13 +154,7 @@ impl OpenAiCompatibleBackend {
         self
     }
 
-    pub fn from_config(config: &crate::config::Config) -> Self {
-        let token_param = match config.openai_token_param {
-            crate::config::OpenAiTokenParamConfig::MaxTokens => TokenParamKind::MaxTokens,
-            crate::config::OpenAiTokenParamConfig::MaxCompletionTokens => {
-                TokenParamKind::MaxCompletionTokens
-            }
-        };
+    pub fn from_config(config: &crate::config::ResolvedConfig) -> Self {
         let reasoning_effort = config
             .openai_reasoning_effort
             .as_deref()
@@ -188,7 +171,7 @@ impl OpenAiCompatibleBackend {
             send_reasoning_effort: reasoning_effort.is_some(),
             reasoning_effort,
             include_usage: config.openai_include_usage,
-            token_param,
+            token_param: config.openai_token_param,
             parallel_tool_calls: None,
         })
         .with_extra_body(config.openai_extra_body.clone())
@@ -235,7 +218,7 @@ impl LlmBackend for OpenAiCompatibleBackend {
         }
 
         let (resp, attempt_count) = client
-            .send_body_with_retry(request.display.as_ref(), body, &request.cancel)
+            .send_with_retry(request.display.as_ref(), body, &request.cancel)
             .await
             .map_err(|failure| LlmRequestFailure {
                 attempt_count: failure.attempt_count,
@@ -248,26 +231,6 @@ impl LlmBackend for OpenAiCompatibleBackend {
             events: Box::pin(SseEventStream { rx, cancel }),
             attempt_count,
         })
-    }
-}
-
-pub struct BackendLlmClient {
-    backend: Arc<dyn LlmBackend>,
-    model_name: String,
-    model_alias: Option<String>,
-}
-
-impl BackendLlmClient {
-    pub fn new(
-        backend: Arc<dyn LlmBackend>,
-        model_name: impl Into<String>,
-        model_alias: Option<String>,
-    ) -> Self {
-        Self {
-            backend,
-            model_name: model_name.into(),
-            model_alias,
-        }
     }
 }
 
@@ -377,26 +340,7 @@ impl AsyncLlClient {
         });
     }
 
-    pub async fn send_with_retry(
-        &self,
-        ctx: &AgentSharedContext,
-        body: Vec<u8>,
-    ) -> Result<reqwest::Response> {
-        self.send_with_retry_counted(ctx, body)
-            .await
-            .map(|(response, _)| response)
-            .map_err(|failure| failure.error)
-    }
-
-    async fn send_with_retry_counted(
-        &self,
-        ctx: &AgentSharedContext,
-        body: Vec<u8>,
-    ) -> std::result::Result<(reqwest::Response, u32), SendFailure> {
-        self.send_body_with_retry(ctx.display.as_ref(), body, &ctx.cancel)
-            .await
-    }
-    async fn send_body_with_retry(
+    async fn send_with_retry(
         &self,
         display: &dyn crate::ui::Display,
         body: Vec<u8>,
@@ -491,69 +435,59 @@ impl AsyncLlClient {
     }
 }
 
-#[async_trait::async_trait]
-impl LlmClient for BackendLlmClient {
-    fn model(&self) -> &str {
-        &self.model_name
-    }
-
-    fn model_alias(&self) -> Option<&str> {
-        self.model_alias.as_deref()
-    }
-
-    async fn stream(
-        &self,
-        ctx: &AgentSharedContext,
-        messages_json: &[serde_json::Value],
-        tools_json: &[serde_json::Value],
-        system_prompt: &str,
-    ) -> Result<Box<dyn futures::Stream<Item = Result<Event>> + Unpin + Send>> {
-        let purpose = if ctx.is_sub_agent {
-            LlmPurpose::SubAgent {
-                session_id: ctx.config.session_id.clone(),
-            }
+pub(crate) async fn stream_backend(
+    backend: &Arc<dyn LlmBackend>,
+    ctx: &AgentSharedContext,
+    model_name: &str,
+    model_alias: Option<&str>,
+    messages_json: &[serde_json::Value],
+    tools_json: &[serde_json::Value],
+    system_prompt: &str,
+) -> Result<LlmEventStream> {
+    let purpose = if ctx.is_sub_agent {
+        LlmPurpose::SubAgent {
+            session_id: ctx.config.session_id.clone(),
+        }
+    } else {
+        LlmPurpose::Agent
+    };
+    let capture = ctx.usage.capture(
+        ctx.usage_scope(if ctx.is_sub_agent {
+            UsageKind::SubAgent
         } else {
-            LlmPurpose::Agent
-        };
-        let capture = ctx.usage.capture(
-            ctx.usage_scope(if ctx.is_sub_agent {
-                UsageKind::SubAgent
-            } else {
-                UsageKind::Agent
-            }),
-            self.model_name.clone(),
-        );
-        let response = match self
-            .backend
-            .stream(LlmRequest {
-                purpose,
-                model: self.model_name.clone(),
-                model_alias: self.model_alias.clone(),
-                api_url: ctx.api_url.clone(),
-                api_key: ctx.api_key().to_string(),
-                system_prompt: system_prompt.to_string(),
-                messages: messages_json.to_vec(),
-                tools: tools_json.to_vec(),
-                max_tokens: crate::session::compaction::effective_max_tokens(&ctx.config),
-                cancel: ctx.cancel.clone(),
-                verbose: ctx.verbose(),
-                display: ctx.display.clone(),
-            })
-            .await
-        {
-            Ok(response) => response,
-            Err(error) => {
-                let attempt_count = request_failure_attempt_count(&error);
-                record_unreported(&capture, attempt_count, format!("request_failed: {error}"));
-                return Err(error);
-            }
-        };
-        Ok(Box::new(MeteredStream::new(
-            response.events,
-            capture,
-            response.attempt_count,
-        )))
-    }
+            UsageKind::Agent
+        }),
+        model_name.to_string(),
+    );
+    let response = match backend
+        .stream(LlmRequest {
+            purpose,
+            model: model_name.to_string(),
+            model_alias: model_alias.map(str::to_string),
+            api_url: ctx.api_url.clone(),
+            api_key: ctx.api_key().to_string(),
+            system_prompt: system_prompt.to_string(),
+            messages: messages_json.to_vec(),
+            tools: tools_json.to_vec(),
+            max_tokens: crate::session::compaction::effective_max_tokens(&ctx.config),
+            cancel: ctx.cancel.clone(),
+            verbose: ctx.verbose(),
+            display: ctx.display.clone(),
+        })
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            let attempt_count = request_failure_attempt_count(&error);
+            record_unreported(&capture, attempt_count, format!("request_failed: {error}"));
+            return Err(error);
+        }
+    };
+    Ok(Box::pin(MeteredStream::new(
+        response.events,
+        capture,
+        response.attempt_count,
+    )))
 }
 
 fn is_fatal_parser_error(e: &anyhow::Error) -> bool {
@@ -683,7 +617,7 @@ impl futures::Stream for SseEventStream {
 mod tests {
     use super::*;
     use crate::cancel::CancellationToken;
-    use crate::config::{Config, OutputFormat};
+    use crate::config::{OutputFormat, ResolvedConfig as Config};
     use crate::context::{AgentSharedContext, ToolConfig};
     use crate::session::compaction::CompactionEngine;
     use crate::session::paths;
@@ -711,9 +645,10 @@ mod tests {
     impl Display for TestDisplay {
         fn render_thinking(&self, _content: &str) {}
         fn render_text(&self, _content: &str) {}
-        fn render_tool_call(&self, _name: &str, _summary: &str) {}
-        fn render_tool_result(&self, _tool_name: &str, _content_preview: &str) {}
-        fn render_stop(&self) {}
+        fn render_tool_call(&self, _call: &crate::ui::ToolCallDisplay<'_>) {}
+        fn render_tool_result(&self, _result: &crate::ui::PresentedToolResultDisplay<'_>) {}
+        fn render_stop(&self, _reason: &str) {}
+        fn render_signal(&self, _kind: &str, _severity: f64, _message: &str) {}
         fn render_error(&self, message: &str) {
             self.messages
                 .lock()
@@ -726,6 +661,16 @@ mod tests {
         }
         fn render_title_update(&self, _model: &str, _stats: &StatsSnapshot) {}
         fn render_sub_agent_status(&self, _sid: &str, _st: &str, _it: u64, _ot: u64) {}
+        fn render_sub_agent_output(
+            &self,
+            _sid: &str,
+            _st: &str,
+            _th: &str,
+            _tx: &str,
+            _it: u64,
+            _ot: u64,
+        ) {
+        }
         fn render_prompt(&self) {}
         fn render_clear_line(&self) {}
     }
@@ -741,9 +686,14 @@ mod tests {
         let ctx = test_context("client-retry", &api_url).await?;
         let client = AsyncLlClient::new("secret-key", &api_url)?;
 
-        let resp = client
-            .send_with_retry(&ctx, br#"{"ping":true}"#.to_vec())
-            .await?;
+        let (resp, _) = client
+            .send_with_retry(
+                ctx.display.as_ref(),
+                br#"{"ping":true}"#.to_vec(),
+                &ctx.cancel,
+            )
+            .await
+            .map_err(|failure| failure.error)?;
         assert_eq!(resp.status().as_u16(), 200);
         assert_eq!(seen.load(Ordering::SeqCst), 2);
         Ok(())
@@ -758,9 +708,14 @@ mod tests {
         let client = AsyncLlClient::new("secret-key", &api_url)?;
 
         let err = client
-            .send_with_retry(&ctx, br#"{"ping":true}"#.to_vec())
+            .send_with_retry(
+                ctx.display.as_ref(),
+                br#"{"ping":true}"#.to_vec(),
+                &ctx.cancel,
+            )
             .await
             .unwrap_err()
+            .error
             .to_string();
         assert!(err.contains("HTTP 400"), "{err}");
         assert_eq!(seen.load(Ordering::SeqCst), 1);
@@ -781,9 +736,14 @@ mod tests {
 
         let start = std::time::Instant::now();
         let err = client
-            .send_with_retry(&ctx, br#"{"ping":true}"#.to_vec())
+            .send_with_retry(
+                ctx.display.as_ref(),
+                br#"{"ping":true}"#.to_vec(),
+                &ctx.cancel,
+            )
             .await
             .unwrap_err()
+            .error
             .to_string();
         // Uncapped, retry-after 10000 would park each attempt for hours;
         // capped at 10s the failure arrives after ~2 sleeps + the 20s budget.
@@ -806,10 +766,9 @@ mod tests {
         let ctx_clone = ctx.clone();
         let (tx, rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
-            // Bypass ctx.cancel (not cancelled) to exercise the param wiring:
-            // send_body_with_retry must select on the token it receives.
+            // Bypass ctx.cancel (not cancelled) to exercise the parameter wiring.
             let result = client
-                .send_body_with_retry(
+                .send_with_retry(
                     ctx_clone.display.as_ref(),
                     br#"{"ping":true}"#.to_vec(),
                     &cancel,
@@ -915,17 +874,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn backend_client_records_unreported_usage_when_request_fails() -> anyhow::Result<()> {
+    async fn backend_request_records_unreported_usage_when_request_fails() -> anyhow::Result<()> {
         let ctx = test_context("backend-request-failed", "https://example.invalid/v1").await?;
-        let client = BackendLlmClient::new(Arc::new(FailingBackend), "custom-model", None);
-        let result = client
-            .stream(
-                &ctx,
-                &[json!({"role":"user","content":"ping"})],
-                &[],
-                "system",
-            )
-            .await;
+        let result = stream_backend(
+            &(Arc::new(FailingBackend) as Arc<dyn LlmBackend>),
+            &ctx,
+            "custom-model",
+            None,
+            &[json!({"role":"user","content":"ping"})],
+            &[],
+            "system",
+        )
+        .await;
         let err = match result {
             Ok(_) => anyhow::bail!("expected backend failure"),
             Err(error) => error.to_string(),
@@ -952,17 +912,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn backend_client_preserves_request_failure_attempt_count() -> anyhow::Result<()> {
+    async fn backend_request_preserves_request_failure_attempt_count() -> anyhow::Result<()> {
         let ctx = test_context("backend-attempt-failed", "https://example.invalid/v1").await?;
-        let client = BackendLlmClient::new(Arc::new(AttemptFailingBackend), "custom-model", None);
-        let result = client
-            .stream(
-                &ctx,
-                &[json!({"role":"user","content":"ping"})],
-                &[],
-                "system",
-            )
-            .await;
+        let result = stream_backend(
+            &(Arc::new(AttemptFailingBackend) as Arc<dyn LlmBackend>),
+            &ctx,
+            "custom-model",
+            None,
+            &[json!({"role":"user","content":"ping"})],
+            &[],
+            "system",
+        )
+        .await;
         let err = match result {
             Ok(_) => anyhow::bail!("expected backend failure"),
             Err(error) => error.to_string(),

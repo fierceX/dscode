@@ -20,7 +20,6 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
         session,
         session_layout,
         first_prompt,
-        display,
         event_sink,
         sub_stream_tx,
         read_only_fs,
@@ -34,6 +33,7 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
     } = config;
 
     crate::config::validate_runtime_config(&config)?;
+    crate::tools::catalog::validate_tool_config(&crate::context::ToolConfig::from_config(&config))?;
     let custom_tools = crate::runtime::tools::freeze_custom_tools(custom_tools);
     crate::tools::catalog::validate_custom_tools(&custom_tools)?;
 
@@ -53,7 +53,7 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
 
     let cancel = CancellationToken::new();
     let event_dispatcher = event_sink.map(EventDispatcher::new);
-    let event_display = Arc::new(EventDisplay::new(display, event_dispatcher));
+    let event_display = Arc::new(EventDisplay::new(event_dispatcher));
     let display: Arc<dyn crate::ui::Display> = event_display.clone();
     let interrupt = Arc::new(AtomicBool::new(false));
     let api_url_str = api_url(&config);
@@ -214,9 +214,10 @@ mod tests {
     use super::*;
     use crate::capabilities::skills::{LoadContext, LoadedSkill, SkillCapability, SkillProvider};
     use crate::capabilities::{CapabilityExposure, SourceLevel, SourceMeta};
-    use crate::config::Config;
+    use crate::config::ResolvedConfig as Config;
     use crate::resources::{
-        Resource, ResourceContentType, ResourceHandler, ResourceMetadata, ResourceRequest,
+        ResourceHandler,
+        router::{Resource, ResourceContentType, ResourceMetadata, ResourceRequest},
     };
     use crate::runtime::{
         AgentEvent, AgentOptions, AgentTool, EventSink, SkillDiscoveryPolicy, ToolDefinition,
@@ -237,7 +238,7 @@ mod tests {
     }
 
     fn read_skill_resource(url: &str, ctx: &crate::context::ToolContext) -> anyhow::Result<String> {
-        let selection = crate::resources::split_read_path_selection(url)?;
+        let selection = crate::resources::selector::split_read_path_selection(url)?;
         ctx.resource_router
             .resolve(&selection, ctx)
             .map(|resource| resource.content)
@@ -659,21 +660,23 @@ mod tests {
             r#"{
                 "prompt":"hi",
                 "options":{
-                    "skills":["company-policy"],
-                    "inline_skills":[{
-                        "name":"company-policy",
-                        "description":"Company policy",
-                        "content":"private policy",
-                        "exposure":"model_addressable"
-                    }],
-                    "skill_discovery_policy":"runtime_only"
+                    "tools":{
+                        "skills":["company-policy"],
+                        "inline_skills":[{
+                            "name":"company-policy",
+                            "description":"Company policy",
+                            "content":"private policy",
+                            "exposure":"model_addressable"
+                        }],
+                        "skill_discovery_policy":"runtime_only"
+                    }
                 }
             }"#,
         )
         .unwrap();
         crate::sdk_protocol::validate_sdk_request(&req).unwrap();
         let mut runtime_config = AgentOptions::new(&home, &cwd).into_runtime_config();
-        runtime_config.config.skills = req.options.skills.clone().unwrap();
+        runtime_config.config.skills = req.options.tools.skills.clone().unwrap();
         runtime_config.runtime_skills = runtime_skills_from_sdk_request(&req);
         runtime_config.skill_discovery_policy =
             skill_discovery_policy_from_sdk_request(&req).unwrap();
@@ -836,7 +839,8 @@ mod tests {
 
         let runtime = build_runtime(runtime_config).await.unwrap();
         let tool_ctx = crate::context::ToolContext::from(&*runtime.ctx);
-        let selection = crate::resources::split_read_path_selection("kb://tenant/doc").unwrap();
+        let selection =
+            crate::resources::selector::split_read_path_selection("kb://tenant/doc").unwrap();
         let resource = runtime
             .ctx
             .resource_router
@@ -1015,7 +1019,7 @@ mod tests {
         tokio::fs::create_dir_all(&cwd).await.unwrap();
         let sink = Arc::new(RecordingSink::default());
 
-        let mock = crate::llm::mock::MockLlmClient::new(
+        let mock = crate::llm::mock::MockLlmBackend::new(
             "flash",
             vec![
                 vec![
@@ -1111,9 +1115,9 @@ mod tests {
     // ── Mock LLM runtime integration tests ──────────────────────────
 
     /// Build a minimal mock LLM that returns Text + Stop for each call.
-    fn mock_llm_hello() -> crate::llm::mock::MockLlmClient {
+    fn mock_llm_hello() -> crate::llm::mock::MockLlmBackend {
         use crate::protocol::{Event, StopEvent, TextEvent};
-        crate::llm::mock::MockLlmClient::new(
+        crate::llm::mock::MockLlmBackend::new(
             "flash",
             vec![
                 vec![
@@ -1144,9 +1148,9 @@ mod tests {
         )
     }
 
-    fn mock_llm_with_usage() -> crate::llm::mock::MockLlmClient {
+    fn mock_llm_with_usage() -> crate::llm::mock::MockLlmBackend {
         use crate::protocol::{Event, StopEvent, TextEvent, UsageEvent};
-        crate::llm::mock::MockLlmClient::new(
+        crate::llm::mock::MockLlmBackend::new(
             "flash",
             vec![vec![
                 Ok(Event::Text(TextEvent {
@@ -1168,7 +1172,7 @@ mod tests {
     fn runtime_config_with_mock(
         home: &std::path::Path,
         cwd: &std::path::Path,
-        mock: crate::llm::mock::MockLlmClient,
+        mock: crate::llm::mock::MockLlmBackend,
     ) -> AgentRuntimeConfig {
         let cfg = Config {
             model: "flash".into(),
@@ -1406,7 +1410,7 @@ mod tests {
         assert_eq!(outcome.usage.tokens.input_tokens, 100);
         assert_eq!(outcome.usage.tokens.cache_read_tokens, 40);
         assert_eq!(outcome.usage.tokens.output_tokens, 20);
-        assert_eq!(outcome.usage.cost_nano_cny, 140_800);
+        assert_eq!(outcome.usage.cost.known_nano_cny, 140_800);
         assert_eq!(
             outcome.usage_records[0].billing_turn_id,
             outcome.billing_turn_id
@@ -1774,7 +1778,7 @@ mod tests {
     /// A mock LLM whose first `stream()` call returns a never-yielding
     /// stream (for testing interrupt), and subsequent calls return a normal
     /// Text+Stop (for testing recovery).
-    struct InterruptTestMockLlmClient {
+    struct InterruptTestMockLlmBackend {
         calls: std::sync::Mutex<u32>,
     }
 
@@ -1812,7 +1816,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl crate::llm::client::LlmBackend for InterruptTestMockLlmClient {
+    impl crate::llm::client::LlmBackend for InterruptTestMockLlmBackend {
         fn name(&self) -> &str {
             "interrupt-test"
         }
@@ -1858,7 +1862,7 @@ mod tests {
         };
         let mut rt_config =
             AgentRuntimeConfig::from_config(cfg, home.to_path_buf(), cwd.to_path_buf());
-        rt_config.llm_backend = Some(Arc::new(InterruptTestMockLlmClient {
+        rt_config.llm_backend = Some(Arc::new(InterruptTestMockLlmBackend {
             calls: std::sync::Mutex::new(0),
         }));
         rt_config
@@ -1980,12 +1984,12 @@ mod tests {
 
     /// Mock LLM that exercises the full tool-execution pipeline:
     /// first turn returns a Bash tool call, second turn returns Text+Stop.
-    fn mock_llm_tool_use() -> crate::llm::mock::MockLlmClient {
+    fn mock_llm_tool_use() -> crate::llm::mock::MockLlmBackend {
         use crate::protocol::{Event, StopEvent, TextEvent, ToolCallEvent};
         use serde_json::json;
         let mut fields = std::collections::BTreeMap::new();
         fields.insert("command".into(), "echo hello".into());
-        crate::llm::mock::MockLlmClient::new(
+        crate::llm::mock::MockLlmBackend::new(
             "flash",
             vec![
                 // First LLM call: request a Bash tool execution
@@ -2162,9 +2166,9 @@ mod tests {
         }
     }
 
-    fn mock_llm_single_tool(name: &str) -> crate::llm::mock::MockLlmClient {
+    fn mock_llm_single_tool(name: &str) -> crate::llm::mock::MockLlmBackend {
         use crate::protocol::{Event, StopEvent, TextEvent, ToolCallEvent};
-        crate::llm::mock::MockLlmClient::new(
+        crate::llm::mock::MockLlmBackend::new(
             "flash",
             vec![
                 vec![
@@ -2191,11 +2195,11 @@ mod tests {
         )
     }
 
-    fn mock_llm_custom_tool_use() -> crate::llm::mock::MockLlmClient {
+    fn mock_llm_custom_tool_use() -> crate::llm::mock::MockLlmBackend {
         use crate::protocol::{Event, StopEvent, TextEvent, ToolCallEvent};
         let mut fields = std::collections::BTreeMap::new();
         fields.insert("text".into(), "hello".into());
-        crate::llm::mock::MockLlmClient::new(
+        crate::llm::mock::MockLlmBackend::new(
             "flash",
             vec![
                 vec![
@@ -2242,22 +2246,22 @@ mod tests {
                 tool_use_id,
                 tool_name,
                 content,
-                success,
+                status,
                 result_kind,
                 ..
             } = event.kind
             {
-                result = Some((tool_use_id, tool_name, content, success, result_kind));
+                result = Some((tool_use_id, tool_name, content, status, result_kind));
             }
         }
         assert!(sequences.windows(2).all(|pair| pair[0] < pair[1]));
         let outcome = stream.outcome().await.unwrap();
         assert!(outcome.text.contains("custom done"));
-        let (tool_use_id, tool_name, content, success, result_kind) = result.unwrap();
+        let (tool_use_id, tool_name, content, status, result_kind) = result.unwrap();
         assert_eq!(tool_use_id.as_deref(), Some("call_echo_1"));
         assert_eq!(tool_name, "AsyncEcho");
         assert!(content.contains("echo:hello@"));
-        assert!(success);
+        assert!(status.is_success());
         assert_eq!(result_kind, crate::tools::metadata::ToolResultKind::Text);
 
         runtime.shutdown().await.unwrap();
@@ -2379,7 +2383,7 @@ mod tests {
         let mut config = runtime_config_with_mock(
             &home,
             &cwd,
-            crate::llm::mock::MockLlmClient::new(
+            crate::llm::mock::MockLlmBackend::new(
                 "flash",
                 vec![
                     vec![
@@ -2423,16 +2427,16 @@ mod tests {
         let mut timeout_result = None;
         while let Some(event) = stream.recv().await {
             if let crate::runtime::AgentEventKind::ToolResult {
-                content, success, ..
+                content, status, ..
             } = event.kind
             {
-                timeout_result = Some((content, success));
+                timeout_result = Some((content, status));
             }
         }
         let timed_out = stream.outcome().await.unwrap();
         assert_eq!(timed_out.status, crate::agent::orchestrator::TurnStatus::Ok);
-        let (content, success) = timeout_result.expect("timeout tool result");
-        assert!(!success);
+        let (content, status) = timeout_result.expect("timeout tool result");
+        assert!(!status.is_success());
         assert!(content.contains("timed out after 5s"), "{content}");
         let next = runtime.run_turn("next").await.unwrap();
         assert_eq!(next.status, crate::agent::orchestrator::TurnStatus::Ok);

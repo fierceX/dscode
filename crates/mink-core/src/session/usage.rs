@@ -1,4 +1,3 @@
-use crate::config::ModelTier;
 use crate::protocol::UsageEvent;
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
@@ -92,41 +91,51 @@ pub struct UsageRecord {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageCost {
+    pub known_nano_cny: u64,
+    pub unpriced_requests: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UsageSummary {
     pub request_count: u64,
     pub reported_request_count: u64,
     pub unreported_request_count: u64,
     pub attempt_count: u64,
     pub tokens: TokenUsage,
-    pub cost_nano_cny: u64,
+    pub cost: UsageCost,
 }
 
 impl UsageSummary {
     pub fn from_records(records: &[UsageRecord]) -> Self {
         let mut summary = Self::default();
         for record in records {
-            summary.request_count = summary.request_count.saturating_add(1);
-            summary.attempt_count = summary
-                .attempt_count
-                .saturating_add(u64::from(record.attempt_count));
-            match record.status {
-                UsageStatus::Reported => {
-                    summary.reported_request_count =
-                        summary.reported_request_count.saturating_add(1);
-                }
-                UsageStatus::Unreported => {
-                    summary.unreported_request_count =
-                        summary.unreported_request_count.saturating_add(1);
-                }
-            }
-            if let Some(tokens) = &record.tokens {
-                summary.tokens.add_assign(tokens);
-            }
-            summary.cost_nano_cny = summary
-                .cost_nano_cny
-                .saturating_add(record.cost_nano_cny.unwrap_or_default());
+            summary.add_record(record);
         }
         summary
+    }
+
+    fn add_record(&mut self, record: &UsageRecord) {
+        self.request_count = self.request_count.saturating_add(1);
+        self.attempt_count = self
+            .attempt_count
+            .saturating_add(u64::from(record.attempt_count));
+        match record.status {
+            UsageStatus::Reported => {
+                self.reported_request_count = self.reported_request_count.saturating_add(1);
+            }
+            UsageStatus::Unreported => {
+                self.unreported_request_count = self.unreported_request_count.saturating_add(1);
+            }
+        }
+        if let Some(tokens) = &record.tokens {
+            self.tokens.add_assign(tokens);
+        }
+        if let Some(cost) = record.cost_nano_cny {
+            self.cost.known_nano_cny = self.cost.known_nano_cny.saturating_add(cost);
+        } else if record.status == UsageStatus::Reported && record.tokens.is_some() {
+            self.cost.unpriced_requests = self.cost.unpriced_requests.saturating_add(1);
+        }
     }
 }
 
@@ -145,14 +154,19 @@ pub struct UsageJournal {
     path: PathBuf,
     write_lock: Mutex<()>,
     active_turn: Mutex<Option<ActiveTurn>>,
+    summary: Mutex<UsageSummary>,
 }
 
 impl UsageJournal {
     pub fn new(path: PathBuf) -> Arc<Self> {
+        let summary = read_records(&path)
+            .map(|records| UsageSummary::from_records(&records))
+            .unwrap_or_default();
         Arc::new(Self {
             path,
             write_lock: Mutex::new(()),
             active_turn: Mutex::new(None),
+            summary: Mutex::new(summary),
         })
     }
 
@@ -209,6 +223,13 @@ impl UsageJournal {
         read_records(&self.path)
     }
 
+    pub fn summary(&self) -> UsageSummary {
+        self.summary
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -231,6 +252,11 @@ impl UsageJournal {
         serde_json::to_writer(&mut file, record)?;
         writeln!(file)?;
         file.flush()?;
+        let mut summary = self
+            .summary
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        summary.add_record(record);
         Ok(())
     }
 }
@@ -250,7 +276,7 @@ impl UsageCapture {
             attempt_count,
             UsageStatus::Reported,
             Some(tokens.clone()),
-            Some(price_usage(&self.model, &tokens)?),
+            PricingCatalog::price(&self.model, &tokens)?,
             None,
         );
         self.journal.append(&record)?;
@@ -294,7 +320,7 @@ impl UsageCapture {
     }
 }
 
-fn read_records(path: &Path) -> Result<Vec<UsageRecord>> {
+pub(crate) fn read_records(path: &Path) -> Result<Vec<UsageRecord>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
@@ -314,35 +340,45 @@ fn read_records(path: &Path) -> Result<Vec<UsageRecord>> {
     Ok(records)
 }
 
-fn price_usage(model: &str, tokens: &TokenUsage) -> Result<u64> {
-    let Ok(tier) = ModelTier::parse(model) else {
-        return Ok(0);
-    };
-    let input_nano = (tier.price_input_per_m() * 1000.0).round() as u64;
-    let output_nano = (tier.price_output_per_m() * 1000.0).round() as u64;
-    let cache_read_nano = (tier.price_cache_read_per_m() * 1000.0).round() as u64;
-    tokens
-        .input_tokens
-        .checked_mul(input_nano)
-        .and_then(|value| {
-            tokens
-                .cache_creation_tokens
-                .checked_mul(input_nano)
-                .and_then(|cache| value.checked_add(cache))
-        })
-        .and_then(|value| {
-            tokens
-                .cache_read_tokens
-                .checked_mul(cache_read_nano)
-                .and_then(|cache| value.checked_add(cache))
-        })
-        .and_then(|value| {
-            tokens
-                .output_tokens
-                .checked_mul(output_nano)
-                .and_then(|output| value.checked_add(output))
-        })
-        .ok_or_else(|| anyhow!("usage cost overflow"))
+pub struct PricingCatalog;
+
+impl PricingCatalog {
+    fn rates(model: &str) -> Option<(u64, u64, u64)> {
+        match model.to_ascii_lowercase().as_str() {
+            "flash" | "deepseek-v4-flash" => Some((1_000, 2_000, 20)),
+            "pro" | "deepseek-v4-pro" => Some((3_000, 6_000, 25)),
+            _ => None,
+        }
+    }
+
+    pub fn price(model: &str, tokens: &TokenUsage) -> Result<Option<u64>> {
+        let Some((input_nano, output_nano, cache_read_nano)) = Self::rates(model) else {
+            return Ok(None);
+        };
+        tokens
+            .input_tokens
+            .checked_mul(input_nano)
+            .and_then(|value| {
+                tokens
+                    .cache_creation_tokens
+                    .checked_mul(input_nano)
+                    .and_then(|cache| value.checked_add(cache))
+            })
+            .and_then(|value| {
+                tokens
+                    .cache_read_tokens
+                    .checked_mul(cache_read_nano)
+                    .and_then(|cache| value.checked_add(cache))
+            })
+            .and_then(|value| {
+                tokens
+                    .output_tokens
+                    .checked_mul(output_nano)
+                    .and_then(|output| value.checked_add(output))
+            })
+            .ok_or_else(|| anyhow!("usage cost overflow"))
+            .map(Some)
+    }
 }
 
 #[cfg(test)]
@@ -384,7 +420,38 @@ mod tests {
         assert_eq!(summary.request_count, 1);
         assert_eq!(summary.attempt_count, 2);
         assert_eq!(summary.tokens.input_tokens, 100);
-        assert_eq!(summary.cost_nano_cny, 140_800);
+        assert_eq!(summary.cost.known_nano_cny, 140_800);
+        assert_eq!(journal.summary(), summary);
+        let reloaded = UsageJournal::new(path.clone());
+        assert_eq!(reloaded.summary(), summary);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn unknown_models_are_reported_as_unpriced() {
+        let path = temp_path("unpriced");
+        let journal = UsageJournal::new(path.clone());
+        journal.begin_turn();
+        journal
+            .capture(
+                journal.scope(UsageKind::Agent, "session-1"),
+                "private-model",
+            )
+            .reported(
+                &UsageEvent {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                },
+                1,
+            )
+            .unwrap();
+
+        let summary = journal.summary();
+        assert_eq!(summary.cost.known_nano_cny, 0);
+        assert_eq!(summary.cost.unpriced_requests, 1);
+        assert!(journal.all_records().unwrap()[0].cost_nano_cny.is_none());
         let _ = std::fs::remove_file(path);
     }
 

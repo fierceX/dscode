@@ -3,13 +3,6 @@ use anyhow::Result;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-pub struct LoadContext<'a> {
-    pub cwd: &'a Path,
-    pub home: &'a Path,
-    pub session_id: &'a str,
-    pub resource_session_id: &'a str,
-}
-
 #[derive(Debug, Clone)]
 pub struct RuleCapability {
     pub name: String,
@@ -44,7 +37,7 @@ pub fn build_default_rule_snapshot(
 ) -> Result<RuleSnapshot> {
     let content = "- Be concise and concrete. No pleasantries, no explanations unless asked. Raw results only.\n- Prefer safe, exact edits.\n- Report failures clearly.";
     let rule = LoadedRule {
-        revision: crate::util::sha256_hex(content),
+        revision: crate::capabilities::fingerprint::sha256_hex(content),
         rule: RuleCapability {
             name: "default-agent-rules".to_string(),
             description: "Default response and edit discipline".to_string(),
@@ -98,7 +91,7 @@ fn compute_dependency_fingerprint(
         input.push_str(&rule.revision);
         input.push('\0');
     }
-    crate::util::sha256_hex(&input)
+    crate::capabilities::fingerprint::sha256_hex(&input)
 }
 
 #[cfg(test)]

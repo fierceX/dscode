@@ -1,4 +1,4 @@
-use crate::config::Config;
+use crate::config::ResolvedConfig as Config;
 use crate::llm::client::{LlmBackend, LlmModelTarget, LlmPurpose, LlmRequest, MeteredStream};
 use crate::protocol::{ErrorEvent, Event, StopEvent, TextEvent, UsageEvent};
 use crate::session::compaction_input;
@@ -594,7 +594,7 @@ fn strip_dsml_tags(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::mock::MockLlmClient;
+    use crate::llm::mock::MockLlmBackend;
     use crate::protocol::StopEvent;
     use serde_json::json;
     use std::sync::Mutex;
@@ -664,7 +664,7 @@ mod tests {
     }
 
     fn summary_backend() -> Arc<dyn LlmBackend> {
-        Arc::new(MockLlmClient::new(
+        Arc::new(MockLlmBackend::new(
             "summary-model",
             vec![vec![
                 Ok(Event::Text(TextEvent {
@@ -693,14 +693,11 @@ mod tests {
             )
             .await?;
         ctx.store
-            .add_tool_results(&[crate::session::store::ToolResult {
-                tool_use_id: "bash-1".into(),
-                tool_name: "Bash".into(),
-                tool_args: Default::default(),
-                content: "Process completed with exit code 1.".into(),
-                conv_content: "Process completed with exit code 1.".into(),
-                state_metadata: None,
-            }])
+            .add_tool_results(&[crate::tools::runner::ToolExecution::test_result(
+                "bash-1",
+                "Bash",
+                "Process completed with exit code 1.",
+            )])
             .await?;
         ctx.store.add_user("keep the API stable").await?;
         Ok(())
@@ -1017,7 +1014,6 @@ mod tests {
         assert!(serialized.contains("command=cargo test"));
         assert!(serialized.contains("Process completed with exit code 1."));
         assert!(!serialized.contains("private reasoning"));
-        // A5：摘要指令必须是 7 字段并含空字段指引。
         assert!(serialized.contains("seven non-empty fields"));
         for field in ["Task focus:", "Errors:", "Decisions:", "Reflections:"] {
             assert!(serialized.contains(field), "instruction missing {field}");
@@ -1122,7 +1118,6 @@ mod tests {
                 .as_str()
                 .is_some_and(|c| c.contains("<context-snapshot>"))
         );
-        // B2(a): system fragments (context snapshot) stay before the last real user message.
         let last_user = projected
             .iter()
             .rposition(|m| {
@@ -1139,7 +1134,6 @@ mod tests {
                 );
             }
         }
-        // B2(b): the context snapshot is present exactly once.
         let snapshots = projected
             .iter()
             .filter(|m| {
@@ -1170,7 +1164,7 @@ mod tests {
 
     #[tokio::test]
     async fn summary_preserves_tool_commands_and_paths() -> anyhow::Result<()> {
-        let backend = Arc::new(MockLlmClient::new(
+        let backend = Arc::new(MockLlmBackend::new(
             "summary-model",
             vec![vec![
                 Ok(Event::Text(TextEvent {

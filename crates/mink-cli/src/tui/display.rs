@@ -1,7 +1,7 @@
 use crate::tui::signal::TuiSignal;
 use crate::ui::{
     Display, PresentedToolResultDisplay, StatsSnapshot, SubAgentStreamKind, SubAgentStreamSink,
-    ToolCallDisplay, ToolResultDisplay,
+    ToolCallDisplay,
 };
 use std::sync::mpsc;
 
@@ -34,15 +34,7 @@ impl Display for TuiDisplay {
         let _ = self.tx.send(TuiSignal::Text(c.into()));
     }
 
-    fn render_tool_call(&self, n: &str, s: &str) {
-        let _ = self.tx.send(TuiSignal::ToolCall {
-            tool_use_id: None,
-            tool_name: n.into(),
-            summary: s.into(),
-        });
-    }
-
-    fn render_tool_call_detail(&self, call: &ToolCallDisplay<'_>) {
+    fn render_tool_call(&self, call: &ToolCallDisplay<'_>) {
         let _ = self.tx.send(TuiSignal::ToolCall {
             tool_use_id: Some(call.tool_use_id.into()),
             tool_name: call.tool_name.into(),
@@ -50,38 +42,12 @@ impl Display for TuiDisplay {
         });
     }
 
-    fn render_tool_result(&self, n: &str, c: &str) {
-        let _ = self.tx.send(TuiSignal::ToolResult {
-            tool_use_id: None,
-            tool_name: n.into(),
-            content: c.into(),
-            success: true,
-            exit_code: None,
-            result_kind: crate::ui::ToolResultKind::Text,
-            presentation: None,
-            artifacts: Vec::new(),
-        });
-    }
-
-    fn render_tool_result_detail(&self, result: &ToolResultDisplay<'_>) {
-        let _ = self.tx.send(TuiSignal::ToolResult {
-            tool_use_id: result.tool_use_id.map(str::to_owned),
-            tool_name: result.tool_name.into(),
-            content: result.content.into(),
-            success: result.exit_code.is_none_or(|code| code == 0),
-            exit_code: result.exit_code,
-            result_kind: crate::ui::ToolResultKind::Text,
-            presentation: None,
-            artifacts: Vec::new(),
-        });
-    }
-
-    fn render_tool_result_presented(&self, result: &PresentedToolResultDisplay<'_>) {
+    fn render_tool_result(&self, result: &PresentedToolResultDisplay<'_>) {
         let _ = self.tx.send(TuiSignal::ToolResult {
             tool_use_id: result.base.tool_use_id.map(str::to_owned),
             tool_name: result.base.tool_name.into(),
             content: result.base.content.into(),
-            success: result.success,
+            success: result.status.is_success(),
             exit_code: result.base.exit_code,
             result_kind: result.result_kind,
             presentation: result.presentation.cloned(),
@@ -89,7 +55,7 @@ impl Display for TuiDisplay {
         });
     }
 
-    fn render_stop(&self) {
+    fn render_stop(&self, _reason: &str) {
         let _ = self.tx.send(TuiSignal::Stop);
     }
 
@@ -100,6 +66,8 @@ impl Display for TuiDisplay {
     fn render_retry(&self) {
         let _ = self.tx.send(TuiSignal::Retry);
     }
+
+    fn render_signal(&self, _signal_kind: &str, _severity: f64, _message: &str) {}
 
     fn render_info(&self, m: &str) {
         let _ = self.tx.send(TuiSignal::Info(m.into()));

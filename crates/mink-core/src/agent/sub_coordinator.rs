@@ -1,9 +1,10 @@
 use crate::agent::sub_executor::{SubAgentExecutor, SubAgentResult};
+use crate::agent::text::truncate_str;
 use crate::cancel::CancellationToken;
-use crate::config::Config;
+use crate::config::ResolvedConfig as Config;
 use crate::context::AgentSharedContext;
-use crate::tools::runner::ToolRunResult;
-use crate::util::truncate_str;
+use crate::tools::metadata::{ToolFailureKind, ToolStatus};
+use crate::tools::runner::ToolExecution;
 use futures::FutureExt;
 use std::collections::BTreeSet;
 use std::future::Future;
@@ -46,7 +47,7 @@ impl SubAgentCoordinator {
         }
     }
 
-    pub async fn process(&self, results: Vec<ToolRunResult>) -> Vec<ToolRunResult> {
+    pub async fn process(&self, results: Vec<ToolExecution>) -> Vec<ToolExecution> {
         self.process_with_runner(
             results,
             default_sub_agent_runner(self.sub_agent_config.clone()),
@@ -56,9 +57,9 @@ impl SubAgentCoordinator {
 
     pub(crate) async fn process_with_runner(
         &self,
-        results: Vec<ToolRunResult>,
+        results: Vec<ToolExecution>,
         runner: SubAgentRunner,
-    ) -> Vec<ToolRunResult> {
+    ) -> Vec<ToolExecution> {
         let mut processed_results = Vec::new();
         let (sub_result_tx, sub_result_rx) =
             tokio::sync::mpsc::unbounded_channel::<(usize, String, SubAgentResult)>();
@@ -74,7 +75,7 @@ impl SubAgentCoordinator {
                     result.content =
                         "Error: sub-agent recursion blocked: sub-agent cannot spawn sub-agents."
                             .to_string();
-                    result.success = false;
+                    result.status = ToolStatus::Failed(ToolFailureKind::SafetyBlocked);
                     result.spawns_sub_agent = false;
                     processed_results.push(result);
                     continue;
@@ -131,10 +132,10 @@ impl SubAgentCoordinator {
 
     async fn collect_results(
         &self,
-        mut processed_results: Vec<ToolRunResult>,
+        mut processed_results: Vec<ToolExecution>,
         mut sub_result_rx: tokio::sync::mpsc::UnboundedReceiver<(usize, String, SubAgentResult)>,
         launches: Vec<SubAgentLaunch>,
-    ) -> Vec<ToolRunResult> {
+    ) -> Vec<ToolExecution> {
         let timeout = self.ctx.tool_config.sub_agent_timeout_secs.max(0);
         let deadline = Instant::now() + Duration::from_secs(timeout as u64);
         let mut sub_completed = 0usize;
@@ -163,7 +164,11 @@ impl SubAgentCoordinator {
                     sub_completed += 1;
                     completed_indices.insert(idx);
                     if let Some(ref mut pr) = processed_results.get_mut(idx) {
-                        pr.success = sa.status == "ok";
+                        pr.status = if sa.status == "ok" {
+                            ToolStatus::Succeeded
+                        } else {
+                            ToolStatus::Failed(ToolFailureKind::Unknown)
+                        };
                         pr.content = format!(
                             "[sub-agent {}] {} (in={}, out={})\nThinking: {}\nText: {}",
                             session_id,
@@ -229,7 +234,13 @@ impl SubAgentCoordinator {
                     "status": reason,
                 }));
                 if let Some(pr) = processed_results.get_mut(launch.idx) {
-                    pr.success = false;
+                    pr.status = if reason == "cancelled" {
+                        ToolStatus::Interrupted
+                    } else if reason == "timed_out" {
+                        ToolStatus::Failed(ToolFailureKind::Timeout)
+                    } else {
+                        ToolStatus::Failed(ToolFailureKind::Unknown)
+                    };
                     if pr.content.is_empty() {
                         pr.content = match reason {
                             "timed_out" => format!("Sub-agent timed out after {timeout}s."),
@@ -254,7 +265,7 @@ impl SubAgentCoordinator {
         for pr in &mut processed_results {
             if pr.spawns_sub_agent && pr.content.is_empty() {
                 pr.content = "Sub-agent did not complete.".into();
-                pr.success = false;
+                pr.status = ToolStatus::Failed(ToolFailureKind::Unknown);
             }
         }
         processed_results

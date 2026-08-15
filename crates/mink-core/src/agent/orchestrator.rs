@@ -2,7 +2,6 @@ use crate::agent::belief::BeliefTracker;
 use crate::agent::turn::{TurnDecision, TurnEffect, TurnExecutor};
 use crate::context::AgentSharedContext;
 use crate::errors;
-use crate::llm::client::{BackendLlmClient, LlmClient};
 use crate::session::usage::{UsageRecord, UsageSummary};
 use anyhow::Result;
 use std::sync::Arc;
@@ -20,8 +19,8 @@ pub struct OrchActor {
 }
 
 /// Commands received by the orchestrator.
-#[doc(hidden)]
 pub enum OrchCmd {
+    #[cfg(test)]
     UserInput {
         input: String,
         done: oneshot::Sender<TurnRunResult>,
@@ -32,6 +31,7 @@ pub enum OrchCmd {
         emitter: std::sync::Arc<crate::runtime::TurnEventEmitter>,
         done: oneshot::Sender<TurnRunResult>,
     },
+    #[cfg(test)]
     SetModel(String),
     SetModelAck {
         model: String,
@@ -76,20 +76,6 @@ impl TurnStatus {
 }
 
 impl TurnRunResult {
-    pub fn ok(tool_call_count: u32, tool_error_count: u32) -> Self {
-        Self {
-            billing_turn_id: String::new(),
-            status: TurnStatus::Ok,
-            tool_call_count,
-            tool_error_count,
-            error: None,
-            usage_records: Vec::new(),
-            usage: UsageSummary::default(),
-            text: String::new(),
-            thinking: String::new(),
-        }
-    }
-
     pub fn failed(error: impl Into<String>) -> Self {
         Self {
             billing_turn_id: String::new(),
@@ -106,7 +92,7 @@ impl TurnRunResult {
 
     fn from_decision(decision: &TurnDecision, executor: &TurnExecutor) -> Self {
         let status = match decision {
-            TurnDecision::Stop | TurnDecision::Continue => TurnStatus::Ok,
+            TurnDecision::Stop => TurnStatus::Ok,
             TurnDecision::Interrupted => TurnStatus::Interrupted,
             TurnDecision::MaxTurnsExceeded => TurnStatus::MaxTurnsExceeded,
             TurnDecision::Failed(_) => TurnStatus::Failed,
@@ -153,6 +139,7 @@ impl OrchActor {
         loop {
             tokio::select! {
                 cmd = self.cmd_rx.recv() => match cmd {
+                    #[cfg(test)]
                     Some(OrchCmd::UserInput { input, done }) => {
                         let result = self.handle_user_input(input, true).await;
                         let _ = done.send(result);
@@ -163,6 +150,7 @@ impl OrchActor {
                         let result = self.handle_user_input(input, false).await;
                         let _ = done.send(result);
                     }
+                    #[cfg(test)]
                     Some(OrchCmd::SetModel(model)) => {
                         let _ = self.handle_model_command(&model).await;
                     }
@@ -207,7 +195,7 @@ impl OrchActor {
                                 Err(anyhow::anyhow!("{e:#}"))
                             }
                         };
-                        self.ctx.display.render_stop();
+                        self.ctx.display.render_stop("end_turn");
                         let _ = done.send(outcome);
                     }
                     None => break,
@@ -226,7 +214,6 @@ impl OrchActor {
     async fn handle_user_input(&mut self, input: String, reset_interrupt: bool) -> TurnRunResult {
         let started_at = Instant::now();
         let billing_turn_id = self.ctx.usage.begin_turn();
-        // 跨输入衰减替代硬重置（SIGNAL_RESPONSE_REDESIGN S3c）：
         // 跨轮重复失败可累积升级，单次偶然失败自然消退。
         self.belief.decay(self.ctx.config.signal.decay_per_input);
         if reset_interrupt {
@@ -292,12 +279,8 @@ impl OrchActor {
             "forced_model": self.forced_model.as_deref(),
         }));
 
-        let llm: Arc<dyn LlmClient> = Arc::new(BackendLlmClient::new(
-            self.ctx.llm_backend.clone(),
-            resolved.actual.clone(),
-            resolved.alias.clone(),
-        ));
-        let executor = TurnExecutor::new(self.ctx.clone(), llm);
+        let executor = TurnExecutor::new(self.ctx.clone(), self.ctx.llm_backend.clone())
+            .with_model_target(resolved.actual.clone(), resolved.alias.clone());
         Ok((resolved.actual, self.ctx.api_url.clone(), executor))
     }
 
@@ -337,7 +320,6 @@ impl OrchActor {
     fn log_turn_tracking(&self, executor: &TurnExecutor, decision: &TurnDecision, model: &str) {
         let decision_str = match decision {
             TurnDecision::Stop => "Stop",
-            TurnDecision::Continue => "Continue",
             TurnDecision::Interrupted => "Interrupted",
             TurnDecision::MaxTurnsExceeded => "MaxTurnsExceeded",
             TurnDecision::Failed(_) => "Failed",

@@ -97,7 +97,7 @@ impl RecoveryPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
+    use crate::config::ResolvedConfig as Config;
     use crate::context::ToolConfig;
     use crate::resources::ResourceRouter;
     use crate::tools::catalog::ToolCatalog;

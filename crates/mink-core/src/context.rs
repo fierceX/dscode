@@ -1,6 +1,8 @@
 use crate::cancel::CancellationToken;
 use crate::capabilities::CapabilitySnapshot;
-use crate::config::{Config, EditMode, OutputFormat, ToolApprovalMode, ToolApprovalPolicy};
+use crate::config::{
+    EditMode, OutputFormat, ResolvedConfig as Config, ToolApprovalMode, ToolApprovalPolicy,
+};
 use crate::llm::client::LlmBackend;
 use crate::resources::ResourceRouter;
 use crate::session::artifacts::ArtifactManager;
@@ -48,7 +50,7 @@ pub struct ToolConfig {
 }
 
 impl ToolConfig {
-    pub fn from_config(cfg: &crate::config::Config) -> Self {
+    pub fn from_config(cfg: &crate::config::ResolvedConfig) -> Self {
         Self {
             tool_timeout_secs: cfg.tool_timeout_secs,
             sub_agent_timeout_secs: cfg.sub_agent_timeout_secs,

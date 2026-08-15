@@ -16,7 +16,6 @@ pub enum PromptFact {
 
 #[derive(Debug, Clone, Copy)]
 pub enum WorkflowRequirement {
-    Fact(PromptFact),
     All(&'static [PromptFact]),
     Any(&'static [PromptFact]),
     AllWithAny {
@@ -28,7 +27,6 @@ pub enum WorkflowRequirement {
 impl WorkflowRequirement {
     pub fn satisfied_by(&self, facts: &BTreeSet<PromptFact>) -> bool {
         match self {
-            Self::Fact(fact) => facts.contains(fact),
             Self::All(required) => required.iter().all(|fact| facts.contains(fact)),
             Self::Any(required) => required.iter().any(|fact| facts.contains(fact)),
             Self::AllWithAny { all, any } => {
@@ -40,7 +38,6 @@ impl WorkflowRequirement {
 
     fn workflow_dependencies(&self) -> impl Iterator<Item = &'static str> {
         let facts: Vec<PromptFact> = match self {
-            Self::Fact(fact) => vec![*fact],
             Self::All(facts) | Self::Any(facts) => facts.to_vec(),
             Self::AllWithAny { all, any } => all.iter().chain(*any).copied().collect(),
         };
@@ -305,7 +302,6 @@ impl PromptWorkflowResolver {
                 WorkflowRequirement::AllWithAny { all, any } => {
                     ensure!(!all.is_empty() && !any.is_empty());
                 }
-                WorkflowRequirement::Fact(_) => {}
             }
         }
         for spec in self.specs {
@@ -361,10 +357,6 @@ impl PromptWorkflowResolver {
 }
 
 impl ResolvedPromptWorkflows {
-    pub fn has(&self, workflow_id: &str) -> bool {
-        self.ordered.iter().any(|spec| spec.id == workflow_id)
-    }
-
     pub fn has_fact(&self, fact: PromptFact) -> bool {
         self.facts.contains(&fact)
     }
@@ -744,7 +736,7 @@ fn workflow_fingerprint(ordered: &[&PromptWorkflowSpec], facts: &BTreeSet<Prompt
     for fact in facts {
         hasher.update(format!("{fact:?}\0").as_bytes());
     }
-    crate::util::hex_lower(hasher.finalize())
+    crate::capabilities::fingerprint::hex_lower(hasher.finalize())
 }
 
 pub(super) fn workflow_section_ids() -> impl Iterator<Item = &'static str> {

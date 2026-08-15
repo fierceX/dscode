@@ -5,7 +5,7 @@ mod modules;
 pub mod workflows;
 
 pub use document::{PromptDocument, PromptSection, PromptSectionOrigin};
-pub use workflows::{PromptFact, RenderedPromptPack, ResolvedPromptWorkflows, WorkflowRequirement};
+pub use workflows::{RenderedPromptPack, ResolvedPromptWorkflows};
 
 use crate::capabilities::{ContextFileSnapshot, RuleSnapshot, SkillSnapshot};
 use crate::tools::semantic_capabilities::ResolvedToolCapabilities;
@@ -29,6 +29,7 @@ pub struct Builder {
     pub edit_fuzzy_match: bool,
     pub edit_fuzzy_threshold: f64,
     pub edit_enforce_seen_lines: bool,
+    pub signal_policy: crate::config::SignalPolicy,
 }
 
 pub struct PromptBuildContext {
@@ -126,7 +127,7 @@ fn validate_pack(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Config;
+    use crate::config::ResolvedConfig as Config;
     use crate::context::ToolConfig;
     use crate::tools::catalog::ToolCatalog;
     use crate::tools::semantic_capabilities::ToolCapabilityRegistry;
@@ -163,6 +164,7 @@ mod tests {
             edit_fuzzy_match: config.edit_fuzzy_match,
             edit_fuzzy_threshold: config.edit_fuzzy_threshold,
             edit_enforce_seen_lines: config.edit_enforce_seen_lines,
+            signal_policy: base.signal_policy,
         }
     }
 

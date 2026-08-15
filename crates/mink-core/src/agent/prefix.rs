@@ -45,6 +45,7 @@ impl PrefixManager {
                 edit_fuzzy_match: self.ctx.tool_config.edit_fuzzy_match,
                 edit_fuzzy_threshold: self.ctx.tool_config.edit_fuzzy_threshold,
                 edit_enforce_seen_lines: self.ctx.tool_config.edit_enforce_seen_lines,
+                signal_policy: self.ctx.config.signal_policy,
             }
             .build_system_prompt()?;
             let tools_json = self.ctx.tool_surface.schemas();
@@ -80,6 +81,7 @@ impl PrefixManager {
         }
     }
 
+    #[cfg(test)]
     pub fn invalidate(&self) {
         *self
             .ctx

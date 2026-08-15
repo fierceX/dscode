@@ -79,10 +79,7 @@ async fn main() -> Result<()> {
         .with_model("local")
         .with_enabled_tools(Vec::<String>::new())
         .with_llm_backend(Arc::new(EchoBackend));
-    options
-        .config_mut()
-        .model_aliases
-        .insert("local".to_string(), "private-model-v1".to_string());
+    options = options.with_model_alias("local", "private-model-v1");
 
     let runtime = AgentRuntime::start(options).await?;
     let outcome = runtime
@@ -91,11 +88,11 @@ async fn main() -> Result<()> {
 
     println!("{}", outcome.text);
     println!(
-        "usage: requests={}, input={}, output={}, cost_nano_cny={}",
+        "usage: requests={}, input={}, output={}, known_nano_cny={}",
         outcome.usage.request_count,
         outcome.usage.tokens.input_tokens,
         outcome.usage.tokens.output_tokens,
-        outcome.usage.cost_nano_cny
+        outcome.usage.cost.known_nano_cny
     );
 
     runtime.shutdown().await?;

@@ -77,7 +77,7 @@ SubAgent 由 `SubAgentCoordinator` 在 turn 内部启动、收集和注入结果
   ├── 延迟结果统一执行大小保护
   ├── ToolSignalProcessor 基于最终结果采集信号并更新 belief
   ├── ConversationStore::add_tool_results()
-  └── Display::render_tool_result_presented()
+  └── AgentEventKind::ToolResult
 步骤 6.1: Plan 压缩请求交给 TurnCompactor，失败则终止并返回错误
 步骤 7: DecisionEngine 决策继续、注入、中止或停止
 ```
@@ -261,7 +261,7 @@ ConversationStore 的活跃缓存。主 turn、tool_use 循环刷新和压缩评
 
 所有压缩都将被折叠的活跃消息送入当前 LLM，并与已有摘要合并：
 
-“当前 LLM”由调用方的活动模型决定：turn 内压缩使用当前 `LlmClient` 的真实模型名和别名，
+“当前 LLM”由调用方的活动模型决定：turn 内压缩使用当前 `LlmBackend` 的真实模型名和别名，
 手动压缩使用 `OrchActor::resolve_active()` 的结果。摘要请求统一通过 runtime 注入的
 `Arc<dyn LlmBackend>` 发送。
 
@@ -362,7 +362,8 @@ resolved `ModelToolSurface` 是唯一工具边界：`PrefixManager` 从它生成
 
 ```rust
 StormDecision::Suppress(reason) => {
-    results.push(ToolRunResult {
+    results.push(ToolExecution {
+        status: ToolStatus::Blocked(ToolBlocker::StormBreaker),
         content: format!("Error: {reason}"),
         ...
     });
@@ -395,7 +396,7 @@ StormDecision::Suppress(reason) => {
   快照回滚与恢复首步守卫（拦截喂回信念）；`B < abort` 用户接管；阈值/超参/档位全可配置
 - 注入协议：以独立 User 消息（`[trajectory]`/`[detector]` 事实帧）写入 conversation，
   不污染 system prefix；`RecoveryPolicy` 按 resolved capabilities 校验恢复首步
-- `MINK_SIGNAL_MODE=off`：不生成 `<belief-awareness>` prompt 段，不采集、不注入、
+- `MINK_SIGNAL_POLICY=off`：不生成 `<belief-awareness>` prompt 段，不采集、不注入、
   不回滚、不接管、不启用恢复守卫
 - 错误分类（`errors.rs` 的 `ErrorCategory`：Network/Auth/RateLimit/Parse/Tool/Internal）
   仅用于日志与用户提示，不驱动任何决策
@@ -472,11 +473,11 @@ tool runner、session 写入或 usage 统计。
 runtime 在构建阶段创建或接收共享 backend。主代理、子代理和压缩分别构造带有不同
 `LlmPurpose` 的 `LlmRequest`，并提交到该 backend。
 `TurnExecutor` 创建子代理协调器时，会从父配置克隆一份 child config，并把 `model` 设置为当前
-活动 `LlmClient` 的别名或真实模型名；存在别名时同时写入该别名到真实模型的映射，保证配置自洽。
+活动 `LlmBackend` 的别名或真实模型名；存在别名时同时写入该别名到真实模型的映射，保证配置自洽。
 每个子代理使用这份显式配置构建 context，因此模型切换后的活动模型和父 runtime 注入的 backend
 会同时传递到子代理。
 
-`BackendLlmClient` 负责把当前上下文转换为 `LlmRequest`：
+`OpenAiCompatibleBackend` 负责把当前上下文转换为 `LlmRequest`：
 
 - `model`：经过 `ModelResolver` 解析后的真实 provider 模型名。
 - `model_alias`：用户请求的别名，如 `flash`、`pro` 或 `model_aliases` 自定义别名。
@@ -667,7 +668,7 @@ custom_budget = 8192
 |------|------|------|
 | API | `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL` | 认证和端点 |
 | 大小 | `TOOL_RESULT_MAX_BYTES`, `FILE_WRITE_MAX_BYTES` | 输出限制 |
-| 信号 | `MINK_SIGNAL_MODE` | `full` 启用信号系统，`off` 关闭信号提示词和运行时干预 |
+| 信号 | `MINK_SIGNAL_POLICY` | `off` / `evidence` / `state_ops` / `restart` / `full`，默认 `full` |
 | 沙箱 | `MINK_LIMITS` | JSON 格式 sandbox 限制配置 |
 | 调试 | `LOG_EVENTS`, `MINK_HOME` | 日志和 session 路径 |
 
@@ -684,7 +685,7 @@ Agent JSONL `SdkOptions` 和 Python `SandboxConfig` 同样直接暴露 `max_cont
 
 ### 工具审批配置
 
-`ToolConfig` 从 `Config` 派生，随 `ToolContext` 进入工具层：
+`ToolConfig` 从启动时解析完成的内部配置派生，随 `ToolContext` 进入工具层：
 
 ```toml
 [tools]
@@ -861,7 +862,7 @@ Rust 发布包名为 `mink-core`，库 crate 名为 `mink`。`mink-core` 发布�
 实现；终端二进制和 UI 实现由 workspace 中的 `mink-cli` 包持有。服务端依赖时推荐只启用嵌入式 runtime：
 
 ```toml
-mink = { package = "mink-core", version = "0.4.0", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.5.0", default-features = false, features = ["runtime"] }
 ```
 
 `mink::runtime` / `mink::prelude` 解决这些问题：**同一套 OrchActor / TurnExecutor / ToolRunner 核心，但无进程边界**。
@@ -887,7 +888,7 @@ Rust crate mink ───┘
 
 | 层 | 类型 | 定位 |
 |----|------|------|
-| **唯一构建入口** | `AgentOptions` + 完整 `Config` | 常用字段快捷方法，`config_mut()` 逃生口 |
+| **唯一构建入口** | `AgentOptions` + grouped options | 私有状态，无配置逃生口 |
 | **并发入口** | `AgentRuntimeHandle` | 可克隆，共享同一 turn/control gate，不拥有 shutdown |
 | **stream** | `AgentEventStream` | per-turn 实时事件，`recv()` + `outcome()` |
 

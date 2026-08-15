@@ -1,6 +1,5 @@
-//! Shared utility functions used across the codebase.
+//! Child-process supervision shared by execution tools.
 
-use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::process::{Child, Command};
 use std::sync::{Arc, Mutex};
@@ -8,53 +7,6 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 const PROCESS_OUTPUT_CAPTURE_LIMIT: usize = 1_000_000;
-
-/// Truncate a string to at most `n` bytes on a UTF-8 character boundary,
-/// appending "..." if truncation occurred.
-pub fn truncate_str(s: &str, n: usize) -> String {
-    if s.len() <= n {
-        return s.to_string();
-    }
-    let mut end = n;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}...", &s[..end])
-}
-
-/// Format a token count for display.
-/// Examples: 0 → "0", 500 → "500", 1234 → "1.2K", 1234567 → "1.23M"
-pub fn fmt_k(n: u64) -> String {
-    if n < 1000 {
-        return n.to_string();
-    }
-    if n >= 1_000_000 {
-        let m = n / 1_000_000;
-        let rest = n % 1_000_000;
-        format!("{}.{:02}M", m, rest / 10_000)
-    } else {
-        let k = n / 1000;
-        let rem = n % 1000;
-        format!("{}.{}K", k, rem / 100)
-    }
-}
-
-/// Compute SHA-256 hex digest of a string.
-#[doc(hidden)]
-pub fn sha256_hex(input: &str) -> String {
-    hex_lower(Sha256::digest(input.as_bytes()))
-}
-
-pub(crate) fn hex_lower(bytes: impl AsRef<[u8]>) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let bytes = bytes.as_ref();
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for &byte in bytes {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    out
-}
 
 #[derive(Clone, Default)]
 pub(crate) struct ProcessOutputBuffer {
