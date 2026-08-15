@@ -1,5 +1,5 @@
 // 事件 → 状态 纯函数 reducer。
-// 历史重放与 SSE 实时共用；不可变更新，便于测试与 Svelte 细粒度渲染。
+// 历史重放与 SSE 实时共用；不可变更新，便于测试与 Vue 3 响应式渲染。
 
 import type { RawEvent, SessionState, ToolItem, TranscriptItem, TranscriptKey } from "./types";
 import { emptySession } from "./types";

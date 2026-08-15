@@ -14,7 +14,7 @@ Mink 是一个 Rust 实现的轻量 AI coding agent，专为 DeepSeek/OpenAI-com
 
 - LLM 流式请求 -> 工具执行 -> 决策的内循环
 - **Rust 库 API**：`AgentRuntime::start() → run_turn() / stream_turn() → shutdown()`，无需子进程
-- 信号驱动的信念系统：自动错误检测、轨迹证据注入（`[trajectory]`）、编辑循环快照回滚与恢复首步守卫，阈值/超参全可配置（`Config.signal`），可用 `MINK_SIGNAL_MODE=off` 关闭
+- 信号驱动的信念系统：自动错误检测、轨迹证据注入（`[trajectory]`）、编辑循环快照回滚与恢复首步守卫，阈值/超参全可配置（`Config.signal`），可用 `MINK_SIGNAL_POLICY=off` 关闭
 - 上下文自适应压缩：显式阈值、响应预留、热尾部和摘要预算；可选摘要输入降噪
 - 维修流水线：Scavenge 回收、Truncation 修复、StormBreaker 重复调用抑制
 - Session 持久化：JSONL 追加写入，支持恢复和重放
@@ -180,7 +180,7 @@ TurnExecutor (agent/turn.rs)
 │ guard/evidence.rs     │ 轨迹证据跟踪：重复调用/失败聚类/预算消耗（证据注入、回滚定位）
 │ agent/belief.rs       │ 信念度计算（先验/窗口/衰减可配置）
 │ agent/decision.rs     │ 分层响应决策（证据注入/回滚/接管）
- │ config.rs             │ MINK_SIGNAL_MODE 开关 / SignalMode 枚举 / Config.signal 参数组
+ │ config.rs             │ MINK_SIGNAL_POLICY 覆盖 / SignalPolicy 枚举 / Config.signal 参数组
 └───────────────────────┘
          │
 ┌─────── 持久化层 ──────┐
@@ -268,7 +268,7 @@ DecisionEngine.decide_with_signals()
 `guard_max_blocks`、`rollback_enabled` 等）。设计依据见
 `docs/设计哲学-信号系统.md`。
 
-`MINK_SIGNAL_MODE=off` 时，不生成 `<belief-awareness>` prompt 段，也不执行信号采集、信念更新、证据注入、回滚、接管和恢复守卫。
+`MINK_SIGNAL_POLICY=off` 时，不生成 `<belief-awareness>` prompt 段，也不执行信号采集、信念更新、证据注入、回滚、接管和恢复守卫。
 
 ---
 
@@ -294,7 +294,6 @@ DecisionEngine.decide_with_signals()
 | `cancel.rs` | CancellationToken 父子传播 |
 | `safety.rs` | 危险命令过滤 |
 | `sandbox/` | 沙箱自举和平台实现 |
-| `util.rs` | 通用工具函数 |
 
 ### Rust 库门面 (`mink::runtime`)
 
@@ -320,7 +319,7 @@ DecisionEngine.decide_with_signals()
 | `agent/belief.rs` | 信念度追踪 |
 | `agent/decision.rs` | 结构化注入/中止决策 |
 | `agent/recovery_policy.rs` | 从 resolved semantic capabilities 校验恢复首个调用 |
- | `config.rs` | `SignalMode` / 信号模式开关 |
+| `config.rs` | `SignalPolicy` / 信号模式开关 |
 | `agent/tool_signals.rs` | 工具信号处理 + 轨迹证据记录（EvidenceTracker） |
 | `guard/evidence.rs` | 轨迹证据构造与渲染：重复调用/失败聚类/预算截断/新鲜度去重 |
 | `agent/sub_coordinator.rs` | 子代理启动、并发限制、结果收集 |

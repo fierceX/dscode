@@ -128,6 +128,34 @@ fn parse_args_session_accepts_separate_and_equals_forms() {
 }
 
 #[test]
+fn parse_args_session_requires_value() {
+    let at_end = parse_args(vec!["--session".into()]).unwrap_err();
+    assert!(at_end.to_string().contains("missing value for --session"));
+
+    let before_flag = parse_args(vec!["--session".into(), "--continue".into()]).unwrap_err();
+    assert!(
+        before_flag
+            .to_string()
+            .contains("missing value for --session")
+    );
+}
+
+#[test]
+fn parse_args_rejects_multiple_prompts() {
+    let err = parse_args(vec!["first".into(), "second".into()]).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("unexpected extra argument: second")
+    );
+}
+
+#[test]
+fn parse_args_option_like_token_is_not_consumed_as_value() {
+    let err = parse_args(vec!["--model".into(), "--session".into()]).unwrap_err();
+    assert!(err.to_string().contains("missing value for --model"));
+}
+
+#[test]
 fn parse_args_agent_jsonl_enables_single_shot_protocol() {
     let cfg = parse_args(vec!["--agent-jsonl".into()]).unwrap();
     assert!(cfg.agent_jsonl);

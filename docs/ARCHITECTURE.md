@@ -222,7 +222,7 @@ ToolExecution
 | `protocol.rs` | LLM 流式 `Event` 类型 |
 | `events.rs` | typed event log 类型 |
 | `errors.rs` | error 分类和用户提示 |
-| `util.rs` | 截断等通用工具 |
+| `agent/text.rs` | 文本截断等通用工具 |
 
 ### mink-server（Server + Web）
 

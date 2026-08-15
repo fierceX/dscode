@@ -21,6 +21,23 @@ impl TuiMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CliEarlyExit {
+    Help,
+    Version,
+}
+
+impl std::fmt::Display for CliEarlyExit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Help => f.write_str("help requested"),
+            Self::Version => f.write_str("version requested"),
+        }
+    }
+}
+
+impl std::error::Error for CliEarlyExit {}
+
 /// TOML config file structure (optional, loaded from ~/.minkrc or <project>/.minkrc).
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -295,6 +312,7 @@ impl Default for CliConfig {
 pub fn parse_args(args: Vec<String>) -> Result<CliConfig> {
     let mut cfg = CliConfig::default();
     let mut i = 0usize;
+    let mut seen_prompt = false;
 
     while i < args.len() {
         let arg = &args[i];
@@ -327,12 +345,12 @@ pub fn parse_args(args: Vec<String>) -> Result<CliConfig> {
                 i += 1;
             }
             "--session" => {
-                if i + 1 < args.len() && !args[i + 1].starts_with('-') {
-                    cfg.session_id = args[i + 1].clone();
-                    i += 2;
-                } else {
-                    i += 1;
+                let value = require_value(&args, i)?;
+                if value.trim().is_empty() {
+                    bail!("session name must not be empty");
                 }
+                cfg.session_id = value;
+                i += 2;
             }
             arg if arg.starts_with("--session=") => {
                 let value = arg.strip_prefix("--session=").unwrap_or_default().trim();
@@ -375,10 +393,10 @@ pub fn parse_args(args: Vec<String>) -> Result<CliConfig> {
                 i += 1;
             }
             "-h" | "--help" => {
-                return Err(anyhow!("__HELP__"));
+                return Err(anyhow!(CliEarlyExit::Help));
             }
             "-V" | "--version" => {
-                return Err(anyhow!("__VERSION__"));
+                return Err(anyhow!(CliEarlyExit::Version));
             }
             "--agent-jsonl" => {
                 cfg.agent_jsonl = true;
@@ -424,7 +442,14 @@ pub fn parse_args(args: Vec<String>) -> Result<CliConfig> {
                 if arg.starts_with('-') {
                     bail!("unknown option: {arg}");
                 }
+                if seen_prompt {
+                    bail!(
+                        "unexpected extra argument: {arg} (prompt already set to {:?})",
+                        cfg.prompt
+                    );
+                }
                 cfg.prompt = arg.clone();
+                seen_prompt = true;
                 i += 1;
             }
         }
@@ -437,7 +462,11 @@ fn require_value(args: &[String], i: usize) -> Result<String> {
     if i + 1 >= args.len() {
         bail!("missing value for {}", args[i]);
     }
-    Ok(args[i + 1].clone())
+    let value = args[i + 1].clone();
+    if value.starts_with('-') && value.len() > 1 {
+        bail!("missing value for {}", args[i]);
+    }
+    Ok(value)
 }
 
 fn parse_enabled_tools(value: String) -> Result<Vec<String>> {

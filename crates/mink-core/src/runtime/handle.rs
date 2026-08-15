@@ -415,6 +415,9 @@ impl AgentRuntime {
         {
             failures.push(format!("event dispatcher shutdown failed: {error}"));
         }
+        if let Err(error) = self.ctx.flush_event_log().await {
+            failures.push(format!("event log flush failed: {error:#}"));
+        }
         if let Err(error) = self.ctx.usage.flush() {
             failures.push(format!("usage flush failed: {error:#}"));
         }

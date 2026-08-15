@@ -10,8 +10,9 @@
 **Rust 原生 · 终端优先 · 可嵌入**
 
 Mink 是一个 Rust 实现的 **AI agent runtime**：面向终端，也面向系统。既适合在终端中直接
-工作（REPL / Full TUI / Inline TUI），也适合嵌入到服务端、桌面端或内部工具中 —— CLI、
-Python SDK 和 Rust 嵌入共享同一个运行时内核，不依赖子进程，语义完全一致。
+工作（REPL / Full TUI / Inline TUI），也适合嵌入到服务端、桌面端或内部工具中 —— Rust
+嵌入通过 `mink::runtime` in-process 运行；Python SDK 通过 wheel 内置的
+`mink-core --agent-jsonl` 子进程复用同一运行时内核与语义。
 
 ---
 
@@ -95,7 +96,7 @@ async fn main() -> anyhow::Result<()> {
 
 ## 核心特点
 
-- **可嵌入的运行时内核** — `AgentRuntime::start() → run_turn() / stream_turn() → shutdown()` 完整生命周期。CLI、REPL、TUI、Python SDK 和 Rust 嵌入共享同一套运行时语义，不需要维护多套 agent 内核。
+- **可嵌入的运行时内核** — `AgentRuntime::start() → run_turn() / stream_turn() → shutdown()` 完整生命周期。CLI、REPL、TUI 和 Rust 嵌入共享 in-process 运行时；Python SDK 通过内置 `mink-core` 二进制复用同一 Rust 内核，不需要维护多套 agent 内核。
 - **长上下文与长任务可控** — 显式压缩参数 + LLM 摘要非破坏式投影 + 持久化 session 共同工作，上下文不无限膨胀，长任务可持续推进；`enabled_tools` 统一工具边界。
 - **编辑与状态管理更可靠** — Anchored Edit（`Read` snapshot + `Edit.patch` 行锚定）、artifact 超长输出回读、Plan/Todo revision 原子提交和 session 恢复机制，不把正确性交给运气。
 

@@ -1,4 +1,4 @@
-// Vue 版状态：模块级 reactive/ref（无 Svelte 5 赋值限制）。
+// Vue 版状态：模块级 reactive/ref，属性变更由 Vue 自动追踪。
 // 组件直接读写属性，无需 setter 包装。
 
 import { reactive, ref } from "vue";

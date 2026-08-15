@@ -1,6 +1,6 @@
 use crate::config::{
-    apply_config_file, apply_provider_defaults, apply_sdk_request_options, parse_args,
-    validate_runtime_config,
+    CliEarlyExit, apply_config_file, apply_provider_defaults, apply_sdk_request_options,
+    parse_args, validate_runtime_config,
 };
 use crate::runtime::{
     AgentEventKind, AgentOptions, AgentRuntime, AgentRuntimeHandle, ContextPolicy,
@@ -181,15 +181,17 @@ pub fn install_panic_hook() {
 pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
     let mut cfg = match parse_args(args) {
         Ok(v) => v,
-        Err(e) if e.to_string() == "__HELP__" => {
-            print_usage();
-            return Ok(CliExit { code: 0 });
-        }
-        Err(e) if e.to_string() == "__VERSION__" => {
-            println!("{}", version_line());
-            return Ok(CliExit { code: 0 });
-        }
-        Err(e) => return Err(e),
+        Err(e) => match e.downcast_ref::<CliEarlyExit>() {
+            Some(CliEarlyExit::Help) => {
+                print_usage();
+                return Ok(CliExit { code: 0 });
+            }
+            Some(CliEarlyExit::Version) => {
+                println!("{}", version_line());
+                return Ok(CliExit { code: 0 });
+            }
+            None => return Err(e),
+        },
     };
 
     let cwd = std::env::current_dir()?;
@@ -979,7 +981,7 @@ fn print_usage() {
     println!("  --api-key KEY           API key (default from env)");
     println!("  --base-url URL          Override API base URL");
     println!("  --mission PATH          Load custom system prompt from MISSION.md file");
-    println!("  --session [NAME]        Use named session");
+    println!("  --session NAME          Use named session");
     println!("  --continue              Continue most recent session");
     println!("  --list-sessions         List saved sessions");
     println!("  --list-skills           List available skills");

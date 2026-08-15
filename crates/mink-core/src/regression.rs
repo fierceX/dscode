@@ -380,6 +380,8 @@ async fn harness_with_config(
         is_sub_agent,
         interrupt,
         event_log_warned: AtomicBool::new(false),
+        event_log_writer: None,
+        stream_flush_last: Mutex::new(None),
     });
     Ok(TestHarness { ctx, cwd, display })
 }
@@ -469,6 +471,8 @@ fn test_context_with_llm_backend(
         is_sub_agent: ctx.is_sub_agent,
         interrupt: ctx.interrupt.clone(),
         event_log_warned: AtomicBool::new(false),
+        event_log_writer: None,
+        stream_flush_last: Mutex::new(None),
     })
 }
 

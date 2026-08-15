@@ -137,7 +137,7 @@ prompt 为空且 stdin 是终端时自动进入交互模式。非终端 stdin �
 | `PROMPT` | — | 用户输入（位置参数） |
 | `-m` / `--model` | `flash` | 模型名。`flash` / `pro` 是默认别名，也可直接指定任意 OpenAI-compatible 模型名 |
 | `--mission PATH` | — | 加载 MISSION.md |
-| `--session [NAME]` | 自动生成 | 命名会话 |
+| `--session NAME` | 自动生成 | 命名会话 |
 | `--continue` | — | 恢复最近的 session |
 | `--list-sessions` | — | 列出所有 session |
 | `--list-skills` | — | 列出可用 skill |

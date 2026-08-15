@@ -196,6 +196,11 @@ impl OrchActor {
                             }
                         };
                         self.ctx.display.render_stop("end_turn");
+                        if let Err(error) = self.ctx.flush_event_log().await {
+                            self.ctx
+                                .display
+                                .render_error(&format!("Event log flush failed: {error}"));
+                        }
                         let _ = done.send(outcome);
                     }
                     None => break,
@@ -207,6 +212,11 @@ impl OrchActor {
             }
         }
 
+        if let Err(error) = self.ctx.flush_event_log().await {
+            self.ctx
+                .display
+                .render_error(&format!("Event log flush failed: {error}"));
+        }
         let _ = self.ctx.stats.flush().await;
         Ok(())
     }
@@ -232,7 +242,8 @@ impl OrchActor {
                     TurnRunResult::failed(format!("failed to prepare turn: {e}")),
                     &billing_turn_id,
                 );
-                self.log_turn_final(&result, started_at.elapsed().as_millis() as u64);
+                self.log_turn_final(&result, started_at.elapsed().as_millis() as u64)
+                    .await;
                 return result;
             }
         };
@@ -247,7 +258,8 @@ impl OrchActor {
 
         let result = self.finish_usage(result, &billing_turn_id);
         self.refresh_title().await;
-        self.log_turn_final(&result, started_at.elapsed().as_millis() as u64);
+        self.log_turn_final(&result, started_at.elapsed().as_millis() as u64)
+            .await;
         result
     }
 
@@ -334,7 +346,7 @@ impl OrchActor {
         }));
     }
 
-    fn log_turn_final(&self, result: &TurnRunResult, elapsed_ms: u64) {
+    async fn log_turn_final(&self, result: &TurnRunResult, elapsed_ms: u64) {
         self.ctx.log_event(serde_json::json!({
             "type": "turn_final",
             "billing_turn_id": result.billing_turn_id,
@@ -345,6 +357,11 @@ impl OrchActor {
             "error": result.error.clone(),
             "usage": result.usage,
         }));
+        if let Err(error) = self.ctx.flush_event_log().await {
+            self.ctx
+                .display
+                .render_error(&format!("Event log flush failed: {error}"));
+        }
     }
 
     async fn handle_turn_error(

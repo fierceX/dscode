@@ -7,6 +7,7 @@ use crate::llm::client::LlmBackend;
 use crate::resources::ResourceRouter;
 use crate::session::artifacts::ArtifactManager;
 use crate::session::compaction::CompactionEngine;
+use crate::session::event_log::EventLogWriter;
 use crate::session::paths::SessionLayout;
 use crate::session::plan::PlanStore;
 use crate::session::prefix::ImmutablePrefix;
@@ -24,7 +25,7 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::config::SandboxPythonConfig;
@@ -295,6 +296,12 @@ pub struct AgentSharedContext {
     pub interrupt: Arc<AtomicBool>,
     /// Avoid repeated stderr warnings if event logging starts failing.
     pub event_log_warned: AtomicBool,
+    /// Optional serialized writer for production runtimes. Test contexts may
+    /// leave this unset and fall back to the synchronous append path.
+    pub(crate) event_log_writer: Option<EventLogWriter>,
+    /// Per-context stream-json flush throttle. Deliberately not process-global:
+    /// multiple embedded runtimes must not share one flush clock.
+    pub(crate) stream_flush_last: Mutex<Option<Instant>>,
 }
 
 impl AgentSharedContext {
@@ -347,31 +354,35 @@ impl AgentSharedContext {
             }
         };
         if self.config.log_events {
-            match std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&self.events_path)
-            {
-                Ok(mut file) => {
-                    if let Err(e) = writeln!(file, "{line}") {
+            if let Some(writer) = &self.event_log_writer {
+                writer.send(line.clone());
+            } else {
+                match std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&self.events_path)
+                {
+                    Ok(mut file) => {
+                        if let Err(e) = writeln!(file, "{line}") {
+                            self.warn_event_log_once(&format!(
+                                "failed to write event log {}: {e}",
+                                self.events_path.display()
+                            ));
+                        }
+                    }
+                    Err(e) => {
                         self.warn_event_log_once(&format!(
-                            "failed to write event log {}: {e}",
+                            "failed to open event log {}: {e}",
                             self.events_path.display()
                         ));
                     }
-                }
-                Err(e) => {
-                    self.warn_event_log_once(&format!(
-                        "failed to open event log {}: {e}",
-                        self.events_path.display()
-                    ));
                 }
             }
         }
         if self.config.output_format == OutputFormat::StreamJson {
             let mut stdout = std::io::stdout().lock();
             let write_result = writeln!(stdout, "{line}");
-            let flush_result = if write_result.is_ok() && should_flush_stream_event(&value) {
+            let flush_result = if write_result.is_ok() && self.should_flush_stream_event(&value) {
                 stdout.flush()
             } else {
                 Ok(())
@@ -380,6 +391,13 @@ impl AgentSharedContext {
                 self.warn_event_log_once(&format!("failed to write stream-json event: {e}"));
             }
         }
+    }
+
+    pub(crate) async fn flush_event_log(&self) -> std::io::Result<()> {
+        if let Some(writer) = &self.event_log_writer {
+            writer.flush().await?;
+        }
+        Ok(())
     }
 
     pub fn log_typed_event(&self, event: crate::events::EventLog) {
@@ -393,37 +411,38 @@ impl AgentSharedContext {
             let _ = writeln!(std::io::stderr(), "[mink] Warning: {message}");
         }
     }
-}
 
-fn should_flush_stream_event(value: &Value) -> bool {
-    const FLUSH_INTERVAL: Duration = Duration::from_millis(80);
-    static LAST_FLUSH: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+    fn should_flush_stream_event(&self, value: &Value) -> bool {
+        const FLUSH_INTERVAL: Duration = Duration::from_millis(80);
 
-    let event_type = value.get("type").and_then(Value::as_str).unwrap_or("");
-    let force = matches!(
-        event_type,
-        "final"
-            | "tool_call"
-            | "tool_result"
-            | "stop"
-            | "error"
-            | "retry"
-            | "turn_error"
-            | "llm_wait"
-    );
+        let event_type = value.get("type").and_then(Value::as_str).unwrap_or("");
+        let force = matches!(
+            event_type,
+            "final"
+                | "tool_call"
+                | "tool_result"
+                | "stop"
+                | "error"
+                | "retry"
+                | "turn_error"
+                | "llm_wait"
+        );
 
-    let now = Instant::now();
-    let lock = LAST_FLUSH.get_or_init(|| Mutex::new(None));
-    let mut last = lock.lock().unwrap_or_else(|e| e.into_inner());
-    let due = match *last {
-        Some(prev) => now.duration_since(prev) >= FLUSH_INTERVAL,
-        None => true,
-    };
-    let stream_delta = matches!(event_type, "text");
-    if force || (stream_delta && due) {
-        *last = Some(now);
-        true
-    } else {
-        false
+        let now = Instant::now();
+        let mut last = self
+            .stream_flush_last
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let due = match *last {
+            Some(prev) => now.duration_since(prev) >= FLUSH_INTERVAL,
+            None => true,
+        };
+        let stream_delta = matches!(event_type, "text");
+        if force || (stream_delta && due) {
+            *last = Some(now);
+            true
+        } else {
+            false
+        }
     }
 }

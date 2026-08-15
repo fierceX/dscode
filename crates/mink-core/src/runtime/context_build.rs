@@ -122,6 +122,10 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
         params.llm_backend.clone(),
     )?);
 
+    let event_log_writer = config
+        .log_events
+        .then(|| crate::session::event_log::EventLogWriter::start(paths.events.clone()));
+
     let ctx = Arc::new(AgentSharedContext {
         config: config.clone(),
         cwd: params.cwd,
@@ -159,6 +163,8 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
         is_sub_agent: params.is_sub_agent,
         interrupt: params.interrupt,
         event_log_warned: AtomicBool::new(false),
+        event_log_writer,
+        stream_flush_last: Mutex::new(None),
     });
     ctx.log_event(serde_json::json!({
         "type": "tool_surface",
