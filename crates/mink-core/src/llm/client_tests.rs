@@ -373,6 +373,7 @@ async fn test_context(name: &str, api_url: &str) -> anyhow::Result<Arc<AgentShar
         CancellationToken::new(),
         Arc::new(AtomicBool::new(false)),
         llm_backend.clone(),
+        None,
     )?);
     let tool_config = ToolConfig::from_config(&cfg);
     let todo_store = Arc::new(crate::session::todo::TodoStore::load(spaths.todos.clone())?);

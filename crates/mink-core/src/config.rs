@@ -165,6 +165,33 @@ impl Default for SandboxPythonConfig {
     }
 }
 
+/// Detection-weight ladder for edit-loop signals.
+///
+/// Kept alongside the other signal parameters so every heuristic weight has
+/// one validated home instead of being a bare literal in the collector.
+#[derive(Debug, Clone)]
+pub(crate) struct EditLoopWeights {
+    pub five_edits: f64,
+    pub six_edits: f64,
+    pub excess_edits: f64,
+    pub one_edit_diff_alternation: f64,
+    pub two_edit_diff_alternations: f64,
+    pub three_or_more_edit_diff_alternations: f64,
+}
+
+impl Default for EditLoopWeights {
+    fn default() -> Self {
+        Self {
+            five_edits: 0.6,
+            six_edits: 0.8,
+            excess_edits: 0.9,
+            one_edit_diff_alternation: 0.4,
+            two_edit_diff_alternations: 0.7,
+            three_or_more_edit_diff_alternations: 0.9,
+        }
+    }
+}
+
 /// Fixed runtime constants for the signal algorithm.
 #[derive(Debug, Clone)]
 pub(crate) struct SignalConfig {
@@ -180,6 +207,8 @@ pub(crate) struct SignalConfig {
     pub beta_prior: f64,
     /// 滑动窗口大小。
     pub window_size: usize,
+    /// 工具调用历史窗口；回滚窗口与该值保持同一来源。
+    pub seq_window: usize,
     /// 每用户输入结束时对信念的衰减因子（0 = 完全重置，1 = 不衰减）。
     pub decay_per_input: f64,
     /// 轨迹证据注入的字符预算。
@@ -188,6 +217,8 @@ pub(crate) struct SignalConfig {
     pub guard_max_blocks: usize,
     /// 注入后的冷却轮数。
     pub cooldown_turns: usize,
+    /// Edit-loop 检测权重阶梯。
+    pub edit_loop_weights: EditLoopWeights,
     /// Fresh recovery agent 的最大内部轮数。
     pub replan_max_turns: i32,
     /// Fresh recovery agent 的最大输出长度。
@@ -203,10 +234,12 @@ impl Default for SignalConfig {
             alpha_prior: 3.0,
             beta_prior: 1.0,
             window_size: 16,
+            seq_window: 6,
             decay_per_input: 0.6,
             evidence_max_chars: 4_000,
             guard_max_blocks: 3,
             cooldown_turns: 3,
+            edit_loop_weights: EditLoopWeights::default(),
             replan_max_turns: 12,
             replan_token_budget: 24_000,
         }
@@ -382,6 +415,31 @@ pub fn validate_runtime_config(cfg: &ResolvedConfig) -> Result<()> {
     }
     if s.window_size == 0 {
         bail!("signal window_size must be greater than 0");
+    }
+    if s.seq_window == 0 {
+        bail!("signal seq_window must be greater than 0");
+    }
+    let weights = &s.edit_loop_weights;
+    for (name, weight) in [
+        ("five_edits", weights.five_edits),
+        ("six_edits", weights.six_edits),
+        ("excess_edits", weights.excess_edits),
+        (
+            "one_edit_diff_alternation",
+            weights.one_edit_diff_alternation,
+        ),
+        (
+            "two_edit_diff_alternations",
+            weights.two_edit_diff_alternations,
+        ),
+        (
+            "three_or_more_edit_diff_alternations",
+            weights.three_or_more_edit_diff_alternations,
+        ),
+    ] {
+        if !(0.0..=1.0).contains(&weight) {
+            bail!("signal edit-loop weight {name} must be in 0.0..=1.0");
+        }
     }
     if !(0.0..=1.0).contains(&s.decay_per_input) {
         bail!("signal decay_per_input must be in 0.0..=1.0");

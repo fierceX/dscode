@@ -23,8 +23,6 @@ fn tool_result(content: &str) -> ToolExecution {
         signals: vec![Signal {
             kind: SignalKind::ToolFailed,
             severity: 1.0,
-            source: "Bash".into(),
-            detail: "old".into(),
             source_tool: "Bash".into(),
             exit_code: None,
             matched_pattern: None,
@@ -108,4 +106,17 @@ async fn compile_error_increments_tool_error_count() {
         .await;
     assert_eq!(processor.tool_error_count(), 1);
     assert!(!processor.collected_signals().is_empty());
+}
+
+#[test]
+fn edited_paths_uses_authoritative_hashline_header_grammar() {
+    let mut args = BTreeMap::new();
+    args.insert(
+        "input".to_string(),
+        "[\"dir/a.rs\"#A1B2]\n[*Update File: quoted.rs#BEEF]\nPUT 1.=1:\n+x\n".to_string(),
+    );
+    assert_eq!(
+        edited_paths("Edit", &args),
+        vec!["dir/a.rs".to_string(), "quoted.rs".to_string()]
+    );
 }

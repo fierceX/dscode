@@ -337,8 +337,6 @@ async fn soft_only_editloop_does_not_inject_above_warn_zone() -> anyhow::Result<
     belief.observe(&[Signal {
         kind: SignalKind::EditLoop,
         severity: 0.9,
-        source: "EditLoop".into(),
-        detail: "loop".into(),
         source_tool: "EditLoop".into(),
         exit_code: None,
         matched_pattern: None,

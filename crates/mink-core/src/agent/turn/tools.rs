@@ -76,7 +76,7 @@ impl super::TurnExecutor {
         mut belief: Option<&mut crate::agent::belief::BeliefTracker>,
         effects: &mut Vec<TurnEffect>,
     ) -> Result<Option<&'static str>> {
-        self.tool_call_count += calls.len() as u32;
+        self.local.tool_call_count += calls.len() as u32;
         let (calls_to_execute, mut guarded_results) = self.apply_signal_recovery_guard(calls);
         let executed = if calls_to_execute.is_empty() {
             Ok(Vec::new())
@@ -171,14 +171,15 @@ impl super::TurnExecutor {
                 continue;
             }
             if result.tool_name == "TodoAdvance" {
-                self.successful_work_calls_since_todo_advance = 0;
+                self.local.successful_work_calls_since_todo_advance = 0;
                 continue;
             }
             if matches!(
                 result.tool_name.as_str(),
                 "Bash" | "Python" | "PythonSandbox" | "Write" | "Edit" | "TodoWrite" | "SubAgent"
             ) {
-                self.successful_work_calls_since_todo_advance = self
+                self.local.successful_work_calls_since_todo_advance = self
+                    .local
                     .successful_work_calls_since_todo_advance
                     .saturating_add(1);
             }
@@ -186,8 +187,8 @@ impl super::TurnExecutor {
     }
 
     pub(super) async fn maybe_append_todo_progress_reminder(&mut self) -> Result<()> {
-        if self.todo_progress_reminder_sent
-            || self.successful_work_calls_since_todo_advance < 8
+        if self.local.todo_progress_reminder_sent
+            || self.local.successful_work_calls_since_todo_advance < 8
             || !self
                 .ctx
                 .todo_store
@@ -207,7 +208,7 @@ impl super::TurnExecutor {
                 "<todo-progress-reminder>Active todo work has continued across several successful operations without a progress transition. Reassess the active batch and call {provider} if any item should be completed, paused, or otherwise advanced.</todo-progress-reminder>"
             ))
             .await?;
-        self.todo_progress_reminder_sent = true;
+        self.local.todo_progress_reminder_sent = true;
         Ok(())
     }
 }

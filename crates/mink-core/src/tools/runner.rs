@@ -780,15 +780,8 @@ fn hashline_target_paths(input: &str) -> Vec<String> {
     let mut paths = Vec::new();
     for line in input.lines() {
         let trimmed = line.trim_start();
-        if let Some(stripped) = trimmed.strip_prefix('[') {
-            if let Some(path) = stripped
-                .split('#')
-                .next()
-                .map(str::trim)
-                .filter(|path| !path.is_empty())
-            {
-                paths.push(path.to_string());
-            }
+        if let Some(path) = crate::tools::hashline::section_header_path(line) {
+            paths.push(path);
         } else if trimmed.starts_with("MV") && trimmed[2..].starts_with(char::is_whitespace) {
             // A moved file lands at the destination: validate the target so
             // `MV source.json -> destination.json` is still covered.

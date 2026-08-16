@@ -5,7 +5,7 @@ use crate::ui::{
     ToolPresentation,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,6 +92,12 @@ pub(crate) struct EventDispatcher {
     tx: Mutex<Option<tokio::sync::mpsc::Sender<AgentEvent>>>,
     task: Mutex<Option<tokio::task::JoinHandle<Result<(), String>>>>,
     failure: Arc<Mutex<Option<String>>>,
+    /// Number of observer events dropped because the bounded queue was full.
+    /// The observer is best-effort telemetry: overflow drops the newest event
+    /// and keeps the sink alive instead of permanently stopping it.
+    dropped_events: AtomicU64,
+    /// Ensures the first overflow is visible in production via warn_once.
+    overflow_warned: AtomicBool,
 }
 
 impl EventDispatcher {
@@ -102,7 +108,6 @@ impl EventDispatcher {
         let task = tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
                 if let Err(error) = sink.on_event(event).await {
-                    eprintln!("[mink] event observer failed: {error}");
                     *task_failure.lock().unwrap_or_else(|e| e.into_inner()) = Some(error.clone());
                     return Err(error);
                 }
@@ -113,7 +118,14 @@ impl EventDispatcher {
             tx: Mutex::new(Some(tx)),
             task: Mutex::new(Some(task)),
             failure,
+            dropped_events: AtomicU64::new(0),
+            overflow_warned: AtomicBool::new(false),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn dropped_events(&self) -> u64 {
+        self.dropped_events.load(Ordering::Relaxed)
     }
 
     fn dispatch(&self, event: AgentEvent) {
@@ -122,7 +134,12 @@ impl EventDispatcher {
             tx.as_ref().and_then(|tx| match tx.try_send(event) {
                 Ok(()) => None,
                 Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                    Some("event observer queue overflowed (capacity 1024)")
+                    self.dropped_events.fetch_add(1, Ordering::Relaxed);
+                    crate::session::event_log::warn_once(
+                        &self.overflow_warned,
+                        "event observer queue overflowed; dropping newest event",
+                    );
+                    None
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                     Some("event observer stopped before runtime shutdown")
@@ -140,7 +157,6 @@ impl EventDispatcher {
         if failure.is_some() {
             return;
         }
-        eprintln!("[mink] {message}");
         *failure = Some(message);
         self.tx.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some(task) = self.task.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {

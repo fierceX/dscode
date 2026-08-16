@@ -271,6 +271,7 @@ async fn startup_rebuilds_missing_or_stale_summary_projection() -> anyhow::Resul
         ctx.cancel.clone(),
         ctx.interrupt.clone(),
         summary_backend(),
+        None,
     )?;
 
     assert_eq!(
@@ -281,6 +282,47 @@ async fn startup_rebuilds_missing_or_stale_summary_projection() -> anyhow::Resul
         std::fs::read_to_string(&ctx.summary_path)?,
         "authoritative summary\n"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn startup_repairs_legacy_cut_on_internal_user_message() -> anyhow::Result<()> {
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "compact-repair-internal-boundary",
+        |_| {},
+        summary_backend(),
+    )
+    .await?;
+    ctx.store.add_user("head constraint").await?;
+    ctx.store.add_assistant("head response", "", &[]).await?;
+    ctx.store.add_runtime_user("plain injected text").await?;
+    ctx.store
+        .add_assistant("next safe boundary", "", &[])
+        .await?;
+
+    let state_path = ctx.summary_path.with_file_name("context-state.json");
+    let state = CompactionState {
+        active_start: 2,
+        summary: "authoritative summary".into(),
+    };
+    crate::session::atomic_file::atomic_replace(&state_path, &serde_json::to_vec_pretty(&state)?)?;
+
+    let engine = CompactionEngine::new(
+        ctx.store.clone(),
+        ctx.summary_path.clone(),
+        ctx.config.base_url.clone(),
+        &ctx.config,
+        ctx.stats.clone(),
+        ctx.usage.clone(),
+        ctx.config.session_id.clone(),
+        ctx.display.clone(),
+        ctx.cancel.clone(),
+        ctx.interrupt.clone(),
+        summary_backend(),
+        None,
+    )?;
+    engine.validate_startup().await?;
+    assert_eq!(engine.current_state()?.active_start, 3);
     Ok(())
 }
 

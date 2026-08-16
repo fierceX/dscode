@@ -1,5 +1,6 @@
 //! 信号采集器 — 自维护调用历史。
 
+use crate::config::EditLoopWeights;
 use crate::tools::metadata::{ToolBlocker, ToolFailureKind, ToolStatus};
 use std::collections::VecDeque;
 use std::sync::OnceLock;
@@ -34,8 +35,6 @@ impl SignalKind {
 pub struct Signal {
     pub kind: SignalKind,
     pub severity: f64,
-    pub source: String,
-    pub detail: String,
     pub source_tool: String,
     pub exit_code: Option<i32>,
     pub matched_pattern: Option<String>,
@@ -61,17 +60,13 @@ impl Signal {
         matched_pattern: Option<String>,
         message: impl Into<String>,
     ) -> Self {
-        let source_tool = source_tool.into();
-        let message = message.into();
         Self {
             kind,
             severity,
-            source: source_tool.clone(),
-            detail: message.clone(),
-            source_tool,
+            source_tool: source_tool.into(),
             exit_code,
             matched_pattern,
-            message,
+            message: message.into(),
         }
     }
 }
@@ -152,13 +147,23 @@ fn compiled_patterns() -> &'static CompiledPatterns {
 pub struct SignalCollector {
     call_history: VecDeque<String>,
     seq_window: usize,
+    weights: EditLoopWeights,
 }
 
 impl SignalCollector {
+    /// Test-only convenience constructor. Production paths must use
+    /// `with_weights` and the runtime `SignalConfig`.
+    #[cfg(test)]
     pub fn new() -> Self {
+        let config = crate::config::SignalConfig::default();
+        Self::with_weights(config.seq_window, config.edit_loop_weights)
+    }
+
+    pub(crate) fn with_weights(seq_window: usize, weights: EditLoopWeights) -> Self {
         Self {
-            call_history: VecDeque::with_capacity(8),
-            seq_window: 6,
+            call_history: VecDeque::with_capacity(seq_window.max(8)),
+            seq_window,
+            weights,
         }
     }
 
@@ -262,11 +267,11 @@ impl SignalCollector {
 
         if edit_count > 4 {
             let severity = if edit_count == 5 {
-                0.6
+                self.weights.five_edits
             } else if edit_count == 6 {
-                0.8
+                self.weights.six_edits
             } else {
-                0.9
+                self.weights.excess_edits
             };
             return Some(Signal::new(
                 SignalKind::EditLoop,
@@ -283,11 +288,11 @@ impl SignalCollector {
         if has_diff && !has_read_op && has_edit_diff_alternation(history) {
             let alt_count = count_edit_diff_alternations(history);
             let severity = if alt_count >= 3 {
-                0.9
+                self.weights.three_or_more_edit_diff_alternations
             } else if alt_count == 2 {
-                0.7
+                self.weights.two_edit_diff_alternations
             } else {
-                0.4
+                self.weights.one_edit_diff_alternation
             };
             return Some(Signal::new(
                 SignalKind::EditLoop,
@@ -322,6 +327,7 @@ fn count_edit_diff_alternations(history: &VecDeque<String>) -> usize {
     count
 }
 
+#[cfg(test)]
 impl Default for SignalCollector {
     fn default() -> Self {
         Self::new()

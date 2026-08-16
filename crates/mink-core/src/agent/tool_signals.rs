@@ -12,9 +12,17 @@ pub struct ToolSignalProcessor {
 }
 
 impl ToolSignalProcessor {
+    /// Test-only convenience constructor. Production paths must use
+    /// `with_weights` and the runtime `SignalConfig`.
+    #[cfg(test)]
     pub fn new() -> Self {
+        let config = crate::config::SignalConfig::default();
+        Self::with_weights(config.seq_window, config.edit_loop_weights)
+    }
+
+    pub(crate) fn with_weights(seq_window: usize, weights: crate::config::EditLoopWeights) -> Self {
         Self {
-            collector: SignalCollector::new(),
+            collector: SignalCollector::with_weights(seq_window, weights),
             tool_error_count: 0,
             signals: Vec::new(),
             evidence: EvidenceTracker::default(),
@@ -165,6 +173,7 @@ impl ToolSignalProcessor {
     }
 }
 
+#[cfg(test)]
 impl Default for ToolSignalProcessor {
     fn default() -> Self {
         Self::new()
@@ -184,16 +193,10 @@ fn edited_paths(tool_name: &str, args: &std::collections::BTreeMap<String, Strin
             if let Some(path) = args.get("path") {
                 paths.push(path.clone());
             } else if let Some(input) = args.get("input") {
-                // Hashline 形态：解析每个 section 头 [PATH#TAG]。
+                // Hashline 形态：通过权威 header 解析器取每个 section 的路径。
                 for line in input.lines() {
-                    let trimmed = line.trim();
-                    if trimmed.starts_with('[')
-                        && let Some(close) = trimmed.find('#')
-                    {
-                        let path = trimmed[1..close].to_string();
-                        if !path.is_empty() {
-                            paths.push(path);
-                        }
+                    if let Some(path) = crate::tools::hashline::section_header_path(line) {
+                        paths.push(path);
                     }
                 }
             }

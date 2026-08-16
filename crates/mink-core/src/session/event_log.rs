@@ -24,6 +24,7 @@ enum EventLogCmd {
 /// backpressure path and bounds memory, matching the old synchronous writer's
 /// never-silently-drop behavior while keeping the common case off the tokio
 /// worker.
+#[derive(Clone)]
 pub(crate) struct EventLogWriter {
     tx: SyncSender<EventLogCmd>,
     warned: Arc<AtomicBool>,
@@ -140,7 +141,7 @@ fn clear_failure(failure: &Mutex<Option<String>>) {
     *failure.lock().unwrap_or_else(|error| error.into_inner()) = None;
 }
 
-fn warn_once(warned: &AtomicBool, message: &str) {
+pub(crate) fn warn_once(warned: &AtomicBool, message: &str) {
     if !warned.swap(true, Ordering::SeqCst) {
         eprintln!("[mink] Warning: {message}");
     }

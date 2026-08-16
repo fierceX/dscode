@@ -45,8 +45,6 @@ async fn signal_recovery_decision_noops_when_signal_policy_is_off() {
     belief.observe(&[crate::guard::collector::Signal {
         kind: crate::guard::collector::SignalKind::ToolFailed,
         severity: 1.0,
-        source: "Bash".into(),
-        detail: "failed".into(),
         source_tool: "Bash".into(),
         exit_code: Some(1),
         matched_pattern: None,
@@ -164,7 +162,7 @@ async fn todo_progress_guard_appends_at_most_one_reminder_per_turn() -> anyhow::
     )?;
     let llm = Arc::new(MockLlmBackend::new("flash", vec![]));
     let mut executor = TurnExecutor::new(ctx.clone(), llm);
-    executor.successful_work_calls_since_todo_advance = 8;
+    executor.local.successful_work_calls_since_todo_advance = 8;
 
     executor.maybe_append_todo_progress_reminder().await?;
     executor.maybe_append_todo_progress_reminder().await?;

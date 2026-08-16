@@ -2,6 +2,7 @@ use crate::config::ResolvedConfig as Config;
 use crate::llm::client::{LlmBackend, LlmModelTarget, LlmPurpose, LlmRequest, MeteredStream};
 use crate::protocol::{ErrorEvent, Event, StopEvent, TextEvent, UsageEvent};
 use crate::session::compaction_input;
+use crate::session::event_log::EventLogWriter;
 use crate::session::stats::StatsTracker;
 use crate::session::store::ConversationStore;
 use crate::session::usage::{UsageJournal, UsageKind};
@@ -39,11 +40,12 @@ pub struct CompactionEngine {
     compact_lock: tokio::sync::Mutex<()>,
     memo_epoch: Arc<AtomicU64>,
     projection_dirty: AtomicBool,
+    event_log_writer: Option<EventLogWriter>,
 }
 
 impl CompactionEngine {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub(crate) fn new(
         store: Arc<ConversationStore>,
         summary_path: PathBuf,
         api_url: String,
@@ -55,6 +57,7 @@ impl CompactionEngine {
         cancel: crate::cancel::CancellationToken,
         interrupt: Arc<AtomicBool>,
         llm_backend: Arc<dyn LlmBackend>,
+        event_log_writer: Option<EventLogWriter>,
     ) -> Result<Self> {
         let state_path = summary_path.with_file_name("context-state.json");
         let state = load_state(&state_path)?;
@@ -85,6 +88,7 @@ impl CompactionEngine {
             compact_lock: tokio::sync::Mutex::new(()),
             memo_epoch: Arc::new(AtomicU64::new(0)),
             projection_dirty: AtomicBool::new(false),
+            event_log_writer,
         })
     }
 
@@ -102,17 +106,28 @@ impl CompactionEngine {
 
     pub async fn validate_startup(&self) -> Result<()> {
         let state = self.current_state()?;
-        let active = self.store.lines_from(state.active_start).await?;
-        if state.active_start > 0
-            && active
-                .first()
-                .is_some_and(|message| !is_safe_context_start(message))
-        {
-            bail!(
-                "compaction active_start {} splits the conversation protocol",
-                state.active_start
-            );
+        if state.active_start == 0 {
+            return Ok(());
         }
+        let active = self.store.lines_from(state.active_start).await?;
+        if active.is_empty() {
+            return Ok(());
+        }
+        if active.first().is_some_and(is_safe_context_start) {
+            return Ok(());
+        }
+        // Older builds could persist a cut on a runtime-injected user message.
+        // Repair by moving the boundary forward to the next safe start (or to
+        // an empty active tail) instead of refusing to open the session.
+        let repaired_relative = (0..active.len())
+            .find(|&index| is_safe_context_start(&active[index]))
+            .unwrap_or(active.len());
+        let repaired_start = state.active_start.saturating_add(repaired_relative);
+        let next = CompactionState {
+            active_start: repaired_start,
+            summary: state.summary,
+        };
+        self.commit_state(next).await?;
         Ok(())
     }
 
@@ -416,23 +431,33 @@ impl CompactionEngine {
     }
 
     fn log_compact_event(&self, usage: &UsageEvent) {
+        if !self.config.log_events {
+            return;
+        }
+        let event = json!({
+            "type": "usage",
+            "input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+            "cache_read_input_tokens": usage.cache_read_input_tokens,
+            "cache_creation_input_tokens": usage.cache_creation_input_tokens,
+            "kind": "compact",
+        });
+        let Ok(line) = serde_json::to_string(&event) else {
+            return;
+        };
+        if let Some(writer) = &self.event_log_writer {
+            writer.send(line);
+            return;
+        }
+        // Test contexts without a session writer retain the direct append
+        // fallback so their synchronous event-log assertions keep working.
         let events_path = self.summary_path.with_file_name("events.jsonl");
         if let Ok(mut file) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&events_path)
         {
-            let event = json!({
-                "type": "usage",
-                "input_tokens": usage.input_tokens,
-                "output_tokens": usage.output_tokens,
-                "cache_read_input_tokens": usage.cache_read_input_tokens,
-                "cache_creation_input_tokens": usage.cache_creation_input_tokens,
-                "kind": "compact",
-            });
-            if let Ok(line) = serde_json::to_string(&event) {
-                let _ = writeln!(file, "{line}");
-            }
+            let _ = writeln!(file, "{line}");
         }
     }
 }
@@ -581,9 +606,10 @@ fn is_real_user_message(message: &Value) -> bool {
 }
 
 fn is_safe_context_start(message: &Value) -> bool {
-    let role = message.get("role").and_then(Value::as_str);
-    role == Some("assistant")
-        || (role == Some("user") && message.get("content").is_some_and(Value::is_string))
+    // Runtime-injected user messages are not safe boundaries: a cut may never
+    // land on an internal prompt that the caller did not author.
+    message.get("role").and_then(Value::as_str) == Some("assistant")
+        || is_real_user_message(message)
 }
 
 fn strip_dsml_tags(text: &str) -> String {

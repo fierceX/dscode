@@ -32,14 +32,20 @@ fn info_event(sequence: u64) -> AgentEvent {
 }
 
 #[tokio::test]
-async fn observer_overflow_stops_only_the_observer() {
+async fn observer_overflow_drops_newest_and_keeps_observer_alive() {
     let dispatcher = EventDispatcher::new(Arc::new(BlockingSink));
     for sequence in 0..2048 {
         dispatcher.dispatch(info_event(sequence));
     }
 
-    let error = dispatcher.shutdown().await.unwrap_err();
-    assert!(error.contains("overflowed"));
+    dispatcher
+        .shutdown_with_timeout(std::time::Duration::from_millis(1))
+        .await
+        .unwrap_err();
+    assert!(
+        dispatcher.dropped_events() > 0,
+        "overflowing dispatch must record dropped events"
+    );
 }
 
 struct FailingSink;

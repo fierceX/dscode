@@ -38,6 +38,31 @@ impl std::fmt::Display for ContextOverflowError {
 
 impl std::error::Error for ContextOverflowError {}
 
+/// Per-user-input state. Every field is reset between inputs by replacing
+/// the whole value with `Default::default()`, so adding a new field cannot be
+/// forgotten in a hand-maintained reset list.
+#[derive(Default)]
+struct TurnLocalState {
+    tool_call_count: u32,
+    /// Set after a signal injection. The next tool batch must observe before mutating.
+    signal_recovery_guard: bool,
+    /// 恢复守卫连续拦截计数（达到 guard_max_blocks 后绕过守卫并强制证据注入）。
+    guard_blocks: usize,
+    /// 守卫已达上限被绕过：下一次决策强制注入证据（即使处于冷却）。
+    guard_bypassed: bool,
+    /// 本输入内 Warning 级响应的累计次数；连续两次触发策略重启。
+    warning_count: usize,
+    /// 本输入内已尝试的策略重启次数。
+    replan_attempts: usize,
+    /// 当前用户输入原文，供恢复任务报告引用。
+    current_user_input: String,
+    todo_final_reminder_sent: bool,
+    todo_progress_reminder_sent: bool,
+    successful_work_calls_since_todo_advance: u32,
+    final_text: String,
+    final_thinking: String,
+}
+
 /// TurnExecutor runs a single "turn" of the agent loop:
 ///   Stream (LLM response) → Persist → Tools → Decide (continue/stop)
 pub struct TurnExecutor {
@@ -51,29 +76,12 @@ pub struct TurnExecutor {
     signal_processor: crate::agent::tool_signals::ToolSignalProcessor,
     plan_actions: crate::agent::plan_actions::PlanActionHandler,
     sub_agents: crate::agent::sub_coordinator::SubAgentCoordinator,
-    tool_call_count: u32,
+    local: TurnLocalState,
     /// 决策引擎（含冷却逻辑，由引擎内部管理）。
     decision_engine: crate::agent::decision::DecisionEngine,
     recovery_policy: crate::agent::recovery_policy::RecoveryPolicy,
-    /// Set after a signal injection. The next tool batch must observe before mutating.
-    signal_recovery_guard: bool,
-    /// 恢复守卫连续拦截计数（达到 guard_max_blocks 后绕过守卫并强制证据注入）。
-    guard_blocks: usize,
-    /// 守卫已达上限被绕过：下一次决策强制注入证据（即使处于冷却）。
-    guard_bypassed: bool,
-    /// 本输入内 Warning 级响应的累计次数；连续两次触发策略重启。
-    warning_count: usize,
-    /// 本输入内已尝试的策略重启次数。
-    replan_attempts: usize,
-    /// 当前用户输入原文，供恢复任务报告引用。
-    current_user_input: String,
     /// 恢复子代理配置副本，包含当前活动模型。
     sub_agent_config: crate::config::ResolvedConfig,
-    todo_final_reminder_sent: bool,
-    todo_progress_reminder_sent: bool,
-    successful_work_calls_since_todo_advance: u32,
-    final_text: String,
-    final_thinking: String,
 }
 
 /// Represents the outcome of a turn that needs to be actioned.
@@ -115,14 +123,17 @@ impl TurnExecutor {
             tools,
             prefix,
             compactor: crate::agent::compactor::TurnCompactor::new(ctx.clone()),
-            signal_processor: crate::agent::tool_signals::ToolSignalProcessor::new(),
+            signal_processor: crate::agent::tool_signals::ToolSignalProcessor::with_weights(
+                ctx.config.signal.seq_window,
+                ctx.config.signal.edit_loop_weights.clone(),
+            ),
             plan_actions: crate::agent::plan_actions::PlanActionHandler,
             sub_agents: crate::agent::sub_coordinator::SubAgentCoordinator::new(
                 ctx.clone(),
                 sub_agent_config.clone(),
             ),
             sub_agent_config,
-            tool_call_count: 0,
+            local: TurnLocalState::default(),
             decision_engine: crate::agent::decision::DecisionEngine::from_config(
                 &ctx.config.signal,
             ),
@@ -131,17 +142,6 @@ impl TurnExecutor {
                 crate::tools::catalog::ToolCatalog::builtin()
                     .expect("built-in tool catalog was validated during context construction"),
             ),
-            signal_recovery_guard: false,
-            guard_blocks: 0,
-            guard_bypassed: false,
-            warning_count: 0,
-            replan_attempts: 0,
-            current_user_input: String::new(),
-            todo_final_reminder_sent: false,
-            todo_progress_reminder_sent: false,
-            successful_work_calls_since_todo_advance: 0,
-            final_text: String::new(),
-            final_thinking: String::new(),
         }
     }
 
@@ -173,7 +173,7 @@ impl TurnExecutor {
 
     /// Return the total number of tool calls made during this turn.
     pub fn tool_call_count(&self) -> u32 {
-        self.tool_call_count
+        self.local.tool_call_count
     }
 
     /// Number of tool calls that produced at least one tool_error signal.
@@ -188,11 +188,22 @@ impl TurnExecutor {
     }
 
     pub fn text(&self) -> &str {
-        &self.final_text
+        &self.local.final_text
     }
 
     pub fn thinking(&self) -> &str {
-        &self.final_thinking
+        &self.local.final_thinking
+    }
+
+    fn reset_local_state(&mut self, user_input: &str) {
+        self.tools.reset_storm();
+        self.compactor.reset();
+        self.signal_processor.reset();
+        self.decision_engine.reset();
+        self.local = TurnLocalState {
+            current_user_input: user_input.to_string(),
+            ..TurnLocalState::default()
+        };
     }
 }
 
@@ -203,23 +214,8 @@ impl TurnExecutor {
         user_input: &str,
         mut belief: Option<&mut crate::agent::belief::BeliefTracker>,
     ) -> Result<(TurnDecision, Vec<TurnEffect>)> {
-        // New user intent: reset storm breaker window, compact guard, and decision engine
-        self.tools.reset_storm();
-        self.tool_call_count = 0;
-        self.compactor.reset();
-        self.signal_processor.reset();
-        self.decision_engine.reset();
-        self.signal_recovery_guard = false;
-        self.guard_blocks = 0;
-        self.guard_bypassed = false;
-        self.warning_count = 0;
-        self.replan_attempts = 0;
-        self.current_user_input = user_input.to_string();
-        self.todo_final_reminder_sent = false;
-        self.todo_progress_reminder_sent = false;
-        self.successful_work_calls_since_todo_advance = 0;
-        self.final_text.clear();
-        self.final_thinking.clear();
+        // New user intent: compiler-enforced full local-state reset.
+        self.reset_local_state(user_input);
 
         let mut messages = self.ctx.compaction.active_messages().await?;
         self.reconcile_todo_state(&mut messages).await?;
@@ -320,8 +316,8 @@ impl TurnExecutor {
                 mut stop,
                 usage,
             } = stream_output;
-            self.final_text.push_str(&text);
-            self.final_thinking.push_str(&thinking);
+            self.local.final_text.push_str(&text);
+            self.local.final_thinking.push_str(&thinking);
 
             if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.load(Ordering::SeqCst) {
                 self.ctx.display.render_stop("interrupted");

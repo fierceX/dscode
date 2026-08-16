@@ -333,6 +333,7 @@ async fn harness_with_config(
         cancel.clone(),
         interrupt.clone(),
         llm_backend.clone(),
+        None,
     )?);
     let tool_config = ToolConfig::from_config(&cfg);
     let todo_store = Arc::new(crate::session::todo::TodoStore::load(spaths.todos.clone())?);

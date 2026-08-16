@@ -279,7 +279,16 @@ pub fn parse(input: &str) -> Result<Patch> {
     Ok(Patch { sections })
 }
 
-fn try_parse_header(line: &str, line_num: usize) -> Result<Option<Section>> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SectionHeader {
+    pub(crate) path: String,
+    pub(crate) tag: String,
+}
+
+/// Parse one `[PATH#TAG]` section header. This is the single authoritative
+/// grammar for hash headers; callers that only need the path should use
+/// [`section_header_path`] rather than reimplementing a weaker parser.
+pub(crate) fn parse_section_header(line: &str, line_num: usize) -> Result<Option<SectionHeader>> {
     if !line.starts_with('[') {
         return Ok(None);
     }
@@ -304,9 +313,26 @@ fn try_parse_header(line: &str, line_num: usize) -> Result<Option<Section>> {
         tag.len() == 4 && tag.chars().all(|ch| ch.is_ascii_hexdigit()),
         "Error: line {line_num}: snapshot tag must contain exactly four hexadecimal characters"
     );
-    Ok(Some(Section {
+    Ok(Some(SectionHeader {
         path,
         tag: tag.to_ascii_uppercase(),
+    }))
+}
+
+/// Lenient projection for callers that only need the path from a header line.
+/// Malformed headers are treated as non-headers, matching the historical
+/// skip-and-continue behavior of these projections.
+pub(crate) fn section_header_path(line: &str) -> Option<String> {
+    parse_section_header(line.trim(), 0)
+        .ok()
+        .flatten()
+        .map(|header| header.path)
+}
+
+fn try_parse_header(line: &str, line_num: usize) -> Result<Option<Section>> {
+    Ok(parse_section_header(line, line_num)?.map(|header| Section {
+        path: header.path,
+        tag: header.tag,
         operations: Vec::new(),
         warnings: Vec::new(),
     }))

@@ -5,8 +5,6 @@ fn sig(kind: SignalKind, severity: f64) -> Signal {
     Signal {
         kind,
         severity,
-        source: "test".into(),
-        detail: "test".into(),
         source_tool: "test".into(),
         exit_code: None,
         matched_pattern: None,

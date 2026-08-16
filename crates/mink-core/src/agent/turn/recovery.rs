@@ -7,7 +7,7 @@ impl super::TurnExecutor {
         &mut self,
         calls: Vec<ToolCallEvent>,
     ) -> (Vec<ToolCallEvent>, Vec<crate::tools::runner::ToolExecution>) {
-        if !self.signal_recovery_guard || calls.is_empty() {
+        if !self.local.signal_recovery_guard || calls.is_empty() {
             return (calls, Vec::new());
         }
 
@@ -32,7 +32,7 @@ impl super::TurnExecutor {
             guidance
                 .validate(&self.ctx.tool_surface)
                 .expect("RecoveryPolicy emitted an inactive tool reference");
-            self.guard_blocks += 1;
+            self.local.guard_blocks += 1;
             let max_blocks = self.ctx.config.signal.guard_max_blocks;
             self.ctx.log_event(serde_json::json!({
                 "type": "signal_recovery_guard",
@@ -40,12 +40,12 @@ impl super::TurnExecutor {
                 "tool": first.name.clone(),
                 "tool_use_id": first.id.clone(),
                 "reason": guidance.content,
-                "guard_blocks": self.guard_blocks,
+                "guard_blocks": self.local.guard_blocks,
             }));
-            if self.guard_blocks >= max_blocks {
+            if self.local.guard_blocks >= max_blocks {
                 // 达到上限：绕过守卫放行调用，并强制下一次决策注入证据。
-                self.signal_recovery_guard = false;
-                self.guard_bypassed = true;
+                self.local.signal_recovery_guard = false;
+                self.local.guard_bypassed = true;
                 let mut allowed = Vec::new();
                 allowed.push(first);
                 allowed.extend(iter);
@@ -58,23 +58,23 @@ impl super::TurnExecutor {
             return (Vec::new(), blocked);
         }
 
-        self.signal_recovery_guard = false;
+        self.local.signal_recovery_guard = false;
         let mut allowed = Vec::new();
         allowed.push(first);
         allowed.extend(iter);
         (allowed, Vec::new())
     }
 
-    /// 回滚循环窗口内（最近 ROLLBACK_WINDOW_STEPS 步）被编辑过的路径。
+    /// 回滚循环窗口内（最近 SignalConfig.seq_window 步）被编辑过的路径。
     /// - 回滚目标是 read 基线而非 record_edit 的编辑后内容（否则恒等 no-op）；
     /// - 只回滚窗口内路径，窗口之前的合法编辑保持不动；
     /// - 写回经 atomic_replace（同目录临时文件 + rename），失败只记录不中断 turn。
     async fn apply_rollback(&mut self) -> Result<()> {
-        const ROLLBACK_WINDOW_STEPS: usize = 6; // 与 guard/collector 的 seq_window 对齐。
+        let rollback_window_steps = self.ctx.config.signal.seq_window;
         let paths = self
             .signal_processor
             .evidence()
-            .edited_paths_since(ROLLBACK_WINDOW_STEPS);
+            .edited_paths_since(rollback_window_steps);
         if paths.is_empty() {
             return Ok(());
         }
@@ -148,13 +148,13 @@ impl super::TurnExecutor {
             return Ok(None);
         }
         let s = self.ctx.config.signal.clone();
-        if self.replan_attempts >= MAX_REPLAN_ATTEMPTS_PER_INPUT {
+        if self.local.replan_attempts >= MAX_REPLAN_ATTEMPTS_PER_INPUT {
             return Ok(None);
         }
         if !self.ctx.tool_surface.has("SubAgent") {
             return Ok(None);
         }
-        self.replan_attempts += 1;
+        self.local.replan_attempts += 1;
         let mut child_cfg = self.sub_agent_config.clone();
         child_cfg.max_turns = s.replan_max_turns;
         child_cfg.max_tokens = child_cfg.max_tokens.min(s.replan_token_budget);
@@ -172,7 +172,7 @@ impl super::TurnExecutor {
             Err(error) => {
                 self.ctx.log_event(serde_json::json!({
                     "type": "signal_replan_error",
-                    "attempts": self.replan_attempts,
+                    "attempts": self.local.replan_attempts,
                     "session_id": session_id,
                     "error": error.to_string(),
                 }));
@@ -185,7 +185,7 @@ impl super::TurnExecutor {
         let result = executor.execute(report).await;
         self.ctx.log_event(serde_json::json!({
             "type": "signal_replan",
-            "attempts": self.replan_attempts,
+            "attempts": self.local.replan_attempts,
             "session_id": session_id,
             "status": result.status,
             "text_len": result.text.len(),
@@ -218,7 +218,7 @@ impl super::TurnExecutor {
              Produce a short revised plan: diagnose the most likely root cause, then list the \
              next 3 concrete verification-first steps. Output the plan only; do not continue \
              the parent's work.",
-            self.current_user_input,
+            self.local.current_user_input,
             if paths.is_empty() { "(none)" } else { &paths },
             evidence,
         )
@@ -246,7 +246,7 @@ impl super::TurnExecutor {
                 Ok(None) // 继续循环
             }
             "end_turn" | "stop" | "done" => {
-                if !self.todo_final_reminder_sent
+                if !self.local.todo_final_reminder_sent
                     && self
                         .ctx
                         .todo_store
@@ -262,7 +262,7 @@ impl super::TurnExecutor {
                             "<todo-final-reminder>Todo items remain in_progress. Before finishing, call {provider} to complete verified work or pause work that is no longer active. If the work is blocked and should remain active, state that explicitly.</todo-final-reminder>"
                         ))
                         .await?;
-                    self.todo_final_reminder_sent = true;
+                    self.local.todo_final_reminder_sent = true;
                     return Ok(None);
                 }
                 self.ctx.display.render_stop(stop);
@@ -291,9 +291,9 @@ impl super::TurnExecutor {
             let b = bt.belief();
             let hard = self.signal_processor.hard_failures() as usize;
             let soft = self.signal_processor.soft_failures() as usize;
-            let decision = if self.guard_bypassed {
+            let decision = if self.local.guard_bypassed {
                 // 守卫达到上限被绕过：强制一次证据注入，即使处于冷却。
-                self.guard_bypassed = false;
+                self.local.guard_bypassed = false;
                 crate::agent::decision::Decision::Inject(
                     crate::agent::decision::RecoveryDirective {
                         severity: crate::agent::decision::RecoverySeverity::Warning,
@@ -337,17 +337,17 @@ impl super::TurnExecutor {
                     let is_warning =
                         directive.severity == crate::agent::decision::RecoverySeverity::Warning;
                     if is_warning {
-                        self.warning_count += 1;
+                        self.local.warning_count += 1;
                     }
                     let mut replanned = false;
-                    if is_warning && self.warning_count >= 2 && policy.allows_restart() {
+                    if is_warning && self.local.warning_count >= 2 && policy.allows_restart() {
                         replanned = self.run_replan(b).await?.is_some();
                         if replanned {
                             bt.reset();
                         }
                     }
                     // 恢复守卫降级为状态门：仅在 Warning 级启用且未成功重规划时。
-                    self.signal_recovery_guard =
+                    self.local.signal_recovery_guard =
                         is_warning && !replanned && policy.allows_state_ops();
                 }
                 crate::agent::decision::Decision::Abort => {

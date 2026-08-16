@@ -108,6 +108,9 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
         }
         Arc::new(router)
     };
+    let event_log_writer = config
+        .log_events
+        .then(|| crate::session::event_log::EventLogWriter::start(paths.events.clone()));
     let compaction = Arc::new(CompactionEngine::new(
         store.clone(),
         paths.summary.clone(),
@@ -120,11 +123,8 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
         params.cancel.clone(),
         params.interrupt.clone(),
         params.llm_backend.clone(),
+        event_log_writer.clone(),
     )?);
-
-    let event_log_writer = config
-        .log_events
-        .then(|| crate::session::event_log::EventLogWriter::start(paths.events.clone()));
 
     let ctx = Arc::new(AgentSharedContext {
         config: config.clone(),
