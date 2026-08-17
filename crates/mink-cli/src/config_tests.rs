@@ -49,37 +49,56 @@ fn parse_args_config_rejects_invalid_toml() {
 }
 
 #[test]
-fn model_resolver_maps_aliases_and_preserves_custom_names() {
-    let mut aliases = BTreeMap::new();
-    aliases.insert("flash".to_string(), "local-fast".to_string());
-    aliases.insert("coder".to_string(), "qwen3-coder-plus".to_string());
-    let resolver = ModelResolver::new(&aliases);
-
-    let flash = resolver.resolve("flash");
-    assert_eq!(flash.actual, "local-fast");
-    assert_eq!(flash.alias.as_deref(), Some("flash"));
-
-    let custom = resolver.resolve("gpt-4.1");
-    assert_eq!(custom.actual, "gpt-4.1");
-    assert_eq!(custom.alias, None);
-}
-
-#[test]
-fn model_resolver_defaults_empty_model_to_flash_alias() {
-    let resolver = ModelResolver::new(&BTreeMap::new());
-    let resolved = resolver.resolve(" ");
-    assert_eq!(resolved.requested, "flash");
-    assert_eq!(resolved.actual, "deepseek-v4-flash");
-    assert_eq!(resolved.label, "flash");
-    assert_eq!(resolved.alias.as_deref(), Some("flash"));
-}
-
-#[test]
 fn parse_args_flags() {
     let cfg = parse_args(vec!["-v".into(), "-i".into(), "--print".into()]).unwrap();
     assert!(cfg.verbose);
     assert!(cfg.interactive);
     assert_eq!(cfg.output_format, OutputFormat::StreamJson);
+    // --print marks the output-format flag so [generation] TOML cannot
+    // outrank the explicit CLI choice.
+    assert!(cfg.cli_overrides.output_format);
+}
+
+#[test]
+fn parse_args_skill_flag_collects_unique_names() {
+    let cfg = parse_args(vec![
+        "--skill".into(),
+        "debugging".into(),
+        "--skill".into(),
+        "review".into(),
+        "--skill".into(),
+        "debugging".into(),
+    ])
+    .unwrap();
+    assert_eq!(cfg.skills, vec!["debugging", "review"]);
+
+    let err = parse_args(vec!["--skill".into(), "  ".into()]).unwrap_err();
+    assert!(err.to_string().contains("skill name must not be empty"));
+}
+
+#[test]
+fn env_size_limits_lose_to_config_files() {
+    // Documented priority: CLI > --config > project .minkrc > user .minkrc >
+    // env > defaults. Env limits are applied before file sources, so a
+    // [tools] value in any file layer outranks the env value.
+    let defaults = CliConfig::default();
+    let mut cfg = defaults.clone();
+    super::apply_size_limit_envs(&mut cfg, Some(111), None, Some(222), Some(333));
+    assert_eq!(cfg.tool_result_max_bytes, 111);
+    assert_eq!(cfg.max_search_files, 222);
+    assert_eq!(cfg.max_search_results, 333);
+
+    let project = MinkConfigFile {
+        tools: ToolsConfigFile {
+            max_search_files: Some(9_999),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    apply_config_sources(&mut cfg, &defaults, None, Some(&project), None);
+    assert_eq!(cfg.max_search_files, 9_999);
+    assert_eq!(cfg.max_search_results, 333);
+    assert_eq!(cfg.tool_result_max_bytes, 111);
 }
 
 #[test]
@@ -313,7 +332,7 @@ Read = "allow"
 }
 
 #[test]
-fn config_cli_overrides_project_config() {
+fn config_cli_flags_beat_project_config() {
     let defaults = CliConfig::default();
     let project = MinkConfigFile {
         provider: ProviderConfigFile {
@@ -329,11 +348,17 @@ fn config_cli_overrides_project_config() {
     let mut cfg = CliConfig {
         model: "flash".into(),
         max_turns: 12,
+        // `--model flash` marks the flag; max_turns has no CLI flag, so the
+        // TOML layer legitimately owns it (12 was only a pre-set default).
+        cli_overrides: CliOverrides {
+            model: true,
+            ..Default::default()
+        },
         ..Default::default()
     };
     apply_config_sources(&mut cfg, &defaults, None, Some(&project), None);
     assert_eq!(cfg.model, "flash");
-    assert_eq!(cfg.max_turns, 12);
+    assert_eq!(cfg.max_turns, 99);
 }
 
 #[test]

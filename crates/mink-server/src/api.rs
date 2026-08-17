@@ -462,6 +462,20 @@ async fn get_artifact(
         format!("{name}.txt")
     };
     let path = dir.join("artifacts").join(&filename);
+    // artifact 正文可达 MB 级（超长工具输出落盘）：与 /files?raw 相同的
+    // 读取上限，防止内存放大。
+    match tokio::fs::metadata(&path).await {
+        Ok(meta) if meta.len() > FILE_RAW_MAX_BYTES => {
+            return ApiResponse::err(
+                413,
+                format!(
+                    "artifact {name} is {} bytes; the REST API caps reads at {FILE_RAW_MAX_BYTES} bytes",
+                    meta.len()
+                ),
+            );
+        }
+        _ => {}
+    }
     match read_optional(&path).await {
         Some(text) => ApiResponse::ok(json!({ "name": filename, "content": text })),
         None => ApiResponse::err(404, format!("artifact {name} not found")),

@@ -11,21 +11,30 @@ pub struct ToolSignalProcessor {
     evidence: EvidenceTracker,
 }
 
+/// EvidenceTracker 的最小轨迹容量：seq_window 小于该值时按该值保留，
+/// 注入渲染仍有足够上下文；配置更大的 seq_window 时不会被截断。
+const MIN_EVIDENCE_RECORDS: usize = 24;
+
 impl ToolSignalProcessor {
     /// Test-only convenience constructor. Production paths must use
-    /// `with_weights` and the runtime `SignalConfig`.
+    /// `from_config` with the runtime `SignalConfig`.
     #[cfg(test)]
     pub fn new() -> Self {
-        let config = crate::config::SignalConfig::default();
-        Self::with_weights(config.seq_window, config.edit_loop_weights)
+        Self::from_config(&crate::config::SignalConfig::default())
     }
 
-    pub(crate) fn with_weights(seq_window: usize, weights: crate::config::EditLoopWeights) -> Self {
+    pub(crate) fn from_config(config: &crate::config::SignalConfig) -> Self {
         Self {
-            collector: SignalCollector::with_weights(seq_window, weights),
+            collector: SignalCollector::with_weights(
+                config.seq_window,
+                config.edit_loop_weights.clone(),
+            ),
             tool_error_count: 0,
             signals: Vec::new(),
-            evidence: EvidenceTracker::default(),
+            evidence: EvidenceTracker::new(
+                config.seq_window.max(MIN_EVIDENCE_RECORDS),
+                config.evidence_dedup_window,
+            ),
         }
     }
 
@@ -145,12 +154,17 @@ impl ToolSignalProcessor {
             crate::ui::render_title_snapshot(ctx, model_label, bt.belief()).await;
         }
 
-        if result.signals.iter().any(|s| {
-            matches!(
-                s.kind,
-                SignalKind::ToolError | SignalKind::TestFailure | SignalKind::CompileError
-            )
-        }) {
+        // 对外指标：硬失败（ToolFailed/SafetyBlocked/Timeout/ProcessFailed 等
+        // 执行状态失败）与软诊断（ToolError/TestFailure/CompileError）都计入；
+        // 此前只计软嗅探、Bash 非零退出等硬失败被漏掉，指标失真。
+        if hard
+            || result.signals.iter().any(|s| {
+                matches!(
+                    s.kind,
+                    SignalKind::ToolError | SignalKind::TestFailure | SignalKind::CompileError
+                )
+            })
+        {
             self.tool_error_count += 1;
         }
 

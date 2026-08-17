@@ -119,6 +119,8 @@ impl EvidenceTracker {
     }
 
     /// 渲染证据文本（纯事实，无祈使句），受 `budget_chars` 上限约束。
+    /// 新鲜度哈希只覆盖事实行：detector 行含实时 belief 数值，把它算进
+    /// 哈希会让"证据未变仅 belief 变化"的批次被误判为新证据。
     pub fn render(&self, budget_chars: usize, belief: f64) -> EvidenceBatch {
         let mut lines: Vec<String> = Vec::new();
         lines.push("[trajectory]".to_string());
@@ -146,38 +148,25 @@ impl EvidenceTracker {
             lines.push("- no failures recorded".to_string());
         }
 
-        lines.push(format!(
+        let detector = format!(
             "[detector] hard failures {}, soft {}; belief {:.2} (reference only)",
             self.hard_failures, self.soft_failures, belief
-        ));
-
-        let mut text = lines.join(
-            "
-",
         );
-        if text.chars().count() > budget_chars {
-            // 按优先级截断：detector 行保留，事实行从头截。
-            let detector = lines.pop().unwrap_or_default();
-            let mut kept: Vec<String> = Vec::new();
-            let mut used = detector.chars().count();
-            for line in lines {
-                let cost = line.chars().count() + 1;
-                if used + cost > budget_chars {
-                    break;
-                }
-                kept.push(line);
-                used += cost;
+        // 按优先级截断：detector 行保留，事实行从头截。
+        let facts_budget = budget_chars.saturating_sub(detector.chars().count() + 1);
+        let mut kept: Vec<String> = Vec::new();
+        let mut used = 0usize;
+        for line in &lines {
+            let cost = line.chars().count() + 1;
+            if used + cost > facts_budget {
+                break;
             }
-            text = format!(
-                "{}
-{detector}",
-                kept.join(
-                    "
-"
-                )
-            );
+            kept.push(line.clone());
+            used += cost;
         }
-        let hash = hash_text(&text);
+        let fact_text = kept.join("\n");
+        let hash = hash_text(&fact_text);
+        let text = format!("{fact_text}\n{detector}");
         EvidenceBatch { text, hash }
     }
 

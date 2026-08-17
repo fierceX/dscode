@@ -262,6 +262,22 @@ fn execute_in_sandbox(
     )
 }
 
+/// Resolve the effective sandbox timeout: model-provided values must honor the
+/// documented 300s ceiling (fail closed; smaller values honored verbatim);
+/// 0/absent falls back to the configured default, clamped.
+fn resolve_sandbox_timeout(explicit: Option<u64>, configured: u64) -> Result<u64> {
+    match explicit {
+        Some(t) if t > 0 => {
+            anyhow::ensure!(
+                t <= 300,
+                "Error: timeout must not exceed 300 seconds; got {t}"
+            );
+            Ok(t)
+        }
+        _ => Ok(configured.clamp(5, 300)),
+    }
+}
+
 pub struct PythonSandboxTool;
 
 impl super::runner::ToolExec for PythonSandboxTool {
@@ -313,7 +329,7 @@ impl super::runner::ToolExec for PythonSandboxTool {
         };
 
         let sp_cfg = &ctx.tool_config.sandbox_python;
-        let timeout = args.timeout.unwrap_or(sp_cfg.timeout);
+        let timeout = resolve_sandbox_timeout(args.timeout, sp_cfg.timeout)?;
 
         let wasm_path = Path::new(&sp_cfg.wasm_path);
         if !wasm_path.exists() {

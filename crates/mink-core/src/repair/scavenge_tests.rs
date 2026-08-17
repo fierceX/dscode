@@ -195,3 +195,14 @@ fn scavenge_combined_respects_max() {
     assert_eq!(calls.len(), 2);
     assert!(notes.iter().any(|n| n.contains("reached max")));
 }
+
+#[test]
+fn scavenge_dsml_param_without_string_attribute_strips_separator() {
+    // 兜底路径（参数无 string= 属性）：此前值会带上前导 '>' 被静默传给工具。
+    let text = r#"<|DSML|invoke name="Read">
+<|DSML|parameter name="path">/tmp/no-attr.txt<|DSML|parameter>
+</|DSML|invoke>"#;
+    let result = scavenge_tool_calls(text).unwrap();
+    assert_eq!(result[0]["name"], "Read");
+    assert_eq!(result[0]["arguments"]["path"], "/tmp/no-attr.txt");
+}

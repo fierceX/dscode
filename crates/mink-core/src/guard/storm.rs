@@ -25,11 +25,13 @@ impl StormBreaker {
         self.window.clear();
     }
 
-    pub fn check(&mut self, name: &str, args: &str, is_mutating: bool) -> StormDecision {
-        if is_mutating {
-            self.window.clear();
-        }
-
+    /// All calls (mutating or not) share one window: a mutating call advancing
+    /// the task must not immunize itself against repeated-call suppression.
+    /// Suppression fires when the count exceeds `threshold` — the first
+    /// `threshold` identical calls stay allowed so graded tool feedback
+    /// (e.g. the Edit soft no-op → 3-strike escalation) can complete before
+    /// the breaker takes over.
+    pub fn check(&mut self, name: &str, args: &str) -> StormDecision {
         let key = (name.to_string(), args.to_string());
         self.window.push_back(key.clone());
         while self.window.len() > self.max_window {
@@ -41,7 +43,7 @@ impl StormBreaker {
             .iter()
             .filter(|(n, a)| n == name && a == args)
             .count();
-        if count >= self.threshold {
+        if count > self.threshold {
             StormDecision::Suppress(format!(
                 "Tool call suppressed: {} repeated {} times in window of {}. Rephrase or try different approach.",
                 name, count, self.max_window

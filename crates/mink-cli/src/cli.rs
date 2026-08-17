@@ -265,12 +265,15 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
         .map(|r| r.prompt.clone())
         .or_else(|| (!cfg.prompt.trim().is_empty()).then(|| cfg.prompt.clone()));
 
-    // Determine interactive mode early, before ctx creation
-    let is_interactive =
-        cfg.interactive || (cfg.prompt.is_empty() && std::io::stdin().is_terminal());
-    cfg.interactive = is_interactive;
-    let is_stream_json =
+    // Determine interactive mode early, before ctx creation.
+    // StreamJson 输出（--print/--agent-jsonl）没有人类可读输出，
+    // 不得落入 REPL（否则 REPL 渲染全部被抑制、只剩 stderr 提示符）。
+    let is_stream_json_output =
         cfg.output_format == crate::config::OutputFormat::StreamJson || cfg.agent_jsonl;
+    let is_interactive = cfg.interactive
+        || (cfg.prompt.is_empty() && std::io::stdin().is_terminal() && !is_stream_json_output);
+    cfg.interactive = is_interactive;
+    let is_stream_json = is_stream_json_output;
 
     // TUI channels (if tui_mode). Created before display so signal_tx is available.
     #[cfg(feature = "tui")]
@@ -996,22 +999,30 @@ fn print_usage() {
     println!("  --edit-fuzzy-match BOOL Enable Replace progressive/fuzzy matching");
     println!("  --edit-fuzzy-threshold N Replace fuzzy threshold, 0.0..=1.0 (default: 0.95)");
     println!("  --edit-enforce-seen-lines BOOL Require displayed Hashline anchors");
-    println!("  --config <toml>         Set config via TOML string");
-    println!("                          Example: --config \"max_tokens=4096\\ntool_timeout=300\"");
-    println!("                          Supports: model, max_tokens, max_turns, max_context,");
-    println!("                          context_compact_*, context_reserve_tokens,");
-    println!("                          tool_timeout, sub_agent_timeout, llm_*_timeout,");
-    println!("                          output_format, approval_mode, edit_*, skills, verbose,");
-    println!("                          and [sandbox_python] section");
+    println!("  --skill NAME            Select a skill (repeatable); same as tools.skills");
+    println!("  --config <toml>         Set config via TOML string (grouped sections)");
+    println!(
+        "                          Example: --config \"[generation]\\nmax_tokens=4096\\n[tools]\\ntool_timeout=300\""
+    );
+    println!("                          Sections: [provider] [generation] [context] [tools]");
+    println!("                          [tools.edit] [signal] [sandbox] [sandbox_python]");
     println!("  -h, --help              Show this help");
     println!();
     println!("Config via TOML (--config or .minkrc):");
     println!("  See .minkrc.example for a complete reference.");
+    println!(
+        "  Priority: CLI flags > --config > project .minkrc > user ~/.minkrc > env > defaults."
+    );
     println!();
     println!("Environment:");
     println!("  DEEPSEEK_API_KEY        DeepSeek API key");
     println!("  DEEPSEEK_BASE_URL       DeepSeek base URL");
     println!("  LOG_EVENTS              Enable event logging (default: true)");
+    println!("  TOOL_RESULT_MAX_BYTES   Max tool result bytes");
+    println!("  FILE_WRITE_MAX_BYTES    Max file write bytes");
+    println!("  MAX_SEARCH_FILES        Max files scanned by Glob/Grep");
+    println!("  MAX_SEARCH_RESULTS      Max Glob/Grep results");
+    println!("  MINK_LIMITS             Sandbox limits as JSON [sandbox] override");
     println!(
         "  MINK_SIGNAL_POLICY      Signal policy: off | evidence | state_ops | restart | full"
     );

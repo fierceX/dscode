@@ -3,7 +3,7 @@ use super::*;
 impl super::TurnExecutor {
     /// 从 thinking/text 中回收漏报的工具调用。
     pub(super) fn scavenge_calls(
-        &self,
+        &mut self,
         thinking: &str,
         text: &str,
         mut calls: Vec<ToolCallEvent>,
@@ -20,9 +20,10 @@ impl super::TurnExecutor {
             if text.is_empty() { None } else { Some(text) },
             4,
         );
+        self.local.scavenge_seq += 1;
         let mut recovered = false;
         for sc in &scavenged {
-            let cid = format!("scavenged_{}", calls.len());
+            let cid = format!("scavenged_{}_{}", self.local.scavenge_seq, calls.len());
             match build_tool_call_event(&sc.name, &cid, &sc.arguments) {
                 Ok(call) => {
                     let duplicate = calls

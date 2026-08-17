@@ -179,3 +179,20 @@ fn default_timeout_is_stable_without_execution_history() {
     let (result, _) = execute("sleep 1; echo done", None, 5).unwrap();
     assert!(result.contains("done"));
 }
+
+#[test]
+fn explicit_timeout_over_ceiling_fails_closed() {
+    for bad in [601u64, 86_400, usize::MAX as u64] {
+        let err = execute("true", Some(bad), 600).unwrap_err();
+        assert!(
+            err.to_string().contains("must not exceed 600"),
+            "timeout {bad} should be rejected: {err}"
+        );
+    }
+    // Explicit values within the ceiling (including short 1-5s timeouts used
+    // for quick commands) are honored verbatim; 0 falls back to the default.
+    assert!(execute("true", Some(1), 0).is_ok());
+    assert!(execute("true", Some(5), 0).is_ok());
+    assert!(execute("true", Some(600), 0).is_ok());
+    assert!(execute("true", Some(0), 60).is_ok());
+}

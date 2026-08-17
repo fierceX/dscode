@@ -1,5 +1,5 @@
 use crate::safety;
-use anyhow::{Result, bail};
+use anyhow::{Result, bail, ensure};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::path::Path;
@@ -49,11 +49,20 @@ fn execute_with_interrupt_in_dir(
         bail!("Error: command blocked by bash safety policy ({reason})");
     }
 
-    let timeout = Duration::from_secs(match timeout_secs {
-        Some(t) if t > 0 => t,
-        _ if default_timeout > 0 => (default_timeout as u64).clamp(5, 600),
-        _ => 600,
-    });
+    // Explicit model-provided timeouts must honor the documented 600s ceiling;
+    // oversized values fail closed instead of running unbounded. Sub-ceiling
+    // values (including 1-4s for quick commands) are honored verbatim.
+    let timeout = match timeout_secs {
+        Some(t) if t > 0 => {
+            ensure!(
+                t <= 600,
+                "Error: timeout must not exceed 600 seconds; got {t}"
+            );
+            Duration::from_secs(t)
+        }
+        _ if default_timeout > 0 => Duration::from_secs((default_timeout as u64).clamp(5, 600)),
+        _ => Duration::from_secs(600),
+    };
 
     let sync = execute_sync(command, timeout, interrupt, cwd)?;
     let (output_bytes, stderr_bytes, exit_code) = (sync.stdout, sync.stderr, sync.code);

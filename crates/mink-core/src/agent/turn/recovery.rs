@@ -32,30 +32,39 @@ impl super::TurnExecutor {
             guidance
                 .validate(&self.ctx.tool_surface)
                 .expect("RecoveryPolicy emitted an inactive tool reference");
-            self.local.guard_blocks += 1;
             let max_blocks = self.ctx.config.signal.guard_max_blocks;
+            if self.local.guard_blocks < max_blocks {
+                self.local.guard_blocks += 1;
+                self.ctx.log_event(serde_json::json!({
+                    "type": "signal_recovery_guard",
+                    "action": "blocked_non_inspection",
+                    "tool": first.name.clone(),
+                    "tool_use_id": first.id.clone(),
+                    "reason": guidance.content,
+                    "guard_blocks": self.local.guard_blocks,
+                }));
+                let blocked: Vec<crate::tools::runner::ToolExecution> = std::iter::once(first)
+                    .chain(iter)
+                    .map(|call| blocked_by_signal_recovery(call, guidance.content.clone()))
+                    .collect();
+                return (Vec::new(), blocked);
+            }
+            // 连续拦截达到 guard_max_blocks：绕过守卫放行调用，并强制下一次
+            // 决策注入证据。事件 action 与实际行为保持一致（bypassed 而非 blocked）。
+            self.local.signal_recovery_guard = false;
+            self.local.guard_bypassed = true;
             self.ctx.log_event(serde_json::json!({
                 "type": "signal_recovery_guard",
-                "action": "blocked_non_inspection",
+                "action": "bypassed_max_blocks",
                 "tool": first.name.clone(),
                 "tool_use_id": first.id.clone(),
                 "reason": guidance.content,
                 "guard_blocks": self.local.guard_blocks,
             }));
-            if self.local.guard_blocks >= max_blocks {
-                // 达到上限：绕过守卫放行调用，并强制下一次决策注入证据。
-                self.local.signal_recovery_guard = false;
-                self.local.guard_bypassed = true;
-                let mut allowed = Vec::new();
-                allowed.push(first);
-                allowed.extend(iter);
-                return (allowed, Vec::new());
-            }
-            let blocked: Vec<crate::tools::runner::ToolExecution> = std::iter::once(first)
-                .chain(iter)
-                .map(|call| blocked_by_signal_recovery(call, guidance.content.clone()))
-                .collect();
-            return (Vec::new(), blocked);
+            let mut allowed = Vec::new();
+            allowed.push(first);
+            allowed.extend(iter);
+            return (allowed, Vec::new());
         }
 
         self.local.signal_recovery_guard = false;

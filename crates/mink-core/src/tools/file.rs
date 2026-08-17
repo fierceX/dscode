@@ -51,8 +51,18 @@ fn read_tail_lines(path: &Path, max_lines: usize) -> Result<Vec<String>> {
     let window = 8192usize.min(meta.len() as usize);
     let mut file = std::fs::File::open(path)?;
     file.seek(SeekFrom::End(-(window as i64)))?;
-    let mut text = String::new();
-    std::io::BufReader::new(file).read_to_string(&mut text)?;
+    let mut bytes = Vec::new();
+    std::io::BufReader::new(file).read_to_end(&mut bytes)?;
+    // 窗口起点可能落在多字节 UTF-8 字符中间：丢弃残缺的首字符再解码，
+    // 否则含 CJK 的超限文件整读失败。
+    if window < meta.len() as usize {
+        let mut start = 0;
+        while start < bytes.len() && (bytes[start] >> 6) == 0b10 {
+            start += 1;
+        }
+        bytes.drain(..start);
+    }
+    let text = String::from_utf8(bytes)?;
     let mut lines = text.lines().rev().take(max_lines).collect::<Vec<_>>();
     lines.reverse();
     Ok(lines.into_iter().map(str::to_string).collect())
@@ -307,16 +317,11 @@ pub(crate) enum ReadTargetClass {
     RegisteredResource,
 }
 
-pub(crate) fn classify_read_target(
-    input: &serde_json::Value,
+pub(crate) fn classify_read_selection(
+    selection: &crate::resources::selector::ReadPathSelection,
     router: &crate::resources::ResourceRouter,
     filesystem_backend: FilesystemBackend,
 ) -> anyhow::Result<ReadTargetClass> {
-    let path = input
-        .get("path")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| anyhow::anyhow!("tool input is missing a string path"))?;
-    let selection = split_read_path_selection(path)?;
     if router.can_handle(&selection.path) {
         return Ok(ReadTargetClass::RegisteredResource);
     }
@@ -331,6 +336,19 @@ pub(crate) fn classify_read_target(
         backend: filesystem_backend,
         raw: selection.raw,
     })
+}
+
+pub(crate) fn classify_read_target(
+    input: &serde_json::Value,
+    router: &crate::resources::ResourceRouter,
+    filesystem_backend: FilesystemBackend,
+) -> anyhow::Result<ReadTargetClass> {
+    let path = input
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("tool input is missing a string path"))?;
+    let selection = split_read_path_selection(path)?;
+    classify_read_selection(&selection, router, filesystem_backend)
 }
 
 fn resolve_tool_path(cwd: &Path, raw: &str) -> Result<PathBuf> {
@@ -388,10 +406,16 @@ impl super::runner::ToolExec for ReadTool {
         } else {
             FilesystemBackend::Local
         };
-        let target_class = classify_read_target(input, &ctx.resource_router, filesystem_backend)?;
+        let target_class =
+            classify_read_selection(&selection, &ctx.resource_router, filesystem_backend)?;
         if target_class == ReadTargetClass::RegisteredResource {
             let resource = ctx.resource_router.resolve(&selection, ctx)?;
-            let text = select_text_lines(&resource.content, selection.offset, selection.limit);
+            let text = select_text_lines(
+                &resource.content,
+                selection.offset,
+                selection.limit,
+                &selection.path,
+            )?;
             return Ok(super::runner::ToolOutcome::text(text));
         }
         if let Some(vfs) = &ctx.read_only_fs {
@@ -473,7 +497,7 @@ impl super::runner::ToolExec for ReadTool {
             selection
                 .offset
                 .zip(selection.limit)
-                .map(|(start, count)| start + count.saturating_sub(1)),
+                .map(|(start, count)| start.saturating_add(count.saturating_sub(1))),
         ) {
             return Ok(super::runner::ToolOutcome::text(cached));
         }
@@ -498,7 +522,7 @@ impl super::runner::ToolExec for ReadTool {
                     selection.limit,
                 )
             },
-            |text| Ok(select_text_lines(text, selection.offset, selection.limit)),
+            |text| select_text_lines(text, selection.offset, selection.limit, &selection.path),
         )?;
         let visible_count = crate::tools::snapshot::split_content_lines(&content).len();
         if selection.raw {
@@ -511,12 +535,8 @@ impl super::runner::ToolExec for ReadTool {
                 content.len(),
                 ctx.tool_config.tool_result_max_bytes
             );
-            if let Some(full_text) = &full_text {
-                ctx.snapshots
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .record(&path, full_text, start_line..start_line + visible_count);
-            }
+            // raw 读取不记录可编辑 snapshot（文档协议：raw 不生成锚点），
+            // 也不满足 Hashline 的 seen-lines 守卫。
             // Offer the memo candidate; the runner records it only when the
             // final composed output (raw content plus its summary line) fits
             // the budget, so a later hit can never ask the model to "reuse"
@@ -527,10 +547,7 @@ impl super::runner::ToolExec for ReadTool {
                 path: path.clone(),
                 raw: true,
                 start_line: selection.offset,
-                end_line: selection
-                    .offset
-                    .map(|start| start + visible_count.saturating_sub(1))
-                    .filter(|_| visible_count > 0),
+                end_line: memo_end_line(selection.offset, selection.limit, visible_count),
             });
             return Ok(outcome);
         }
@@ -576,13 +593,24 @@ impl super::runner::ToolExec for ReadTool {
             path: path.clone(),
             raw: false,
             start_line: selection.offset,
-            end_line: selection
-                .offset
-                .map(|start| start + visible_count.saturating_sub(1))
-                .filter(|_| visible_count > 0),
+            end_line: memo_end_line(selection.offset, selection.limit, visible_count),
         });
         Ok(outcome)
     }
+}
+
+/// memo 端行语义：开放式选择器（读到 EOF）记 `None`，与 `covers()` 的
+/// `(Some(N), None)` 查询对齐，使重复的 `path:N` 开放式读取可以命中；
+/// 有界选择器记实际末行。
+fn memo_end_line(
+    offset: Option<usize>,
+    limit: Option<usize>,
+    visible_count: usize,
+) -> Option<usize> {
+    if limit.is_none() {
+        return None;
+    }
+    offset.map(|start| start + visible_count.saturating_sub(1))
 }
 
 impl super::runner::ToolExec for WriteTool {
@@ -703,9 +731,14 @@ struct TextShape {
 fn decode_text_shape(raw: &str) -> (TextShape, String) {
     let bom = raw.starts_with('\u{feff}');
     let without_bom = raw.strip_prefix('\u{feff}').unwrap_or(raw);
-    let crlf = without_bom
-        .find("\r\n")
-        .is_some_and(|crlf| without_bom.find('\n').is_none_or(|lf| crlf <= lf));
+    // 仅当全部换行都是 CRLF 才按 CRLF 恢复：此前只看第一个换行，
+    // 混合行尾文件（如 "a\r\nb\nc"）会被整体改写成 CRLF。混合文件
+    // 统一按 LF 处理（少数 CRLF 行归一为 LF，不做全文件 EOL 改写）。
+    let bytes = without_bom.as_bytes();
+    let crlf = bytes
+        .iter()
+        .enumerate()
+        .all(|(i, b)| *b != b'\n' || (i > 0 && bytes[i - 1] == b'\r'));
     (
         TextShape { bom, crlf },
         crate::tools::snapshot::normalize_snapshot_text(without_bom),

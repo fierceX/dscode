@@ -408,6 +408,9 @@ pub fn compute_file_tag(content: &str) -> String {
 
 pub fn split_content_lines(content: &str) -> Vec<String> {
     let normalized = normalize_snapshot_text(content);
+    if normalized.is_empty() {
+        return Vec::new();
+    }
     let mut lines = normalized
         .split('\n')
         .map(ToString::to_string)

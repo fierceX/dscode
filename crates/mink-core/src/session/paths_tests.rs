@@ -21,7 +21,7 @@ fn chrono_session_id_format() {
     assert_eq!(parts.len(), 3);
     assert_eq!(parts[0].len(), 8); // YYYYMMDD
     assert_eq!(parts[1].len(), 6); // HHmmss
-    assert_eq!(parts[2].len(), 4); // XXXX
+    assert_eq!(parts[2].len(), 8); // 完整 subsec_nanos（8 位十六进制）
 }
 
 #[test]

@@ -53,18 +53,30 @@ pub fn split_read_path_selection(input: &str) -> Result<ReadPathSelection> {
     })
 }
 
-pub fn select_text_lines(text: &str, offset: Option<usize>, limit: Option<usize>) -> String {
+pub fn select_text_lines(
+    text: &str,
+    offset: Option<usize>,
+    limit: Option<usize>,
+    path: &str,
+) -> Result<String> {
     if offset.is_none() && limit.is_none() {
-        return text.to_string();
+        return Ok(text.to_string());
     }
     let mut lines: Vec<&str> = text.split('\n').collect();
     if !lines.is_empty() && lines.last().is_some_and(|line| line.is_empty()) {
         lines.pop();
     }
     let total = lines.len();
-    let start = offset.unwrap_or(1).saturating_sub(1).min(total);
-    let end = limit.map_or(total, |count| (start + count).min(total));
-    lines[start..end].join("\n")
+    let start_line = offset.unwrap_or(1);
+    if start_line > total {
+        if total == 0 && start_line == 1 {
+            return Ok(String::new());
+        }
+        bail!("Error: offset {start_line} exceeds total lines {total} in {path}");
+    }
+    let start = start_line - 1;
+    let end = limit.map_or(total, |count| start.saturating_add(count).min(total));
+    Ok(lines[start..end].join("\n"))
 }
 
 fn parse_line_selector(suffix: &str) -> Result<Option<(usize, Option<usize>)>> {
@@ -111,4 +123,48 @@ fn parse_line_selector(suffix: &str) -> Result<Option<(usize, Option<usize>)>> {
     }
 
     Ok(Some((parse_line(suffix)?, None)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn huge_count_does_not_overflow() {
+        // `path:2+usize::MAX` must read to EOF, not panic or wrap to an
+        // inverted `lines[start..end]` slice.
+        let text = "a\nb\nc\nd";
+        let out = select_text_lines(text, Some(2), Some(usize::MAX), "f").unwrap();
+        assert_eq!(out, "b\nc\nd");
+    }
+
+    #[test]
+    fn offset_beyond_total_errors() {
+        let err = select_text_lines("a\nb", Some(9), None, "f").unwrap_err();
+        assert!(err.to_string().contains("offset 9 exceeds total lines 2"));
+    }
+
+    #[test]
+    fn empty_text_line_one_is_empty_not_phantom() {
+        assert_eq!(select_text_lines("", Some(1), None, "f").unwrap(), "");
+        assert!(select_text_lines("", Some(2), None, "f").is_err());
+    }
+
+    #[test]
+    fn range_and_open_ended_forms() {
+        let text = "l1\nl2\nl3";
+        assert_eq!(
+            select_text_lines(text, Some(2), Some(2), "f").unwrap(),
+            "l2\nl3"
+        );
+        assert_eq!(
+            select_text_lines(text, Some(2), None, "f").unwrap(),
+            "l2\nl3"
+        );
+        assert_eq!(select_text_lines(text, None, None, "f").unwrap(), text);
+        assert_eq!(
+            select_text_lines(text, Some(1), Some(1), "f").unwrap(),
+            "l1"
+        );
+    }
 }

@@ -227,20 +227,13 @@ pub struct CliConfig {
     pub signal_policy: SignalPolicy,
 }
 
-#[derive(Debug, Clone, Default)]
+/// Fields explicitly provided by CLI flags. Only these inputs outrank the
+/// config-file layer; env vars are applied before files and never set these.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CliOverrides {
     pub model: bool,
-    pub max_tokens: bool,
-    pub tool_timeout_secs: bool,
-    pub sub_agent_timeout_secs: bool,
-    pub llm_first_event_timeout_secs: bool,
-    pub llm_idle_timeout_secs: bool,
-    pub llm_wait_heartbeat_secs: bool,
     pub api_key: bool,
     pub base_url: bool,
-    pub max_turns: bool,
-    pub max_context_tokens: bool,
-    pub tool_approval_mode: bool,
     pub output_format: bool,
     pub enabled_tools: bool,
     pub edit_mode: bool,
@@ -342,6 +335,7 @@ pub fn parse_args(args: Vec<String>) -> Result<CliConfig> {
             }
             "--print" => {
                 cfg.output_format = OutputFormat::StreamJson;
+                cfg.cli_overrides.output_format = true;
                 i += 1;
             }
             "--session" => {
@@ -401,7 +395,18 @@ pub fn parse_args(args: Vec<String>) -> Result<CliConfig> {
             "--agent-jsonl" => {
                 cfg.agent_jsonl = true;
                 cfg.output_format = OutputFormat::StreamJson;
+                cfg.cli_overrides.output_format = true;
                 i += 1;
+            }
+            "--skill" => {
+                let value = require_value(&args, i)?;
+                if value.trim().is_empty() {
+                    bail!("skill name must not be empty");
+                }
+                if !cfg.skills.iter().any(|s| s == &value) {
+                    cfg.skills.push(value);
+                }
+                i += 2;
             }
             "--enabled-tools" => {
                 let value = require_value(&args, i)?;
@@ -541,6 +546,21 @@ fn apply_env_defaults(cfg: &mut CliConfig, defaults: &CliConfig) -> Result<()> {
     {
         apply_log_events_env_value(cfg, v.as_str());
     }
+    // Size-limit env vars sit at the env layer: applied before config files
+    // so [tools] settings in .minkrc/--config outrank them (documented
+    // priority: CLI > --config > project .minkrc > user .minkrc > env).
+    let parse_env = |name: &str| -> Option<usize> {
+        std::env::var(name)
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+    };
+    apply_size_limit_envs(
+        cfg,
+        parse_env("TOOL_RESULT_MAX_BYTES"),
+        parse_env("FILE_WRITE_MAX_BYTES"),
+        parse_env("MAX_SEARCH_FILES"),
+        parse_env("MAX_SEARCH_RESULTS"),
+    );
     if !cfg.cli_overrides.edit_mode
         && let Ok(value) = std::env::var("MINK_EDIT_MODE")
     {
@@ -564,6 +584,27 @@ fn apply_env_defaults(cfg: &mut CliConfig, defaults: &CliConfig) -> Result<()> {
         cfg.edit_enforce_seen_lines = parse_bool_value("MINK_EDIT_ENFORCE_SEEN_LINES", &value)?;
     }
     Ok(())
+}
+
+fn apply_size_limit_envs(
+    cfg: &mut CliConfig,
+    tool_result_max_bytes: Option<usize>,
+    file_write_max_bytes: Option<usize>,
+    max_search_files: Option<usize>,
+    max_search_results: Option<usize>,
+) {
+    if let Some(n) = tool_result_max_bytes {
+        cfg.tool_result_max_bytes = n;
+    }
+    if let Some(n) = file_write_max_bytes {
+        cfg.file_write_max_bytes = n;
+    }
+    if let Some(n) = max_search_files {
+        cfg.max_search_files = n;
+    }
+    if let Some(n) = max_search_results {
+        cfg.max_search_results = n;
+    }
 }
 
 fn apply_log_events_env_value(cfg: &mut CliConfig, value: &str) {
@@ -595,40 +636,19 @@ fn read_config_file(path: &std::path::Path) -> Result<Option<MinkConfigFile>> {
 
 fn apply_config_sources(
     cfg: &mut CliConfig,
-    defaults: &CliConfig,
+    _defaults: &CliConfig,
     user_cfg: Option<&MinkConfigFile>,
     project_cfg: Option<&MinkConfigFile>,
     cli_cfg: Option<&MinkConfigFile>,
 ) {
-    let cli_model = cfg.cli_overrides.model || cfg.model != defaults.model;
-    let cli_api_key = cfg.cli_overrides.api_key || cfg.api_key != defaults.api_key;
-    let cli_base_url = cfg.cli_overrides.base_url || cfg.base_url != defaults.base_url;
-    let cli_max_tokens = cfg.cli_overrides.max_tokens || cfg.max_tokens != defaults.max_tokens;
-    let cli_max_turns = cfg.cli_overrides.max_turns || cfg.max_turns != defaults.max_turns;
-    let cli_max_context = cfg.cli_overrides.max_context_tokens
-        || cfg.max_context_tokens != defaults.max_context_tokens;
-    let cli_tool_timeout =
-        cfg.cli_overrides.tool_timeout_secs || cfg.tool_timeout_secs != defaults.tool_timeout_secs;
-    let cli_sub_agent_timeout = cfg.cli_overrides.sub_agent_timeout_secs
-        || cfg.sub_agent_timeout_secs != defaults.sub_agent_timeout_secs;
-    let cli_llm_first_event_timeout = cfg.cli_overrides.llm_first_event_timeout_secs
-        || cfg.llm_first_event_timeout_secs != defaults.llm_first_event_timeout_secs;
-    let cli_llm_idle_timeout = cfg.cli_overrides.llm_idle_timeout_secs
-        || cfg.llm_idle_timeout_secs != defaults.llm_idle_timeout_secs;
-    let cli_llm_wait_heartbeat = cfg.cli_overrides.llm_wait_heartbeat_secs
-        || cfg.llm_wait_heartbeat_secs != defaults.llm_wait_heartbeat_secs;
-    let cli_tool_approval_mode = cfg.cli_overrides.tool_approval_mode
-        || cfg.tool_approval_mode != defaults.tool_approval_mode;
-    let cli_output_format =
-        cfg.cli_overrides.output_format || cfg.output_format != defaults.output_format;
-    let cli_enabled_tools = cfg.cli_overrides.enabled_tools;
-    let cli_edit_mode = cfg.cli_overrides.edit_mode;
-    let cli_edit_fuzzy_match = cfg.cli_overrides.edit_fuzzy_match;
-    let cli_edit_fuzzy_threshold = cfg.cli_overrides.edit_fuzzy_threshold;
-    let cli_edit_enforce_seen_lines = cfg.cli_overrides.edit_enforce_seen_lines;
+    // CLI-provided flags outrank every file layer; snapshot the flags once so
+    // the loop below can mutate `cfg` freely.
+    let cli = cfg.cli_overrides.clone();
 
     for toml_cfg in [user_cfg, project_cfg, cli_cfg].into_iter().flatten() {
-        if !cli_model && let Some(model) = &toml_cfg.provider.model {
+        if !cli.model
+            && let Some(model) = &toml_cfg.provider.model
+        {
             cfg.model = model.clone();
         }
         if let Some(model_aliases) = &toml_cfg.provider.model_aliases {
@@ -655,20 +675,23 @@ fn apply_config_sources(
         if let Some(extra_body) = &toml_cfg.provider.openai_extra_body {
             cfg.openai_extra_body.extend(extra_body.clone());
         }
-        if !cli_api_key && let Some(api_key) = &toml_cfg.provider.api_key {
+        if !cli.api_key
+            && let Some(api_key) = &toml_cfg.provider.api_key
+        {
             cfg.api_key = api_key.clone();
         }
-        if !cli_base_url && let Some(base_url) = &toml_cfg.provider.base_url {
+        if !cli.base_url
+            && let Some(base_url) = &toml_cfg.provider.base_url
+        {
             cfg.base_url = base_url.clone();
         }
-        if !cli_max_tokens && let Some(max_tokens) = toml_cfg.generation.max_tokens {
+        if let Some(max_tokens) = toml_cfg.generation.max_tokens {
             cfg.max_tokens = max_tokens;
         }
-        if !cli_max_turns && let Some(max_turns) = toml_cfg.generation.max_turns {
+        if let Some(max_turns) = toml_cfg.generation.max_turns {
             cfg.max_turns = max_turns;
         }
-        if !cli_max_context
-            && let Some(max_context) = &toml_cfg.context.max_context
+        if let Some(max_context) = &toml_cfg.context.max_context
             && let Ok(v) = parse_size_bytes(max_context)
         {
             cfg.max_context_tokens = v;
@@ -679,30 +702,27 @@ fn apply_config_sources(
         if let Some(v) = toml_cfg.tools.max_search_results {
             cfg.max_search_results = v;
         }
-        if !cli_tool_timeout && let Some(tool_timeout) = toml_cfg.tools.tool_timeout {
+        if let Some(tool_timeout) = toml_cfg.tools.tool_timeout {
             apply_positive_i32_config(&mut cfg.tool_timeout_secs, tool_timeout, "tool_timeout");
         }
-        if !cli_sub_agent_timeout && let Some(sub_agent_timeout) = toml_cfg.tools.sub_agent_timeout
-        {
+        if let Some(sub_agent_timeout) = toml_cfg.tools.sub_agent_timeout {
             apply_positive_i32_config(
                 &mut cfg.sub_agent_timeout_secs,
                 sub_agent_timeout,
                 "sub_agent_timeout",
             );
         }
-        if !cli_llm_first_event_timeout
-            && let Some(timeout) = toml_cfg.generation.llm_first_event_timeout
-        {
+        if let Some(timeout) = toml_cfg.generation.llm_first_event_timeout {
             apply_positive_i32_config(
                 &mut cfg.llm_first_event_timeout_secs,
                 timeout,
                 "llm_first_event_timeout",
             );
         }
-        if !cli_llm_idle_timeout && let Some(timeout) = toml_cfg.generation.llm_idle_timeout {
+        if let Some(timeout) = toml_cfg.generation.llm_idle_timeout {
             apply_positive_i32_config(&mut cfg.llm_idle_timeout_secs, timeout, "llm_idle_timeout");
         }
-        if !cli_llm_wait_heartbeat && let Some(timeout) = toml_cfg.generation.llm_wait_heartbeat {
+        if let Some(timeout) = toml_cfg.generation.llm_wait_heartbeat {
             apply_nonnegative_i32_config(
                 &mut cfg.llm_wait_heartbeat_secs,
                 timeout,
@@ -749,7 +769,7 @@ fn apply_config_sources(
             cfg.log_events = log_events;
         }
         let tools = &toml_cfg.tools;
-        if !cli_tool_approval_mode && let Some(mode) = tools.approval_mode {
+        if let Some(mode) = tools.approval_mode {
             cfg.tool_approval_mode = mode;
         }
         if let Some(approval) = &tools.approval {
@@ -757,7 +777,9 @@ fn apply_config_sources(
                 cfg.tool_approval.insert(name.clone(), *policy);
             }
         }
-        if !cli_output_format && let Some(ref v) = toml_cfg.generation.output_format {
+        if !cli.output_format
+            && let Some(ref v) = toml_cfg.generation.output_format
+        {
             match v.as_str() {
                 "human" => cfg.output_format = OutputFormat::Human,
                 "stream-json" => cfg.output_format = OutputFormat::StreamJson,
@@ -767,19 +789,27 @@ fn apply_config_sources(
         if let Some(ref v) = toml_cfg.tools.skills {
             cfg.skills = v.clone();
         }
-        if !cli_enabled_tools && let Some(ref v) = toml_cfg.tools.enabled_tools {
+        if !cli.enabled_tools
+            && let Some(ref v) = toml_cfg.tools.enabled_tools
+        {
             cfg.enabled_tools = Some(v.clone());
         }
-        if !cli_edit_mode && let Some(mode) = toml_cfg.tools.edit.mode {
+        if !cli.edit_mode
+            && let Some(mode) = toml_cfg.tools.edit.mode
+        {
             cfg.edit_mode = mode;
         }
-        if !cli_edit_fuzzy_match && let Some(enabled) = toml_cfg.tools.edit.fuzzy_match {
+        if !cli.edit_fuzzy_match
+            && let Some(enabled) = toml_cfg.tools.edit.fuzzy_match
+        {
             cfg.edit_fuzzy_match = enabled;
         }
-        if !cli_edit_fuzzy_threshold && let Some(threshold) = toml_cfg.tools.edit.fuzzy_threshold {
+        if !cli.edit_fuzzy_threshold
+            && let Some(threshold) = toml_cfg.tools.edit.fuzzy_threshold
+        {
             cfg.edit_fuzzy_threshold = threshold;
         }
-        if !cli_edit_enforce_seen_lines
+        if !cli.edit_enforce_seen_lines
             && let Some(enabled) = toml_cfg.tools.edit.enforce_seen_lines
         {
             cfg.edit_enforce_seen_lines = enabled;
@@ -886,27 +916,6 @@ fn apply_sandbox_config(
 }
 
 pub fn apply_provider_defaults(cfg: &mut CliConfig) -> Result<()> {
-    // Env var overrides for size limits
-    if let Ok(v) = std::env::var("TOOL_RESULT_MAX_BYTES")
-        && let Ok(n) = v.parse::<usize>()
-    {
-        cfg.tool_result_max_bytes = n;
-    }
-    if let Ok(v) = std::env::var("FILE_WRITE_MAX_BYTES")
-        && let Ok(n) = v.parse::<usize>()
-    {
-        cfg.file_write_max_bytes = n;
-    }
-    if let Ok(v) = std::env::var("MAX_SEARCH_FILES")
-        && let Ok(n) = v.parse::<usize>()
-    {
-        cfg.max_search_files = n;
-    }
-    if let Ok(v) = std::env::var("MAX_SEARCH_RESULTS")
-        && let Ok(n) = v.parse::<usize>()
-    {
-        cfg.max_search_results = n;
-    }
     // API key: CLI/config > DEEPSEEK_API_KEY
     if cfg.api_key.is_empty() {
         cfg.api_key = std::env::var("DEEPSEEK_API_KEY").unwrap_or_default();
@@ -923,19 +932,6 @@ pub fn apply_provider_defaults(cfg: &mut CliConfig) -> Result<()> {
         bail!("no API key. Set DEEPSEEK_API_KEY or use --api-key");
     }
     Ok(())
-}
-
-pub fn api_url(cfg: &CliConfig) -> String {
-    let base = if cfg.base_url.is_empty() {
-        "https://api.deepseek.com/v1"
-    } else {
-        cfg.base_url.as_str()
-    };
-    format!("{}/chat/completions", base.trim_end_matches('/'))
-}
-
-pub fn model_resolver(cfg: &CliConfig) -> ModelResolver {
-    ModelResolver::new(&cfg.model_aliases)
 }
 
 pub fn validate_runtime_config(cfg: &CliConfig) -> Result<()> {
@@ -1022,45 +1018,28 @@ pub(crate) fn apply_sdk_request_options(
     let options = &request.options;
     if let Some(model) = &options.provider.model {
         cfg.model = model.clone();
-        cfg.cli_overrides.model = true;
     }
     let generation = &options.generation;
-    for (value, target, overridden) in [
-        (
-            generation.max_tokens,
-            &mut cfg.max_tokens,
-            &mut cfg.cli_overrides.max_tokens,
-        ),
-        (
-            generation.max_turns,
-            &mut cfg.max_turns,
-            &mut cfg.cli_overrides.max_turns,
-        ),
+    for (value, target) in [
+        (generation.max_tokens, &mut cfg.max_tokens),
+        (generation.max_turns, &mut cfg.max_turns),
         (
             generation.llm_first_event_timeout,
             &mut cfg.llm_first_event_timeout_secs,
-            &mut cfg.cli_overrides.llm_first_event_timeout_secs,
         ),
-        (
-            generation.llm_idle_timeout,
-            &mut cfg.llm_idle_timeout_secs,
-            &mut cfg.cli_overrides.llm_idle_timeout_secs,
-        ),
+        (generation.llm_idle_timeout, &mut cfg.llm_idle_timeout_secs),
         (
             generation.llm_wait_heartbeat,
             &mut cfg.llm_wait_heartbeat_secs,
-            &mut cfg.cli_overrides.llm_wait_heartbeat_secs,
         ),
     ] {
         if let Some(value) = value {
             *target = value;
-            *overridden = true;
         }
     }
     let context = &options.context;
     if let Some(value) = context.max_context {
         cfg.max_context_tokens = value;
-        cfg.cli_overrides.max_context_tokens = true;
     }
     if let Some(value) = context.context_compact_pct {
         cfg.context_compact_pct = value;
@@ -1080,11 +1059,9 @@ pub(crate) fn apply_sdk_request_options(
     let tools = &options.tools;
     if let Some(value) = tools.tool_timeout {
         cfg.tool_timeout_secs = value;
-        cfg.cli_overrides.tool_timeout_secs = true;
     }
     if let Some(value) = tools.sub_agent_timeout {
         cfg.sub_agent_timeout_secs = value;
-        cfg.cli_overrides.sub_agent_timeout_secs = true;
     }
     if let Some(value) = &tools.enabled_tools {
         cfg.enabled_tools = Some(value.clone());

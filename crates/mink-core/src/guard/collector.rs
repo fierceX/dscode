@@ -207,7 +207,8 @@ impl SignalCollector {
                     severity,
                 ))
             }
-            ToolStatus::Interrupted => Some((SignalKind::ToolFailed, "interrupted".into(), 1.0)),
+            // 用户主动中断不是模型失败：不产生信号、不喂信念。
+            ToolStatus::Interrupted => None,
         };
         if let Some((kind, default_message, severity)) = status_signal {
             let message = output

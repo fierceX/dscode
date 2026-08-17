@@ -1193,3 +1193,75 @@ async fn edit_already_applied_patch_returns_idempotent_success() -> anyhow::Resu
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn raw_read_does_not_seed_editable_snapshot() -> anyhow::Result<()> {
+    let h = harness("raw-no-snapshot").await?;
+    tokio::fs::write(h.cwd.join("raw.txt"), "l1\nl2\nl3\n").await?;
+    let runner = ToolRunner::new(Arc::new(ToolContext::from(h.ctx.as_ref())));
+    let raw = runner
+        .execute_all(vec![tool_call(
+            "Read",
+            "raw_read",
+            json!({"path": "raw.txt:raw"}),
+        )])
+        .await?;
+    assert!(raw[0].succeeded(), "{}", raw[0].content);
+    // raw 输出无行号锚点。
+    assert!(!raw[0].content.contains("1:l1"), "{}", raw[0].content);
+
+    // raw 读取不生成可编辑 snapshot：按其 tag 直接编辑必须失败，
+    // 而不是让模型绕过 seen-lines 守卫。
+    let tag = crate::tools::snapshot::compute_file_tag("l1\nl2\nl3\n");
+    let edit = runner
+        .execute_all(vec![tool_call(
+            "Edit",
+            "raw_edit",
+            json!({"input": format!("[raw.txt#{tag}]\nPUT 1:\n+x")}),
+        )])
+        .await?;
+    assert!(
+        !edit[0].succeeded(),
+        "raw-only read must not authorize an edit"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_memo_hits_open_ended_range_reread() -> anyhow::Result<()> {
+    let h = harness("memo-open-range").await?;
+    tokio::fs::write(h.cwd.join("a.md"), "line 1\nline 2\nline 3\n").await?;
+    let runner = ToolRunner::new(Arc::new(ToolContext::from(h.ctx.as_ref())));
+
+    // 开放式 `path:N` 首读返回完整尾部内容。
+    let first = runner
+        .execute_all(vec![tool_call(
+            "Read",
+            "open_first",
+            json!({"path": "a.md:2"}),
+        )])
+        .await?;
+    assert!(first[0].succeeded(), "{}", first[0].content);
+    assert!(
+        first[0].content.contains("2:line 2") && first[0].content.contains("3:line 3"),
+        "{}",
+        first[0].content
+    );
+
+    // 相同开放式请求重复执行必须命中 memo（此前记录侧把读到 EOF 的
+    // 结果记为有界 end_line，与查询侧 None 语义错位导致永不命中）。
+    let second = runner
+        .execute_all(vec![tool_call(
+            "Read",
+            "open_second",
+            json!({"path": "a.md:2"}),
+        )])
+        .await?;
+    assert!(second[0].succeeded(), "{}", second[0].content);
+    assert!(
+        second[0].content.contains("Reuse that content"),
+        "{}",
+        second[0].content
+    );
+    Ok(())
+}

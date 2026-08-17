@@ -488,3 +488,54 @@ async fn start_http_server(
     });
     Ok((format!("http://{addr}/chat/completions"), seen, handle))
 }
+
+#[tokio::test]
+async fn stream_eof_residual_frame_without_trailing_newline_is_parsed() -> anyhow::Result<()> {
+    // 连接在最后一帧后被切断：帧 JSON 完整但没有尾部换行、也没有 [DONE]。
+    // 传输层 EOF 时必须把缓冲残留送入 parser，否则 finish_reason/usage 丢失。
+    let body = format!(
+        "data: {}\n\ndata: {}",
+        json!({"choices":[{"delta":{"content":"tail"}}]}),
+        json!({"choices":[{"finish_reason":"stop","delta":{}}],"usage":{"prompt_tokens":5,"completion_tokens":1}})
+    );
+    let responses = vec![http_response(
+        200,
+        &[("content-type", "text/event-stream")],
+        &body,
+    )];
+    let (api_url, _seen, _server) = start_http_server(responses).await?;
+    let ctx = test_context("client-eof-residual", &api_url).await?;
+    let response = OpenAiCompatibleBackend::deepseek_defaults()
+        .stream(LlmRequest {
+            purpose: LlmPurpose::Agent,
+            model: "deepseek-v4-flash".into(),
+            model_alias: Some("flash".into()),
+            api_url,
+            api_key: "secret-key".into(),
+            system_prompt: "system".into(),
+            messages: vec![json!({"role":"user","content":"ping"})],
+            tools: Vec::new(),
+            max_tokens: ctx.max_tokens(),
+            cancel: ctx.cancel.clone(),
+            verbose: ctx.verbose(),
+            display: ctx.display.clone(),
+        })
+        .await?;
+    let mut stream = response.events;
+
+    let mut text = String::new();
+    let mut stop = None;
+    while let Some(event) = stream.next().await {
+        match event? {
+            Event::Text(t) => text.push_str(&t.content),
+            Event::Stop(s) => {
+                stop = Some(s.reason);
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(text, "tail");
+    assert_eq!(stop.as_deref(), Some("stop"));
+    Ok(())
+}

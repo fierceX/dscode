@@ -179,3 +179,11 @@ fn exit_code_zero_does_not_fail() {
             .any(|s| matches!(s.kind, SignalKind::ToolFailed))
     );
 }
+
+#[test]
+fn interrupted_tool_produces_no_signal() {
+    let mut collector = SignalCollector::with_weights(6, crate::config::EditLoopWeights::default());
+    let signals = collector.collect("Bash", ToolStatus::Interrupted, "", None, false);
+    // 用户主动中断不是模型失败：不得产生 ToolFailed 喂信念。
+    assert!(signals.is_empty());
+}

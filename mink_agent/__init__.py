@@ -858,13 +858,8 @@ class AgentSession:
     def _validate_request_config(self) -> None:
         """Validate SDK-side options before launching mink-core."""
         cfg = self._config
-        if cfg.model and cfg.model not in (
-            "flash",
-            "pro",
-            "deepseek-v4-flash",
-            "deepseek-v4-pro",
-        ):
-            raise ValueError("model must be 'flash' or 'pro'")
+        # Model names are passed through to the Rust resolver: known aliases
+        # map to defaults, anything else is used verbatim (custom base_url).
         positive_fields = {
             "timeout_secs": cfg.timeout_secs,
             "tool_timeout": cfg.tool_timeout,
@@ -988,20 +983,29 @@ class AgentSession:
         cmd = [self._binary, "--agent-jsonl"]
         cfg = self._config
 
-        toml = {}
-        toml["max_tokens"] = cfg.max_tokens
-        toml["max_turns"] = cfg.max_turns
-        toml["tool_timeout"] = cfg.tool_timeout
-        toml["sub_agent_timeout"] = cfg.sub_agent_timeout
-        toml["llm_first_event_timeout"] = cfg.llm_first_event_timeout
-        toml["llm_idle_timeout"] = cfg.llm_idle_timeout
-        toml["llm_wait_heartbeat"] = cfg.llm_wait_heartbeat
-        toml["max_search_files"] = cfg.max_search_files
-        toml["max_search_results"] = cfg.max_search_results
-        toml["edit_mode"] = cfg.edit_mode
-        toml["edit_fuzzy_match"] = cfg.edit_fuzzy_match
-        toml["edit_fuzzy_threshold"] = cfg.edit_fuzzy_threshold
-        toml["edit_enforce_seen_lines"] = cfg.edit_enforce_seen_lines
+        # The --config TOML must match mink-cli's MinkConfigFile schema:
+        # grouped sections with nested [tools.edit], never top-level flat keys.
+        generation = {
+            "max_tokens": cfg.max_tokens,
+            "max_turns": cfg.max_turns,
+            "llm_first_event_timeout": cfg.llm_first_event_timeout,
+            "llm_idle_timeout": cfg.llm_idle_timeout,
+            "llm_wait_heartbeat": cfg.llm_wait_heartbeat,
+        }
+        tools = {
+            "tool_timeout": cfg.tool_timeout,
+            "sub_agent_timeout": cfg.sub_agent_timeout,
+            "max_search_files": cfg.max_search_files,
+            "max_search_results": cfg.max_search_results,
+            "edit": {
+                "mode": cfg.edit_mode,
+                "fuzzy_match": cfg.edit_fuzzy_match,
+                "fuzzy_threshold": cfg.edit_fuzzy_threshold,
+                "enforce_seen_lines": cfg.edit_enforce_seen_lines,
+            },
+        }
+        sections = {"generation": generation, "tools": tools}
+
         # PythonSandbox configuration; activation is controlled by enabled_tools.
         sp = {}
         if cfg.python_sandbox_wasm_path != "cpython-wasi/python.wasm":
@@ -1017,19 +1021,23 @@ class AgentSession:
         if cfg.python_sandbox_package_dirs:
             sp["package_dirs"] = cfg.python_sandbox_package_dirs
         if sp:
-            toml["sandbox_python"] = sp
+            sections["sandbox_python"] = sp
 
-        if toml:
-            import json as _json
-            lines = []
-            for k, v in toml.items():
-                if isinstance(v, dict):
-                    lines.append(f"[{k}]")
-                    for sk, sv in v.items():
-                        lines.append(f"{sk} = {_json.dumps(sv)}")
-                else:
-                    lines.append(f"{k} = {_json.dumps(v)}")
-            cmd.extend(["--config", "\n".join(lines)])
+        import json as _json
+
+        lines: list[str] = []
+        for section, values in sections.items():
+            scalars = {k: v for k, v in values.items() if not isinstance(v, dict)}
+            sub_tables = {k: v for k, v in values.items() if isinstance(v, dict)}
+            if scalars or not sub_tables:
+                lines.append(f"[{section}]")
+                for key, value in scalars.items():
+                    lines.append(f"{key} = {_json.dumps(value)}")
+            for sub_name, sub_values in sub_tables.items():
+                lines.append(f"[{section}.{sub_name}]")
+                for key, value in sub_values.items():
+                    lines.append(f"{key} = {_json.dumps(value)}")
+        cmd.extend(["--config", "\n".join(lines)])
         return cmd
 
 

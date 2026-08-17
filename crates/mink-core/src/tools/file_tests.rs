@@ -54,3 +54,30 @@ fn replace_suffix_recovery_rejects_ambiguity() {
     );
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn text_shape_uniform_crlf_and_mixed_eol() {
+    // 全 CRLF 文件往返保持不变。
+    let original = "a\r\nb\r\n";
+    let (shape, normalized) = decode_text_shape(original);
+    assert!(shape.crlf);
+    assert_eq!(restore_text_shape(&shape, &normalized), original);
+
+    // 混合行尾不再因第一个换行是 CRLF 而被整体改写为 CRLF：
+    // 统一按 LF 处理（确定性归一，而非全文件 EOL 翻转）。
+    let mixed = "a\r\nb\nc";
+    let (shape, normalized) = decode_text_shape(mixed);
+    assert!(!shape.crlf);
+    assert_eq!(normalized, "a\nb\nc");
+    assert_eq!(restore_text_shape(&shape, &normalized), "a\nb\nc");
+}
+
+#[test]
+fn memo_end_line_open_ended_reads_cover_eof() {
+    // 开放式选择器：end_line=None 表示覆盖 start..EOF，
+    // 重复的 `path:N` 请求可以命中 memo。
+    assert_eq!(memo_end_line(Some(5), None, 10), None);
+    // 有界选择器：记实际末行。
+    assert_eq!(memo_end_line(Some(5), Some(3), 3), Some(7));
+    assert_eq!(memo_end_line(Some(5), Some(30), 10), Some(14));
+}

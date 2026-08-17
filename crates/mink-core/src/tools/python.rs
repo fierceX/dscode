@@ -112,6 +112,9 @@ impl super::runner::ToolExec for PythonTool {
         )
         .storm_exempt()
         .discoverable()
+        // host Python 可执行任意文件写代码：成功后必须 bump mutation
+        // epoch，使 read memo 失效（与 Bash/PythonSandbox 一致）。
+        .mutating()
     }
 
     fn execute(

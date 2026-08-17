@@ -418,7 +418,6 @@ impl OrchActor {
         } else {
             self.forced_model = Some(model.to_string());
         }
-        self.belief.decay(self.ctx.config.signal.decay_per_input);
         let resolved = self.resolve_active();
         self.ctx
             .display

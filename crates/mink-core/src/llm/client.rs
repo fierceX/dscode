@@ -345,7 +345,41 @@ impl AsyncLlClient {
                                     break 'outer;
                                 }
                             }
-                            None => break 'outer,
+                            None => {
+                                // 传输 EOF：缓冲可能残留未换行的最后一行
+                                //（连接在帧尾被切断但 JSON 完整）。先送入
+                                // parser 再 finish_eof，否则末帧事件丢失。
+                                if !buf.is_empty() {
+                                    let line = String::from_utf8_lossy(&buf).to_string();
+                                    let l = line.trim();
+                                    if !l.is_empty() {
+                                        let full = format!("{l}\n");
+                                        match parser.process_line(
+                                            &full,
+                                            &mut |e| {
+                                                tx.send(Ok(e)).ok();
+                                                Ok(())
+                                            },
+                                        ) {
+                                            Ok(true) => clean_end = true,
+                                            Ok(false) => {}
+                                            Err(e) => {
+                                                if is_fatal_parser_error(&e) {
+                                                    tx.send(Err(e)).ok();
+                                                    clean_end = true;
+                                                } else {
+                                                    decode_errors += 1;
+                                                    if decode_errors > MAX_STREAM_ERRORS {
+                                                        tx.send(Err(e)).ok();
+                                                        clean_end = true;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                break 'outer;
+                            }
                         }
                     }
                 }

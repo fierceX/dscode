@@ -215,11 +215,13 @@ pub fn chrono_session_id() -> String {
     let base = time::OffsetDateTime::now_utc()
         .format(FMT)
         .unwrap_or_else(|_| String::new());
+    // 完整 subsec_nanos（u32）：u16 截断使"随机"后缀每 65.5µs 重复一次，
+    // 并行子代理会话 id 可碰撞导致第二个子代理启动失败。
     let rand_suffix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos() as u16)
+        .map(|d| d.subsec_nanos())
         .unwrap_or(0);
-    format!("{}-{:04x}", base, rand_suffix)
+    format!("{}-{:08x}", base, rand_suffix)
 }
 
 #[cfg(test)]

@@ -20,8 +20,8 @@ mod platform_macos;
 /// Try to re-execute the current process inside a sandbox.
 ///
 /// On success, this function does NOT return — the process is replaced.
-/// On failure (sandbox tool not found, etc.), returns `Ok(())` so the
-/// caller can fall back to running without sandbox.
+/// On failure (sandbox tool not found, unsupported backend, etc.) the
+/// process **exits with code 1**: 沙箱不可用时绝不静默降级运行。
 ///
 /// `exe` is the path to the current binary.
 /// `args` are the original command-line arguments (including argv[0]).
@@ -96,6 +96,14 @@ fn try_reexec(config: &SandboxConfig, exe: &Path, args: &[String]) -> Result<(),
 
     #[cfg(target_os = "macos")]
     {
+        // macOS 只有 sandbox-exec 一个实现：显式请求其他 backend 是配置
+        // 错误，硬失败而不是静默回退（与 Linux 的显式 backend 语义一致）。
+        if config.backend != "auto" && config.backend != "sandbox-exec" {
+            return Err(format!(
+                "sandbox backend '{}' is not available on macOS (only sandbox-exec)",
+                config.backend
+            ));
+        }
         match platform_macos::try_sandbox_exec(config, exe, args) {
             Ok(cmd) => {
                 exec_cmd(&cmd)?;

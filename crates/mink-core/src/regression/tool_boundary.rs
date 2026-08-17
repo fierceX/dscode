@@ -24,7 +24,9 @@ async fn safety_blocked_bash_emits_typed_signal_event() -> anyhow::Result<()> {
     let mut executor = TurnExecutor::new(h.ctx.clone(), llm_backend_from_mock(llm));
     let (decision, _) = executor.execute("try unsafe command", None).await?;
     assert_eq!(decision, TurnDecision::Stop);
-    assert_eq!(executor.tool_error_count(), 0);
+    // SafetyBlocked 是硬失败：计入 tool_error_count（对 TUI/SDK 的
+    // turn 级错误指标），同时照常产生类型化 signal 事件。
+    assert_eq!(executor.tool_error_count(), 1);
     assert!(
         executor
             .collected_signals()

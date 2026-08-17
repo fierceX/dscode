@@ -164,6 +164,10 @@ fn scavenge_dsml(text: &str) -> Option<Vec<(String, serde_json::Map<String, Valu
                 (val_search_start + 15, false)
             } else if body[val_search_start..].starts_with(" string=\"false\"") {
                 (val_search_start + 16, true)
+            } else if body[val_search_start..].starts_with('>') {
+                // 无 string= 属性的兜底路径：同样要越过 '>' 分隔符，
+                // 否则参数值会带上前导 '>' 被静默传给工具。
+                (val_search_start + 1, false)
             } else {
                 (val_search_start, false)
             };

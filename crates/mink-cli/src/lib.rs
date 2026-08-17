@@ -1,6 +1,5 @@
 pub(crate) use mink::{runtime, sdk_protocol};
 
-#[allow(dead_code)]
 pub(crate) mod config;
 
 pub(crate) mod capabilities {

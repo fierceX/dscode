@@ -61,6 +61,9 @@ struct TurnLocalState {
     successful_work_calls_since_todo_advance: u32,
     final_text: String,
     final_thinking: String,
+    /// 本输入内 scavenge 批次序号：回收调用的 id 必须跨轮唯一，
+    /// 否则 conversation.jsonl 中会出现重复 tool_use_id 干扰配对修复。
+    scavenge_seq: u32,
 }
 
 /// TurnExecutor runs a single "turn" of the agent loop:
@@ -123,9 +126,8 @@ impl TurnExecutor {
             tools,
             prefix,
             compactor: crate::agent::compactor::TurnCompactor::new(ctx.clone()),
-            signal_processor: crate::agent::tool_signals::ToolSignalProcessor::with_weights(
-                ctx.config.signal.seq_window,
-                ctx.config.signal.edit_loop_weights.clone(),
+            signal_processor: crate::agent::tool_signals::ToolSignalProcessor::from_config(
+                &ctx.config.signal,
             ),
             plan_actions: crate::agent::plan_actions::PlanActionHandler,
             sub_agents: crate::agent::sub_coordinator::SubAgentCoordinator::new(
@@ -234,19 +236,20 @@ impl TurnExecutor {
         while turn < max_turns {
             turn += 1;
 
-            // Phase 0: 上下文压缩
+            // Phase 0: 上下文压缩（auto 触发在 maybe_compact 内部估算一次）
             self.try_compact("auto", &mut messages, &mut system_prompt, &mut tools_json)
                 .await?;
             let mut request_messages = self.project_request_messages(&messages)?;
-            if !self.compactor.compacted_this_turn() {
-                let estimated_tokens = crate::llm::transport::estimate_openai_context_tokens(
+            let input_limit = crate::session::compaction::request_input_limit(&self.ctx.config);
+            // preflight 只在 auto 未压缩时评估；压缩发生后必须重估。
+            // 估算只做一次并复用（避免同轮对相同输入的全量重复估算）。
+            let estimated_tokens = if !self.compactor.compacted_this_turn() {
+                let estimated = crate::llm::transport::estimate_openai_context_tokens(
                     &request_messages,
                     &tools_json,
                     &system_prompt,
                 )?;
-                if estimated_tokens
-                    > crate::session::compaction::request_input_limit(&self.ctx.config)
-                {
+                if estimated > input_limit {
                     self.try_compact(
                         "preflight",
                         &mut messages,
@@ -255,14 +258,21 @@ impl TurnExecutor {
                     )
                     .await?;
                     request_messages = self.project_request_messages(&messages)?;
+                    crate::llm::transport::estimate_openai_context_tokens(
+                        &request_messages,
+                        &tools_json,
+                        &system_prompt,
+                    )?
+                } else {
+                    estimated
                 }
-            }
-            let estimated_tokens = crate::llm::transport::estimate_openai_context_tokens(
-                &request_messages,
-                &tools_json,
-                &system_prompt,
-            )?;
-            let input_limit = crate::session::compaction::request_input_limit(&self.ctx.config);
+            } else {
+                crate::llm::transport::estimate_openai_context_tokens(
+                    &request_messages,
+                    &tools_json,
+                    &system_prompt,
+                )?
+            };
             if estimated_tokens > input_limit {
                 anyhow::bail!(
                     "context remains over the request input budget after compaction: \
@@ -345,6 +355,12 @@ impl TurnExecutor {
                 self.execute_tools_inner(calls, belief.as_deref_mut(), &mut effects)
                     .await?
             };
+
+            // 用户中断：跳过决策/证据注入/回滚，也不再发起下一次 LLM 请求。
+            if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.load(Ordering::SeqCst) {
+                self.ctx.display.render_stop("interrupted");
+                return Ok((TurnDecision::Interrupted, effects));
+            }
 
             if let Some(trigger) = plan_compaction_trigger {
                 messages = self.ctx.compaction.active_messages().await?;

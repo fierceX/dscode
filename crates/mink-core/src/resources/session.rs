@@ -106,7 +106,9 @@ Resources:\n\
 - session://current/messages\n\
 - session://current/messages/all\n\
 - session://current/history\n\
-- session://current/artifacts\n",
+- session://current/artifacts\n\
+- session://current/todo\n\
+- session://current/plan\n",
         ctx.cwd.display(),
         ctx.home.display(),
         dir.display()
@@ -114,6 +116,9 @@ Resources:\n\
 }
 
 fn format_session_stats(ctx: &ToolContext) -> Result<String> {
+    // stats.json 由编排器在每轮结束后 flush：轮内读取反映上一轮的
+    // 快照（todo/plan 走内存 store、messages 走逐条 flush 的
+    // conversation.jsonl，三者时点语义不同属已知设计）。
     let dir = session_dir(ctx)?;
     let raw = read_optional_file(&dir.join("stats.json"))?;
     if raw.trim().is_empty() {

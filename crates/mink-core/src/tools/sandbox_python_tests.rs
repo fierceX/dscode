@@ -686,3 +686,19 @@ fn sandbox_stderr_captured_separately() {
     assert_eq!(code, Some(0));
     assert!(out.contains("out msg"));
 }
+
+#[test]
+fn sandbox_timeout_over_ceiling_fails_closed() {
+    for bad in [301u64, 86_400, usize::MAX as u64] {
+        let err = resolve_sandbox_timeout(Some(bad), 30).unwrap_err();
+        assert!(
+            err.to_string().contains("must not exceed 300"),
+            "timeout {bad} should be rejected: {err}"
+        );
+    }
+    assert_eq!(resolve_sandbox_timeout(Some(1), 30).unwrap(), 1);
+    assert_eq!(resolve_sandbox_timeout(Some(300), 30).unwrap(), 300);
+    assert_eq!(resolve_sandbox_timeout(None, 30).unwrap(), 30);
+    assert_eq!(resolve_sandbox_timeout(Some(0), 30).unwrap(), 30);
+    assert_eq!(resolve_sandbox_timeout(None, 9_999).unwrap(), 300);
+}

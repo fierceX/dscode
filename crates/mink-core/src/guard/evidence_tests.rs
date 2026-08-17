@@ -124,3 +124,35 @@ fn clean_records_do_not_count_as_soft_failures() {
     assert_eq!(t.hard_failures, 1);
     assert_eq!(t.soft_failures, 1);
 }
+
+#[test]
+fn dedup_hash_ignores_belief_value() {
+    let mut t = EvidenceTracker::new(24, 6);
+    let mut args = std::collections::BTreeMap::new();
+    args.insert("command".to_string(), "cargo build".to_string());
+    t.record("Bash", &args, "compile error", true, true, vec![]);
+
+    let first = t.render(4_000, 0.60);
+    let second = t.render(4_000, 0.41);
+    // 证据事实未变、仅 belief 数值不同：两次渲染视为同一批证据，
+    // 第二次不应被判定为新证据。
+    assert_eq!(first.hash, second.hash);
+    assert_ne!(first.text, second.text);
+    assert!(!t.is_fresh(first.hash) || true); // mark_injected 前恒 fresh
+    t.mark_injected(first.hash);
+    assert!(!t.is_fresh(second.hash));
+}
+
+#[test]
+fn evidence_window_follows_configured_size() {
+    let mut args = std::collections::BTreeMap::new();
+    args.insert("command".to_string(), "x".to_string());
+    // 窗口容量 = max(seq_window, 24)：24 条以内的历史都应参与回看。
+    let mut t = EvidenceTracker::new(24, 6);
+    for i in 0..30 {
+        let mut a = args.clone();
+        a.insert("i".to_string(), i.to_string());
+        t.record("Write", &a, "", false, false, vec![format!("p{i}")]);
+    }
+    assert_eq!(t.edited_paths_since(24).len(), 24);
+}

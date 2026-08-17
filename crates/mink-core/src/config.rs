@@ -213,6 +213,8 @@ pub(crate) struct SignalConfig {
     pub decay_per_input: f64,
     /// 轨迹证据注入的字符预算。
     pub evidence_max_chars: usize,
+    /// 证据新鲜度去重窗口：最近 N 次注入哈希内不重复注入。
+    pub evidence_dedup_window: usize,
     /// 恢复守卫连续拦截上限；达到后绕过守卫并强制证据注入。
     pub guard_max_blocks: usize,
     /// 注入后的冷却轮数。
@@ -237,6 +239,7 @@ impl Default for SignalConfig {
             seq_window: 6,
             decay_per_input: 0.6,
             evidence_max_chars: 4_000,
+            evidence_dedup_window: 6,
             guard_max_blocks: 3,
             cooldown_turns: 3,
             edit_loop_weights: EditLoopWeights::default(),
@@ -385,6 +388,9 @@ pub fn validate_runtime_config(cfg: &ResolvedConfig) -> Result<()> {
     if cfg.max_tokens <= 0 {
         bail!("max_tokens must be greater than 0");
     }
+    if cfg.max_turns <= 0 {
+        bail!("max_turns must be greater than 0");
+    }
     if !(1..=100).contains(&cfg.context_compact_pct) {
         bail!("context_compact_pct must be between 1 and 100");
     }
@@ -397,62 +403,9 @@ pub fn validate_runtime_config(cfg: &ResolvedConfig) -> Result<()> {
     if cfg.context_compact_max_output_tokens <= 0 {
         bail!("context_compact_max_output_tokens must be greater than 0");
     }
-    let s = &cfg.signal;
-    if !(0.0 < s.abort_threshold
-        && s.abort_threshold < s.warn_threshold
-        && s.warn_threshold < s.remind_threshold
-        && s.remind_threshold < 1.0)
-    {
-        bail!(
-            "signal thresholds must satisfy 0 < abort ({}) < warn ({}) < remind ({}) < 1",
-            s.abort_threshold,
-            s.warn_threshold,
-            s.remind_threshold
-        );
-    }
-    if s.alpha_prior <= 0.0 || s.beta_prior <= 0.0 {
-        bail!("signal alpha_prior/beta_prior must be positive");
-    }
-    if s.window_size == 0 {
-        bail!("signal window_size must be greater than 0");
-    }
-    if s.seq_window == 0 {
-        bail!("signal seq_window must be greater than 0");
-    }
-    let weights = &s.edit_loop_weights;
-    for (name, weight) in [
-        ("five_edits", weights.five_edits),
-        ("six_edits", weights.six_edits),
-        ("excess_edits", weights.excess_edits),
-        (
-            "one_edit_diff_alternation",
-            weights.one_edit_diff_alternation,
-        ),
-        (
-            "two_edit_diff_alternations",
-            weights.two_edit_diff_alternations,
-        ),
-        (
-            "three_or_more_edit_diff_alternations",
-            weights.three_or_more_edit_diff_alternations,
-        ),
-    ] {
-        if !(0.0..=1.0).contains(&weight) {
-            bail!("signal edit-loop weight {name} must be in 0.0..=1.0");
-        }
-    }
-    if !(0.0..=1.0).contains(&s.decay_per_input) {
-        bail!("signal decay_per_input must be in 0.0..=1.0");
-    }
-    if s.guard_max_blocks == 0 {
-        bail!("signal guard_max_blocks must be greater than 0");
-    }
-    if s.replan_max_turns <= 0 {
-        bail!("signal replan_max_turns must be greater than 0");
-    }
-    if s.replan_token_budget <= 0 {
-        bail!("signal replan_token_budget must be greater than 0");
-    }
+    // NOTE: signal thresholds/weights are not validated here — SignalConfig is
+    // crate-private with no production mutation path (only SignalPolicy is
+    // externally settable), so validating the constant defaults was dead code.
     if cfg.max_context_tokens == 0 {
         return Ok(());
     }
@@ -479,6 +432,17 @@ pub fn validate_runtime_config(cfg: &ResolvedConfig) -> Result<()> {
     if cfg.context_compact_tail_tokens >= request_input_budget {
         bail!(
             "context_compact_tail_tokens ({}) must be less than the request input budget ({request_input_budget} = max_context {max_context} - response budget {response_budget})",
+            cfg.context_compact_tail_tokens
+        );
+    }
+    // Post-compaction context = summary output + hot tail + response budget;
+    // the combination must still fit the window or compaction can never
+    // prevent provider overflow (each individual check above can pass while
+    // the sum exceeds max_context).
+    let post_compact_total = compact_output + cfg.context_compact_tail_tokens + response_budget;
+    if post_compact_total > max_context {
+        bail!(
+            "compaction budget exceeds the context window: context_compact_max_output_tokens ({compact_output}) + context_compact_tail_tokens ({}) + response budget ({response_budget}) = {post_compact_total} > max_context ({max_context})",
             cfg.context_compact_tail_tokens
         );
     }
@@ -554,4 +518,56 @@ pub enum ToolApprovalPolicy {
     Allow,
     Deny,
     Prompt,
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+
+    #[test]
+    fn max_turns_must_be_positive() {
+        let mut cfg = ResolvedConfig::default();
+        cfg.max_turns = 0;
+        assert!(
+            validate_runtime_config(&cfg)
+                .unwrap_err()
+                .to_string()
+                .contains("max_turns must be greater than 0")
+        );
+        cfg.max_turns = -3;
+        assert!(validate_runtime_config(&cfg).is_err());
+    }
+
+    #[test]
+    fn combined_compaction_budget_must_fit_window() {
+        // Each individual limit passes but summary + tail + response budget
+        // together overflow the window: compaction could never prevent
+        // provider overflow.
+        let mut cfg = ResolvedConfig::default();
+        cfg.max_context_tokens = 200_000;
+        cfg.context_reserve_tokens = 190_000;
+        cfg.max_tokens = 180_000;
+        // tail (10k) < input budget (20k) and each limit is individually
+        // below the window, yet summary (150k) + tail + response (180k)
+        // = 340k > 200k.
+        cfg.context_compact_tail_tokens = 10_000;
+        cfg.context_compact_max_output_tokens = 150_000;
+        let err = validate_runtime_config(&cfg).unwrap_err().to_string();
+        assert!(
+            err.contains("compaction budget exceeds the context window"),
+            "{err}"
+        );
+
+        // Shrinking the summary so the sum fits must pass.
+        cfg.context_compact_max_output_tokens = 9_000;
+        assert!(validate_runtime_config(&cfg).is_ok());
+    }
+
+    #[test]
+    fn zero_max_context_disables_window_checks() {
+        let mut cfg = ResolvedConfig::default();
+        cfg.max_context_tokens = 0;
+        cfg.context_reserve_tokens = usize::MAX;
+        assert!(validate_runtime_config(&cfg).is_ok());
+    }
 }

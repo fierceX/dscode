@@ -45,11 +45,10 @@ impl OpenAIParser {
     ) -> Result<bool> {
         let l = line.trim_end_matches(['\n', '\r']);
 
-        if l == "RETRY:" {
-            self.reset_state();
-            emit(Event::Retry(RetryEvent {}))?;
-            return Ok(false);
-        }
+        // SSE 规范的 `retry: <ms>` 行只影响重连间隔，对单次请求流是可忽略
+        // 的控制行（落入下方非 data 分支静默跳过）。历史上的大写 `RETRY:`
+        // 分支匹配无值字面量、实际不可达，且一旦触发会半重置累计状态并
+        // 丢失重置前的 usage 计费，已删除。
 
         if l.is_empty() || !l.starts_with("data: ") {
             return Ok(false);
@@ -269,20 +268,6 @@ impl OpenAIParser {
             call.arguments.clear();
         }
         Ok(())
-    }
-
-    fn reset_state(&mut self) {
-        self.stop_reason.clear();
-        self.input_tokens = 0;
-        self.output_tokens = 0;
-        self.cache_read_input_tokens = 0;
-        self.cache_creation_input_tokens = 0;
-        self.saw_usage = false;
-        self.saw_text = false;
-        self.pending_calls.clear();
-        self.pending_usage = None;
-        self.pending_stop = None;
-        self.saw_done = false;
     }
 }
 
