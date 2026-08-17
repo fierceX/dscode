@@ -103,6 +103,9 @@ pub fn validate_virtual_grep_request(request: &VfsGrepRequest) -> Result<()> {
     if request.pattern.is_empty() {
         bail!("Error: no pattern provided");
     }
+    if request.max_results == 0 {
+        bail!("Error: max search results must be greater than zero");
+    }
     RegexMatcher::new_line_matcher(&request.pattern)
         .map_err(|e| anyhow!("Error: invalid regex pattern '{}': {e}", request.pattern))?;
     if !request.file_glob.is_empty() {

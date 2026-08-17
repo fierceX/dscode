@@ -4,6 +4,7 @@ use super::*;
 fn failure_adapter_covers_stable_failure_kinds() {
     let cases = [
         ("operation timed out", None, ToolFailureKind::Timeout),
+        ("operation timed out", Some(124), ToolFailureKind::Timeout),
         (
             "invalid tag: stale snapshot",
             None,

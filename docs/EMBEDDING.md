@@ -234,7 +234,7 @@ print(result["text"])
 | 提示词 | `mission_file` / `mission_content` | MISSION.md 文件或内联内容（二选一，内联避免临时文件） |
 | 技能 | `skills` / `inline_skills` / `skill_discovery_policy` | 技能选择与注入 |
 | 压缩 | `max_context` / `context_compact_*` | 与 Rust/CLI 同一组压缩参数 |
-| 超时 | `timeout_secs` / `tool_timeout` / `sub_agent_timeout` / `llm_*` | 各层超时限制 |
+| 超时 | `timeout_secs` / `tool_timeout` / `tool_timeout_max` / `sub_agent_timeout` / `llm_*` | 各层超时限制 |
 | 沙箱 | `sandbox_backend` | `"auto"` / `"nsjail"` / `"bwrap"` / `"sandbox-exec"` / `"off"` |
 | API | `api_key` / `api_url` / `model` | DeepSeek 配置 |
 

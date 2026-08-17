@@ -1,7 +1,7 @@
 [
   {
     "name": "Read",
-    "description": "Read one local or configured virtual-filesystem path or registered lightweight resource. Use multiple calls for multiple targets. Local output is mode-aware: Hashline mode adds a [PATH#TAG] header to non-raw editable files and records the actual raw/non-raw range as seen; Replace mode uses ordinary numbered output. Virtual-filesystem and registered-resource reads are always read-only and never create an editable snapshot. Path selectors select line ranges.\n\nSupported targets include local paths, artifact://<id>, skill:// resources, rule:// resources, and session://current resources. A full result may be truncated; request a narrower selector when exact lines are known. Full reads above the configured limit are answered with a preview; large files require a line-range selector.\n\nRead accepts exactly one parameter: `path`. Line ranges go inside the path selector (`path:1-200`, `path:10+5`, `path:raw`); do not invent other parameter names (e.g. `selector`, `path_sel`, `offset`, `limit`).",
+    "description": "Read one local or configured virtual-filesystem path or registered lightweight resource. Use multiple calls for multiple targets. Local output is mode-aware: Hashline mode adds a [PATH#TAG] header to non-raw editable files and records the actual non-raw range as seen; raw output creates no snapshot and advances no seen-lines; Replace mode uses ordinary numbered output. Virtual-filesystem and registered-resource reads are always read-only and never create an editable snapshot. Path selectors select line ranges.\n\nSupported targets include local paths, artifact://<id>, skill:// resources, rule:// resources, and session://current resources. A full result may be truncated; request a narrower selector when exact lines are known. Full reads above the configured limit are answered with a preview; large files require a line-range selector.\n\nRead accepts exactly one parameter: `path`. Line ranges go inside the path selector (`path:1-200`, `path:10+5`, `path:raw`); do not invent other parameter names (e.g. `selector`, `path_sel`, `offset`, `limit`).",
     "input_schema": {
       "type": "object",
       "properties": {
@@ -117,7 +117,7 @@
         },
         "timeout": {
           "type": "integer",
-          "description": "Timeout in seconds. If the command exceeds this duration, it will be killed. Only set this for commands expected to need a non-default duration (e.g. build, test, server start). Default: global tool timeout from configuration, clamped to 5-600 seconds."
+          "description": "Timeout in seconds. If the command exceeds this duration, it will be killed. Only set this for commands expected to need a non-default duration (e.g. build, test, server start). Default: global tool timeout from configuration, clamped to 5 seconds up to the configured tool_timeout_max (default 600)."
         }
       },
       "required": [
@@ -142,7 +142,7 @@
         },
         "timeout": {
           "type": "integer",
-          "description": "Timeout in seconds (default: 30, min: 5, max: 300)."
+          "description": "Timeout in seconds. If the script exceeds this duration, it will be killed. Only set this for scripts expected to need a non-default duration. Default: global tool timeout from configuration, clamped to 5 seconds up to the configured tool_timeout_max (default 600)."
         }
       },
       "additionalProperties": false

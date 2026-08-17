@@ -1,32 +1,68 @@
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::Weak;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Notify;
 
 /// CancellationToken provides cooperative cancellation across async tasks.
 /// Mirrors Go's context.WithCancel pattern.
+///
+/// Child tokens are registered with their parent through weak references, so
+/// dropping a child (with or without an explicit `cancel()`) does not leak a
+/// Tokio task or keep the parent alive indefinitely.
 #[derive(Clone)]
 pub struct CancellationToken {
-    cancelled: Arc<AtomicBool>,
-    notify: Arc<Notify>,
+    inner: Arc<Inner>,
+}
+
+struct Inner {
+    cancelled: AtomicBool,
+    notify: Notify,
+    children: Mutex<Vec<Weak<Inner>>>,
 }
 
 impl CancellationToken {
     pub fn new() -> Self {
         Self {
-            cancelled: Arc::new(AtomicBool::new(false)),
-            notify: Arc::new(Notify::new()),
+            inner: Arc::new(Inner {
+                cancelled: AtomicBool::new(false),
+                notify: Notify::new(),
+                children: Mutex::new(Vec::new()),
+            }),
         }
     }
 
-    /// Cancel the token, waking all waiters.
+    /// Cancel the token, waking all waiters and propagating to live children.
     pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::SeqCst);
-        self.notify.notify_waiters();
+        if self.is_cancelled() {
+            return;
+        }
+        self.inner.cancelled.store(true, Ordering::SeqCst);
+        self.inner.notify.notify_waiters();
+        let live_children = {
+            let mut children = self
+                .inner
+                .children
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut live = Vec::new();
+            children.retain(|child| match child.upgrade() {
+                Some(child) => {
+                    live.push(Self { inner: child });
+                    true
+                }
+                None => false,
+            });
+            live
+        };
+        for child in live_children {
+            child.cancel();
+        }
     }
 
     /// Returns true if cancelled.
     pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::SeqCst)
+        self.inner.cancelled.load(Ordering::SeqCst)
     }
 
     /// Wait until cancelled, then return.
@@ -34,7 +70,7 @@ impl CancellationToken {
         if self.is_cancelled() {
             return;
         }
-        let notified = self.notify.notified();
+        let notified = self.inner.notify.notified();
         if !self.is_cancelled() {
             notified.await;
         }
@@ -42,17 +78,29 @@ impl CancellationToken {
 
     /// Create a linked child token. Parent cancellation propagates to the
     /// child, but cancelling the child does not cancel the parent.
+    ///
+    /// This is implemented with a weak registration list instead of a spawned
+    /// Tokio task, so every child token is free of task-leak and parent-retention
+    /// costs even when callers drop it without calling `cancel()`.
     pub fn linked_child_token(&self) -> Self {
-        let child = Self::new();
-        let parent = self.clone();
-        let child_from_parent = child.clone();
-        let child_done = child.clone();
-        tokio::spawn(async move {
-            tokio::select! {
-                _ = parent.cancelled() => child_from_parent.cancel(),
-                _ = child_done.cancelled() => {}
-            }
+        let child_inner = Arc::new(Inner {
+            cancelled: AtomicBool::new(false),
+            notify: Notify::new(),
+            children: Mutex::new(Vec::new()),
         });
+        {
+            let mut children = self
+                .inner
+                .children
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            children.retain(|child| child.upgrade().is_some());
+            children.push(Arc::downgrade(&child_inner));
+        }
+        let child = Self { inner: child_inner };
+        if self.is_cancelled() {
+            child.cancel();
+        }
         child
     }
 }

@@ -5,8 +5,15 @@ pub enum StormDecision {
     Suppress(String),
 }
 
+#[derive(Clone)]
+struct StormEntry {
+    name: String,
+    args: String,
+    mutating: bool,
+}
+
 pub struct StormBreaker {
-    window: VecDeque<(String, String)>,
+    window: VecDeque<StormEntry>,
     max_window: usize,
     threshold: usize,
 }
@@ -25,15 +32,27 @@ impl StormBreaker {
         self.window.clear();
     }
 
-    /// All calls (mutating or not) share one window: a mutating call advancing
-    /// the task must not immunize itself against repeated-call suppression.
-    /// Suppression fires when the count exceeds `threshold` — the first
-    /// `threshold` identical calls stay allowed so graded tool feedback
-    /// (e.g. the Edit soft no-op → 3-strike escalation) can complete before
-    /// the breaker takes over.
-    pub fn check(&mut self, name: &str, args: &str) -> StormDecision {
-        let key = (name.to_string(), args.to_string());
-        self.window.push_back(key.clone());
+    /// Mutating and non-mutating calls keep independent histories.
+    ///
+    /// Repeated identical mutating calls still count across intervening
+    /// mutations (a repeated edit loop must not immunize itself), while a
+    /// successful mutation resets non-mutating history so the legitimate
+    /// `Read → Edit/Write → Read` verification loop is not mistaken for a
+    /// read storm.
+    ///
+    /// Suppression fires when the count for the same `(mutating, name, args)`
+    /// class exceeds `threshold` — the first `threshold` identical calls stay
+    /// allowed so graded tool feedback (e.g. the Edit soft no-op → 3-strike
+    /// escalation) can complete before the breaker takes over.
+    pub fn check(&mut self, name: &str, args: &str, mutating: bool) -> StormDecision {
+        if mutating {
+            self.window.retain(|entry| entry.mutating);
+        }
+        self.window.push_back(StormEntry {
+            name: name.to_string(),
+            args: args.to_string(),
+            mutating,
+        });
         while self.window.len() > self.max_window {
             self.window.pop_front();
         }
@@ -41,7 +60,7 @@ impl StormBreaker {
         let count = self
             .window
             .iter()
-            .filter(|(n, a)| n == name && a == args)
+            .filter(|entry| entry.mutating == mutating && entry.name == name && entry.args == args)
             .count();
         if count > self.threshold {
             StormDecision::Suppress(format!(

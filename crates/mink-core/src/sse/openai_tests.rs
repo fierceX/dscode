@@ -71,6 +71,46 @@ fn basic_text_with_done() {
 }
 
 #[test]
+fn sse_data_without_space_after_colon_is_accepted() {
+    let mut parser = OpenAIParser::new();
+    let events = collect_lines(
+        &mut parser,
+        &[
+            "data:{\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2}}",
+            "data:[DONE]",
+        ],
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::Text(t) if t.content == "ok"))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::Usage(u) if u.input_tokens == 5 && u.output_tokens == 2))
+    );
+}
+
+#[test]
+fn cached_tokens_larger_than_prompt_tokens_does_not_underflow() {
+    let mut parser = OpenAIParser::new();
+    let events = collect_lines(
+        &mut parser,
+        &[
+            "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":8}}}",
+            "data: [DONE]",
+        ],
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::Usage(u) if u.input_tokens == 0 && u.output_tokens == 2)),
+        "events: {events:?}"
+    );
+}
+
+#[test]
 fn missing_provider_usage_is_not_reported_as_zero_tokens() {
     let mut parser = OpenAIParser::new();
     let events = collect_lines(

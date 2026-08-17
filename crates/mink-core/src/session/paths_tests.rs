@@ -108,3 +108,18 @@ fn paths_for_layout_isolated_uses_home_as_session_dir() {
         PathBuf::from("/home/mink/session-root/todos.json")
     );
 }
+
+#[test]
+fn from_session_dir_preserves_passed_directory_name() {
+    // session_id 与目录名不一致时也必须忠实使用传入目录，
+    // 不能靠 parent.join(session_id) 推导到另一个路径。
+    let dir = PathBuf::from("/tmp/mink-sessions/dir-name");
+    let paths = Paths::from_session_dir("metadata-id", dir.clone());
+    assert_eq!(paths.session_id, "metadata-id");
+    assert_eq!(paths.base_dir, PathBuf::from("/tmp/mink-sessions"));
+    assert_eq!(paths.session_dir, dir);
+    assert_eq!(
+        paths.metadata,
+        PathBuf::from("/tmp/mink-sessions/dir-name/session.json")
+    );
+}

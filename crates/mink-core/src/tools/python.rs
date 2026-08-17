@@ -2,7 +2,6 @@ use anyhow::{Result, bail};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::AtomicBool;
-use std::time::Duration;
 
 /// Execute a Python script and return (stdout, stderr, exit_code).
 /// Test-only convenience wrapper; the tool executes through
@@ -21,7 +20,7 @@ pub fn execute_script_with_interrupt(
     timeout_secs: Option<u64>,
     interrupt: Option<&AtomicBool>,
 ) -> Result<(String, String, Option<i32>)> {
-    execute_script_with_interrupt_in_dir(script, timeout_secs, interrupt, None)
+    execute_script_with_interrupt_in_dir(script, timeout_secs, interrupt, None, 30, 600)
 }
 
 fn execute_script_with_interrupt_in_dir(
@@ -29,6 +28,8 @@ fn execute_script_with_interrupt_in_dir(
     timeout_secs: Option<u64>,
     interrupt: Option<&AtomicBool>,
     cwd: Option<&Path>,
+    default_timeout: i32,
+    max_timeout: i32,
 ) -> Result<(String, String, Option<i32>)> {
     if script.trim().is_empty() {
         bail!("Error: no Python script provided");
@@ -36,7 +37,8 @@ fn execute_script_with_interrupt_in_dir(
 
     // 安全策略已交给 OS 进程沙箱处理
 
-    let timeout = Duration::from_secs(timeout_secs.unwrap_or(30).clamp(5, 300));
+    let timeout =
+        crate::tools::process::resolve_tool_timeout(timeout_secs, default_timeout, max_timeout)?;
 
     let mut cmd = Command::new("python3");
     cmd.arg("-B") // don't write .pyc
@@ -128,6 +130,8 @@ impl super::runner::ToolExec for PythonTool {
             args.timeout,
             Some(ctx.interrupt.as_ref()),
             Some(&ctx.cwd),
+            ctx.tool_config.tool_timeout_secs,
+            ctx.tool_config.tool_timeout_max_secs,
         )?;
 
         let mut content = stdout;

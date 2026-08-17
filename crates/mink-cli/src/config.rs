@@ -113,6 +113,8 @@ pub struct ToolsConfigFile {
     pub enabled_tools: Option<Vec<String>>,
     pub skills: Option<Vec<String>>,
     pub tool_timeout: Option<i32>,
+    /// 单次 Bash/Python/自定义工具调用的超时上限（默认 600，至少 5）。
+    pub tool_timeout_max: Option<i32>,
     pub sub_agent_timeout: Option<i32>,
     pub max_search_files: Option<usize>,
     pub max_search_results: Option<usize>,
@@ -169,6 +171,8 @@ pub struct CliConfig {
     pub openai_extra_body: BTreeMap<String, serde_json::Value>,
     pub max_tokens: i32,
     pub tool_timeout_secs: i32,
+    /// 单次 Bash/Python/自定义工具调用的超时上限（默认 600 秒，至少 5 秒）。
+    pub tool_timeout_max_secs: i32,
     pub sub_agent_timeout_secs: i32,
     pub llm_first_event_timeout_secs: i32,
     pub llm_idle_timeout_secs: i32,
@@ -236,6 +240,7 @@ pub struct CliOverrides {
     pub base_url: bool,
     pub output_format: bool,
     pub enabled_tools: bool,
+    pub skills: bool,
     pub edit_mode: bool,
     pub edit_fuzzy_match: bool,
     pub edit_fuzzy_threshold: bool,
@@ -254,6 +259,7 @@ impl Default for CliConfig {
             openai_extra_body: BTreeMap::new(),
             max_tokens: 81920,
             tool_timeout_secs: 600,
+            tool_timeout_max_secs: 600,
             sub_agent_timeout_secs: 300,
             llm_first_event_timeout_secs: 60,
             llm_idle_timeout_secs: 90,
@@ -406,6 +412,7 @@ pub fn parse_args(args: Vec<String>) -> Result<CliConfig> {
                 if !cfg.skills.iter().any(|s| s == &value) {
                     cfg.skills.push(value);
                 }
+                cfg.cli_overrides.skills = true;
                 i += 2;
             }
             "--enabled-tools" => {
@@ -709,6 +716,13 @@ fn apply_config_sources(
         if let Some(tool_timeout) = toml_cfg.tools.tool_timeout {
             apply_positive_i32_config(&mut cfg.tool_timeout_secs, tool_timeout, "tool_timeout");
         }
+        if let Some(tool_timeout_max) = toml_cfg.tools.tool_timeout_max {
+            apply_tool_timeout_max_config(
+                &mut cfg.tool_timeout_max_secs,
+                tool_timeout_max,
+                "tool_timeout_max",
+            );
+        }
         if let Some(sub_agent_timeout) = toml_cfg.tools.sub_agent_timeout {
             apply_positive_i32_config(
                 &mut cfg.sub_agent_timeout_secs,
@@ -790,7 +804,9 @@ fn apply_config_sources(
                 _ => {}
             }
         }
-        if let Some(ref v) = toml_cfg.tools.skills {
+        if !cli.skills
+            && let Some(ref v) = toml_cfg.tools.skills
+        {
             cfg.skills = v.clone();
         }
         if !cli.enabled_tools
@@ -829,6 +845,14 @@ fn apply_positive_i32_config(target: &mut i32, value: i32, name: &str) {
         *target = value;
     } else {
         eprintln!("[mink] Warning: ignoring {name}={value}; must be greater than 0");
+    }
+}
+
+fn apply_tool_timeout_max_config(target: &mut i32, value: i32, name: &str) {
+    if value >= 5 {
+        *target = value;
+    } else {
+        eprintln!("[mink] Warning: ignoring {name}={value}; must be at least 5");
     }
 }
 
@@ -949,7 +973,11 @@ pub fn validate_runtime_config(cfg: &CliConfig) -> Result<()> {
         cfg.context_compact_tail_tokens,
         cfg.context_compact_max_output_tokens,
         cfg.max_context_tokens,
-    )
+    )?;
+    if cfg.tool_timeout_max_secs < 5 {
+        bail!("tool_timeout_max_secs must be at least 5 seconds");
+    }
+    Ok(())
 }
 
 /// Resolve the display label for the title bar.
@@ -1030,6 +1058,9 @@ pub(crate) fn apply_sdk_request_options(
     if let Some(value) = tools.tool_timeout {
         cfg.tool_timeout_secs = value;
     }
+    if let Some(value) = tools.tool_timeout_max {
+        cfg.tool_timeout_max_secs = value;
+    }
     if let Some(value) = tools.sub_agent_timeout {
         cfg.sub_agent_timeout_secs = value;
     }
@@ -1051,7 +1082,9 @@ pub(crate) fn apply_sdk_request_options(
     if let Some(value) = tools.edit_enforce_seen_lines {
         cfg.edit_enforce_seen_lines = value;
     }
-    if let Some(value) = &tools.skills {
+    if !cfg.cli_overrides.skills
+        && let Some(value) = &tools.skills
+    {
         cfg.skills = value.clone();
     }
     if let Some(value) = options.output.verbose {

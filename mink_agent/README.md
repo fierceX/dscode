@@ -142,6 +142,7 @@ Rust core 会在 `conversation.jsonl` 中完整保留历史，并通过 `context
 |------|--------|------|
 | `timeout_secs` | `600` | agent 运行总超时（秒），超时会终止 agent 进程组 |
 | `tool_timeout` | `600` | 单次工具调用超时（秒） |
+| `tool_timeout_max` | `600` | 单次 Bash/Python/自定义工具调用的超时上限（秒，最低 5） |
 | `sub_agent_timeout` | `300` | 子代理执行超时（秒） |
 | `llm_first_event_timeout` | `60` | 等待首个模型 stream event 的秒数 |
 | `llm_idle_timeout` | `90` | 模型 stream 空闲超时（秒） |

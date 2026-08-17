@@ -18,6 +18,10 @@ pub struct FileSnapshot {
     pub path: PathBuf,
     /// UTF-8 BOM-free, LF-normalized complete file text.
     pub text: String,
+    /// Whether the original snapshot content started with a UTF-8 BOM.
+    pub bom: bool,
+    /// Whether the original snapshot content used CRLF line endings uniformly.
+    pub crlf: bool,
     pub seen_lines: BTreeSet<usize>,
 }
 
@@ -62,6 +66,7 @@ impl FileSnapshotStore {
         I: IntoIterator<Item = usize>,
     {
         let path = canonical_snapshot_path(path);
+        let (bom, crlf) = detect_text_shape(content);
         let text = normalize_snapshot_text(content);
         let tag = compute_file_tag(&text);
         let visible = visible_lines
@@ -75,6 +80,8 @@ impl FileSnapshotStore {
                 .remove(index)
                 .expect("snapshot index came from this history");
             existing.seen_lines.extend(visible);
+            existing.bom = bom;
+            existing.crlf = crlf;
             let snapshot = existing.clone();
             versions.push_front(existing);
             // versions 借用在 push_front 后结束，才能更新基线映射。
@@ -89,6 +96,8 @@ impl FileSnapshotStore {
             tag,
             path: path.clone(),
             text,
+            bom,
+            crlf,
             seen_lines: visible,
         };
         self.total_bytes = self.total_bytes.saturating_add(snapshot.text.len());
@@ -159,12 +168,10 @@ impl FileSnapshotStore {
 
     /// Read/Write 完整内容基线。**不含** record_edit 的编辑后内容——回滚目标是
     /// 循环起点（模型最后一次亲自读到的完整文件），不是最近一次编辑结果。
-    /// 调用方负责原子写回与 mutation bump。
-    pub fn latest_read_snapshot(&self, path: &Path) -> Option<(String, String)> {
+    /// 返回完整快照（含文本 shape），调用方负责原子写回与 mutation bump。
+    pub fn latest_read_snapshot(&self, path: &Path) -> Option<FileSnapshot> {
         let path = canonical_snapshot_path(path);
-        self.read_latest
-            .get(&path)
-            .map(|version| (version.tag.clone(), version.text.clone()))
+        self.read_latest.get(&path).cloned()
     }
 
     /// 更新回滚基线并按 MAX_PATHS 做 LRU 淘汰，防止长会话无界增长。
@@ -387,6 +394,34 @@ pub fn canonical_snapshot_path(path: &Path) -> PathBuf {
 pub fn normalize_snapshot_text(content: &str) -> String {
     let content = content.strip_prefix('\u{feff}').unwrap_or(content);
     content.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+/// Detect the original text shape (UTF-8 BOM and uniform CRLF) so callers can
+/// restore it after writing normalized snapshot text.
+pub(crate) fn detect_text_shape(content: &str) -> (bool, bool) {
+    let bom = content.starts_with('\u{feff}');
+    let without_bom = content.strip_prefix('\u{feff}').unwrap_or(content);
+    // 仅当文件至少有一个 LF，且全部 LF 都是 CRLF 的一部分才按 CRLF 恢复。
+    // Iterator::all 对空集合恒为 true："" 和 "hello" 没有 LF，必须显式
+    // 排除，否则无换行内容会被误判为 CRLF。
+    let bytes = without_bom.as_bytes();
+    let has_lf = bytes.contains(&b'\n');
+    let crlf = has_lf
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(i, b)| *b != b'\n' || (i > 0 && bytes[i - 1] == b'\r'));
+    (bom, crlf)
+}
+
+/// Restore BOM/CRLF shape around normalized LF text.
+pub(crate) fn restore_text_shape(bom: bool, crlf: bool, normalized: &str) -> String {
+    let text = if crlf {
+        normalized.replace('\n', "\r\n")
+    } else {
+        normalized.to_string()
+    };
+    if bom { format!("\u{feff}{text}") } else { text }
 }
 
 pub fn compute_file_tag(content: &str) -> String {

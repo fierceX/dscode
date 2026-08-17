@@ -371,7 +371,7 @@ fn resolved_schema(
     // 将结果标记协议追加到工具描述，让模型正确读取现有输出。
     let description = match (name, config.edit_mode) {
         ("Read", crate::config::EditMode::Hashline) => Some(
-            "Read a local path or registered resource. Editable local non-raw output uses [PATH#TAG] plus numbered lines; raw output omits the header but still marks only its actual range as seen. Resource/VFS reads stay read-only and never mint tags. Output over {{CAP_TOOL_RESULT_MAX_BYTES}} bytes is rejected with an Error asking for a narrower line range; line numbers anchor later Edit or Read ranges.",
+            "Read a local path or registered resource. Editable local non-raw output uses [PATH#TAG] plus numbered lines and marks its actual range as seen; raw output omits the header and does not create a snapshot or advance seen-lines. Resource/VFS reads stay read-only and never mint tags. Output over {{CAP_TOOL_RESULT_MAX_BYTES}} bytes is rejected with an Error asking for a narrower line range; line numbers anchor later Edit or Read ranges.",
         ),
         ("Read", crate::config::EditMode::Replace) => Some(
             "Read a local path or registered resource using ordinary numbered output. Resource/VFS reads remain read-only. Output over {{CAP_TOOL_RESULT_MAX_BYTES}} bytes is rejected with an Error asking for a narrower line range; line numbers anchor later Edit or Read ranges.",

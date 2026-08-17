@@ -726,14 +726,16 @@ struct TextShape {
 fn decode_text_shape(raw: &str) -> (TextShape, String) {
     let bom = raw.starts_with('\u{feff}');
     let without_bom = raw.strip_prefix('\u{feff}').unwrap_or(raw);
-    // 仅当全部换行都是 CRLF 才按 CRLF 恢复：此前只看第一个换行，
-    // 混合行尾文件（如 "a\r\nb\nc"）会被整体改写成 CRLF。混合文件
-    // 统一按 LF 处理（少数 CRLF 行归一为 LF，不做全文件 EOL 改写）。
+    // 仅当文件至少有一个 LF，且全部 LF 都是 CRLF 的一部分才按 CRLF 恢复。
+    // Iterator::all 对空集合恒为 true："" 和 "hello" 没有 LF，必须显式
+    // 排除，否则无换行内容会被误判为 CRLF。
     let bytes = without_bom.as_bytes();
-    let crlf = bytes
-        .iter()
-        .enumerate()
-        .all(|(i, b)| *b != b'\n' || (i > 0 && bytes[i - 1] == b'\r'));
+    let has_lf = bytes.contains(&b'\n');
+    let crlf = has_lf
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(i, b)| *b != b'\n' || (i > 0 && bytes[i - 1] == b'\r'));
     (
         TextShape { bom, crlf },
         crate::tools::snapshot::normalize_snapshot_text(without_bom),

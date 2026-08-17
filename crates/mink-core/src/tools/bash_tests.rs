@@ -132,6 +132,7 @@ fn execute_in_dir_uses_requested_cwd() {
         "test -f marker.txt && echo found",
         None,
         600,
+        600,
         None,
         Some(&dir),
     )
@@ -195,4 +196,15 @@ fn explicit_timeout_over_ceiling_fails_closed() {
     assert!(execute("true", Some(5), 0).is_ok());
     assert!(execute("true", Some(600), 0).is_ok());
     assert!(execute("true", Some(0), 60).is_ok());
+}
+
+#[test]
+fn bash_timeout_honors_configured_ceiling() {
+    assert!(execute_with_interrupt_in_dir("true", Some(1_200), 30, 1_800, None, None).is_ok());
+    let err =
+        execute_with_interrupt_in_dir("true", Some(1_801), 30, 1_800, None, None).unwrap_err();
+    assert!(err.to_string().contains("must not exceed 1800"), "{err}");
+    // A ceiling below the 5s default floor is rejected instead of panicking.
+    let err = execute_with_interrupt_in_dir("true", None, 30, 4, None, None).unwrap_err();
+    assert!(err.to_string().contains("at least 5"), "{err}");
 }

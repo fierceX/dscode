@@ -163,6 +163,9 @@ pub fn grep(
     if pattern.is_empty() {
         bail!("Error: no pattern provided");
     }
+    if max_results == 0 {
+        bail!("Error: max search results must be greater than zero");
+    }
     let matcher = RegexMatcher::new_line_matcher(pattern)
         .map_err(|e| anyhow!("Error: invalid regex pattern '{pattern}': {e}"))?;
     let ctx = context.unwrap_or(0);
@@ -475,6 +478,9 @@ fn grep_hashline(
 ) -> Result<String> {
     if pattern.is_empty() {
         bail!("Error: no pattern provided");
+    }
+    if ctx.tool_config.max_search_results == 0 {
+        bail!("Error: max search results must be greater than zero");
     }
     let matcher = regex::Regex::new(pattern)
         .map_err(|error| anyhow!("Error: invalid regex pattern '{pattern}': {error}"))?;

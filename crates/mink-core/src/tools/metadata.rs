@@ -77,14 +77,17 @@ impl ToolFailureKind {
 /// 兜底分类只服务展示与统计；确定性错误码应尽早由执行路径显式携带
 /// （见 `ToolExecution.error_code`），避免依赖文本嗅探。
 pub fn classify_failure_kind(content: &str, exit_code: Option<i32>) -> ToolFailureKind {
+    let lower = content.to_lowercase();
+    // Timeout must be checked before the generic non-zero exit code branch:
+    // Bash/Python report timeout as exit code 124, but the semantic kind is
+    // Timeout, not ProcessFailed.
+    if lower.contains("timed out") || lower.contains("timeout") {
+        return ToolFailureKind::Timeout;
+    }
     if let Some(code) = exit_code
         && code != 0
     {
         return ToolFailureKind::ProcessFailed;
-    }
-    let lower = content.to_lowercase();
-    if lower.contains("timed out") || lower.contains("timeout") {
-        return ToolFailureKind::Timeout;
     }
     if lower.contains("safety policy") || lower.contains("blocked by bash") {
         return ToolFailureKind::SafetyBlocked;

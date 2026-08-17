@@ -164,6 +164,9 @@ impl SubAgentCoordinator {
                 Ok(Some((idx, session_id, sa))) => {
                     sub_completed += 1;
                     completed_indices.insert(idx);
+                    if let Some(launch) = launches.iter().find(|launch| launch.idx == idx) {
+                        launch.cancel.cancel();
+                    }
                     if let Some(ref mut pr) = processed_results.get_mut(idx) {
                         pr.status = if sa.status == "ok" {
                             ToolStatus::Succeeded

@@ -175,6 +175,14 @@ fn grep_empty_pattern_errors() {
     assert!(grep("", ".", "", None, 5000, 1000).is_err());
 }
 
+#[test]
+fn grep_zero_max_results_fails_closed_like_resource_grep() {
+    let error = grep("needle", ".", "", None, 5000, 0).unwrap_err();
+    assert!(error.to_string().contains("max search results"), "{error}");
+    let error = grep_resource("needle", "session://x", "needle\n", None, 0).unwrap_err();
+    assert!(error.to_string().contains("max search results"), "{error}");
+}
+
 #[tokio::test]
 async fn grep_searches_registered_resource_content() -> anyhow::Result<()> {
     let ctx = crate::regression::test_context_for_agent("grep-session-history").await?;

@@ -33,6 +33,8 @@ use crate::config::SandboxPythonConfig;
 #[derive(Clone)]
 pub struct ToolConfig {
     pub tool_timeout_secs: i32,
+    /// 单次 Bash/Python/自定义工具调用的超时上限（默认 600 秒）。
+    pub tool_timeout_max_secs: i32,
     pub sub_agent_timeout_secs: i32,
     pub tool_result_max_bytes: usize,
     pub file_write_max_bytes: usize,
@@ -54,6 +56,7 @@ impl ToolConfig {
     pub fn from_config(cfg: &crate::config::ResolvedConfig) -> Self {
         Self {
             tool_timeout_secs: cfg.tool_timeout_secs,
+            tool_timeout_max_secs: cfg.tool_timeout_max_secs,
             sub_agent_timeout_secs: cfg.sub_agent_timeout_secs,
             tool_result_max_bytes: cfg.tool_result_max_bytes,
             file_write_max_bytes: cfg.file_write_max_bytes,
@@ -296,8 +299,10 @@ pub struct AgentSharedContext {
     pub interrupt: Arc<AtomicBool>,
     /// Avoid repeated stderr warnings if event logging starts failing.
     pub event_log_warned: AtomicBool,
-    /// Optional serialized writer for production runtimes. Test contexts may
-    /// leave this unset and fall back to the synchronous append path.
+    /// Optional serialized writer for production runtimes. Hand-built test
+    /// contexts must inject a writer; there is intentionally no synchronous
+    /// fallback, so unset writers discard (with one warning) instead of
+    /// silently writing through a different path.
     pub(crate) event_log_writer: Option<EventLogWriter>,
     /// Per-context stream-json flush throttle. Deliberately not process-global:
     /// multiple embedded runtimes must not share one flush clock.

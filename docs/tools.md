@@ -155,7 +155,7 @@ cargo build --release
 42:    ...
 ```
 
-- `:raw` 禁用 header 和行号，但 Hashline 模式仍把实际读取范围记为 seen-lines。
+- `:raw` 禁用 header 和行号，且不生成 snapshot、不推进 seen-lines；Hashline Edit 仍要求先有一次非 raw 可编辑 Read。
 - `replace` 模式保持普通行号输出，不生成 Hashline tag。resource/VFS Read 始终只读且不生成 tag。
 - 注入 VFS 后，普通路径读取虚拟文件并显示只读标记，不生成 snapshot；selector 和 `:raw` 语义保持一致。
 - `artifact://<id>` 可读取被截断工具输出，支持同样的行 selector；恢复和 fork 后引用保持稳定。
@@ -252,7 +252,7 @@ cargo build --release
 - 当 `Write` 或 `Edit` 同时位于模型工具 surface 时，系统提示词要求文件创建、完整覆盖和锚定修改优先使用专用 provider，不使用 Bash 重定向、heredoc、sed 或 awk 代替。
 - 恢复首步守卫生效后，首个 Bash 调用还要单独满足 `FocusedVerificationExec`。这只是
   恢复首步资格，不改变普通 Bash 的误用拦截；
-- 显式 `timeout` 为 `1..=600` 时按原值执行；超过 600 秒直接报错（fail closed），`0` 回退到全局 `tool_timeout`；未设置 `tool_timeout` 时默认值稳定夹在 5 到 600 秒之间，不再根据历史执行耗时自适应调整。
+- 显式 `timeout` 为 `1..=tool_timeout_max` 时按原值执行；超过 `tool_timeout_max` 直接报错（fail closed），`0` 回退到全局 `tool_timeout`；未设置 `tool_timeout` 时默认值稳定夹在 5 到 `tool_timeout_max` 秒之间。`tool_timeout_max` 默认 600 秒，可在 `[tools]` 中配置，最低 5 秒。
 - Ctrl+C / interrupt 会尝试中断子进程，返回 exit code 130 语义。
 - stdout 和 stderr 合并返回，非零退出码会追加提示。
 
@@ -265,10 +265,11 @@ cargo build --release
 |---|---|---|
 | `script` | string | 内联 Python 代码 |
 | `script_file` | string | Python 文件路径 |
-| `timeout` | integer | 超时秒数，可选，默认 30，范围 5-300 |
+| `timeout` | integer | 超时秒数，可选 |
 
 - `script` 和 `script_file` 必须二选一，不能同时提供。
 - 在当前会话 `cwd` 下使用 `python3 -B -W ignore -c` 执行。
+- 显式 `timeout` 为 `1..=tool_timeout_max` 时按原值执行；超过 `tool_timeout_max` 直接报错（fail closed），`0` 回退到全局 `tool_timeout`；未设置 `tool_timeout` 时默认值稳定夹在 5 到 `tool_timeout_max` 秒之间。`tool_timeout_max` 默认 600 秒，可在 `[tools]` 中配置，最低 5 秒。
 - Ctrl+C / interrupt 会杀掉脚本并返回 interrupted 提示。
 
 ## `PythonSandbox`

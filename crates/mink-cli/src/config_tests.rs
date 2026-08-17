@@ -42,6 +42,7 @@ fn cli_defaults_track_runtime_option_defaults() {
 
     let tools = crate::runtime::ToolOptions::default();
     assert_eq!(cli.tool_timeout_secs, tools.timeout_secs);
+    assert_eq!(cli.tool_timeout_max_secs, tools.timeout_max_secs);
     assert_eq!(cli.sub_agent_timeout_secs, tools.sub_agent_timeout_secs);
     assert_eq!(cli.tool_result_max_bytes, tools.result_max_bytes);
     assert_eq!(cli.file_write_max_bytes, tools.file_write_max_bytes);
@@ -127,9 +128,38 @@ fn parse_args_skill_flag_collects_unique_names() {
     ])
     .unwrap();
     assert_eq!(cfg.skills, vec!["debugging", "review"]);
+    assert!(cfg.cli_overrides.skills);
 
     let err = parse_args(vec!["--skill".into(), "  ".into()]).unwrap_err();
     assert!(err.to_string().contains("skill name must not be empty"));
+}
+
+#[test]
+fn skill_flag_outranks_file_and_sdk_skills() {
+    let mut cfg = parse_args(vec!["--skill".into(), "from_cli".into()]).unwrap();
+    let defaults = CliConfig::default();
+    let file = MinkConfigFile {
+        tools: ToolsConfigFile {
+            skills: Some(vec!["from_file".into()]),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    apply_config_sources(&mut cfg, &defaults, Some(&file), Some(&file), Some(&file));
+    assert_eq!(cfg.skills, vec!["from_cli"]);
+
+    let request = mink::sdk_protocol::SdkRequest {
+        options: mink::sdk_protocol::SdkOptions {
+            tools: mink::sdk_protocol::SdkToolOptions {
+                skills: Some(vec!["from_sdk".into()]),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    super::apply_sdk_request_options(&mut cfg, &request);
+    assert_eq!(cfg.skills, vec!["from_cli"]);
 }
 
 #[test]
@@ -614,6 +644,7 @@ fn config_file_invalid_llm_timeouts_are_ignored() {
     let project = MinkConfigFile {
         tools: ToolsConfigFile {
             tool_timeout: Some(0),
+            tool_timeout_max: Some(4),
             sub_agent_timeout: Some(-5),
             ..Default::default()
         },
@@ -628,6 +659,7 @@ fn config_file_invalid_llm_timeouts_are_ignored() {
     let mut cfg = CliConfig::default();
     apply_config_sources(&mut cfg, &defaults, None, Some(&project), None);
     assert_eq!(cfg.tool_timeout_secs, defaults.tool_timeout_secs);
+    assert_eq!(cfg.tool_timeout_max_secs, defaults.tool_timeout_max_secs);
     assert_eq!(cfg.sub_agent_timeout_secs, defaults.sub_agent_timeout_secs);
     assert_eq!(
         cfg.llm_first_event_timeout_secs,
@@ -644,7 +676,7 @@ fn config_file_invalid_llm_timeouts_are_ignored() {
 fn config_parse_toml_via_cli() {
     let mut cfg = parse_args(vec![
         "--config".into(),
-        "[generation]\nmax_turns = 50\n[tools]\ntool_timeout = 300".into(),
+        "[generation]\nmax_turns = 50\n[tools]\ntool_timeout = 300\ntool_timeout_max = 1200".into(),
     ])
     .unwrap();
     let defaults = CliConfig::default();
@@ -653,6 +685,7 @@ fn config_parse_toml_via_cli() {
     cfg.cli_config = cli;
     assert_eq!(cfg.max_turns, 50);
     assert_eq!(cfg.tool_timeout_secs, 300);
+    assert_eq!(cfg.tool_timeout_max_secs, 1200);
 }
 
 #[test]
@@ -723,6 +756,22 @@ fn edit_configuration_toml_and_threshold_validation_fail_fast() {
 }
 
 #[test]
+fn tool_timeout_max_below_five_is_rejected_by_cli_validation() {
+    let mut cfg = CliConfig {
+        tool_timeout_max_secs: 4,
+        ..CliConfig::default()
+    };
+    assert!(
+        validate_runtime_config(&cfg)
+            .unwrap_err()
+            .to_string()
+            .contains("tool_timeout_max_secs must be at least 5 seconds")
+    );
+    cfg.tool_timeout_max_secs = 5;
+    assert!(validate_runtime_config(&cfg).is_ok());
+}
+
+#[test]
 fn sdk_grouped_options_map_to_cli_config() {
     let request = mink::sdk_protocol::parse_agent_jsonl_request(
         r#"{
@@ -740,6 +789,7 @@ fn sdk_grouped_options_map_to_cli_config() {
                 },
                 "tools": {
                     "tool_timeout": 5,
+                    "tool_timeout_max": 900,
                     "enabled_tools": ["Read", "Bash"],
                     "edit_mode": "replace"
                 },
@@ -761,6 +811,7 @@ fn sdk_grouped_options_map_to_cli_config() {
     assert_eq!(config.context_compact_tail_tokens, 16_000);
     assert_eq!(config.context_compact_max_output_tokens, 4_096);
     assert_eq!(config.tool_timeout_secs, 5);
+    assert_eq!(config.tool_timeout_max_secs, 900);
     assert_eq!(
         config.enabled_tools,
         Some(vec!["Read".to_string(), "Bash".to_string()])

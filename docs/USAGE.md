@@ -197,6 +197,7 @@ context_compact_input_reduction = false
 
 [tools]
 tool_timeout = 300
+tool_timeout_max = 600
 sub_agent_timeout = 120
 max_search_files = 5000
 max_search_results = 1000
@@ -277,6 +278,7 @@ plan_projection_tail = true
 
 [tools]
 tool_timeout = 600
+tool_timeout_max = 600
 sub_agent_timeout = 120
 max_search_files = 5000
 max_search_results = 1000
@@ -293,6 +295,10 @@ enforce_seen_lines = false
 Bash = "prompt"                      # allow | deny | prompt
 Read = "allow"
 ```
+
+`tool_timeout` 是 Bash/Python/自定义工具未显式指定 `timeout` 时的默认值；`tool_timeout_max`
+是单次工具调用的硬上限（默认 600 秒）。显式 `timeout` 或默认值超过该上限时 fail closed /
+钳制到上限，`tool_timeout_max` 最低可设为 5 秒。
 
 `openai_extra_body` 会合并到 `/chat/completions` 请求体中。`model`、`messages`、`stream`、`tools`、`tool_choice`、`max_tokens`、`max_completion_tokens` 不会被 extra body 覆盖。
 

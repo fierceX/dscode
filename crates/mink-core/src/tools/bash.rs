@@ -1,5 +1,5 @@
 use crate::safety;
-use anyhow::{Result, bail, ensure};
+use anyhow::{Result, bail};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::path::Path;
@@ -32,13 +32,14 @@ pub fn execute_with_interrupt(
     default_timeout: i32,
     interrupt: Option<&AtomicBool>,
 ) -> Result<(String, Option<i32>)> {
-    execute_with_interrupt_in_dir(command, timeout_secs, default_timeout, interrupt, None)
+    execute_with_interrupt_in_dir(command, timeout_secs, default_timeout, 600, interrupt, None)
 }
 
 fn execute_with_interrupt_in_dir(
     command: &str,
     timeout_secs: Option<u64>,
     default_timeout: i32,
+    max_timeout: i32,
     interrupt: Option<&AtomicBool>,
     cwd: Option<&Path>,
 ) -> Result<(String, Option<i32>)> {
@@ -49,20 +50,11 @@ fn execute_with_interrupt_in_dir(
         bail!("Error: command blocked by bash safety policy ({reason})");
     }
 
-    // Explicit model-provided timeouts must honor the documented 600s ceiling;
-    // oversized values fail closed instead of running unbounded. Sub-ceiling
-    // values (including 1-4s for quick commands) are honored verbatim.
-    let timeout = match timeout_secs {
-        Some(t) if t > 0 => {
-            ensure!(
-                t <= 600,
-                "Error: timeout must not exceed 600 seconds; got {t}"
-            );
-            Duration::from_secs(t)
-        }
-        _ if default_timeout > 0 => Duration::from_secs((default_timeout as u64).clamp(5, 600)),
-        _ => Duration::from_secs(600),
-    };
+    // Explicit model-provided timeouts must honor the configured ceiling;
+    // oversized values fail closed instead of running unbounded. The ceiling
+    // defaults to 600s and is configurable via `tool_timeout_max`.
+    let timeout =
+        crate::tools::process::resolve_tool_timeout(timeout_secs, default_timeout, max_timeout)?;
 
     let sync = execute_sync(command, timeout, interrupt, cwd)?;
     // execute_sync 已把 stderr 合入 stdout（sync.stderr 恒为空）。
@@ -267,6 +259,7 @@ impl BashTool {
             command,
             timeout,
             ctx.tool_config.tool_timeout_secs,
+            ctx.tool_config.tool_timeout_max_secs,
             Some(ctx.interrupt.as_ref()),
             Some(&ctx.cwd),
         )

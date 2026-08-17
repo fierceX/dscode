@@ -71,6 +71,23 @@ fn virtual_line_selection_matches_read_ranges() {
 }
 
 #[test]
+fn virtual_grep_request_rejects_zero_result_limit() {
+    let request = VfsGrepRequest {
+        pattern: "needle".into(),
+        path: ".".into(),
+        file_glob: String::new(),
+        context: None,
+        max_files: 10,
+        max_results: 0,
+    };
+    let error = validate_virtual_grep_request(&request).unwrap_err();
+    assert!(
+        error.to_string().contains("max search results"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn virtual_grep_formatter_handles_zero_result_limit() {
     let request = VfsGrepRequest {
         pattern: "needle".into(),

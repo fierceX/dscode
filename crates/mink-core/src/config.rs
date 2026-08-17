@@ -260,6 +260,9 @@ pub struct ResolvedConfig {
     pub openai_extra_body: BTreeMap<String, serde_json::Value>,
     pub max_tokens: i32,
     pub tool_timeout_secs: i32,
+    /// 单次 Bash/Python/自定义工具调用的超时上限（显式 `timeout` 与全局
+    /// `tool_timeout_secs` 都不得超过该值）。默认 600 秒。
+    pub tool_timeout_max_secs: i32,
     pub sub_agent_timeout_secs: i32,
     pub llm_first_event_timeout_secs: i32,
     pub llm_idle_timeout_secs: i32,
@@ -322,6 +325,7 @@ impl Default for ResolvedConfig {
             openai_extra_body: BTreeMap::new(),
             max_tokens: 81920,
             tool_timeout_secs: 600,
+            tool_timeout_max_secs: 600,
             sub_agent_timeout_secs: 300,
             llm_first_event_timeout_secs: 60,
             llm_idle_timeout_secs: 90,
@@ -388,7 +392,11 @@ pub fn validate_runtime_config(cfg: &ResolvedConfig) -> Result<()> {
         cfg.context_compact_tail_tokens,
         cfg.context_compact_max_output_tokens,
         cfg.max_context_tokens,
-    )
+    )?;
+    if cfg.tool_timeout_max_secs < 5 {
+        bail!("tool_timeout_max_secs must be at least 5 seconds");
+    }
+    Ok(())
 }
 
 /// 与配置来源无关的运行时限值校验（CLI / SDK / 库入口共用的唯一实现）。
@@ -460,8 +468,13 @@ pub(crate) fn validate_runtime_limits(
     // the combination must still fit the window or compaction can never
     // prevent provider overflow (each individual check above can pass while
     // the sum exceeds max_context).
-    let post_compact_total = compact_output + context_compact_tail_tokens + response_budget;
-    if post_compact_total > max_context {
+    //
+    // 安全比较：tail < max_context - response_budget，因此
+    // tail + response_budget 不会溢出且严格小于 max_context；
+    // 再用减法比较 compact_output，避免三项直接相加在 usize 边界回绕。
+    let tail_response = context_compact_tail_tokens + response_budget;
+    if compact_output > max_context - tail_response {
+        let post_compact_total = tail_response.saturating_add(compact_output);
         bail!(
             "compaction budget exceeds the context window: context_compact_max_output_tokens ({compact_output}) + context_compact_tail_tokens ({}) + response budget ({response_budget}) = {post_compact_total} > max_context ({max_context})",
             context_compact_tail_tokens
@@ -585,6 +598,42 @@ mod validation_tests {
 
         // Shrinking the summary so the sum fits must pass.
         cfg.context_compact_max_output_tokens = 9_000;
+        assert!(validate_runtime_config(&cfg).is_ok());
+    }
+
+    #[test]
+    fn combined_compaction_budget_does_not_overflow_usize() {
+        // Every individual limit passes on 64-bit, and the naive three-way
+        // addition would overflow usize::MAX. The validation must still
+        // fail closed instead of panicking in debug or wrapping in release.
+        let cfg = ResolvedConfig {
+            max_context_tokens: usize::MAX,
+            context_reserve_tokens: 1,
+            max_tokens: 1,
+            context_compact_tail_tokens: usize::MAX - 2,
+            context_compact_max_output_tokens: i32::MAX,
+            ..ResolvedConfig::default()
+        };
+        let err = validate_runtime_config(&cfg).unwrap_err().to_string();
+        assert!(
+            err.contains("compaction budget exceeds the context window"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn tool_timeout_max_must_be_at_least_five_seconds() {
+        let mut cfg = ResolvedConfig {
+            tool_timeout_max_secs: 4,
+            ..ResolvedConfig::default()
+        };
+        assert!(
+            validate_runtime_config(&cfg)
+                .unwrap_err()
+                .to_string()
+                .contains("tool_timeout_max_secs must be at least 5 seconds")
+        );
+        cfg.tool_timeout_max_secs = 5;
         assert!(validate_runtime_config(&cfg).is_ok());
     }
 

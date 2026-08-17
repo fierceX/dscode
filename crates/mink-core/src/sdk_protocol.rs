@@ -72,6 +72,8 @@ pub struct SdkContextOptions {
 #[serde(default, deny_unknown_fields)]
 pub struct SdkToolOptions {
     pub tool_timeout: Option<i32>,
+    /// 单次 Bash/Python/自定义工具调用的超时上限（默认 600，至少 5）。
+    pub tool_timeout_max: Option<i32>,
     pub sub_agent_timeout: Option<i32>,
     pub enabled_tools: Option<Vec<String>>,
     pub edit_mode: Option<crate::config::EditMode>,
@@ -268,6 +270,11 @@ pub fn validate_sdk_request(req: &SdkRequest) -> Result<(), String> {
         && tool_timeout <= 0
     {
         return Err("invalid SDK request: tool_timeout must be greater than 0".to_string());
+    }
+    if let Some(tool_timeout_max) = tools.tool_timeout_max
+        && tool_timeout_max < 5
+    {
+        return Err("invalid SDK request: tool_timeout_max must be at least 5".to_string());
     }
     if let Some(sub_agent_timeout) = tools.sub_agent_timeout
         && sub_agent_timeout <= 0

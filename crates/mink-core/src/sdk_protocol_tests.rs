@@ -197,6 +197,29 @@ fn sdk_request_accepts_explicit_compaction_policy() {
 }
 
 #[test]
+fn validate_sdk_request_rejects_bad_tool_timeout_options() {
+    let req =
+        parse_agent_jsonl_request(r#"{"prompt":"hi","options":{"tools":{"tool_timeout":0}}}"#)
+            .unwrap();
+    let err = validate_sdk_request(&req).unwrap_err();
+    assert!(err.contains("tool_timeout must be greater than 0"), "{err}");
+
+    let req =
+        parse_agent_jsonl_request(r#"{"prompt":"hi","options":{"tools":{"tool_timeout_max":4}}}"#)
+            .unwrap();
+    let err = validate_sdk_request(&req).unwrap_err();
+    assert!(err.contains("tool_timeout_max must be at least 5"), "{err}");
+
+    let req = parse_agent_jsonl_request(
+        r#"{"prompt":"hi","options":{"tools":{"tool_timeout":30,"tool_timeout_max":900}}}"#,
+    )
+    .unwrap();
+    validate_sdk_request(&req).unwrap();
+    assert_eq!(req.options.tools.tool_timeout, Some(30));
+    assert_eq!(req.options.tools.tool_timeout_max, Some(900));
+}
+
+#[test]
 fn validate_sdk_request_rejects_bad_llm_timeout_options() {
     let req = parse_agent_jsonl_request(
         r#"{"prompt":"hi","options":{"generation":{"llm_idle_timeout":0}}}"#,

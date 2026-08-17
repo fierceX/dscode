@@ -1,5 +1,6 @@
 //! Child-process supervision shared by execution tools.
 
+use anyhow::{Result, ensure};
 use std::io::Read;
 use std::process::{Child, Command};
 use std::sync::{Arc, Mutex};
@@ -7,6 +8,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 const PROCESS_OUTPUT_CAPTURE_LIMIT: usize = 1_000_000;
+const MIN_DEFAULT_TOOL_TIMEOUT_SECS: u64 = 5;
 
 /// Shared argument parsing for the host Python and CPython WASI sandbox tools.
 /// Both tools accept the same `script` / `script_file` / `timeout` surface;
@@ -51,6 +53,41 @@ impl PythonScriptArgs {
                 anyhow::bail!("Error: provide either 'script' or 'script_file'");
             }
         }
+    }
+}
+
+/// Resolve the effective timeout for Bash/Python/custom tool execution.
+///
+/// `explicit` is the model-provided per-call value: 0/absent falls back to
+/// `configured_default` (the global `tool_timeout`), which is clamped to
+/// `5..=configured_max`. Explicit values above `configured_max` fail closed.
+/// When no positive default is configured, the configured maximum is used.
+pub(crate) fn resolve_tool_timeout(
+    explicit: Option<u64>,
+    configured_default: i32,
+    configured_max: i32,
+) -> Result<Duration> {
+    let max = u64::try_from(configured_max).map_err(|_| {
+        anyhow::anyhow!(
+            "Error: tool timeout limit must be at least {MIN_DEFAULT_TOOL_TIMEOUT_SECS} seconds; got {configured_max}"
+        )
+    })?;
+    ensure!(
+        max >= MIN_DEFAULT_TOOL_TIMEOUT_SECS,
+        "Error: tool timeout limit must be at least {MIN_DEFAULT_TOOL_TIMEOUT_SECS} seconds; got {configured_max}"
+    );
+    match explicit {
+        Some(t) if t > 0 => {
+            ensure!(
+                t <= max,
+                "Error: timeout must not exceed {max} seconds; got {t}"
+            );
+            Ok(Duration::from_secs(t))
+        }
+        _ if configured_default > 0 => Ok(Duration::from_secs(
+            (configured_default as u64).clamp(MIN_DEFAULT_TOOL_TIMEOUT_SECS, max),
+        )),
+        _ => Ok(Duration::from_secs(max)),
     }
 }
 

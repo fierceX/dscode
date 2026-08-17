@@ -48,11 +48,13 @@ impl OpenAIParser {
         // 分支匹配无值字面量、实际不可达，且一旦触发会半重置累计状态并
         // 丢失重置前的 usage 计费，已删除。
 
-        if l.is_empty() || !l.starts_with("data: ") {
+        if l.is_empty() || !l.starts_with("data:") {
             return Ok(false);
         }
 
-        let payload = &l[6..];
+        // Accept both `data: {...}` and `data:{...}` (some SSE senders omit
+        // the optional space after the colon).
+        let payload = l[5..].trim_start_matches(' ');
         if payload == "[DONE]" {
             self.saw_done = true;
             self.prepare_terminal_events(emit)?;
@@ -103,7 +105,10 @@ impl OpenAIParser {
         }
         if let Some(v) = usage.get("prompt_tokens").and_then(Value::as_i64) {
             self.input_tokens = if self.cache_read_input_tokens > 0 {
-                v - self.cache_read_input_tokens
+                // i64::saturating_sub saturates at i64::MIN, not at zero, so a
+                // provider reporting cached tokens above prompt_tokens would
+                // still produce a negative input count. Clamp to zero.
+                v.saturating_sub(self.cache_read_input_tokens).max(0)
             } else {
                 v
             };

@@ -387,6 +387,7 @@ fn approval_test_config<const N: usize>(
 ) -> ToolConfig {
     ToolConfig {
         tool_timeout_secs: 600,
+        tool_timeout_max_secs: 600,
         sub_agent_timeout_secs: 300,
         tool_result_max_bytes: 100_000,
         file_write_max_bytes: 1_048_576,

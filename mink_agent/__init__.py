@@ -187,6 +187,11 @@ class SandboxConfig:
         Maximum number of processes (nsjail cgroup only).
     timeout_secs:
         Hard timeout for the entire agent run.
+    tool_timeout:
+        Default timeout (seconds) for a single Bash/Python/custom tool call.
+    tool_timeout_max:
+        Upper limit (seconds) for a single Bash/Python/custom tool call.
+        Explicit per-call timeouts above this value fail closed; default 600.
     llm_first_event_timeout:
         Seconds to wait for the first model stream event.
     llm_idle_timeout:
@@ -248,6 +253,7 @@ class SandboxConfig:
     max_pids: int = 64
     timeout_secs: int = 600
     tool_timeout: int = 600
+    tool_timeout_max: int = 600
     sub_agent_timeout: int = 300
     llm_first_event_timeout: int = 60
     llm_idle_timeout: int = 90
@@ -796,6 +802,8 @@ class AgentSession:
             context["context_compact_input_reduction"] = True
         if self._config.tool_timeout != 600:
             tools["tool_timeout"] = self._config.tool_timeout
+        if self._config.tool_timeout_max != 600:
+            tools["tool_timeout_max"] = self._config.tool_timeout_max
         if self._config.sub_agent_timeout != 300:
             tools["sub_agent_timeout"] = self._config.sub_agent_timeout
         if self._config.llm_first_event_timeout != 60:
@@ -872,6 +880,8 @@ class AgentSession:
         for name, value in positive_fields.items():
             if value <= 0:
                 raise ValueError(f"{name} must be greater than 0")
+        if cfg.tool_timeout_max < 5:
+            raise ValueError("tool_timeout_max must be at least 5")
         if cfg.max_context < 0:
             raise ValueError("max_context must be zero or greater")
         if not 1 <= cfg.context_compact_pct <= 100:
@@ -994,6 +1004,7 @@ class AgentSession:
         }
         tools = {
             "tool_timeout": cfg.tool_timeout,
+            "tool_timeout_max": cfg.tool_timeout_max,
             "sub_agent_timeout": cfg.sub_agent_timeout,
             "max_search_files": cfg.max_search_files,
             "max_search_results": cfg.max_search_results,

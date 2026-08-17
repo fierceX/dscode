@@ -71,7 +71,7 @@ echo '{"version":3,"prompt":"scan this repo"}' | mink-core --agent-jsonl
 | `provider` | `model` | 模型名（别名或真实名） |
 | `generation` | `max_tokens`, `max_turns`, `llm_*_timeout` | 生成和流超时 |
 | `context` | `max_context`, `context_compact_*`, `context_reserve_tokens` | 上下文与压缩；`max_context=0` 禁用自动压缩 |
-| `tools` | `enabled_tools`, `tool_timeout`, `sub_agent_timeout`, edit 和 skill 字段 | 工具 surface 与执行策略 |
+| `tools` | `enabled_tools`, `tool_timeout`, `tool_timeout_max`, `sub_agent_timeout`, edit 和 skill 字段 | 工具 surface 与执行策略 |
 | `session` | `session_id`, `session_layout` | session 引用与布局 |
 | `output` | `verbose`, `stream_events` | 输出策略 |
 | `signal` | `policy` | `off` / `evidence` / `state_ops` / `restart` / `full` |
@@ -92,6 +92,8 @@ echo '{"version":3,"prompt":"scan this repo"}' | mink-core --agent-jsonl
       "context_reserve_tokens": 12000
     },
     "tools": {
+      "tool_timeout": 300,
+      "tool_timeout_max": 600,
       "edit_mode": "hashline",
       "edit_enforce_seen_lines": false,
       "enabled_tools": ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]

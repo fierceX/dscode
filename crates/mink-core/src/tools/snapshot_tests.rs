@@ -22,13 +22,13 @@ fn record_edit_does_not_update_read_baseline() {
     let mut store = FileSnapshotStore::default();
     let path = PathBuf::from("missing-baseline.rs");
     let read_snapshot = store.record(&path, "original\n", [1]);
-    let (tag, text) = store.latest_read_snapshot(&path).expect("baseline exists");
-    assert_eq!(text, "original\n");
-    assert_eq!(tag, read_snapshot.tag);
+    let baseline = store.latest_read_snapshot(&path).expect("baseline exists");
+    assert_eq!(baseline.text, "original\n");
+    assert_eq!(baseline.tag, read_snapshot.tag);
     store.record_edit(&path, "edited\n", [1]);
-    let (_, text_after_edit) = store.latest_read_snapshot(&path).expect("baseline kept");
+    let baseline_after_edit = store.latest_read_snapshot(&path).expect("baseline kept");
     assert_eq!(
-        text_after_edit, "original\n",
+        baseline_after_edit.text, "original\n",
         "edit must not clobber baseline"
     );
 }
@@ -43,6 +43,31 @@ fn identical_content_reuses_version_and_merges_seen_lines() {
     let stored = store.versions(&path, &first.tag);
     assert_eq!(stored.len(), 1);
     assert_eq!(stored[0].seen_lines, BTreeSet::from([1, 2]));
+}
+
+#[test]
+fn snapshot_preserves_bom_and_crlf_shape() {
+    let mut store = FileSnapshotStore::default();
+    let path = PathBuf::from("shape.rs");
+    store.record(&path, "\u{feff}a\r\nb\r\n", [1, 2]);
+    let snapshot = store.latest_read_snapshot(&path).expect("baseline exists");
+    assert_eq!(snapshot.text, "a\nb\n");
+    assert!(snapshot.bom);
+    assert!(snapshot.crlf);
+    assert_eq!(
+        crate::tools::snapshot::restore_text_shape(snapshot.bom, snapshot.crlf, &snapshot.text),
+        "\u{feff}a\r\nb\r\n"
+    );
+}
+
+#[test]
+fn text_shape_detection_keeps_plain_lf_and_no_newline_content() {
+    let (bom, crlf) = detect_text_shape("a\nb\n");
+    assert!(!bom);
+    assert!(!crlf);
+    let (bom, crlf) = detect_text_shape("\u{feff}no-newline");
+    assert!(bom);
+    assert!(!crlf);
 }
 
 #[test]

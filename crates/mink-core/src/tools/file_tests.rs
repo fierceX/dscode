@@ -73,6 +73,19 @@ fn text_shape_uniform_crlf_and_mixed_eol() {
 }
 
 #[test]
+fn text_shape_empty_and_no_lf_inputs_are_lf() {
+    for (original, expected) in [("", ""), ("hello", "hello"), ("a\rb\rc", "a\nb\nc")] {
+        let (shape, normalized) = decode_text_shape(original);
+        assert!(
+            !shape.crlf,
+            "input {original:?} must not be classified as CRLF"
+        );
+        assert_eq!(normalized, expected);
+        assert_eq!(restore_text_shape(&shape, &normalized), expected);
+    }
+}
+
+#[test]
 fn memo_end_line_open_ended_reads_cover_eof() {
     // 开放式选择器：end_line=None 表示覆盖 start..EOF，
     // 重复的 `path:N` 请求可以命中 memo。

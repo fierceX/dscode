@@ -330,61 +330,67 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
     let session = runtime.session_info().clone();
 
     let mut process_exit_code = 0i32;
-    if cfg.agent_jsonl {
-        let outcome = run_turn_rendered(
-            &runtime_handle,
-            sdk_request
-                .map(|request| request.prompt)
-                .unwrap_or_default(),
-            display.as_ref(),
-        )
-        .await?;
-        crate::sdk_protocol::emit_json_line(&final_from_outcome(&outcome));
-        process_exit_code = exit_code_from_turn(outcome.status);
-    } else if cfg.tui_mode.enabled() {
-        #[cfg(feature = "tui")]
-        {
-            let cmd_tx = start_runtime_broker(runtime_handle.clone(), display.clone());
-            if let Some((_, signal_rx)) = tui_tx {
-                let model_label = crate::config::resolve_model_label(&cfg.model);
-                if let Err(e) = crate::tui::run_tui(
-                    cfg.tui_mode,
-                    signal_rx,
-                    cmd_tx.clone(),
-                    &session,
-                    &model_label,
-                    &cfg.sandbox,
-                ) {
-                    eprintln!("TUI error: {e}");
+    let turn_result: anyhow::Result<()> = async {
+        if cfg.agent_jsonl {
+            let outcome = run_turn_rendered(
+                &runtime_handle,
+                sdk_request
+                    .map(|request| request.prompt)
+                    .unwrap_or_default(),
+                display.as_ref(),
+            )
+            .await?;
+            crate::sdk_protocol::emit_json_line(&final_from_outcome(&outcome));
+            process_exit_code = exit_code_from_turn(outcome.status);
+        } else if cfg.tui_mode.enabled() {
+            #[cfg(feature = "tui")]
+            {
+                let cmd_tx = start_runtime_broker(runtime_handle.clone(), display.clone());
+                if let Some((_, signal_rx)) = tui_tx {
+                    let model_label = crate::config::resolve_model_label(&cfg.model);
+                    if let Err(e) = crate::tui::run_tui(
+                        cfg.tui_mode,
+                        signal_rx,
+                        cmd_tx.clone(),
+                        &session,
+                        &model_label,
+                        &cfg.sandbox,
+                    ) {
+                        eprintln!("TUI error: {e}");
+                    }
                 }
             }
+            #[cfg(not(feature = "tui"))]
+            anyhow::bail!("this mink binary was built without the `tui` feature");
+        } else if is_interactive {
+            let cmd_tx = start_runtime_broker(runtime_handle.clone(), display.clone());
+            display.render_info("mink interactive mode (type 'exit' or Ctrl+D to quit)");
+            if !session.is_new {
+                replay_last_turns(&session.events_path);
+            }
+            run_interactive(cmd_tx, &home).await?;
+        } else if !cfg.prompt.is_empty() {
+            let outcome =
+                run_turn_rendered(&runtime_handle, cfg.prompt.clone(), display.as_ref()).await?;
+            emit_stream_json_final_if_needed(&cfg, &outcome);
+            process_exit_code = exit_code_from_turn(outcome.status);
+        } else {
+            let mut input = String::new();
+            tokio::io::AsyncReadExt::read_to_string(&mut tokio::io::stdin(), &mut input).await?;
+            let outcome = run_turn_rendered(&runtime_handle, input, display.as_ref()).await?;
+            emit_stream_json_final_if_needed(&cfg, &outcome);
+            process_exit_code = exit_code_from_turn(outcome.status);
         }
-        #[cfg(not(feature = "tui"))]
-        anyhow::bail!("this mink binary was built without the `tui` feature");
-    } else if is_interactive {
-        let cmd_tx = start_runtime_broker(runtime_handle.clone(), display.clone());
-        display.render_info("mink interactive mode (type 'exit' or Ctrl+D to quit)");
-        if !session.is_new {
-            replay_last_turns(&session.events_path);
-        }
-        run_interactive(cmd_tx, &home).await?;
-    } else if !cfg.prompt.is_empty() {
-        let outcome =
-            run_turn_rendered(&runtime_handle, cfg.prompt.clone(), display.as_ref()).await?;
-        emit_stream_json_final_if_needed(&cfg, &outcome);
-        process_exit_code = exit_code_from_turn(outcome.status);
-    } else {
-        let mut input = String::new();
-        tokio::io::AsyncReadExt::read_to_string(&mut tokio::io::stdin(), &mut input).await?;
-        let outcome = run_turn_rendered(&runtime_handle, input, display.as_ref()).await?;
-        emit_stream_json_final_if_needed(&cfg, &outcome);
-        process_exit_code = exit_code_from_turn(outcome.status);
+
+        // Auto-generate session title from first user input if missing
+        auto_set_session_title(&session).await;
+        Ok(())
     }
+    .await;
 
-    // Auto-generate session title from first user input if missing
-    auto_set_session_title(&session).await;
-
-    runtime.shutdown().await?;
+    let shutdown_result = runtime.shutdown().await;
+    turn_result?;
+    shutdown_result?;
 
     if !session.session_id.is_empty() {
         let alias_label = read_session_alias(&session).await;
@@ -442,6 +448,7 @@ fn assemble_runtime_options(
         })
         .with_tool_options(ToolOptions {
             timeout_secs: cfg.tool_timeout_secs,
+            timeout_max_secs: cfg.tool_timeout_max_secs,
             sub_agent_timeout_secs: cfg.sub_agent_timeout_secs,
             result_max_bytes: cfg.tool_result_max_bytes,
             file_write_max_bytes: cfg.file_write_max_bytes,

@@ -391,11 +391,12 @@ async fn execute_custom(
 ) -> Result<ToolExecution> {
     let definition = &tool.definition;
     let started = std::time::Instant::now();
-    let timeout_secs = if ctx.tool_config.tool_timeout_secs > 0 {
-        ctx.tool_config.tool_timeout_secs.clamp(5, 600) as u64
-    } else {
-        600
-    };
+    let timeout = crate::tools::process::resolve_tool_timeout(
+        None,
+        ctx.tool_config.tool_timeout_secs,
+        ctx.tool_config.tool_timeout_max_secs,
+    )?;
+    let timeout_secs = timeout.as_secs();
     let execution = tool.executor.execute(
         call.input_json.clone(),
         crate::runtime::ToolExecutionContext::new(ctx.cwd.clone(), ctx.interrupt.clone()),
@@ -504,7 +505,7 @@ impl ToolPolicyGate<'_> {
         let args_json = serde_json::to_string(&call.input_json).unwrap_or_default();
         let decision = {
             let mut storm = self.storm.lock().unwrap_or_else(|e| e.into_inner());
-            storm.check(&call.name, &args_json)
+            storm.check(&call.name, &args_json, metadata.mutating)
         };
         match decision {
             StormDecision::Allow => None,

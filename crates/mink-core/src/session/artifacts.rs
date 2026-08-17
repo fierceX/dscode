@@ -70,19 +70,34 @@ impl ArtifactManager {
                 Err(error) => return Err(error.into()),
             }
         };
-        file.write_all(content.as_bytes())?;
-        file.flush()?;
-        file.sync_all()?;
-        let record = ArtifactRecord {
-            id,
-            tool: tool.to_string(),
-            path: filename,
-            bytes: content.len() as u64,
-            created_at: crate::session::stats::chrono_now_rfc3339(),
-            description: description.to_string(),
-        };
-        self.append_index(&record)?;
-        Ok(record)
+        let path = self.root.join(&filename);
+        let result = (|| -> Result<ArtifactRecord> {
+            file.write_all(content.as_bytes())?;
+            file.flush()?;
+            file.sync_all()?;
+            let record = ArtifactRecord {
+                id: id.clone(),
+                tool: tool.to_string(),
+                path: filename,
+                bytes: content.len() as u64,
+                created_at: crate::session::stats::chrono_now_rfc3339(),
+                description: description.to_string(),
+            };
+            self.append_index(&record)?;
+            Ok(record)
+        })();
+        if let Err(error) = result {
+            // The body file was created with create_new. Remove it unless the
+            // index write actually made the record durable (e.g. a full line
+            // was appended but the final sync failed): in that case the index
+            // legitimately references the body and it must be kept.
+            drop(file);
+            if self.get(&id).is_err() {
+                let _ = std::fs::remove_file(&path);
+            }
+            return Err(error);
+        }
+        result
     }
 
     pub fn read_text(&self, id: &str) -> Result<String> {

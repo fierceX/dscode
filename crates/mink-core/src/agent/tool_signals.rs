@@ -113,11 +113,17 @@ impl ToolSignalProcessor {
         self.signals.extend(result.signals.clone());
 
         let hard_count = result.signals.iter().filter(|s| s.kind.is_hard()).count();
+        // 用户主动中断不是模型失败：collector 不产生 Signal，这里也排除
+        // ToolStatus::Interrupted，避免它借 Aborted 分支计入 hard evidence
+        // 和 tool_error_count。
         let hard = hard_count > 0
-            || result
+            || (!matches!(
+                result.status,
+                crate::tools::metadata::ToolStatus::Interrupted
+            ) && result
                 .status
                 .failure_kind()
-                .is_some_and(|kind| kind.is_hard());
+                .is_some_and(|kind| kind.is_hard()));
         let summary = result
             .status
             .failure_kind()

@@ -52,6 +52,8 @@ pub struct ContextPolicy {
 #[derive(Debug, Clone)]
 pub struct ToolOptions {
     pub timeout_secs: i32,
+    /// 单次 Bash/Python/自定义工具调用的超时上限（默认 600 秒）。
+    pub timeout_max_secs: i32,
     pub sub_agent_timeout_secs: i32,
     pub result_max_bytes: usize,
     pub file_write_max_bytes: usize,
@@ -116,6 +118,7 @@ impl Default for ToolOptions {
         let config = Config::default();
         Self {
             timeout_secs: config.tool_timeout_secs,
+            timeout_max_secs: config.tool_timeout_max_secs,
             sub_agent_timeout_secs: config.sub_agent_timeout_secs,
             result_max_bytes: config.tool_result_max_bytes,
             file_write_max_bytes: config.file_write_max_bytes,
@@ -230,6 +233,7 @@ impl AgentOptions {
 
     pub fn with_tool_options(mut self, options: ToolOptions) -> Self {
         self.config.tool_timeout_secs = options.timeout_secs;
+        self.config.tool_timeout_max_secs = options.timeout_max_secs;
         self.config.sub_agent_timeout_secs = options.sub_agent_timeout_secs;
         self.config.tool_result_max_bytes = options.result_max_bytes;
         self.config.file_write_max_bytes = options.file_write_max_bytes;
@@ -471,6 +475,12 @@ impl AgentOptions {
 
     pub fn with_tool_timeout_secs(mut self, secs: i32) -> Self {
         self.config.tool_timeout_secs = secs;
+        self
+    }
+
+    /// 设置单次 Bash/Python/自定义工具调用的超时上限（默认 600 秒，至少 5 秒）。
+    pub fn with_tool_timeout_max_secs(mut self, secs: i32) -> Self {
+        self.config.tool_timeout_max_secs = secs;
         self
     }
 

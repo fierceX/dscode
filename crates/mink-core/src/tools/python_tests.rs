@@ -1,9 +1,44 @@
 use super::*;
+use std::time::Duration;
 
 #[test]
 fn empty_script_errors() {
     assert!(execute_script("", None).is_err());
     assert!(execute_script("   ", None).is_err());
+}
+
+#[test]
+fn python_timeout_uses_configured_default_and_configured_ceiling() {
+    let resolve = crate::tools::process::resolve_tool_timeout;
+    assert_eq!(resolve(None, 45, 600).unwrap(), Duration::from_secs(45));
+    assert_eq!(resolve(Some(0), 45, 600).unwrap(), Duration::from_secs(45));
+    assert_eq!(resolve(Some(1), 45, 600).unwrap(), Duration::from_secs(1));
+    assert_eq!(resolve(None, 9_999, 600).unwrap(), Duration::from_secs(600));
+    for bad in [601u64, 86_400, u64::MAX] {
+        let err = resolve(Some(bad), 30, 600).unwrap_err();
+        assert!(
+            err.to_string().contains("must not exceed 600"),
+            "timeout {bad} should be rejected: {err}"
+        );
+    }
+
+    // A raised configured ceiling admits larger explicit values and clamps
+    // the configured default to the new ceiling.
+    assert_eq!(
+        resolve(Some(1_200), 30, 1_800).unwrap(),
+        Duration::from_secs(1_200)
+    );
+    assert_eq!(
+        resolve(None, 3_600, 1_800).unwrap(),
+        Duration::from_secs(1_800)
+    );
+    let err = resolve(Some(1_801), 30, 1_800).unwrap_err();
+    assert!(err.to_string().contains("must not exceed 1800"), "{err}");
+
+    // A ceiling below the 5s default floor fails closed instead of panicking
+    // inside Duration::clamp.
+    let err = resolve(None, 30, 4).unwrap_err();
+    assert!(err.to_string().contains("at least 5"), "{err}");
 }
 
 #[test]

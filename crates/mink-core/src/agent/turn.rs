@@ -367,7 +367,10 @@ impl TurnExecutor {
             }
 
             // Phase 4: 决策 — 继续或结束
-            if let Some(decision) = self.decide_next(&stop, belief.as_deref_mut()).await? {
+            if let Some(decision) = self
+                .decide_next(&stop, belief.as_deref_mut(), turn >= max_turns)
+                .await?
+            {
                 return Ok((decision, effects));
             }
             // tool_use 路径：重新加载 messages 继续循环

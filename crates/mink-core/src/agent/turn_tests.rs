@@ -121,9 +121,50 @@ async fn todo_final_guard_reminds_once_but_does_not_force_a_loop() -> anyhow::Re
     let llm = Arc::new(MockLlmBackend::new("flash", vec![]));
     let mut executor = TurnExecutor::new(ctx.clone(), llm);
 
-    assert!(executor.decide_next("stop", None).await?.is_none());
+    assert!(executor.decide_next("stop", None, false).await?.is_none());
     assert_eq!(
-        executor.decide_next("stop", None).await?,
+        executor.decide_next("stop", None, false).await?,
+        Some(TurnDecision::Stop)
+    );
+    let messages = ctx.store.lines().await?;
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| {
+                message["content"]
+                    .as_str()
+                    .is_some_and(|content| content.contains("<todo-final-reminder>"))
+            })
+            .count(),
+        1
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn todo_final_guard_on_last_turn_records_reminder_but_stops() -> anyhow::Result<()> {
+    let ctx = crate::regression::test_context_for_agent("turn-todo-final-guard-last-turn").await?;
+    ctx.todo_store.apply_structure(
+        0,
+        crate::session::todo::TodoChanges {
+            add: vec![crate::session::todo::TodoAdd {
+                content: "active".into(),
+            }],
+            ..Default::default()
+        },
+    )?;
+    ctx.todo_store.advance(
+        1,
+        crate::session::todo::TodoTransitions {
+            activate: vec!["T0001".into()],
+            ..Default::default()
+        },
+    )?;
+    let llm = Arc::new(MockLlmBackend::new("flash", vec![]));
+    let mut executor = TurnExecutor::new(ctx.clone(), llm);
+
+    assert_eq!(
+        executor.decide_next("stop", None, true).await?,
         Some(TurnDecision::Stop)
     );
     let messages = ctx.store.lines().await?;

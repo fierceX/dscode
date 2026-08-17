@@ -107,6 +107,30 @@ async fn compile_error_increments_tool_error_count() {
     assert!(!processor.collected_signals().is_empty());
 }
 
+#[tokio::test]
+async fn interrupted_tool_is_not_counted_as_hard_failure() {
+    let mut processor = ToolSignalProcessor::default();
+    let mut result = ToolExecution {
+        status: crate::tools::metadata::ToolStatus::Interrupted,
+        signals: Vec::new(),
+        ..tool_result("")
+    };
+    processor
+        .process_with_mode(
+            &mut result,
+            None,
+            &crate::regression::test_context_for_agent("tool-signals-interrupted")
+                .await
+                .unwrap(),
+            "flash",
+            true,
+        )
+        .await;
+    assert!(result.signals.is_empty());
+    assert_eq!(processor.hard_failures(), 0);
+    assert_eq!(processor.tool_error_count(), 0);
+}
+
 #[test]
 fn edited_paths_uses_authoritative_hashline_header_grammar() {
     let mut args = BTreeMap::new();

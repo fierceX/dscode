@@ -288,6 +288,7 @@ impl CompactionEngine {
     ) -> Result<String> {
         let request_cancel = self.cancel.linked_child_token();
         let watcher_cancel = request_cancel.clone();
+        let cleanup_cancel = request_cancel.clone();
         let interrupt = self.interrupt.clone();
         let watcher = tokio::spawn(async move {
             loop {
@@ -305,6 +306,7 @@ impl CompactionEngine {
             .run_summary_call_with_cancel(dropped, previous_summary, target, request_cancel)
             .await;
         watcher.abort();
+        cleanup_cancel.cancel();
         if self.interrupt.load(Ordering::SeqCst) {
             bail!("compaction interrupted");
         }

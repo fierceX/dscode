@@ -95,14 +95,16 @@ fn run_writer(
             EventLogCmd::Flush { done } => {
                 let result = match file.as_mut() {
                     Some(file) => file.flush(),
-                    None => {
-                        let message = failure
-                            .lock()
-                            .unwrap_or_else(|error| error.into_inner())
-                            .clone()
-                            .unwrap_or_else(|| "event log file is not open".to_string());
-                        Err(io::Error::other(message))
-                    }
+                    None => match failure
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .clone()
+                    {
+                        Some(message) => Err(io::Error::other(message)),
+                        // No events have been written yet: flushing an empty
+                        // session is a no-op, not an error.
+                        None => Ok(()),
+                    },
                 };
                 let _ = done.send(result);
             }
@@ -198,6 +200,18 @@ mod tests {
         assert_eq!(contents.lines().count(), event_count);
         drop(writer);
         let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
+    async fn flush_without_any_events_is_a_noop() {
+        let path = std::env::temp_dir().join(format!(
+            "mink-event-log-empty-{}-{}.jsonl",
+            std::process::id(),
+            uuid_like()
+        ));
+        let writer = EventLogWriter::start(path.clone());
+        writer.flush().await.unwrap();
+        drop(writer);
     }
 
     #[tokio::test]

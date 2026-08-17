@@ -99,20 +99,25 @@ impl super::TurnExecutor {
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 snapshots.latest_read_snapshot(&full)
             };
-            let Some((tag, snapshot_text)) = candidate else {
+            let Some(snapshot) = candidate else {
                 continue;
             };
             let Ok(current) = tokio::fs::read_to_string(&full).await else {
                 continue;
             };
             let normalized = crate::tools::snapshot::normalize_snapshot_text(&current);
-            if normalized == snapshot_text {
+            if normalized == snapshot.text {
                 continue; // 幂等：磁盘内容已与基线一致。
             }
+            let restored = crate::tools::snapshot::restore_text_shape(
+                snapshot.bom,
+                snapshot.crlf,
+                &snapshot.text,
+            );
             // atomic_replace 会用临时文件替换目标，因此必须显式保留原权限。
             let original_permissions = std::fs::metadata(&full).map(|meta| meta.permissions()).ok();
             if let Err(error) =
-                crate::session::atomic_file::atomic_replace(&full, snapshot_text.as_bytes())
+                crate::session::atomic_file::atomic_replace(&full, restored.as_bytes())
             {
                 self.ctx
                     .log_event(crate::events::EventLog::SignalRollbackError {
@@ -129,7 +134,7 @@ impl super::TurnExecutor {
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             rolled_back.push(serde_json::json!({
                 "path": full.display().to_string(),
-                "to_tag": tag,
+                "to_tag": snapshot.tag,
             }));
         }
         if !rolled_back.is_empty() {
@@ -229,10 +234,13 @@ impl super::TurnExecutor {
 
     /// Phase 4: 根据 stop reason 决策本轮是否结束。
     /// 返回 `Some(TurnDecision)` 表示需要从 execute() 返回，`None` 表示继续循环。
+    /// `is_last_turn` 表示当前已经是最后一个允许的 LLM 轮次；此时 todo 提醒
+    /// 只记录、不再强制发起一次额外的 LLM 请求。
     pub(super) async fn decide_next(
         &mut self,
         stop: &str,
         belief: Option<&mut crate::agent::belief::BeliefTracker>,
+        is_last_turn: bool,
     ) -> Result<Option<TurnDecision>> {
         // 更新标题栏信念度
         let _ = self.ctx.stats.flush_if_dirty().await;
@@ -266,7 +274,9 @@ impl super::TurnExecutor {
                         ))
                         .await?;
                     self.local.todo_final_reminder_sent = true;
-                    return Ok(None);
+                    if !is_last_turn {
+                        return Ok(None);
+                    }
                 }
                 self.ctx.display.render_stop(stop);
                 Ok(Some(TurnDecision::Stop))

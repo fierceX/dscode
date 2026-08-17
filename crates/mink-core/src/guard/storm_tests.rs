@@ -4,11 +4,11 @@ use super::*;
 fn allows_if_below_threshold() {
     let mut sb = StormBreaker::new(6, 3);
     assert!(matches!(
-        sb.check("Read", r#"{"path":"/tmp/x"}"#),
+        sb.check("Read", r#"{"path":"/tmp/x"}"#, false),
         StormDecision::Allow
     ));
     assert!(matches!(
-        sb.check("Read", r#"{"path":"/tmp/x"}"#),
+        sb.check("Read", r#"{"path":"/tmp/x"}"#, false),
         StormDecision::Allow
     ));
 }
@@ -22,7 +22,7 @@ fn suppresses_after_threshold() {
     for i in 0..3 {
         assert!(
             matches!(
-                sb.check("Bash", r#"{"command":"ls"}"#),
+                sb.check("Bash", r#"{"command":"ls"}"#, false),
                 StormDecision::Allow
             ),
             "call {} should be allowed",
@@ -30,7 +30,7 @@ fn suppresses_after_threshold() {
         );
     }
     assert!(matches!(
-        sb.check("Bash", r#"{"command":"ls"}"#),
+        sb.check("Bash", r#"{"command":"ls"}"#, false),
         StormDecision::Suppress(_)
     ));
 }
@@ -43,49 +43,76 @@ fn mutating_calls_share_window_and_suppress() {
     let mut sb = StormBreaker::new(6, 3);
     for _ in 0..3 {
         assert!(matches!(
-            sb.check("Write", r#"{"path":"/x","content":"hi"}"#),
+            sb.check("Write", r#"{"path":"/x","content":"hi"}"#, true),
             StormDecision::Allow
         ));
     }
     assert!(matches!(
-        sb.check("Write", r#"{"path":"/x","content":"hi"}"#),
+        sb.check("Write", r#"{"path":"/x","content":"hi"}"#, true),
         StormDecision::Suppress(_)
     ));
 }
 
 #[test]
-fn mutating_call_does_not_clear_other_counts() {
+fn mutating_call_resets_non_mutating_history_only() {
     let mut sb = StormBreaker::new(6, 3);
-    sb.check("Read", r#"{"path":"/x"}"#);
-    sb.check("Read", r#"{"path":"/x"}"#);
-    sb.check("Write", r#"{"path":"/x","content":"hi"}"#);
+    sb.check("Read", r#"{"path":"/x"}"#, false);
+    sb.check("Read", r#"{"path":"/x"}"#, false);
+    sb.check("Write", r#"{"path":"/x","content":"hi"}"#, true);
+
+    // The Read count restarts after the mutation.
     assert!(matches!(
-        sb.check("Read", r#"{"path":"/x"}"#),
+        sb.check("Read", r#"{"path":"/x"}"#, false),
         StormDecision::Allow
     ));
     assert!(matches!(
-        sb.check("Read", r#"{"path":"/x"}"#),
-        StormDecision::Suppress(_)
+        sb.check("Read", r#"{"path":"/x"}"#, false),
+        StormDecision::Allow
     ));
+
+    // A legitimate read-edit-read loop never suppresses the same Read.
+    for _ in 0..8 {
+        sb.check("Read", r#"{"path":"/x"}"#, false);
+        sb.check("Write", r#"{"path":"/x","content":"new"}"#, true);
+    }
+    assert!(matches!(
+        sb.check("Read", r#"{"path":"/x"}"#, false),
+        StormDecision::Allow
+    ));
+}
+
+#[test]
+fn different_mutating_arguments_do_not_cross_count() {
+    let mut sb = StormBreaker::new(6, 3);
+    for _ in 0..3 {
+        assert!(matches!(
+            sb.check("Write", r#"{"path":"/x","content":"a"}"#, true),
+            StormDecision::Allow
+        ));
+        assert!(matches!(
+            sb.check("Write", r#"{"path":"/x","content":"b"}"#, true),
+            StormDecision::Allow
+        ));
+    }
 }
 
 #[test]
 fn window_slides_old_entries_out() {
     let mut sb = StormBreaker::new(3, 3);
-    sb.check("Bash", "a");
-    sb.check("Bash", "b");
-    sb.check("Bash", "c");
+    sb.check("Bash", "a", false);
+    sb.check("Bash", "b", false);
+    sb.check("Bash", "c", false);
     // "a" should be evicted, so only 2 of "Bash/a"
-    let d = sb.check("Bash", "a");
+    let d = sb.check("Bash", "a", false);
     assert!(matches!(d, StormDecision::Allow));
 }
 
 #[test]
 fn reset_clears_window() {
     let mut sb = StormBreaker::new(3, 3);
-    sb.check("Read", "a");
-    sb.check("Read", "a");
+    sb.check("Read", "a", false);
+    sb.check("Read", "a", false);
     sb.reset();
-    let d = sb.check("Read", "a");
+    let d = sb.check("Read", "a", false);
     assert!(matches!(d, StormDecision::Allow));
 }

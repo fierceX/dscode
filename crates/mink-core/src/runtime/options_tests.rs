@@ -16,6 +16,7 @@ fn options_convert_to_runtime_config_without_losing_config_fields() {
         .with_context_compact_max_output_tokens(73)
         .with_context_compact_input_reduction(true)
         .with_tool_timeout_secs(10)
+        .with_tool_timeout_max_secs(1_800)
         .with_sub_agent_timeout_secs(11)
         .with_llm_timeouts(12, 13, 14)
         .with_tool_result_max_bytes(15)
@@ -69,6 +70,7 @@ fn options_convert_to_runtime_config_without_losing_config_fields() {
     assert_eq!(cfg.context_compact_max_output_tokens, 73);
     assert!(cfg.context_compact_input_reduction);
     assert_eq!(cfg.tool_timeout_secs, 10);
+    assert_eq!(cfg.tool_timeout_max_secs, 1_800);
     assert_eq!(cfg.sub_agent_timeout_secs, 11);
     assert_eq!(cfg.llm_first_event_timeout_secs, 12);
     assert_eq!(cfg.llm_idle_timeout_secs, 13);
