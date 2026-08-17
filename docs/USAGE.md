@@ -141,6 +141,7 @@ prompt 为空且 stdin 是终端时自动进入交互模式。非终端 stdin �
 | `--continue` | — | 恢复最近的 session |
 | `--list-sessions` | — | 列出所有 session |
 | `--list-skills` | — | 列出可用 skill |
+| `--skill NAME` | — | 选择要加载的 skill；可重复传入，按传入顺序去重 |
 | `-i` / `--interactive` | auto | REPL 交互模式 |
 | `--tui` / `--tui=full` | — | Full TUI |
 | `--tui=inline` | — | Inline TUI |
@@ -239,7 +240,8 @@ read_dirs = ["./data"]
 ### 配置文件
 
 `~/.minkrc`（用户级）和 `<project>/.minkrc`（项目级）可选配置。
-优先级：CLI 参数 > 项目配置 > 用户配置 > 环境变量 > 默认值。
+优先级：CLI 参数 > `--config` TOML > 项目 `.minkrc` > 用户 `~/.minkrc` > 环境变量 > 默认值。
+环境变量在文件层之前应用，因此 `[tools]` / `[generation]` 等文件配置会覆盖同名环境变量。
 
 ```toml
 # ~/.minkrc
@@ -364,13 +366,13 @@ timeout_secs = 600
 
 ### 平台差异
 
-| 功能 | Linux (nsjail/bwrap) | macOS (sandbox-exec) |
-|------|---------------------|---------------------|
-| 写入限制 | ✅ 内核强制 | ✅ 内核强制 |
-| 读取限制 | ✅ 内核强制 | ❌ 不生效 |
-| 网络隔离 | ✅ namespace | ❌ 不生效 |
-| 资源限制 | ✅ cgroup | ❌ 不生效 |
-| 后台自动启用 | ✅ | ✅（写入限制） |
+| 功能 | Linux nsjail | Linux bwrap | macOS sandbox-exec |
+|------|-------------|-------------|---------------------|
+| 写入限制 | ✅ 内核强制 | ✅ 内核强制 | ✅ 内核强制 |
+| 读取限制 | ✅ 内核强制 | ✅ 内核强制 | ❌ 不生效 |
+| 网络隔离 | ✅ namespace | ✅ namespace | ❌ 不生效 |
+| memory/pids 资源限制 | ✅ cgroup | ❌ 不执行 | ❌ 不执行 |
+| 后台自动启用 | ✅ | ✅ | ✅（写入限制） |
 
 ### 启动机制
 
@@ -629,8 +631,8 @@ LLM 自动调用，支持最多 8 个并发。模式、参数和输出格式详�
 ### 启用
 
 ```bash
-# CLI 加载
-mink -m flash --config 'skills=["debugging","tdd"]' -i
+# CLI 加载（可重复 --skill；与 .minkrc 的 [tools].skills 等价）
+mink -m flash --skill debugging --skill tdd -i
 
 # 查看可用
 mink --list-skills

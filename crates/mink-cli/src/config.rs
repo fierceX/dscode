@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 pub use mink::runtime::{
-    EditMode, ModelResolver, OutputFormat, SandboxConfig, SandboxPythonConfig, SignalPolicy,
-    TokenParamKind, ToolApprovalMode, ToolApprovalPolicy,
+    EditMode, OutputFormat, SandboxConfig, SandboxPythonConfig, SignalPolicy, TokenParamKind,
+    ToolApprovalMode, ToolApprovalPolicy,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -953,8 +953,11 @@ pub fn validate_runtime_config(cfg: &CliConfig) -> Result<()> {
 }
 
 /// Resolve the display label for the title bar.
+#[cfg(feature = "tui")]
 pub fn resolve_model_label(model: &str) -> String {
-    ModelResolver::new(&BTreeMap::new()).resolve(model).label
+    crate::runtime::ModelResolver::new(&BTreeMap::new())
+        .resolve(model)
+        .label
 }
 
 pub fn parse_size_bytes(raw: &str) -> Result<usize> {

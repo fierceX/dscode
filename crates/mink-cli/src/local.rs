@@ -21,6 +21,7 @@ pub(crate) const REPL_EXIT_HELP: &[&str] = &[
     "  exit / quit     Exit REPL",
 ];
 
+#[cfg(feature = "tui")]
 pub(crate) const TUI_EXTRA_HELP: &[&str] = &[
     "  /plan           Open current plan detail",
     "  /todos          Open current todo detail",

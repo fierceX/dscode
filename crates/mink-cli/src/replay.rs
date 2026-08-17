@@ -6,6 +6,7 @@
 
 use serde_json::Value;
 
+#[cfg(feature = "tui")]
 pub(crate) const REPLAY_TURNS: usize = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

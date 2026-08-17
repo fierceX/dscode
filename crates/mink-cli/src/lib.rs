@@ -46,6 +46,7 @@ pub(crate) mod util {
     /// boundaries. `truncate_visual` uses the single-cell ellipsis used by the
     /// TUI renderer; `truncate_display` uses the conventional three-dot suffix
     /// for CLI text output.
+    #[cfg(feature = "tui")]
     pub(crate) fn truncate_visual(value: &str, max_width: usize) -> String {
         truncate_with_ellipsis(value, max_width, "…")
     }

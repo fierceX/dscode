@@ -20,7 +20,7 @@ Mink 是一个 Rust 实现的轻量 AI coding agent，专为 DeepSeek/OpenAI-com
 - Session 持久化：JSONL 追加写入，支持恢复和重放
 - Todo 持久化：session `todos.json` 保存权威完整快照、revision、稳定 ID 和状态；`TodoRead` 按需读取快照，`TodoWrite` 修改结构，`TodoAdvance` 转换进度
 - Artifact 持久化：超长工具输出落到 session `artifacts/`，序号可恢复且禁止覆盖已有正文，可通过 `Read artifact://<id>` 读取
-- 工具元数据与审批策略：每个工具声明 approval tier、结果类型、副作用和 discoverable 状态
+- 工具元数据与审批策略：每个工具声明 approval tier、结果类型、副作用和 storm 豁免状态
 - 轻量资源读取：`Read` 支持本地文件、artifact、skill、rule 和 session introspection URL，并通过 `ResourceRouter` 分发 registered scheme
 - Edit 双模式：默认 Hashline snapshot/stale 恢复，或 Replace exact/行窗口 fuzzy 内容匹配；runtime 启动后固定
 - 两种终端交互模式：REPL + TUI
@@ -82,6 +82,13 @@ TUI 特有操作和行为：
 两种终端模式实现同一个 `Display` trait（`crates/mink-core/src/ui/mod.rs`）。
 
 ```rust
+pub struct ToolCallDisplay<'a> {
+    pub tool_use_id: &'a str,
+    pub tool_name: &'a str,
+    pub summary: &'a str,
+    pub input: Option<&'a serde_json::Value>,
+}
+
 pub struct ToolResultDisplay<'a> {
     pub tool_name: &'a str,
     pub content_preview: &'a str,
@@ -90,21 +97,21 @@ pub struct ToolResultDisplay<'a> {
     pub exit_code: Option<i32>,
 }
 
+pub struct PresentedToolResultDisplay<'a> {
+    pub base: ToolResultDisplay<'a>,
+    pub status: ToolStatus,
+    pub result_kind: ToolResultKind,
+    pub presentation: Option<&'a ToolPresentation>,
+    pub artifacts: &'a [ArtifactDisplay],
+}
+
 pub trait Display: Send + Sync {
     fn render_thinking(&self, content: &str);
     fn render_text(&self, content: &str);
-    fn render_tool_call(&self, name: &str, summary: &str);
-    fn render_tool_call_detail(&self, call: &ToolCallDisplay<'_>) {
-        self.render_tool_call(call.tool_name, call.summary);
-    }
-    fn render_tool_result(&self, tool_name: &str, content_preview: &str);
-    fn render_tool_result_detail(&self, result: &ToolResultDisplay<'_>) {
-        self.render_tool_result(result.tool_name, result.content_preview);
-    }
-    fn render_tool_result_presented(&self, result: &PresentedToolResultDisplay<'_>) {
-        self.render_tool_result_detail(&result.base);
-    }
-    fn render_stop(&self);
+    fn render_tool_call(&self, call: &ToolCallDisplay<'_>);
+    fn render_tool_result(&self, result: &PresentedToolResultDisplay<'_>);
+    fn render_stop(&self, reason: &str);
+    fn render_signal(&self, signal_kind: &str, severity: f64, message: &str);
     fn render_error(&self, message: &str);
     fn render_retry(&self);
     fn render_info(&self, msg: &str);
@@ -112,14 +119,13 @@ pub trait Display: Send + Sync {
     fn render_sub_agent_status(&self, session_id: &str, status: &str, in_tokens: u64, out_tokens: u64);
     fn render_sub_agent_output(
         &self,
-        _session_id: &str,
-        _status: &str,
-        _thinking: &str,
-        _text: &str,
-        _in_tokens: u64,
-        _out_tokens: u64,
-    ) {
-    }
+        session_id: &str,
+        status: &str,
+        thinking: &str,
+        text: &str,
+        in_tokens: u64,
+        out_tokens: u64,
+    );
     fn render_prompt(&self);
     fn render_clear_line(&self);
 }
@@ -457,10 +463,10 @@ fail closed。
 - 子代理 fork 在 runtime 初始化前以目录级克隆继承父 session 状态
 - `ArtifactManager` 初始化必须从已有 index 的最大序号继续，正文文件必须使用独占创建，禁止覆盖恢复或 fork 继承的 artifact
 - `ConversationStore` append 写入通过内部写锁串行化；读盘只容忍文件末尾未换行的半截 JSONL
-- `StormBreaker` 每个新用户输入重置
+- `StormBreaker` 每个新用户输入重置；同轮内所有调用（包括 mutating 调用）统一计数，相同调用连续 3 次触发抑制，不同调用不误伤
 - `BeliefTracker` 初始信念 0.75；每用户输入按 `Config.signal.decay_per_input`（默认 0.6）衰减替代硬重置——跨轮重复失败累积升级、偶然失败自然消退；`DecisionEngine` 冷却与 `StormBreaker` 仍每输入 reset
 - 软信号（ToolError/EditLoop/ArgumentError）单独出现（累计 <= 1 次）且信念 >= warn_threshold 时不产生任何响应（记录不干预）；累计 >= 2 次软失败或出现硬信号（ToolFailed/SafetyBlocked/CompileError/TestFailure）与结构化错误码（Timeout/ProcessFailed/SafetyBlocked/Aborted）即参与决策
-- 信号响应注入的是轨迹事实（`[trajectory]`/`[detector]` 帧），禁止祈使句与"进入恢复模式"类命令；证据按新鲜度哈希去重（`evidence_dedup_window`），同一证据批不重复注入；响应事件必须携带证据文本（可回溯到 conversation.jsonl）
+- 信号响应注入的是轨迹事实（`[trajectory]`/`[detector]` 帧），禁止祈使句与"进入恢复模式"类命令；证据窗口由 `signal.seq_window` 注入，去重哈希只覆盖证据事实文本（`evidence_dedup_window` 控制窗口），不含 belief 数值，同一证据批不重复注入；响应事件必须携带证据文本（可回溯到 conversation.jsonl）
 - 快照回滚只作用于循环窗口（最近 ROLLBACK_WINDOW_STEPS 步，与 collector seq_window 对齐）内被编辑过的路径；回滚目标是该路径**最后一次 Read/Write 完整内容基线**（record_edit 的编辑后内容不得作为回滚目标，否则恒等 no-op）；Replace 模式的 Read 同样记录基线；写回必须经 atomic_replace 且磁盘内容与基线不一致时才写；写回后 bump memo mutation；回滚事件以 `signal_rollback` 落 events.jsonl
 - 恢复守卫拦截必须生成真实信号喂回信念；连续拦截达到 `guard_max_blocks` 必须绕过守卫并强制证据注入，禁止无限拦截
 - B < abort_threshold 时进入用户接管：结构化 `signal_handover` 事件（证据/编辑路径/选项）落 events.jsonl 后返回 Failed；禁止静默丢弃证据
@@ -483,6 +489,7 @@ fail closed。
 - registered resource URL 先于 VFS 处理；未知 URL-like scheme 必须 fail closed
 - Grep 可搜索 registered resource 文本；resource path 不接受 selector/glob，返回行号用于后续 Read selector
 - `Read` 模型可见参数只含 `path`（行范围用路径选择器）；全工具 schema 声明字段必须与 serde 接受字段一致且 `additionalProperties:false`（catalog 一致性测试强制）
+- 行选择器 `N+K` 计算必须饱和；offset 超过总行数时报错而非回读幻影行号；`split_content_lines("")` 返回空集（空文件 0 行），Read/Write/Edit 与 hashline 解析都遵循该语义
 - Read memo 命中必须同时满足 len/mtime 一致、epoch 一致、mutation_epoch 一致与范围覆盖；任何压缩提交成功后必须 bump epoch，任何 Write/Edit 成功后必须 bump mutation；子代理 memo 相互独立，仅本地文件
 - `tool-inventory` section 内容必须与当前 `ModelToolSurface` 名称集一致；空 surface 才使用 `runtime-capabilities`
 - prompt 资产写作纪律：所有适用的 system 指令均必须遵守；RFC2119 只精确定义 system prompt 内全大写关键字的强度，不重解释用户/rule/skill 普通措辞或输出标记；每个 `<critical>` 必须有 3-6 条战术 bullet，每条 ≤12 英文词且只表达一个主张；示例/规范形态置尾、禁 token/budget 措辞、不写引擎内部机制；由 `tests/prompt_discipline.rs` 机械执行（bullet 数/词数/禁词/占位符白名单/示例置尾）
@@ -494,8 +501,7 @@ fail closed。
 - 嵌入式 runtime 可为普通路径注入同步只读 VFS，仅替换 Read/Glob/Grep 后端；未注入时必须严格保持原有本地执行路径
 - VFS 调用同时携带继承的 `resource_session_id` 和当前 `agent_session_id`；虚拟 Read 不生成 snapshot，Edit/Write 始终操作本地文件
 - Hashline stale 恢复仅允许所有锚点唯一映射且共享一致偏移；Replace 多候选必须拒绝
-- Display 包装层必须原样转发 `render_tool_call_detail()` 和
-  `render_tool_result_presented()`；不得退化丢失 `tool_use_id`、presentation 或 artifact 元数据。
+- Display 实现必须完整转发 `ToolCallDisplay` / `PresentedToolResultDisplay` 的结构化字段；不得退化丢失 `tool_use_id`、presentation 或 artifact 元数据。
 - TUI 光标必须始终落在 UTF-8 char boundary。
 - Inline TUI 只提交连续且 sealed 的 transcript 前缀；committed 项不得再修改或重复写入原生 scrollback。
 - Inline TUI 空闲时保留最后一个 sealed item；新工作开始后才能推进该 item 的 committed 边界。

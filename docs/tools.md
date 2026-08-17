@@ -252,7 +252,7 @@ cargo build --release
 - 当 `Write` 或 `Edit` 同时位于模型工具 surface 时，系统提示词要求文件创建、完整覆盖和锚定修改优先使用专用 provider，不使用 Bash 重定向、heredoc、sed 或 awk 代替。
 - 恢复首步守卫生效后，首个 Bash 调用还要单独满足 `FocusedVerificationExec`。这只是
   恢复首步资格，不改变普通 Bash 的误用拦截；
-- 显式 `timeout` 优先；未设置时使用全局 `tool_timeout`（`--config` 或 `.minkrc` 设置），默认超时会稳定夹在 5 到 600 秒之间，不再根据历史执行耗时自适应调整。
+- 显式 `timeout` 为 `1..=600` 时按原值执行；超过 600 秒直接报错（fail closed），`0` 回退到全局 `tool_timeout`；未设置 `tool_timeout` 时默认值稳定夹在 5 到 600 秒之间，不再根据历史执行耗时自适应调整。
 - Ctrl+C / interrupt 会尝试中断子进程，返回 exit code 130 语义。
 - stdout 和 stderr 合并返回，非零退出码会追加提示。
 
@@ -302,6 +302,8 @@ cpython-wasi/
 | `script` | string | 内联 Python 代码 |
 | `script_file` | string | Python 文件路径 |
 | `timeout` | integer | 超时秒数，可选，默认 30，范围 5-300 |
+
+- 显式 `timeout` 为 `1..=300` 时按原值执行；超过 300 秒直接报错（fail closed），`0` 回退到 `[sandbox_python].timeout` 配置（默认 30，并钳制到 5-300）。
 
 ### 限制
 - 完整 CPython 标准库（json/csv/re/math/datetime/xml 等）
