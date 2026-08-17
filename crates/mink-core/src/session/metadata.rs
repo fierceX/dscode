@@ -41,6 +41,34 @@ pub struct SessionSeed {
     pub first_prompt: Option<String>,
 }
 
+/// Typed failure for session-reference resolution.
+///
+/// `None` is the normal "reference did not match any session" result.
+/// Ambiguity is modeled explicitly so hosts such as mink-server can map it
+/// to a conflict response without parsing human-readable strings.
+#[derive(Debug)]
+pub enum SessionReferenceError {
+    Ambiguous(String),
+    Other(anyhow::Error),
+}
+
+impl std::fmt::Display for SessionReferenceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ambiguous(message) => f.write_str(message),
+            Self::Other(error) => write!(f, "{error:#}"),
+        }
+    }
+}
+
+impl std::error::Error for SessionReferenceError {}
+
+impl From<anyhow::Error> for SessionReferenceError {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Other(error)
+    }
+}
+
 pub async fn ensure_metadata(paths: &Paths, cwd: &Path, seed: SessionSeed) -> Result<()> {
     let now = crate::session::stats::chrono_now_rfc3339();
     let mut metadata = match read_metadata(&paths.metadata).await {
@@ -105,7 +133,7 @@ pub async fn resolve_session_record_with_layout(
     cwd: &Path,
     reference: &str,
     layout: SessionLayout,
-) -> Result<Option<SessionRecord>> {
+) -> std::result::Result<Option<SessionRecord>, SessionReferenceError> {
     let reference = reference.trim();
     if reference.is_empty() {
         return Ok(None);
@@ -132,7 +160,7 @@ pub async fn resolve_session_record_with_layout(
         return Ok(Some(alias_matches[0].clone()));
     }
     if alias_matches.len() > 1 {
-        bail!(
+        return Err(SessionReferenceError::Ambiguous(format!(
             "session alias '{}' is ambiguous: {}",
             reference,
             alias_matches
@@ -140,7 +168,7 @@ pub async fn resolve_session_record_with_layout(
                 .map(|record| record.id.as_str())
                 .collect::<Vec<_>>()
                 .join(", ")
-        );
+        )));
     }
 
     let id_prefix_matches: Vec<_> = records
@@ -151,7 +179,7 @@ pub async fn resolve_session_record_with_layout(
         return Ok(Some(id_prefix_matches[0].clone()));
     }
     if id_prefix_matches.len() > 1 {
-        bail!(
+        return Err(SessionReferenceError::Ambiguous(format!(
             "session id prefix '{}' is ambiguous: {}",
             reference,
             id_prefix_matches
@@ -159,7 +187,7 @@ pub async fn resolve_session_record_with_layout(
                 .map(|record| record.id.as_str())
                 .collect::<Vec<_>>()
                 .join(", ")
-        );
+        )));
     }
 
     let title_matches: Vec<_> = records
@@ -176,7 +204,7 @@ pub async fn resolve_session_record_with_layout(
         return Ok(Some(title_matches[0].clone()));
     }
     if title_matches.len() > 1 {
-        bail!(
+        return Err(SessionReferenceError::Ambiguous(format!(
             "session title '{}' is ambiguous: {}",
             reference,
             title_matches
@@ -184,7 +212,7 @@ pub async fn resolve_session_record_with_layout(
                 .map(|record| record.id.as_str())
                 .collect::<Vec<_>>()
                 .join(", ")
-        );
+        )));
     }
 
     Ok(None)

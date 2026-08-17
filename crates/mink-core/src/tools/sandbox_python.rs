@@ -8,7 +8,7 @@
 //! - 无 C 扩展（WASI 不支持动态链接）
 //! - 完整 CPython 标准库
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -284,7 +284,6 @@ impl super::runner::ToolExec for PythonSandboxTool {
     fn metadata(&self) -> super::metadata::ToolMetadata {
         super::metadata::ToolMetadata::new(
             "PythonSandbox",
-            "Execute Python code in a CPython WASI sandbox. The sandbox provides WASI-level isolation: no subprocess, no network (by default), no arbitrary filesystem access, no C extensions. Full CPython standard library available. Use this for safe execution of untrusted or sensitive Python code.",
             super::metadata::ApprovalTier::Exec,
             super::metadata::ToolResultKind::Command,
         )
@@ -297,36 +296,8 @@ impl super::runner::ToolExec for PythonSandboxTool {
         input: &serde_json::Value,
         ctx: &crate::context::ToolContext,
     ) -> Result<super::runner::ToolOutcome> {
-        #[derive(serde::Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Args {
-            script: Option<String>,
-            #[serde(default)]
-            script_file: Option<String>,
-            #[serde(default)]
-            timeout: Option<u64>,
-        }
-
-        let args: Args = serde_json::from_value(input.clone())?;
-
-        let script = match (args.script, args.script_file) {
-            (Some(s), None) => s,
-            (None, Some(path)) => {
-                let full_path = if std::path::Path::new(&path).is_absolute() {
-                    path
-                } else {
-                    format!("{}/{}", ctx.cwd.display(), path)
-                };
-                std::fs::read_to_string(&full_path)
-                    .map_err(|e| anyhow::anyhow!("读取脚本文件失败 {full_path}: {e}"))?
-            }
-            (Some(_), Some(_)) => {
-                bail!("Error: provide either 'script' or 'script_file', not both");
-            }
-            (None, None) => {
-                bail!("Error: provide either 'script' or 'script_file'");
-            }
-        };
+        let args = super::process::PythonScriptArgs::parse(input)?;
+        let script = args.resolve_script(&ctx.cwd)?;
 
         let sp_cfg = &ctx.tool_config.sandbox_python;
         let timeout = resolve_sandbox_timeout(args.timeout, sp_cfg.timeout)?;

@@ -3,6 +3,7 @@ use crate::session::prefix::ImmutablePrefix;
 use anyhow::Result;
 use std::sync::Arc;
 
+#[derive(Clone)]
 pub struct PrefixManager {
     ctx: Arc<AgentSharedContext>,
 }
@@ -51,11 +52,15 @@ impl PrefixManager {
             let tools_json = self.ctx.tool_surface.schemas();
             let workflows = crate::prompt::workflows::PromptWorkflowResolver::builtin()
                 .resolve(&self.ctx.tool_capabilities)?;
-            self.ctx.log_event(serde_json::json!({
-                "type": "prompt_workflow_resolution",
-                "active_workflows": workflows.ordered().iter().map(|spec| spec.id).collect::<Vec<_>>(),
-                "workflow_fingerprint": workflows.fingerprint(),
-            }));
+            self.ctx
+                .log_event(crate::events::EventLog::PromptWorkflowResolution {
+                    active_workflows: workflows
+                        .ordered()
+                        .iter()
+                        .map(|spec| spec.id.to_string())
+                        .collect(),
+                    workflow_fingerprint: workflows.fingerprint().to_string(),
+                });
             let dependency_fingerprint = format!(
                 "mink-prefix-dependencies-v2\0{}\0{}\0{}\0{}",
                 self.ctx.capability_snapshot.dependency_fingerprint,
@@ -68,14 +73,13 @@ impl PrefixManager {
                 tools_json.clone(),
                 dependency_fingerprint.clone(),
             );
-            self.ctx
-                .log_typed_event(crate::events::EventLog::PrefixSnapshot {
-                    version: 1,
-                    fingerprint: prefix.fingerprint().to_string(),
-                    dependency_fingerprint: dependency_fingerprint.clone(),
-                    system_prompt: system_prompt.clone(),
-                    tools_json: tools_json.clone(),
-                });
+            self.ctx.log_event(crate::events::EventLog::PrefixSnapshot {
+                version: Some(1),
+                fingerprint: prefix.fingerprint().to_string(),
+                dependency_fingerprint: dependency_fingerprint.clone(),
+                system_prompt: system_prompt.clone(),
+                tools_json: tools_json.clone(),
+            });
             *guard = Some(prefix);
             return Ok((system_prompt, tools_json));
         }

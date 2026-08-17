@@ -33,6 +33,7 @@ async fn safety_blocked_bash_emits_typed_signal_event() -> anyhow::Result<()> {
             .iter()
             .any(|s| matches!(s.kind, crate::guard::collector::SignalKind::SafetyBlocked))
     );
+    h.ctx.flush_event_log().await?;
     let events = tokio::fs::read_to_string(&h.ctx.events_path).await?;
     assert!(events.contains(r#""type":"signal""#), "{events}");
     assert!(events.contains(r#""version":1"#), "{events}");

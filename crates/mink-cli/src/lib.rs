@@ -40,14 +40,41 @@ pub(crate) mod session {
 }
 
 pub(crate) mod util {
-    pub(crate) fn truncate_str(value: &str, max_chars: usize) -> String {
-        let mut chars = value.chars();
-        let truncated = chars.by_ref().take(max_chars).collect::<String>();
-        if chars.next().is_some() {
-            format!("{truncated}…")
-        } else {
-            truncated
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+    /// Truncate to a visual terminal width, preserving CJK/wide-character
+    /// boundaries. `truncate_visual` uses the single-cell ellipsis used by the
+    /// TUI renderer; `truncate_display` uses the conventional three-dot suffix
+    /// for CLI text output.
+    pub(crate) fn truncate_visual(value: &str, max_width: usize) -> String {
+        truncate_with_ellipsis(value, max_width, "…")
+    }
+
+    pub(crate) fn truncate_display(value: &str, max_width: usize) -> String {
+        truncate_with_ellipsis(value, max_width, "...")
+    }
+
+    fn truncate_with_ellipsis(value: &str, max_width: usize, ellipsis: &str) -> String {
+        if max_width == 0 {
+            return String::new();
         }
+        if UnicodeWidthStr::width(value) <= max_width {
+            return value.to_string();
+        }
+        let ellipsis_width = UnicodeWidthStr::width(ellipsis);
+        let keep = max_width.saturating_sub(ellipsis_width);
+        let mut out = String::new();
+        let mut width = 0usize;
+        for ch in value.chars() {
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if width + ch_width > keep {
+                break;
+            }
+            out.push(ch);
+            width += ch_width;
+        }
+        out.push_str(ellipsis);
+        out
     }
 
     pub(crate) fn fmt_k(value: u64) -> String {
@@ -60,6 +87,9 @@ pub(crate) mod util {
         }
     }
 }
+
+pub(crate) mod local;
+pub(crate) mod replay;
 
 pub mod cli;
 pub(crate) mod ui;

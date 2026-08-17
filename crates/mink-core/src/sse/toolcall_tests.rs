@@ -6,7 +6,7 @@ fn build_tool_call_empty_input_defaults_to_object() {
     assert_eq!(event.name, "Read");
     assert_eq!(event.id, "call_1");
     assert!(event.fields.is_empty());
-    assert!(event.order.is_empty());
+    // `order` 字段已删除（write-only）：字段集由 fields 的键序提供。
     assert_eq!(event.input_json, serde_json::json!({}));
 }
 
@@ -18,7 +18,7 @@ fn build_tool_call_records_field_order_and_scalar_strings() {
         r#"{"command":"echo hi","timeout":3,"safe":true,"env":null}"#,
     )
     .unwrap();
-    assert_eq!(event.order, ["command", "env", "safe", "timeout"]);
+
     assert_eq!(event.fields["command"], "echo hi");
     assert_eq!(event.fields["timeout"], "3");
     assert_eq!(event.fields["safe"], "true");
@@ -41,7 +41,7 @@ fn nested_tool_fields_are_preserved_as_json() {
         r#"{"base_revision":2,"update":[{"id":"T0001","content":"revised"}]}"#,
     )
     .unwrap();
-    assert_eq!(event.order, ["base_revision", "update"]);
+
     assert_eq!(event.fields["base_revision"], "2");
     assert_eq!(
         event.fields["update"],

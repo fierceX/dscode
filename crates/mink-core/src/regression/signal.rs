@@ -61,6 +61,7 @@ async fn signal_recovery_guard_blocks_first_write() -> anyhow::Result<()> {
         "{}",
         serde_json::to_string_pretty(&lines)?
     );
+    h.ctx.flush_event_log().await?;
     let events = tokio::fs::read_to_string(&h.ctx.events_path).await?;
     assert!(events.contains(r#""name":"Write""#), "{events}");
     assert!(

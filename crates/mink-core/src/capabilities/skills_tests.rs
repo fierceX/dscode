@@ -23,8 +23,7 @@ fn skill_snapshot_prefers_project_over_builtin() {
         "---\ndescription: \"Local debugging\"\n---\n\nlocal body",
     );
 
-    let snapshot =
-        build_default_skill_snapshot(&cwd, &home, "session-1", "session-1", &[]).unwrap();
+    let snapshot = build_default_skill_snapshot(&cwd, &home, &[]).unwrap();
 
     let loaded = snapshot.by_name.get("debugging").unwrap();
     assert_eq!(loaded.skill.description, "Local debugging");
@@ -44,8 +43,7 @@ fn skill_shadow_warning_is_reported() {
         "---\ndescription: \"Local debugging\"\n---\n\nlocal body",
     );
 
-    let snapshot =
-        build_default_skill_snapshot(&cwd, &home, "session-1", "session-1", &[]).unwrap();
+    let snapshot = build_default_skill_snapshot(&cwd, &home, &[]).unwrap();
 
     let warning = snapshot
         .warnings
@@ -72,8 +70,7 @@ fn skill_snapshot_model_addressable_hidden_from_index() {
         "---\ndescription: \"Hidden review\"\nhide: true\n---\n\nbody",
     );
 
-    let snapshot =
-        build_default_skill_snapshot(&cwd, &home, "session-1", "session-1", &[]).unwrap();
+    let snapshot = build_default_skill_snapshot(&cwd, &home, &[]).unwrap();
 
     assert!(snapshot.by_name.contains_key("hidden-review"));
     assert!(
@@ -96,14 +93,8 @@ fn selected_model_addressable_skill_enters_prompt() {
         "---\ndescription: \"Hidden review\"\ndisable-model-invocation: true\n---\n\nbody",
     );
 
-    let snapshot = build_default_skill_snapshot(
-        &cwd,
-        &home,
-        "session-1",
-        "session-1",
-        &["hidden-review".to_string()],
-    )
-    .unwrap();
+    let snapshot =
+        build_default_skill_snapshot(&cwd, &home, &["hidden-review".to_string()]).unwrap();
 
     assert_eq!(snapshot.selected.len(), 1);
     assert_eq!(snapshot.selected[0].info.name, "hidden-review");
@@ -121,15 +112,9 @@ fn selected_skill_rejects_whitespace_padding() {
         "---\ndescription: \"Hidden review\"\n---\n\nbody",
     );
 
-    let err = build_default_skill_snapshot(
-        &cwd,
-        &home,
-        "session-1",
-        "session-1",
-        &[" hidden-review".to_string()],
-    )
-    .unwrap_err()
-    .to_string();
+    let err = build_default_skill_snapshot(&cwd, &home, &[" hidden-review".to_string()])
+        .unwrap_err()
+        .to_string();
 
     assert!(err.contains("invalid selected skill name"), "{err}");
     let _ = fs::remove_dir_all(root);
@@ -150,8 +135,6 @@ fn runtime_skill_rejects_whitespace_padding() {
         .load_skills(&LoadContext {
             cwd: &cwd,
             home: &home,
-            session_id: "session-1",
-            resource_session_id: "session-1",
         })
         .unwrap_err()
         .to_string();
@@ -170,13 +153,13 @@ fn skill_snapshot_dependency_fingerprint_changes_on_content_change() {
         "skills/local-review",
         "---\ndescription: \"Local review\"\n---\n\nbody 1",
     );
-    let first = build_default_skill_snapshot(&cwd, &home, "session-1", "session-1", &[]).unwrap();
+    let first = build_default_skill_snapshot(&cwd, &home, &[]).unwrap();
     write_skill(
         &cwd,
         "skills/local-review",
         "---\ndescription: \"Local review\"\n---\n\nbody 2",
     );
-    let second = build_default_skill_snapshot(&cwd, &home, "session-1", "session-1", &[]).unwrap();
+    let second = build_default_skill_snapshot(&cwd, &home, &[]).unwrap();
 
     assert_ne!(first.dependency_fingerprint, second.dependency_fingerprint);
     let _ = fs::remove_dir_all(root);

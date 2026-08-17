@@ -4,7 +4,7 @@ use crate::context::ToolConfig;
 use crate::tools::metadata::{ApprovalTier, ToolMetadata, ToolResultKind};
 
 fn metadata(tier: ApprovalTier) -> ToolMetadata {
-    ToolMetadata::new("Example", "test", tier, ToolResultKind::Text)
+    ToolMetadata::new("Example", tier, ToolResultKind::Text)
 }
 
 #[test]

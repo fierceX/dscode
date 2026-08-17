@@ -2,8 +2,9 @@ use serde_json::Value;
 use std::io::Write;
 use std::path::Path;
 
+use crate::replay::ReplayEventKind;
 use crate::session::store::first_line;
-use crate::util::truncate_str;
+use crate::util::truncate_display;
 
 /// Replay last N turns from events.jsonl synchronously to stdout/stderr.
 pub fn replay_last_turns(events_path: &Path) {
@@ -28,8 +29,7 @@ pub fn replay_last_turns(events_path: &Path) {
 
     let mut turn_starts: Vec<usize> = Vec::new();
     for (i, evt) in events.iter().enumerate() {
-        let t = evt.get("type").and_then(Value::as_str).unwrap_or("");
-        if t == "user_input" || t == "user_message" {
+        if crate::replay::classify_event(evt) == ReplayEventKind::UserInput {
             turn_starts.push(i);
         }
     }
@@ -52,22 +52,20 @@ pub fn replay_last_turns(events_path: &Path) {
     let mut prev_was_thinking = false;
 
     for evt in &events[start_idx..] {
-        let evt_type = evt.get("type").and_then(Value::as_str).unwrap_or("");
-
-        match evt_type {
-            "session_start" | "usage" | "stop" | "retry" | "prefix_snapshot" => continue,
-            "user_input" | "user_message" => {
+        match crate::replay::classify_event(evt) {
+            ReplayEventKind::Ignored | ReplayEventKind::PrefixSnapshot => continue,
+            ReplayEventKind::UserInput => {
                 flush_newline(&mut stdout, &mut last_char, prev_was_thinking);
                 prev_was_thinking = false;
-                let content = evt.get("content").and_then(Value::as_str).unwrap_or("");
+                let content = crate::replay::event_content(evt);
                 if !content.is_empty() {
-                    let preview = truncate_str(first_line(content), 77);
+                    let preview = truncate_display(first_line(content), 77);
                     let _ = writeln!(stderr, "\x1b[32m> {preview}\x1b[0m");
                 }
                 last_char = '\n';
             }
-            "thinking" => {
-                let content = evt.get("content").and_then(Value::as_str).unwrap_or("");
+            ReplayEventKind::Thinking => {
+                let content = crate::replay::event_content(evt);
                 let _ = write!(stdout, "\x1b[90m{content}\x1b[0m");
                 let _ = stdout.flush();
                 if let Some(c) = content.chars().last() {
@@ -75,12 +73,12 @@ pub fn replay_last_turns(events_path: &Path) {
                 }
                 prev_was_thinking = true;
             }
-            "text" => {
+            ReplayEventKind::Text => {
                 if prev_was_thinking && last_char != '\n' {
                     let _ = writeln!(stdout);
                     last_char = '\n';
                 }
-                let content = evt.get("content").and_then(Value::as_str).unwrap_or("");
+                let content = crate::replay::event_content(evt);
                 let _ = write!(stdout, "{content}");
                 let _ = stdout.flush();
                 if let Some(c) = content.chars().last() {
@@ -88,37 +86,37 @@ pub fn replay_last_turns(events_path: &Path) {
                 }
                 prev_was_thinking = false;
             }
-            "tool_call" => {
+            ReplayEventKind::ToolCall => {
                 flush_newline(&mut stdout, &mut last_char, prev_was_thinking);
                 prev_was_thinking = false;
-                let name = evt.get("name").and_then(Value::as_str).unwrap_or("");
-                let summary = build_replay_tool_summary(name, evt);
+                let name = crate::replay::event_name(evt);
+                let summary = crate::replay::build_tool_summary(name, evt);
                 let _ = writeln!(stdout, "\x1b[33m[tool] {}\x1b[0m", summary);
                 last_char = '\n';
             }
-            "tool_result" => {
+            ReplayEventKind::ToolResult => {
                 flush_newline(&mut stdout, &mut last_char, prev_was_thinking);
                 prev_was_thinking = false;
-                let name = evt.get("name").and_then(Value::as_str).unwrap_or("");
-                let content = evt.get("content").and_then(Value::as_str).unwrap_or("");
+                let name = crate::replay::event_name(evt);
+                let content = crate::replay::event_content(evt);
                 let preview = if name == "Edit" || name == "Read" || name == "Write" {
                     first_line(content).to_string()
                 } else {
-                    truncate_str(content, 200)
+                    truncate_display(content, 200)
                 };
                 if !preview.is_empty() {
                     let _ = writeln!(stdout, "{preview}");
                     last_char = '\n';
                 }
             }
-            "error" => {
+            ReplayEventKind::Error => {
                 flush_newline(&mut stdout, &mut last_char, prev_was_thinking);
                 prev_was_thinking = false;
-                let msg = evt.get("message").and_then(Value::as_str).unwrap_or("");
+                let msg = crate::replay::event_message(evt);
                 let _ = writeln!(stderr, "\x1b[31mError: {msg}\x1b[0m");
                 last_char = '\n';
             }
-            "assistant_message" => {
+            ReplayEventKind::AssistantMessage => {
                 flush_newline(&mut stdout, &mut last_char, prev_was_thinking);
                 prev_was_thinking = false;
                 let text = evt.get("text").and_then(Value::as_str).unwrap_or("");
@@ -129,13 +127,13 @@ pub fn replay_last_turns(events_path: &Path) {
                 if let Some(tool_calls) = evt.get("tool_calls").and_then(Value::as_array) {
                     for tc in tool_calls {
                         let name = tc.get("name").and_then(Value::as_str).unwrap_or("");
-                        let summary = build_legacy_tool_summary(name, tc);
+                        let summary = crate::replay::build_tool_summary(name, tc);
                         let _ = writeln!(stdout, "\x1b[33m[tool] {}\x1b[0m", summary);
                     }
                 }
                 last_char = '\n';
             }
-            _ => {}
+            ReplayEventKind::Unknown => {}
         }
     }
 
@@ -150,12 +148,4 @@ fn flush_newline(stdout: &mut std::io::Stdout, last_char: &mut char, prev_was_th
         let _ = writeln!(stdout);
         *last_char = '\n';
     }
-}
-
-fn build_replay_tool_summary(name: &str, evt: &Value) -> String {
-    crate::session::store::build_tool_summary_from_json(name, evt)
-}
-
-fn build_legacy_tool_summary(name: &str, tc: &Value) -> String {
-    crate::session::store::build_tool_summary_from_json(name, tc)
 }

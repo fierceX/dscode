@@ -42,16 +42,6 @@ pub struct Signal {
 }
 
 impl Signal {
-    /// Construct a signal for runtime observations that are not tool results.
-    pub fn synthetic(
-        kind: SignalKind,
-        severity: f64,
-        source_tool: impl Into<String>,
-        message: impl Into<String>,
-    ) -> Self {
-        Self::new(kind, severity, source_tool, None, None, message)
-    }
-
     fn new(
         kind: SignalKind,
         severity: f64,

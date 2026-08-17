@@ -33,7 +33,6 @@ enum GuardedTurnResult {
 struct RuntimeState {
     runtime: Option<AgentRuntime>,
     phase: RuntimePhase,
-    active_turn_id: Option<String>,
     turn_task: Option<JoinHandle<Result<()>>>,
     last_idle: Instant,
     forced_terminal: Option<ForcedTerminal>,
@@ -61,7 +60,6 @@ impl SessionRuntime {
             state: Arc::new(Mutex::new(RuntimeState {
                 runtime: Some(runtime),
                 phase: RuntimePhase::Idle,
-                active_turn_id: None,
                 turn_task: None,
                 last_idle: Instant::now(),
                 forced_terminal: None,
@@ -110,9 +108,7 @@ impl SessionRuntime {
             .ok_or_else(|| anyhow!("session runtime is closed"))?;
         let session = runtime.session_info().clone();
         let stream = runtime.stream_turn(input)?;
-        let turn_id = stream.turn_id().to_string();
         state.phase = RuntimePhase::Running;
-        state.active_turn_id = (!turn_id.is_empty()).then_some(turn_id);
         let shared = self.state.clone();
         let tx = self.event_tx.clone();
         let stream_sequence = self.stream_sequence.clone();
@@ -125,7 +121,6 @@ impl SessionRuntime {
                         state.phase = RuntimePhase::Idle;
                         state.last_idle = Instant::now();
                     }
-                    state.active_turn_id = None;
                     result
                 }
                 GuardedTurnResult::ForceClose {
@@ -286,7 +281,6 @@ fn finalize_shutdown(
     let terminal = {
         let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
         state.phase = RuntimePhase::Closed;
-        state.active_turn_id = None;
         state.forced_terminal.take()
     };
     let Some(terminal) = terminal else { return };
@@ -499,7 +493,6 @@ mod tests {
         let state = Arc::new(Mutex::new(RuntimeState {
             runtime: None,
             phase: RuntimePhase::Closing,
-            active_turn_id: Some("turn".into()),
             turn_task: None,
             last_idle: Instant::now(),
             forced_terminal: Some(ForcedTerminal {

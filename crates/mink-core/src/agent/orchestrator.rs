@@ -5,7 +5,6 @@ use crate::errors;
 use crate::session::usage::{UsageRecord, UsageSummary};
 use anyhow::Result;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::Instant;
 use tokio::sync::{mpsc, oneshot};
 
@@ -20,20 +19,13 @@ pub struct OrchActor {
 
 /// Commands received by the orchestrator.
 pub enum OrchCmd {
-    #[cfg(test)]
     UserInput {
-        input: String,
-        done: oneshot::Sender<TurnRunResult>,
-    },
-    RuntimeUserInput {
         input: String,
         turn_id: crate::runtime::TurnId,
         emitter: std::sync::Arc<crate::runtime::TurnEventEmitter>,
         done: oneshot::Sender<TurnRunResult>,
     },
-    #[cfg(test)]
-    SetModel(String),
-    SetModelAck {
+    SetModel {
         model: String,
         done: oneshot::Sender<anyhow::Result<()>>,
     },
@@ -139,22 +131,20 @@ impl OrchActor {
         loop {
             tokio::select! {
                 cmd = self.cmd_rx.recv() => match cmd {
-                    #[cfg(test)]
-                    Some(OrchCmd::UserInput { input, done }) => {
-                        let result = self.handle_user_input(input, true).await;
-                        let _ = done.send(result);
-                    }
-                    Some(OrchCmd::RuntimeUserInput { input, turn_id, emitter, done }) => {
+                    Some(OrchCmd::UserInput {
+                        input,
+                        turn_id,
+                        emitter,
+                        done,
+                    }) => {
                         emitter.emit(crate::runtime::AgentEventKind::TurnStarted);
-                        self.ctx.log_event(serde_json::json!({"type":"runtime_turn_started","turn_id":turn_id.as_str()}));
-                        let result = self.handle_user_input(input, false).await;
+                        self.ctx.log_event(crate::events::EventLog::RuntimeTurnStarted {
+                            turn_id: turn_id.to_string(),
+                        });
+                        let result = self.handle_user_input(input).await;
                         let _ = done.send(result);
                     }
-                    #[cfg(test)]
-                    Some(OrchCmd::SetModel(model)) => {
-                        let _ = self.handle_model_command(&model).await;
-                    }
-                    Some(OrchCmd::SetModelAck { model, done }) => {
+                    Some(OrchCmd::SetModel { model, done }) => {
                         let result = self.handle_model_command(&model).await;
                         let _ = done.send(result);
                     }
@@ -182,7 +172,11 @@ impl OrchActor {
                                         }
                                     }
                                 }
-                                self.ctx.log_event(serde_json::json!({"type":"compact","trigger":"manual","result":_reason}));
+                                self.ctx.log_event(crate::events::EventLog::Compact {
+                                    version: None,
+                                    trigger: "manual".into(),
+                                    result: _reason.clone(),
+                                });
                                 self.refresh_title().await;
                                 Ok(crate::runtime::CompactOutcome::Compacted { reason: _reason.clone() })
                             }
@@ -221,17 +215,14 @@ impl OrchActor {
         Ok(())
     }
 
-    async fn handle_user_input(&mut self, input: String, reset_interrupt: bool) -> TurnRunResult {
+    async fn handle_user_input(&mut self, input: String) -> TurnRunResult {
         let started_at = Instant::now();
         let billing_turn_id = self.ctx.usage.begin_turn();
         // 跨轮重复失败可累积升级，单次偶然失败自然消退。
         self.belief.decay(self.ctx.config.signal.decay_per_input);
-        if reset_interrupt {
-            self.ctx.interrupt.store(false, Ordering::SeqCst);
-        }
         self.refresh_title().await;
         let prepared = self.prepare_turn().await;
-        let (model, _api_url, mut executor) = match prepared {
+        let (model, mut executor) = match prepared {
             Ok(v) => v,
             Err(e) => {
                 self.ctx
@@ -280,20 +271,19 @@ impl OrchActor {
         result
     }
 
-    async fn prepare_turn(&mut self) -> Result<(String, String, TurnExecutor)> {
+    async fn prepare_turn(&mut self) -> Result<(String, TurnExecutor)> {
         let resolved = self.resolve_active();
 
-        self.ctx.log_event(serde_json::json!({
-            "type": "turn_start",
-            "model": &resolved.actual,
-            "model_alias": &resolved.alias,
-            "belief": self.belief.belief(),
-            "forced_model": self.forced_model.as_deref(),
-        }));
+        self.ctx.log_event(crate::events::EventLog::TurnStart {
+            model: resolved.actual.clone(),
+            model_alias: resolved.alias.clone(),
+            belief: self.belief.belief(),
+            forced_model: self.forced_model.clone(),
+        });
 
         let executor = TurnExecutor::new(self.ctx.clone(), self.ctx.llm_backend.clone())
             .with_model_target(resolved.actual.clone(), resolved.alias.clone());
-        Ok((resolved.actual, self.ctx.api_url.clone(), executor))
+        Ok((resolved.actual, executor))
     }
 
     async fn post_process_turn(
@@ -304,14 +294,7 @@ impl OrchActor {
         model: &str,
     ) -> TurnRunResult {
         for effect in &effects {
-            match effect {
-                TurnEffect::PlanCleared => {
-                    self.ctx.display.render_info("Plan cleared.");
-                }
-                TurnEffect::PlanConfirmed => {
-                    self.ctx.display.render_info("Plan confirmed.");
-                }
-            }
+            self.ctx.display.render_info(effect);
         }
 
         self.log_turn_tracking(executor, &decision, model);
@@ -336,27 +319,26 @@ impl OrchActor {
             TurnDecision::MaxTurnsExceeded => "MaxTurnsExceeded",
             TurnDecision::Failed(_) => "Failed",
         };
-        self.ctx.log_event(serde_json::json!({
-            "type": "turn_tracking",
-            "decision": decision_str,
-            "tool_call_count": executor.tool_call_count(),
-            "tool_error_count": executor.tool_error_count(),
-            "belief": self.belief.belief(),
-            "model": model,
-        }));
+        self.ctx.log_event(crate::events::EventLog::TurnTracking {
+            version: None,
+            decision: decision_str.into(),
+            tool_call_count: executor.tool_call_count(),
+            tool_error_count: executor.tool_error_count(),
+            belief: self.belief.belief(),
+            model: model.into(),
+        });
     }
 
     async fn log_turn_final(&self, result: &TurnRunResult, elapsed_ms: u64) {
-        self.ctx.log_event(serde_json::json!({
-            "type": "turn_final",
-            "billing_turn_id": result.billing_turn_id,
-            "status": result.status.as_str(),
-            "tool_call_count": result.tool_call_count,
-            "tool_error_count": result.tool_error_count,
-            "elapsed_ms": elapsed_ms,
-            "error": result.error.clone(),
-            "usage": result.usage,
-        }));
+        self.ctx.log_event(crate::events::EventLog::TurnFinal {
+            billing_turn_id: result.billing_turn_id.clone(),
+            status: result.status.as_str().into(),
+            tool_call_count: result.tool_call_count,
+            tool_error_count: result.tool_error_count,
+            elapsed_ms,
+            error: result.error.clone(),
+            usage: result.usage.clone(),
+        });
         if let Err(error) = self.ctx.flush_event_log().await {
             self.ctx
                 .display
@@ -372,14 +354,15 @@ impl OrchActor {
     ) -> TurnRunResult {
         let info = errors::classify_anyhow(&e);
         let error = format!("{e}");
-        self.ctx.log_event(serde_json::json!({
-            "type": "turn_error",
-            "error": error,
-            "category": format!("{:?}", info.category),
-            "severity": format!("{:?}", info.severity),
-            "belief": self.belief.belief(),
-            "model": model,
-        }));
+        self.ctx.log_event(crate::events::EventLog::TurnError {
+            error: error.clone(),
+            category: format!("{:?}", info.category),
+            severity: Some(format!("{:?}", info.severity)),
+            belief: Some(self.belief.belief()),
+            model: Some(model.into()),
+            elapsed_ms: None,
+            idle_ms: None,
+        });
         if info.severity == errors::ErrorSeverity::Fatal {
             self.ctx.display.render_error(&format!("Fatal error: {e}"));
         } else {

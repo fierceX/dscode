@@ -1,3 +1,4 @@
+use crate::tui::sanitize::{normalize_tui_input, sanitize_tui_text};
 use crate::tui::state::TranscriptKind;
 use crate::tui::theme;
 use ratatui::{
@@ -8,7 +9,6 @@ use ratatui::{
 mod block;
 mod diff;
 mod inline;
-mod normalize;
 mod table;
 mod types;
 mod util;
@@ -16,9 +16,15 @@ mod util;
 #[cfg(test)]
 pub(crate) use block::parse_blocks;
 pub(crate) use block::render_markdown;
-pub(crate) use normalize::normalize_markdown_input;
+pub(crate) fn normalize_markdown_input(input: &str, preserve_ansi: bool) -> String {
+    if preserve_ansi {
+        normalize_tui_input(input)
+    } else {
+        sanitize_tui_text(input)
+    }
+}
 #[cfg(test)]
-pub(crate) use normalize::strip_ansi;
+pub(crate) use crate::tui::sanitize::strip_ansi;
 #[cfg(test)]
 pub(crate) use table::render_table;
 #[cfg(test)]

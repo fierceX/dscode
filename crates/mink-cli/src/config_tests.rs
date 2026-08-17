@@ -1,6 +1,62 @@
 use super::*;
 
 #[test]
+fn cli_defaults_track_runtime_option_defaults() {
+    let cli = CliConfig::default();
+
+    let provider = crate::runtime::ProviderOptions::default();
+    assert_eq!(cli.model, provider.model);
+    assert_eq!(cli.model_aliases, provider.model_aliases);
+    assert_eq!(cli.api_key, provider.api_key);
+    assert_eq!(cli.base_url, provider.base_url);
+    assert_eq!(cli.openai_reasoning_effort, provider.reasoning_effort);
+    assert_eq!(cli.openai_include_usage, provider.include_usage);
+    assert_eq!(cli.openai_token_param, provider.token_param);
+    assert_eq!(cli.openai_tool_choice, provider.tool_choice);
+    assert_eq!(cli.openai_extra_body, provider.extra_body);
+
+    let generation = crate::runtime::GenerationOptions::default();
+    assert_eq!(cli.max_tokens, generation.max_tokens);
+    assert_eq!(cli.max_turns, generation.max_turns);
+    assert_eq!(
+        cli.llm_first_event_timeout_secs,
+        generation.first_event_timeout_secs
+    );
+    assert_eq!(cli.llm_idle_timeout_secs, generation.idle_timeout_secs);
+    assert_eq!(cli.llm_wait_heartbeat_secs, generation.wait_heartbeat_secs);
+
+    let context = crate::runtime::ContextPolicy::default();
+    assert_eq!(cli.max_context_tokens, context.max_context_tokens);
+    assert_eq!(cli.context_compact_pct, context.compact_pct);
+    assert_eq!(cli.context_reserve_tokens, context.reserve_tokens);
+    assert_eq!(cli.context_compact_tail_tokens, context.compact_tail_tokens);
+    assert_eq!(
+        cli.context_compact_max_output_tokens,
+        context.compact_max_output_tokens
+    );
+    assert_eq!(
+        cli.context_compact_input_reduction,
+        context.compact_input_reduction
+    );
+    assert_eq!(cli.plan_projection_tail, context.plan_projection_tail);
+
+    let tools = crate::runtime::ToolOptions::default();
+    assert_eq!(cli.tool_timeout_secs, tools.timeout_secs);
+    assert_eq!(cli.sub_agent_timeout_secs, tools.sub_agent_timeout_secs);
+    assert_eq!(cli.tool_result_max_bytes, tools.result_max_bytes);
+    assert_eq!(cli.file_write_max_bytes, tools.file_write_max_bytes);
+    assert_eq!(cli.edit_mode, tools.edit_mode);
+    assert_eq!(cli.edit_fuzzy_match, tools.edit_fuzzy_match);
+    assert_eq!(cli.edit_fuzzy_threshold, tools.edit_fuzzy_threshold);
+    assert_eq!(cli.edit_enforce_seen_lines, tools.edit_enforce_seen_lines);
+    assert_eq!(cli.max_search_files, tools.max_search_files);
+    assert_eq!(cli.max_search_results, tools.max_search_results);
+    assert_eq!(cli.enabled_tools, tools.enabled_tools);
+    assert_eq!(cli.tool_approval_mode, tools.approval_mode);
+    assert_eq!(cli.tool_approval, tools.approval);
+}
+
+#[test]
 fn parse_size_bytes_plain() {
     assert_eq!(parse_size_bytes("100").unwrap(), 100);
     assert_eq!(parse_size_bytes("0").unwrap(), 0);

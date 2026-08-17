@@ -21,11 +21,7 @@ impl super::TurnExecutor {
             resource_router: &self.ctx.resource_router,
             filesystem_backend: self.ctx.tool_resolution_context.filesystem_backend(),
         };
-        let decision = self.recovery_policy.classify_first_call(
-            &call_context,
-            crate::tools::catalog::ToolCatalog::builtin()
-                .expect("built-in tool catalog was validated during context construction"),
-        );
+        let decision = self.recovery_policy.classify_first_call(&call_context);
         if let crate::agent::recovery_policy::RecoveryFirstCallDecision::Blocked(guidance) =
             decision
         {
@@ -35,14 +31,14 @@ impl super::TurnExecutor {
             let max_blocks = self.ctx.config.signal.guard_max_blocks;
             if self.local.guard_blocks < max_blocks {
                 self.local.guard_blocks += 1;
-                self.ctx.log_event(serde_json::json!({
-                    "type": "signal_recovery_guard",
-                    "action": "blocked_non_inspection",
-                    "tool": first.name.clone(),
-                    "tool_use_id": first.id.clone(),
-                    "reason": guidance.content,
-                    "guard_blocks": self.local.guard_blocks,
-                }));
+                self.ctx
+                    .log_event(crate::events::EventLog::SignalRecoveryGuard {
+                        action: "blocked_non_inspection".into(),
+                        tool: first.name.clone(),
+                        tool_use_id: first.id.clone(),
+                        reason: guidance.content.clone(),
+                        guard_blocks: self.local.guard_blocks,
+                    });
                 let blocked: Vec<crate::tools::runner::ToolExecution> = std::iter::once(first)
                     .chain(iter)
                     .map(|call| blocked_by_signal_recovery(call, guidance.content.clone()))
@@ -53,14 +49,14 @@ impl super::TurnExecutor {
             // 决策注入证据。事件 action 与实际行为保持一致（bypassed 而非 blocked）。
             self.local.signal_recovery_guard = false;
             self.local.guard_bypassed = true;
-            self.ctx.log_event(serde_json::json!({
-                "type": "signal_recovery_guard",
-                "action": "bypassed_max_blocks",
-                "tool": first.name.clone(),
-                "tool_use_id": first.id.clone(),
-                "reason": guidance.content,
-                "guard_blocks": self.local.guard_blocks,
-            }));
+            self.ctx
+                .log_event(crate::events::EventLog::SignalRecoveryGuard {
+                    action: "bypassed_max_blocks".into(),
+                    tool: first.name.clone(),
+                    tool_use_id: first.id.clone(),
+                    reason: guidance.content.clone(),
+                    guard_blocks: self.local.guard_blocks,
+                });
             let mut allowed = Vec::new();
             allowed.push(first);
             allowed.extend(iter);
@@ -118,11 +114,11 @@ impl super::TurnExecutor {
             if let Err(error) =
                 crate::session::atomic_file::atomic_replace(&full, snapshot_text.as_bytes())
             {
-                self.ctx.log_event(serde_json::json!({
-                    "type": "signal_rollback_error",
-                    "path": full.display().to_string(),
-                    "error": error.to_string(),
-                }));
+                self.ctx
+                    .log_event(crate::events::EventLog::SignalRollbackError {
+                        path: full.display().to_string(),
+                        error: error.to_string(),
+                    });
                 continue;
             }
             if let Some(permissions) = original_permissions {
@@ -137,10 +133,9 @@ impl super::TurnExecutor {
             }));
         }
         if !rolled_back.is_empty() {
-            self.ctx.log_event(serde_json::json!({
-                "type": "signal_rollback",
-                "files": rolled_back,
-            }));
+            self.ctx.log_event(crate::events::EventLog::SignalRollback {
+                files: rolled_back.clone(),
+            });
             self.ctx.display.render_info(&format!(
                 "Signal rollback: restored {} file(s) to their last read snapshot",
                 rolled_back.len()
@@ -179,12 +174,12 @@ impl super::TurnExecutor {
         {
             Ok(executor) => executor,
             Err(error) => {
-                self.ctx.log_event(serde_json::json!({
-                    "type": "signal_replan_error",
-                    "attempts": self.local.replan_attempts,
-                    "session_id": session_id,
-                    "error": error.to_string(),
-                }));
+                self.ctx
+                    .log_event(crate::events::EventLog::SignalReplanError {
+                        attempts: self.local.replan_attempts,
+                        session_id: session_id.clone(),
+                        error: error.to_string(),
+                    });
                 self.ctx.display.render_info(&format!(
                     "Signal replan unavailable: {error}; falling back to evidence/guard",
                 ));
@@ -192,13 +187,12 @@ impl super::TurnExecutor {
             }
         };
         let result = executor.execute(report).await;
-        self.ctx.log_event(serde_json::json!({
-            "type": "signal_replan",
-            "attempts": self.local.replan_attempts,
-            "session_id": session_id,
-            "status": result.status,
-            "text_len": result.text.len(),
-        }));
+        self.ctx.log_event(crate::events::EventLog::SignalReplan {
+            attempts: self.local.replan_attempts,
+            session_id: session_id.clone(),
+            status: result.status.clone(),
+            text_len: result.text.len(),
+        });
         if result.status != "ok" || result.text.trim().is_empty() {
             return Ok(None);
         }
@@ -384,14 +378,17 @@ impl super::TurnExecutor {
                     }
                     let budget = self.ctx.config.signal.evidence_max_chars;
                     let batch = self.signal_processor.evidence().render(budget, b);
-                    let report = serde_json::json!({
-                        "type": "signal_handover",
-                        "belief": b,
-                        "edited_paths": self.signal_processor.evidence().edited_paths,
-                        "evidence": batch.text,
-                        "options": ["retry", "rollback_and_retry", "replan", "abandon"],
+                    self.ctx.log_event(crate::events::EventLog::SignalHandover {
+                        belief: b,
+                        edited_paths: self.signal_processor.evidence().edited_paths.clone(),
+                        evidence: batch.text.clone(),
+                        options: vec![
+                            "retry".into(),
+                            "rollback_and_retry".into(),
+                            "replan".into(),
+                            "abandon".into(),
+                        ],
                     });
-                    self.ctx.log_event(report);
                     self.ctx.display.render_error(&format!(
                         "DecisionEngine: handing over (belief {b:.2}).\n{}",
                         batch.text

@@ -383,7 +383,6 @@ impl super::runner::ToolExec for ReadTool {
     fn metadata(&self) -> super::metadata::ToolMetadata {
         super::metadata::ToolMetadata::new(
             "Read",
-            "Read a local file.",
             super::metadata::ApprovalTier::Read,
             super::metadata::ToolResultKind::FileRead,
         )
@@ -607,9 +606,7 @@ fn memo_end_line(
     limit: Option<usize>,
     visible_count: usize,
 ) -> Option<usize> {
-    if limit.is_none() {
-        return None;
-    }
+    limit?;
     offset.map(|start| start + visible_count.saturating_sub(1))
 }
 
@@ -617,7 +614,6 @@ impl super::runner::ToolExec for WriteTool {
     fn metadata(&self) -> super::metadata::ToolMetadata {
         super::metadata::ToolMetadata::new(
             "Write",
-            "Create or overwrite a local file.",
             super::metadata::ApprovalTier::Write,
             super::metadata::ToolResultKind::FileWrite,
         )
@@ -665,7 +661,6 @@ impl super::runner::ToolExec for EditTool {
     fn metadata(&self) -> super::metadata::ToolMetadata {
         super::metadata::ToolMetadata::new(
             "Edit",
-            "Edit a local file.",
             super::metadata::ApprovalTier::Write,
             super::metadata::ToolResultKind::Edit,
         )
@@ -1131,13 +1126,10 @@ fn execute_hashline_edit(
                         // Idempotent success writes nothing: keep the
                         // mutation epoch untouched so read memos stay valid
                         // (mirrors the Replace-mode idempotent path).
-                        let mut outcome = tool_outcome(
-                            format!(
-                                "Edit({}): already applied (idempotent)\nThe requested final content is already present; no change was made.",
-                                authored.path
-                            ),
-                            String::new(),
-                        );
+                        let mut outcome = tool_outcome(format!(
+                            "Edit({}): already applied (idempotent)\nThe requested final content is already present; no change was made.",
+                            authored.path
+                        ));
                         outcome.no_mutation = true;
                         return Ok(outcome);
                     }
@@ -1150,13 +1142,10 @@ fn execute_hashline_edit(
                     }
                     // Soft no-op writes nothing either: only the no-op
                     // counter changes, never the mutation epoch.
-                    let mut outcome = tool_outcome(
-                        format!(
-                            "Edit({}): no changes (soft no-op {count}/2)\nNo file or clipboard state was changed. Do not expand the edit range. Confirm whether the intended change is already present and re-check the target anchors before retrying.",
-                            authored.path
-                        ),
-                        String::new(),
-                    );
+                    let mut outcome = tool_outcome(format!(
+                        "Edit({}): no changes (soft no-op {count}/2)\nNo file or clipboard state was changed. Do not expand the edit range. Confirm whether the intended change is already present and re-check the target anchors before retrying.",
+                        authored.path
+                    ));
                     outcome.no_mutation = true;
                     return Ok(outcome);
                 }
@@ -1312,7 +1301,7 @@ fn execute_hashline_edit(
         }
     }
     let content = rendered.join("\n\n");
-    Ok(tool_outcome(content, String::new()))
+    Ok(tool_outcome(content))
 }
 
 fn hash_equivalent_snapshot_text(left: &str, right: &str) -> bool {
@@ -1616,7 +1605,7 @@ fn execute_replace_edit(
             diff
         ));
     }
-    let mut outcome = tool_outcome(output.join("\n\n"), String::new());
+    let mut outcome = tool_outcome(output.join("\n\n"));
     outcome.no_mutation = !wrote;
     Ok(outcome)
 }
@@ -1662,9 +1651,9 @@ fn resolve_replace_target(cwd: &Path, authored: &str) -> Result<PathBuf> {
     }
 }
 
-fn tool_outcome(content: String, conversation_content: String) -> super::runner::ToolOutcome {
+fn tool_outcome(content: String) -> super::runner::ToolOutcome {
     super::runner::ToolOutcome {
-        conversation_content,
+        conversation_content: String::new(),
         content,
         is_bash: false,
         exit_code: None,

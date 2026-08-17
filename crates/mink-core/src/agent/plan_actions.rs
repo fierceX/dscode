@@ -15,10 +15,10 @@ impl PlanActionHandler {
         match command {
             PlanCommand::SetDraft => {}
             PlanCommand::Confirm => {
-                effects.push(TurnEffect::PlanConfirmed);
+                effects.push("Plan confirmed.");
             }
             PlanCommand::Clear => {
-                effects.push(TurnEffect::PlanCleared);
+                effects.push("Plan cleared.");
             }
         }
         command.compaction_trigger()

@@ -1,9 +1,7 @@
 use crate::capabilities::CapabilityExposure;
 use crate::capabilities::SourceLevel;
 use crate::context::ToolContext;
-use crate::resources::router::{
-    Resource, ResourceContentType, ResourceHandler, ResourceMetadata, ResourceRequest,
-};
+use crate::resources::router::{Resource, ResourceHandler, ResourceRequest};
 use anyhow::{Result, anyhow, bail};
 use std::path::{Component, Path, PathBuf};
 
@@ -17,9 +15,6 @@ impl ResourceHandler for SkillResourceHandler {
     fn resolve(&self, req: &ResourceRequest, ctx: &ToolContext) -> Result<Resource> {
         resolve_skill_resource(&req.resource_url, ctx).map(|resolved| Resource {
             canonical_url: req.resource_url.clone(),
-            content_type: resolved.content_type,
-            immutable: Some(true),
-            metadata: ResourceMetadata::default(),
             content: resolved.content,
         })
     }
@@ -27,7 +22,6 @@ impl ResourceHandler for SkillResourceHandler {
 
 struct ResolvedSkillResource {
     content: String,
-    content_type: ResourceContentType,
 }
 
 fn resolve_skill_resource(url: &str, ctx: &ToolContext) -> Result<ResolvedSkillResource> {
@@ -41,13 +35,11 @@ fn resolve_skill_resource(url: &str, ctx: &ToolContext) -> Result<ResolvedSkillR
     if rest.is_empty() || rest == "list" {
         return Ok(ResolvedSkillResource {
             content: render_discoverable_skill_list(ctx),
-            content_type: ResourceContentType::Markdown,
         });
     }
     if rest == "list/all" || rest == "all" {
         return Ok(ResolvedSkillResource {
             content: render_all_skill_list(ctx),
-            content_type: ResourceContentType::Markdown,
         });
     }
     let (name_raw, relative_raw) = rest
@@ -96,10 +88,9 @@ fn resolve_skill_resource(url: &str, ctx: &ToolContext) -> Result<ResolvedSkillR
                 loaded.skill.name,
                 rendered_path,
                 loaded.source.model_display_label(),
-                content_type_label(content_type_for_path(&target)),
+                content_type_label(&target),
                 content
             ),
-            content_type: content_type_for_path(&target),
         });
     }
     Ok(ResolvedSkillResource {
@@ -110,20 +101,14 @@ fn resolve_skill_resource(url: &str, ctx: &ToolContext) -> Result<ResolvedSkillR
             loaded.skill.base_dir,
             loaded.skill.content
         ),
-        content_type: ResourceContentType::Markdown,
     })
 }
 
 fn render_discoverable_skill_list(ctx: &ToolContext) -> String {
-    let mut out = String::from("# Skills\n");
-    for skill in &ctx.capability_snapshot.skills.discoverable {
-        let source = skill.source.model_display_label();
-        out.push_str(&format!(
-            "- {} [{}]: {}\n",
-            skill.skill.name, source, skill.skill.description
-        ));
-    }
-    out
+    format!(
+        "# Skills\n{}",
+        ctx.capability_snapshot.skills.format_discoverable_skills()
+    )
 }
 
 fn render_all_skill_list(ctx: &ToolContext) -> String {
@@ -199,17 +184,9 @@ fn format_diagnostic_skill_line(skill: &crate::capabilities::LoadedSkill) -> Str
         "- {} [{}, {}]: {}\n",
         skill.skill.name,
         skill.source.model_display_label(),
-        exposure_label(&skill.exposure),
+        crate::capabilities::source::exposure_label(&skill.exposure),
         skill.skill.description
     )
-}
-
-fn exposure_label(exposure: &CapabilityExposure) -> &'static str {
-    match exposure {
-        CapabilityExposure::ModelDiscoverable => "model-discoverable",
-        CapabilityExposure::ModelAddressable => "model-addressable",
-        CapabilityExposure::HostOnly => "host-only",
-    }
 }
 
 fn validate_skill_relative_path(raw: &str) -> Result<PathBuf> {
@@ -271,7 +248,7 @@ fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
-fn content_type_for_path(path: &Path) -> ResourceContentType {
+fn content_type_label(path: &Path) -> &'static str {
     match path
         .extension()
         .and_then(|ext| ext.to_str())
@@ -279,16 +256,8 @@ fn content_type_for_path(path: &Path) -> ResourceContentType {
         .to_ascii_lowercase()
         .as_str()
     {
-        "md" | "markdown" => ResourceContentType::Markdown,
-        "json" => ResourceContentType::Json,
-        _ => ResourceContentType::PlainText,
-    }
-}
-
-fn content_type_label(content_type: ResourceContentType) -> &'static str {
-    match content_type {
-        ResourceContentType::PlainText => "text/plain",
-        ResourceContentType::Markdown => "text/markdown",
-        ResourceContentType::Json => "application/json",
+        "md" | "markdown" => "text/markdown",
+        "json" => "application/json",
+        _ => "text/plain",
     }
 }

@@ -9,8 +9,6 @@ use std::sync::Arc;
 pub struct LoadContext<'a> {
     pub cwd: &'a Path,
     pub home: &'a Path,
-    pub session_id: &'a str,
-    pub resource_session_id: &'a str,
 }
 
 #[derive(Debug, Clone)]
@@ -43,17 +41,10 @@ impl LoadedSkill {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SkillSource {
-    BuiltIn,
-    FileSystem,
-}
-
 #[derive(Debug, Clone)]
 pub struct SkillInfo {
     pub name: String,
     pub description: String,
-    pub source: SkillSource,
     pub base_dir: String,
 }
 
@@ -131,21 +122,10 @@ pub struct SkillSnapshot {
 pub fn build_default_skill_snapshot(
     cwd: &Path,
     home: &Path,
-    session_id: &str,
-    resource_session_id: &str,
     selected_skills: &[String],
 ) -> Result<SkillSnapshot> {
     let providers = default_skill_providers();
-    SkillSnapshot::load(
-        &providers,
-        &LoadContext {
-            cwd,
-            home,
-            session_id,
-            resource_session_id,
-        },
-        selected_skills,
-    )
+    SkillSnapshot::load(&providers, &LoadContext { cwd, home }, selected_skills)
 }
 
 pub fn default_skill_providers() -> Vec<Arc<dyn SkillProvider>> {
@@ -193,6 +173,21 @@ pub fn skill_providers_for_policy(
 }
 
 impl SkillSnapshot {
+    /// Render the model-discoverable skill list shared by the CLI
+    /// `--list-skills`, TUI `/skills`, and the `skill://list` resource.
+    pub fn format_discoverable_skills(&self) -> String {
+        let mut out = String::new();
+        for skill in &self.discoverable {
+            out.push_str(&format!(
+                "- {} [{}]: {}\n",
+                skill.skill.name,
+                skill.source.model_display_label(),
+                skill.skill.description
+            ));
+        }
+        out
+    }
+
     pub fn load(
         providers: &[Arc<dyn SkillProvider>],
         ctx: &LoadContext<'_>,
@@ -258,7 +253,7 @@ impl SkillSnapshot {
         let mut selected = Vec::new();
         for raw_name in selected_skills {
             let name = raw_name.as_str();
-            if !is_valid_skill_name(name) {
+            if !crate::capabilities::source::is_valid_skill_name(name) {
                 bail!("Error: invalid selected skill name: {name}");
             }
             let loaded = by_name
@@ -311,7 +306,7 @@ impl SkillProvider for RuntimeSkillProvider {
 
     fn load_skills(&self, _ctx: &LoadContext<'_>) -> Result<Vec<LoadedSkill>> {
         for skill in &self.skills {
-            if !is_valid_skill_name(&skill.skill.name) {
+            if !crate::capabilities::source::is_valid_skill_name(&skill.skill.name) {
                 bail!("Error: invalid runtime skill name: {}", skill.skill.name);
             }
         }
@@ -412,7 +407,7 @@ impl SkillProvider for FileSystemSkillProvider {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().to_string();
-            if !is_valid_skill_name(&name) {
+            if !crate::capabilities::source::is_valid_skill_name(&name) {
                 continue;
             }
             let skill_file = entry.path().join("SKILL.md");
@@ -448,7 +443,9 @@ impl SkillProvider for FileSystemSkillProvider {
                     provider_name: self.display_name.to_string(),
                     level: self.level.clone(),
                     source_path: Some(skill_file),
-                    display_label: Some(display_label(&base, ctx.cwd, ctx.home)),
+                    display_label: Some(crate::capabilities::source::display_label(
+                        &base, ctx.cwd, ctx.home,
+                    )),
                 },
                 exposure,
             });
@@ -569,37 +566,11 @@ fn trim_yaml_scalar(value: &str) -> &str {
     value.trim().trim_matches('"').trim_matches('\'')
 }
 
-fn display_label(path: &Path, cwd: &Path, home: &Path) -> String {
-    if let Ok(relative) = path.strip_prefix(cwd) {
-        let rendered = relative.display().to_string();
-        if rendered.is_empty() {
-            ".".to_string()
-        } else {
-            rendered
-        }
-    } else if let Ok(relative) = path.strip_prefix(home) {
-        let rendered = relative.display().to_string();
-        if rendered.is_empty() {
-            "~".to_string()
-        } else {
-            format!("~/{rendered}")
-        }
-    } else {
-        path.file_name()
-            .map(|name| name.to_string_lossy().to_string())
-            .unwrap_or_else(|| path.display().to_string())
-    }
-}
-
 fn to_resolved_skill(loaded: &LoadedSkill) -> ResolvedSkill {
     ResolvedSkill {
         info: SkillInfo {
             name: loaded.skill.name.clone(),
             description: loaded.skill.description.clone(),
-            source: match loaded.source.level {
-                SourceLevel::BuiltIn => SkillSource::BuiltIn,
-                _ => SkillSource::FileSystem,
-            },
             base_dir: loaded.skill.base_dir.clone(),
         },
         content: loaded.skill.content.clone(),
@@ -618,7 +589,7 @@ fn compute_dependency_fingerprint(
         input.push('\0');
         input.push_str(&skill.skill.description);
         input.push('\0');
-        input.push_str(exposure_label(&skill.exposure));
+        input.push_str(crate::capabilities::source::exposure_label(&skill.exposure));
         input.push('\0');
         input.push_str(&skill.source.provider_id);
         input.push('\0');
@@ -639,24 +610,6 @@ fn compute_dependency_fingerprint(
         input.push('\0');
     }
     crate::capabilities::fingerprint::sha256_hex(&input)
-}
-
-fn exposure_label(exposure: &CapabilityExposure) -> &'static str {
-    match exposure {
-        CapabilityExposure::ModelDiscoverable => "model-discoverable",
-        CapabilityExposure::ModelAddressable => "model-addressable",
-        CapabilityExposure::HostOnly => "host-only",
-    }
-}
-
-fn is_valid_skill_name(name: &str) -> bool {
-    let trimmed = name.trim();
-    !trimmed.is_empty()
-        && trimmed == name
-        && !name.starts_with('.')
-        && !name.contains('/')
-        && !name.contains('\\')
-        && !name.contains("..")
 }
 
 #[cfg(test)]

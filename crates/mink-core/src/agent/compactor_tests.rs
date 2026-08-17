@@ -8,7 +8,7 @@ use tokio::net::TcpListener;
 async fn maybe_compact_skips_after_already_compacted_this_turn() -> anyhow::Result<()> {
     let ctx = crate::regression::test_context_for_agent("compactor-already").await?;
     let prefix = PrefixManager::new(ctx.clone());
-    let mut compactor = TurnCompactor::new(ctx);
+    let mut compactor = TurnCompactor::new(ctx, prefix);
     compactor.compacted_this_turn = true;
     let mut messages = Vec::new();
     let mut system_prompt = String::new();
@@ -20,7 +20,6 @@ async fn maybe_compact_skips_after_already_compacted_this_turn() -> anyhow::Resu
             &mut messages,
             &mut system_prompt,
             &mut tools,
-            &prefix,
             LlmModelTarget::new("test-model", None),
         )
         .await?;
@@ -48,7 +47,7 @@ async fn maybe_compact_success_refreshes_context_and_prefix() -> anyhow::Result<
     }
     let prefix = PrefixManager::new(ctx.clone());
     let (_old_prompt, _old_tools) = prefix.ensure()?;
-    let mut compactor = TurnCompactor::new(ctx.clone());
+    let mut compactor = TurnCompactor::new(ctx.clone(), prefix);
     let mut messages = ctx.store.lines().await?;
     let mut system_prompt = String::new();
     let mut tools = Vec::new();
@@ -59,7 +58,6 @@ async fn maybe_compact_success_refreshes_context_and_prefix() -> anyhow::Result<
             &mut messages,
             &mut system_prompt,
             &mut tools,
-            &prefix,
             LlmModelTarget::new("test-model", None),
         )
         .await?;

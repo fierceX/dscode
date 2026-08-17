@@ -82,13 +82,11 @@ fn read_tool_call(id: &str, path: &str) -> LlmEvent {
                 .collect()
         })
         .unwrap_or_default();
-    let order: Vec<String> = fields.keys().cloned().collect();
     LlmEvent::ToolCall(LlmToolCallEvent {
         name: "Read".to_string(),
         id: id.to_string(),
         input_json: input,
         fields,
-        order,
     })
 }
 

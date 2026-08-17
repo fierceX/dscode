@@ -50,7 +50,6 @@ pub struct ToolCallEvent {
     pub id: String,
     pub input_json: Value,
     pub fields: BTreeMap<String, String>,
-    pub order: Vec<String>,
 }
 
 #[cfg(test)]

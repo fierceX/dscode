@@ -1,5 +1,38 @@
 use super::*;
 
+async fn send_set_model(
+    tx: &tokio::sync::mpsc::UnboundedSender<OrchCmd>,
+    model: &str,
+) -> anyhow::Result<()> {
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    tx.send(OrchCmd::SetModel {
+        model: model.into(),
+        done: done_tx,
+    })?;
+    done_rx.await??;
+    Ok(())
+}
+
+async fn send_user_input(
+    tx: &tokio::sync::mpsc::UnboundedSender<OrchCmd>,
+    input: &str,
+) -> anyhow::Result<crate::agent::orchestrator::TurnRunResult> {
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    let turn_id = crate::runtime::TurnId::new("test-turn");
+    let emitter = std::sync::Arc::new(crate::runtime::TurnEventEmitter::new(
+        turn_id.clone(),
+        None,
+        None,
+    ));
+    tx.send(OrchCmd::UserInput {
+        input: input.into(),
+        turn_id,
+        emitter,
+        done: done_tx,
+    })?;
+    Ok(done_rx.await?)
+}
+
 #[tokio::test]
 async fn orchestrator_user_input_runs_turn_and_logs_tracking() -> anyhow::Result<()> {
     let h = harness("orch-user-input").await?;
@@ -19,6 +52,7 @@ async fn orchestrator_user_input_runs_turn_and_logs_tracking() -> anyhow::Result
     assert_eq!(lines.len(), 2);
     assert_eq!(lines[0]["role"], "user");
     assert_eq!(lines[1]["role"], "assistant");
+    h.ctx.flush_event_log().await?;
     let events = tokio::fs::read_to_string(&h.ctx.events_path).await?;
     assert!(events.contains(r#""type":"turn_start""#), "{events}");
     assert!(events.contains(r#""type":"turn_tracking""#), "{events}");
@@ -34,8 +68,8 @@ async fn orchestrator_model_command_updates_display() -> anyhow::Result<()> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let actor = OrchActor::new(h.ctx.clone(), rx);
     let handle = tokio::spawn(actor.run());
-    tx.send(OrchCmd::SetModel("pro".into()))?;
-    tx.send(OrchCmd::SetModel("unknown".into()))?;
+    send_set_model(&tx, "pro").await?;
+    send_set_model(&tx, "unknown").await?;
     drop(tx);
     handle.await??;
     assert!(
@@ -98,13 +132,8 @@ async fn orchestrator_forced_model_title_survives_turn_refreshes() -> anyhow::Re
     ));
     let actor = OrchActor::new(test_context_with_llm_backend(h.ctx.clone(), llm), rx);
     let handle = tokio::spawn(actor.run());
-    tx.send(OrchCmd::SetModel("pro".into()))?;
-    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-    tx.send(OrchCmd::UserInput {
-        input: "say hi".into(),
-        done: done_tx,
-    })?;
-    let result = done_rx.await?;
+    send_set_model(&tx, "pro").await?;
+    let result = send_user_input(&tx, "say hi").await?;
     assert_eq!(result.status, crate::agent::orchestrator::TurnStatus::Ok);
     drop(tx);
     handle.await??;
@@ -139,13 +168,8 @@ async fn orchestrator_active_model_is_used_by_spawned_sub_agent() -> anyhow::Res
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let actor = OrchActor::new(h.ctx.clone(), rx);
     let handle = tokio::spawn(actor.run());
-    tx.send(OrchCmd::SetModel("pro".into()))?;
-    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-    tx.send(OrchCmd::UserInput {
-        input: "delegate this task".into(),
-        done: done_tx,
-    })?;
-    let outcome = done_rx.await?;
+    send_set_model(&tx, "pro").await?;
+    let outcome = send_user_input(&tx, "delegate this task").await?;
     drop(tx);
     handle.await??;
 
@@ -179,8 +203,8 @@ async fn orchestrator_flash_command_resets_forced_model_display() -> anyhow::Res
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let actor = OrchActor::new(h.ctx.clone(), rx);
     let handle = tokio::spawn(actor.run());
-    tx.send(OrchCmd::SetModel("pro".into()))?;
-    tx.send(OrchCmd::SetModel("flash".into()))?;
+    send_set_model(&tx, "pro").await?;
+    send_set_model(&tx, "flash").await?;
     drop(tx);
     handle.await??;
     let info = h.display.info.lock().unwrap();
@@ -232,6 +256,7 @@ async fn orchestrator_logs_stream_error_from_turn() -> anyhow::Result<()> {
         "{:?}",
         h.display.info.lock().unwrap()
     );
+    h.ctx.flush_event_log().await?;
     let events = tokio::fs::read_to_string(&h.ctx.events_path).await?;
     assert!(events.contains(r#""type":"turn_error""#), "{events}");
     assert!(events.contains(r#""category":"Network""#), "{events}");
@@ -307,7 +332,7 @@ async fn orchestrator_manual_compact_uses_active_model_and_shared_backend() -> a
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let actor = OrchActor::new(h.ctx.clone(), rx);
     let handle = tokio::spawn(actor.run());
-    tx.send(OrchCmd::SetModel("pro".into()))?;
+    send_set_model(&tx, "pro").await?;
     let (done_tx, done_rx) = tokio::sync::oneshot::channel();
     tx.send(OrchCmd::Compact { done: done_tx })?;
     done_rx.await??;
@@ -374,7 +399,7 @@ async fn plan_confirm_and_clear_preserve_immutable_prefix() -> anyhow::Result<()
         "1. ship it\n"
     );
     assert!(!h.ctx.plan_draft_path.exists());
-    assert!(matches!(effects.as_slice(), [TurnEffect::PlanConfirmed]));
+    assert!(matches!(effects.as_slice(), ["Plan confirmed."]));
     let (after_confirm_prompt, after_confirm_tools) = prefix.ensure()?;
     assert_eq!(after_confirm_prompt, stable_prompt);
     assert_eq!(after_confirm_tools, stable_tools);
@@ -400,7 +425,7 @@ async fn plan_confirm_and_clear_preserve_immutable_prefix() -> anyhow::Result<()
     assert!(!h.ctx.plan_path.exists());
     assert!(matches!(
         effects.as_slice(),
-        [TurnEffect::PlanConfirmed, TurnEffect::PlanCleared]
+        ["Plan confirmed.", "Plan cleared."]
     ));
     let (after_clear_prompt, after_clear_tools) = prefix.ensure()?;
     assert_eq!(after_clear_prompt, stable_prompt);
@@ -459,7 +484,7 @@ async fn plan_compaction_obeys_the_existing_single_turn_guard() -> anyhow::Resul
     let (decision, effects) = executor.execute("confirm the plan", None).await?;
 
     assert_eq!(decision, TurnDecision::Stop);
-    assert!(matches!(effects.as_slice(), [TurnEffect::PlanConfirmed]));
+    assert!(matches!(effects.as_slice(), ["Plan confirmed."]));
     assert_eq!(requests.lock().unwrap().len(), 1);
     assert!(h.ctx.plan_path.exists());
     assert!(!h.ctx.plan_draft_path.exists());

@@ -4,28 +4,10 @@ use anyhow::{Result, anyhow, bail};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResourceContentType {
-    PlainText,
-    Markdown,
-    Json,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct ResourceMetadata {
-    pub source_label: Option<String>,
-    pub total_lines: Option<usize>,
-    pub total_bytes: Option<usize>,
-    pub notes: Vec<String>,
-}
-
 #[derive(Debug, Clone)]
 pub struct Resource {
     pub canonical_url: String,
     pub content: String,
-    pub content_type: ResourceContentType,
-    pub immutable: Option<bool>,
-    pub metadata: ResourceMetadata,
 }
 
 #[derive(Debug, Clone)]
@@ -39,10 +21,6 @@ pub struct ResourceRequest {
 
 pub trait ResourceHandler: Send + Sync {
     fn scheme(&self) -> &'static str;
-
-    fn immutable(&self) -> bool {
-        true
-    }
 
     fn resolve(&self, req: &ResourceRequest, ctx: &ToolContext) -> Result<Resource>;
 }
@@ -116,11 +94,7 @@ impl ResourceRouter {
             path: parsed.path.to_string(),
             selector: selection.clone(),
         };
-        let mut resource = handler.resolve(&req, ctx)?;
-        if resource.immutable.is_none() {
-            resource.immutable = Some(handler.immutable());
-        }
-        Ok(resource)
+        handler.resolve(&req, ctx)
     }
 }
 

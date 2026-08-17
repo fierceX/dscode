@@ -10,23 +10,6 @@ async fn cancel_wakes_cancelled() {
 }
 
 #[tokio::test]
-async fn child_token_shares_parent_cancel() {
-    let parent = CancellationToken::new();
-    let child = parent.child_token();
-    assert!(!child.is_cancelled());
-    parent.cancel();
-    assert!(child.is_cancelled());
-}
-
-#[tokio::test]
-async fn child_cancel_also_cancels_parent() {
-    let parent = CancellationToken::new();
-    let child = parent.child_token();
-    child.cancel();
-    assert!(parent.is_cancelled());
-}
-
-#[tokio::test]
 async fn linked_child_cancel_does_not_cancel_parent() {
     let parent = CancellationToken::new();
     let child = parent.linked_child_token();

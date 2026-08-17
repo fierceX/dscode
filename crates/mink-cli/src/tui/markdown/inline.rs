@@ -114,7 +114,7 @@ pub(crate) fn render_inline_spans(nodes: &[InlineNode], base: Style) -> Vec<Span
     for node in nodes {
         match node {
             InlineNode::Text(text) => spans.push(Span::styled(text.clone(), base)),
-            InlineNode::Code(text) => spans.push(Span::styled(text.clone(), theme::inline_code())),
+            InlineNode::Code(text) => spans.push(Span::styled(text.clone(), theme::info())),
             InlineNode::Strong(children) => {
                 spans.extend(render_inline_spans(
                     children,

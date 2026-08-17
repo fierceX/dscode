@@ -8,6 +8,52 @@ use std::time::{Duration, Instant};
 
 const PROCESS_OUTPUT_CAPTURE_LIMIT: usize = 1_000_000;
 
+/// Shared argument parsing for the host Python and CPython WASI sandbox tools.
+/// Both tools accept the same `script` / `script_file` / `timeout` surface;
+/// keeping the dispatch here prevents their validation and path resolution
+/// rules from drifting apart.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PythonScriptArgs {
+    pub script: Option<String>,
+    #[serde(default)]
+    pub script_file: Option<String>,
+    #[serde(default)]
+    pub timeout: Option<u64>,
+}
+
+impl PythonScriptArgs {
+    pub(crate) fn parse(input: &serde_json::Value) -> anyhow::Result<Self> {
+        serde_json::from_value(input.clone()).map_err(Into::into)
+    }
+
+    /// Resolve the script body from the mutually exclusive arguments.
+    pub(crate) fn resolve_script(&self, cwd: &std::path::Path) -> anyhow::Result<String> {
+        match (&self.script, &self.script_file) {
+            (Some(script), None) => Ok(script.clone()),
+            (None, Some(path)) => {
+                let full_path = if std::path::Path::new(path).is_absolute() {
+                    std::path::PathBuf::from(path)
+                } else {
+                    cwd.join(path)
+                };
+                std::fs::read_to_string(&full_path).map_err(|error| {
+                    anyhow::anyhow!(
+                        "Failed to read script file {}: {error}",
+                        full_path.display()
+                    )
+                })
+            }
+            (Some(_), Some(_)) => {
+                anyhow::bail!("Error: provide either 'script' or 'script_file', not both");
+            }
+            (None, None) => {
+                anyhow::bail!("Error: provide either 'script' or 'script_file'");
+            }
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct ProcessOutputBuffer {
     inner: Arc<Mutex<ProcessOutputBufferInner>>,

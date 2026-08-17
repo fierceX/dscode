@@ -4,7 +4,7 @@ use crate::agent::plan_actions::PlanActionHandler;
 use crate::agent::prefix::PrefixManager;
 use crate::agent::sub_coordinator::{SubAgentCoordinator, SubAgentRunner};
 use crate::agent::sub_executor::{SubAgentExecutor, SubAgentResult};
-use crate::agent::turn::{TurnDecision, TurnEffect, TurnExecutor};
+use crate::agent::turn::{TurnDecision, TurnExecutor};
 use crate::config::{OutputFormat, ResolvedConfig as Config};
 use crate::context::{AgentSharedContext, ToolConfig, ToolContext};
 use crate::guard::collector::{Signal, SignalKind};
@@ -312,8 +312,6 @@ async fn harness_with_config(
     let capability_snapshot = Arc::new(crate::capabilities::CapabilitySnapshot::load_default(
         &cwd,
         &home,
-        &cfg.session_id,
-        &cfg.session_id,
         &cfg.skills,
     )?);
     let llm_backend = llm_backend.unwrap_or_else(|| {
@@ -321,6 +319,7 @@ async fn harness_with_config(
     });
     let cancel = crate::cancel::CancellationToken::new();
     let interrupt = Arc::new(AtomicBool::new(false));
+    let event_log_writer = crate::session::event_log::EventLogWriter::start(spaths.events.clone());
     let compaction = Arc::new(CompactionEngine::new(
         store.clone(),
         spaths.summary.clone(),
@@ -333,7 +332,7 @@ async fn harness_with_config(
         cancel.clone(),
         interrupt.clone(),
         llm_backend.clone(),
-        None,
+        Some(event_log_writer.clone()),
     )?);
     let tool_config = ToolConfig::from_config(&cfg);
     let todo_store = Arc::new(crate::session::todo::TodoStore::load(spaths.todos.clone())?);
@@ -381,7 +380,7 @@ async fn harness_with_config(
         is_sub_agent,
         interrupt,
         event_log_warned: AtomicBool::new(false),
-        event_log_writer: None,
+        event_log_writer: Some(event_log_writer),
         stream_flush_last: Mutex::new(None),
     });
     Ok(TestHarness { ctx, cwd, display })
@@ -402,13 +401,11 @@ fn tool_call(name: &str, id: &str, input: serde_json::Value) -> ToolCallEvent {
                 .collect::<BTreeMap<_, _>>()
         })
         .unwrap_or_default();
-    let order = fields.keys().cloned().collect();
     ToolCallEvent {
         name: name.into(),
         id: id.into(),
         input_json: input,
         fields,
-        order,
     }
 }
 
@@ -421,8 +418,16 @@ async fn run_orchestrator_user_input(
     let actor = OrchActor::new(test_context_with_llm_backend(ctx, llm), rx);
     let handle = tokio::spawn(actor.run());
     let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    let turn_id = crate::runtime::TurnId::new("test-turn");
+    let emitter = std::sync::Arc::new(crate::runtime::TurnEventEmitter::new(
+        turn_id.clone(),
+        None,
+        None,
+    ));
     tx.send(OrchCmd::UserInput {
         input: input.to_string(),
+        turn_id,
+        emitter,
         done: done_tx,
     })?;
     done_rx.await?;
@@ -472,7 +477,7 @@ fn test_context_with_llm_backend(
         is_sub_agent: ctx.is_sub_agent,
         interrupt: ctx.interrupt.clone(),
         event_log_warned: AtomicBool::new(false),
-        event_log_writer: None,
+        event_log_writer: ctx.event_log_writer.clone(),
         stream_flush_last: Mutex::new(None),
     })
 }
@@ -490,7 +495,6 @@ fn internal_result(name: &str) -> ToolExecution {
         conv_content: String::new(),
         spawns_sub_agent: false,
         sub_agent_prompt: None,
-        sub_agent_description: None,
         sub_agent_fork: false,
         exit_code: None,
         status: crate::tools::metadata::ToolStatus::Succeeded,

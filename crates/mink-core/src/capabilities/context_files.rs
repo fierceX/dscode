@@ -24,12 +24,7 @@ pub struct ContextFileSnapshot {
     pub dependency_fingerprint: String,
 }
 
-pub fn build_default_context_file_snapshot(
-    cwd: &Path,
-    home: &Path,
-    _session_id: &str,
-    _resource_session_id: &str,
-) -> Result<ContextFileSnapshot> {
+pub fn build_default_context_file_snapshot(cwd: &Path, home: &Path) -> Result<ContextFileSnapshot> {
     let mut all = Vec::new();
     for (base, name, provider_id, provider_name, level) in [
         (
@@ -65,7 +60,7 @@ pub fn build_default_context_file_snapshot(
                 provider_name: provider_name.to_string(),
                 level,
                 source_path: Some(path),
-                display_label: Some(display_label(&base, cwd, home)),
+                display_label: Some(crate::capabilities::source::display_label(&base, cwd, home)),
             },
             exposure: CapabilityExposure::ModelDiscoverable,
         });
@@ -92,28 +87,6 @@ fn find_instruction_file_in_dir(dir: &Path) -> Option<PathBuf> {
         dir.join(".claude/CLAUDE.md"),
     ];
     candidates.into_iter().find(|path| path.is_file())
-}
-
-fn display_label(path: &Path, cwd: &Path, home: &Path) -> String {
-    if let Ok(relative) = path.strip_prefix(cwd) {
-        let rendered = relative.display().to_string();
-        if rendered.is_empty() {
-            ".".to_string()
-        } else {
-            rendered
-        }
-    } else if let Ok(relative) = path.strip_prefix(home) {
-        let rendered = relative.display().to_string();
-        if rendered.is_empty() {
-            "~".to_string()
-        } else {
-            format!("~/{rendered}")
-        }
-    } else {
-        path.file_name()
-            .map(|name| name.to_string_lossy().to_string())
-            .unwrap_or_else(|| path.display().to_string())
-    }
 }
 
 fn compute_dependency_fingerprint(always_apply: &[LoadedContextFile]) -> String {

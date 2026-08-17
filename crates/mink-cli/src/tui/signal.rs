@@ -229,7 +229,6 @@ impl TuiState {
                 kind,
                 content,
             } => {
-                let mut changed = false;
                 if let Some(idx) = self.sub_agents.line_by_session.get(session_id).copied()
                     && let Some(line) = self.lines.get_mut(idx)
                     && let Some(ref mut detail) = line.sub_detail
@@ -239,9 +238,7 @@ impl TuiState {
                         SubAgentStreamKind::Thinking => detail.thinking.push_str(&content),
                         SubAgentStreamKind::Text => detail.text.push_str(&content),
                     }
-                    changed = true;
                 }
-                let _ = changed;
             }
             TuiSignal::SubAgentOutput {
                 session_id,

@@ -44,23 +44,17 @@ pub struct Paths {
 impl Paths {
     pub fn from_session_dir(session_id: impl Into<String>, session_dir: PathBuf) -> Self {
         let session_id = session_id.into();
-        let base_dir = session_dir
+        match session_dir
             .parent()
-            .map_or_else(|| session_dir.clone(), Path::to_path_buf);
-        Self {
-            session_id,
-            base_dir,
-            conversation: session_dir.join("conversation.jsonl"),
-            events: session_dir.join("events.jsonl"),
-            summary: session_dir.join("summary.txt"),
-            metadata: session_dir.join("session.json"),
-            plan: session_dir.join("plan.md"),
-            plan_draft: session_dir.join("plan.draft"),
-            todos: session_dir.join("todos.json"),
-            stats: session_dir.join("stats.json"),
-            usage: session_dir.join("usage.jsonl"),
-            artifacts: session_dir.join("artifacts"),
-            session_dir,
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            Some(parent) => paths_for_layout(parent, parent, &session_id, SessionLayout::Direct),
+            None => paths_for_layout(
+                &session_dir,
+                &session_dir,
+                &session_id,
+                SessionLayout::Isolated,
+            ),
         }
     }
 }

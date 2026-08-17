@@ -66,7 +66,7 @@ impl Builder {
             validate_pack(spec, &rendered, &workflows, &self.tool_surface)?;
             document.push(PromptSection {
                 id: spec.id.to_string(),
-                tag: spec.tag.to_string(),
+                tag: spec.id.to_string(),
                 origin: PromptSectionOrigin::Workflow,
                 content: rendered.content,
                 name: None,
@@ -122,6 +122,14 @@ fn validate_pack(
         spec.id
     );
     Ok(())
+}
+
+pub(crate) fn escape_attr(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 #[cfg(test)]

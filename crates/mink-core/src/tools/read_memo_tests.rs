@@ -72,15 +72,6 @@ fn mutation_epoch_change_invalidates() {
 }
 
 #[test]
-fn clear_drops_everything() {
-    let mut memo = ReadMemo::new();
-    let (now, _) = entry_times();
-    memo.record(Path::new("a.md"), 100, now, false, None, None, 0, 0);
-    memo.clear();
-    assert!(!memo.hit(Path::new("a.md"), 100, now, false, 0, 0, None, None));
-}
-
-#[test]
 fn lru_eviction_bounds_memory() {
     let mut memo = ReadMemo::new();
     let (now, _) = entry_times();

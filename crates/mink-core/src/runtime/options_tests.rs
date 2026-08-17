@@ -38,7 +38,6 @@ fn options_convert_to_runtime_config_without_losing_config_fields() {
         .with_mission_content("mission")
         .with_enabled_tools(vec!["Read".to_string(), "Bash".to_string()])
         .with_tool_approval_mode(ToolApprovalMode::Write)
-        .with_tool_approval_policy("Bash", ToolApprovalPolicy::Prompt)
         .with_first_prompt("hello")
         .into_runtime_config();
 
@@ -96,41 +95,22 @@ fn options_convert_to_runtime_config_without_losing_config_fields() {
         Some(vec!["Read".to_string(), "Bash".to_string()])
     );
     assert_eq!(cfg.tool_approval_mode, ToolApprovalMode::Write);
-    assert_eq!(cfg.tool_approval["Bash"], ToolApprovalPolicy::Prompt);
-}
-
-#[test]
-fn options_with_skills_remains_selected_skills_alias() {
-    let runtime_config = AgentOptions::new("/tmp/mink-home", "/tmp/project")
-        .with_skills(["rust", "debugging"])
-        .into_runtime_config();
-
-    assert_eq!(runtime_config.config.skills, vec!["rust", "debugging"]);
+    // per-tool approval 的 options 便捷方法已删除（零外部调用），
+    // 嵌入方经 Config/CLI [tools.approval] 配置。
 }
 
 #[test]
 fn options_use_typed_runtime_controls() {
     let runtime_config = AgentOptions::new("/tmp/mink-home", "/tmp/project")
         .with_first_prompt("metadata")
-        .with_agent_jsonl(true)
         .with_session(SessionPolicy::UseOrCreate("typed-session".into()))
         .into_runtime_config();
 
     assert_eq!(runtime_config.first_prompt.as_deref(), Some("metadata"));
-    assert!(runtime_config.config.agent_jsonl);
     assert!(matches!(
         runtime_config.session,
         SessionPolicy::UseOrCreate(ref value) if value == "typed-session"
     ));
-}
-
-#[test]
-fn options_can_disable_openai_reasoning_effort() {
-    let runtime_config = AgentOptions::new("/tmp/mink-home", "/tmp/project")
-        .without_openai_reasoning_effort()
-        .into_runtime_config();
-
-    assert_eq!(runtime_config.config.openai_reasoning_effort, None);
 }
 
 #[test]

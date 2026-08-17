@@ -4,20 +4,25 @@ use super::*;
 fn typed_events_keep_legacy_replay_type_names() {
     let events = vec![
         crate::events::EventLog::UserInput {
-            version: 1,
+            version: None,
             content: "u".into(),
         },
         crate::events::EventLog::ToolCall {
-            version: 1,
+            version: None,
             name: "Read".into(),
             id: "call".into(),
             input: json!({"path":"a.txt"}),
         },
         crate::events::EventLog::ToolResult {
-            version: 1,
+            version: Some(1),
             tool_use_id: "call".into(),
             name: "Read".into(),
             content: "Read(a.txt) [1 lines, 1 bytes]\nx".into(),
+            status: crate::tools::metadata::ToolStatus::Succeeded,
+            exit_code: Some(0),
+            result_kind: crate::tools::metadata::ToolResultKind::FileRead,
+            presentation: None,
+            artifacts: Vec::new(),
         },
     ];
     let types = events

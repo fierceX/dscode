@@ -1,6 +1,6 @@
 use super::{PromptDocument, PromptSection, PromptSectionOrigin};
 use crate::tools::surface::ModelToolSurface;
-use anyhow::{Result, ensure};
+use anyhow::Result;
 use std::collections::BTreeSet;
 
 struct ToolPromptSpec {
@@ -26,7 +26,6 @@ pub(super) fn append_tool_sections(
             continue;
         }
         let referenced_tools = [spec.tool.to_string()].into_iter().collect();
-        ensure!(surface.has(spec.tool));
         document.push(PromptSection {
             id: spec.id.into(),
             tag: spec.tag.into(),

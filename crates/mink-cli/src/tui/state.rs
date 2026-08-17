@@ -583,62 +583,20 @@ impl TuiState {
     }
 
     pub(crate) fn add_help(&mut self) {
-        self.push_line(TranscriptItem::new(
-            "Commands:".into(),
-            TranscriptKind::Info,
-        ));
-        self.push_line(TranscriptItem::new(
-            "  /flash          Switch to flash alias".into(),
-            TranscriptKind::Text,
-        ));
-        self.push_line(TranscriptItem::new(
-            "  /pro            Switch to pro alias".into(),
-            TranscriptKind::Text,
-        ));
-        self.push_line(TranscriptItem::new(
-            "  /model NAME     Switch to a model name or alias".into(),
-            TranscriptKind::Text,
-        ));
-        self.push_line(TranscriptItem::new(
-            "  /compact        Force context compaction".into(),
-            TranscriptKind::Text,
-        ));
-        self.push_line(TranscriptItem::new(
-            "  /skills         List available skills".into(),
-            TranscriptKind::Text,
-        ));
-        self.push_line(TranscriptItem::new(
-            "  /plan           Open current plan detail".into(),
-            TranscriptKind::Text,
-        ));
-        self.push_line(TranscriptItem::new(
-            "  /todos          Open current todo detail".into(),
-            TranscriptKind::Text,
-        ));
-        self.push_line(TranscriptItem::new(
-            "  /sub-agent ID   Open sub-agent detail".into(),
-            TranscriptKind::Text,
-        ));
-        self.push_line(TranscriptItem::new(
-            "  /artifact ID    Open a bounded artifact preview".into(),
-            TranscriptKind::Text,
-        ));
-        self.push_line(TranscriptItem::new(
-            "  Ctrl+C          Interrupt current task".into(),
-            TranscriptKind::Text,
-        ));
-        self.push_line(TranscriptItem::new(
-            "  Ctrl+C again    Exit TUI".into(),
-            TranscriptKind::Text,
-        ));
-        self.push_line(TranscriptItem::new(
-            "  Esc             Exit TUI".into(),
-            TranscriptKind::Text,
-        ));
-        self.push_line(TranscriptItem::new(
-            "  /exit  /quit    Exit TUI".into(),
-            TranscriptKind::Text,
-        ));
+        for (index, line) in crate::local::COMMON_COMMAND_HELP
+            .iter()
+            .chain(crate::local::TUI_EXTRA_HELP)
+            .enumerate()
+        {
+            self.push_line(TranscriptItem::new(
+                line.to_string(),
+                if index == 0 {
+                    TranscriptKind::Info
+                } else {
+                    TranscriptKind::Text
+                },
+            ));
+        }
     }
 
     pub(crate) fn show_skills(&mut self) {
@@ -646,41 +604,21 @@ impl TuiState {
             "=== Skills ===".into(),
             TranscriptKind::Info,
         ));
-        let cwd = std::env::current_dir().unwrap_or_default();
-        let home = std::path::PathBuf::from(
-            std::env::var("MINK_HOME")
-                .or_else(|_| std::env::var("HOME"))
-                .unwrap_or_else(|_| String::from(".")),
-        );
-        match crate::capabilities::CapabilitySnapshot::load_default(
-            &cwd,
-            &home,
-            "skills-list",
-            "skills-list",
-            &[],
-        ) {
-            Ok(snapshot) => {
-                for skill in &snapshot.skills.discoverable {
-                    self.push_line(TranscriptItem::new(
-                        format!(
-                            "  {} [{}] - {}",
-                            skill.skill.name,
-                            skill.source_label(),
-                            skill.skill.description
-                        ),
-                        TranscriptKind::Text,
-                    ));
+        match crate::local::discoverable_skill_lines() {
+            Ok(lines) => {
+                for line in lines {
+                    self.push_line(TranscriptItem::new(line, TranscriptKind::Text));
                 }
             }
-            Err(e) => {
+            Err(error) => {
                 self.push_line(TranscriptItem::new(
-                    format!("Error loading skills: {e}"),
+                    format!("Error loading skills: {error}"),
                     TranscriptKind::Error,
                 ));
             }
         }
         self.push_line(TranscriptItem::new(
-            "Use --skill NAME or Read skill://NAME to load.".into(),
+            crate::local::SKILL_LOAD_HINT.into(),
             TranscriptKind::Info,
         ));
     }

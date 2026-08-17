@@ -2,7 +2,7 @@ use crate::protocol::ToolCallEvent;
 use anyhow::Result;
 use serde_json::{Value, json};
 use std::path::PathBuf;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{Mutex, RwLock};
 
 /// ConversationStore provides async JSONL conversation persistence.
@@ -100,34 +100,7 @@ impl ConversationStore {
     }
 
     pub async fn lines(&self) -> Result<Vec<Value>> {
-        {
-            let cache = self.cache.read().await;
-            if let Some(cache) = cache.as_ref()
-                && cache.start == 0
-            {
-                return Ok(cache.lines.clone());
-            }
-        }
-
-        let _guard = self.write_lock.lock().await;
-        {
-            let cache = self.cache.read().await;
-            if let Some(cache) = cache.as_ref()
-                && cache.start == 0
-            {
-                return Ok(cache.lines.clone());
-            }
-        }
-
-        let lines = self.read_lines_from_disk(0).await?;
-        let mut cache = self.cache.write().await;
-        if cache.is_none() {
-            *cache = Some(CachedLines {
-                start: 0,
-                lines: lines.clone(),
-            });
-        }
-        Ok(lines)
+        self.lines_from(0).await
     }
 
     pub async fn lines_from(&self, start: usize) -> Result<Vec<Value>> {
@@ -195,31 +168,14 @@ impl ConversationStore {
         self.read_last_assistant_from_disk().await
     }
 
-    pub async fn lines_lossy(&self) -> Result<Vec<Value>> {
-        self.lines_lossy_with_warnings(|_| {}).await
-    }
-
     pub async fn lines_lossy_with_warnings<F>(&self, mut warn: F) -> Result<Vec<Value>>
     where
         F: FnMut(String),
     {
         let data = tokio::fs::read_to_string(&self.path).await?;
-        let mut lines = Vec::new();
-        for (idx, line) in data.lines().enumerate() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            match serde_json::from_str(line) {
-                Ok(value) => lines.push(value),
-                Err(e) => warn(format!(
-                    "invalid JSONL in {} at line {} skipped by lossy read: {}",
-                    self.path.display(),
-                    idx + 1,
-                    e
-                )),
-            }
-        }
-        Ok(lines)
+        Ok(crate::session::jsonl::parse_lossy_lines(
+            &self.path, &data, &mut warn,
+        ))
     }
 
     async fn read_lines_from_disk(&self, start: usize) -> Result<Vec<Value>> {
@@ -307,16 +263,11 @@ impl ConversationStore {
         let _guard = self.write_lock.lock().await;
         let mut line = serde_json::to_vec(value)?;
         line.push(b'\n');
-        let mut file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .append(true)
-            .open(&self.path)
-            .await?;
-        repair_unterminated_tail(&mut file).await?;
-        file.write_all(&line).await?;
-        file.flush().await?;
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::session::jsonl::append_line(&path, &line, false)
+        })
+        .await??;
         // Append to cache instead of invalidating
         let mut cache = self.cache.write().await;
         if let Some(cache) = cache.as_mut() {
@@ -380,48 +331,6 @@ impl ConversationStore {
         self.append_line(&serde_json::json!({"role": "user", "content": content}))
             .await
     }
-}
-
-async fn repair_unterminated_tail(file: &mut tokio::fs::File) -> Result<()> {
-    const SCAN_CHUNK_BYTES: u64 = 8 * 1024;
-
-    let len = file.metadata().await?.len();
-    if len == 0 {
-        return Ok(());
-    }
-
-    file.seek(std::io::SeekFrom::End(-1)).await?;
-    let mut last = [0u8; 1];
-    file.read_exact(&mut last).await?;
-    if last[0] == b'\n' {
-        return Ok(());
-    }
-
-    let mut scan_end = len;
-    let mut tail_start = 0;
-    while scan_end > 0 {
-        let scan_start = scan_end.saturating_sub(SCAN_CHUNK_BYTES);
-        let chunk_len = usize::try_from(scan_end - scan_start)?;
-        let mut chunk = vec![0u8; chunk_len];
-        file.seek(std::io::SeekFrom::Start(scan_start)).await?;
-        file.read_exact(&mut chunk).await?;
-        if let Some(index) = chunk.iter().rposition(|byte| *byte == b'\n') {
-            tail_start = scan_start + index as u64 + 1;
-            break;
-        }
-        scan_end = scan_start;
-    }
-
-    let tail_len = usize::try_from(len - tail_start)?;
-    let mut tail = vec![0u8; tail_len];
-    file.seek(std::io::SeekFrom::Start(tail_start)).await?;
-    file.read_exact(&mut tail).await?;
-    if serde_json::from_slice::<Value>(&tail).is_ok() {
-        file.write_all(b"\n").await?;
-    } else {
-        file.set_len(tail_start).await?;
-    }
-    Ok(())
 }
 
 pub fn first_line(s: &str) -> &str {

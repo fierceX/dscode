@@ -99,11 +99,15 @@ impl ArtifactManager {
         let truncated = bytes.len() > max_bytes;
         bytes.truncate(max_bytes);
         while std::str::from_utf8(&bytes).is_err() {
-            let Some(_) = bytes.pop() else {
+            if bytes.pop().is_none() {
                 break;
-            };
+            }
         }
-        Ok((String::from_utf8(bytes).unwrap_or_default(), truncated))
+        // pop 循环保证退出时必为合法 UTF-8（含空串）。
+        Ok((
+            String::from_utf8(bytes).expect("bytes truncated to a char boundary"),
+            truncated,
+        ))
     }
 
     pub fn read_record_text(&self, record: &ArtifactRecord) -> Result<String> {
@@ -161,36 +165,17 @@ impl ArtifactManager {
             .index_lock
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.index_path)?;
         let line = format!("{}\n", serde_json::to_string(record)?);
-        file.write_all(line.as_bytes())?;
-        file.flush()?;
-        file.sync_all()?;
-        Ok(())
+        crate::session::jsonl::append_line(&self.index_path, line.as_bytes(), true)
     }
 
     fn repair_index_tail(&self) -> Result<()> {
+        // 与 conversation.jsonl / usage.jsonl 共用同一尾部修复策略。
         let _guard = self
             .index_lock
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let bytes = std::fs::read(&self.index_path)?;
-        if bytes.is_empty() || bytes.ends_with(b"\n") {
-            return Ok(());
-        }
-        let keep = bytes
-            .iter()
-            .rposition(|byte| *byte == b'\n')
-            .map_or(0, |index| index + 1);
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .open(&self.index_path)?;
-        file.set_len(keep as u64)?;
-        file.sync_all()?;
-        Ok(())
+        crate::session::jsonl::repair_unterminated_tail(&self.index_path)
     }
 }
 

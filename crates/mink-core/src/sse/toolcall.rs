@@ -15,13 +15,11 @@ pub fn build_tool_call_event(name: &str, id: &str, input: &str) -> Result<ToolCa
         id: id.to_string(),
         input_json: obj.clone(),
         fields: BTreeMap::new(),
-        order: Vec::new(),
     };
     let map = obj
         .as_object()
         .ok_or_else(|| anyhow!("tool input must be object"))?;
     for (k, v) in map {
-        event.order.push(k.clone());
         event.fields.insert(k.clone(), json_scalar_string(v));
     }
     Ok(event)

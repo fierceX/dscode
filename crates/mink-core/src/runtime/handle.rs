@@ -271,7 +271,7 @@ impl AgentRuntimeHandle {
         ));
         self.event_display.begin_turn(emitter.clone());
         let (done_tx, done_rx) = oneshot::channel();
-        if let Err(error) = self.cmd_tx.send(OrchCmd::RuntimeUserInput {
+        if let Err(error) = self.cmd_tx.send(OrchCmd::UserInput {
             input: input.into(),
             turn_id: turn_id.clone(),
             emitter: emitter.clone(),
@@ -324,7 +324,7 @@ impl AgentRuntimeHandle {
         let _permit = self.turn_gate.acquire(operation_id)?;
         let (done_tx, done_rx) = oneshot::channel();
         self.cmd_tx
-            .send(OrchCmd::SetModelAck {
+            .send(OrchCmd::SetModel {
                 model: model.into(),
                 done: done_tx,
             })

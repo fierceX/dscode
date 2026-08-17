@@ -153,32 +153,25 @@ impl ToolStatus {
 #[derive(Debug, Clone)]
 pub struct ToolMetadata {
     pub name: std::borrow::Cow<'static, str>,
-    pub summary: std::borrow::Cow<'static, str>,
     pub approval: ApprovalTier,
     pub result_kind: ToolResultKind,
     pub mutating: bool,
     pub storm_exempt: bool,
-    pub internal: bool,
-    pub discoverable: bool,
     pub spawns_sub_agent: bool,
 }
 
 impl ToolMetadata {
     pub const fn new(
         name: &'static str,
-        summary: &'static str,
         approval: ApprovalTier,
         result_kind: ToolResultKind,
     ) -> Self {
         Self {
             name: std::borrow::Cow::Borrowed(name),
-            summary: std::borrow::Cow::Borrowed(summary),
             approval,
             result_kind,
             mutating: false,
             storm_exempt: false,
-            internal: false,
-            discoverable: false,
             spawns_sub_agent: false,
         }
     }
@@ -190,16 +183,6 @@ impl ToolMetadata {
 
     pub const fn storm_exempt(mut self) -> Self {
         self.storm_exempt = true;
-        self
-    }
-
-    pub const fn internal(mut self) -> Self {
-        self.internal = true;
-        self
-    }
-
-    pub const fn discoverable(mut self) -> Self {
-        self.discoverable = true;
         self
     }
 

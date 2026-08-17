@@ -26,15 +26,9 @@ pub struct PlanClearTool;
 
 impl ToolExec for PlanDraftTool {
     fn metadata(&self) -> ToolMetadata {
-        ToolMetadata::new(
-            "PlanDraft",
-            "Create, replace, or cancel the current plan draft.",
-            ApprovalTier::Write,
-            ToolResultKind::Control,
-        )
-        .mutating()
-        .storm_exempt()
-        .internal()
+        ToolMetadata::new("PlanDraft", ApprovalTier::Write, ToolResultKind::Control)
+            .mutating()
+            .storm_exempt()
     }
 
     fn execute(&self, input: &serde_json::Value, ctx: &ToolContext) -> anyhow::Result<ToolOutcome> {
@@ -69,15 +63,9 @@ impl ToolExec for PlanDraftTool {
 
 impl ToolExec for PlanConfirmTool {
     fn metadata(&self) -> ToolMetadata {
-        ToolMetadata::new(
-            "PlanConfirm",
-            "Atomically confirm the current plan draft.",
-            ApprovalTier::Write,
-            ToolResultKind::Control,
-        )
-        .mutating()
-        .storm_exempt()
-        .internal()
+        ToolMetadata::new("PlanConfirm", ApprovalTier::Write, ToolResultKind::Control)
+            .mutating()
+            .storm_exempt()
     }
 
     fn execute(&self, input: &serde_json::Value, ctx: &ToolContext) -> anyhow::Result<ToolOutcome> {
@@ -97,15 +85,9 @@ impl ToolExec for PlanConfirmTool {
 
 impl ToolExec for PlanClearTool {
     fn metadata(&self) -> ToolMetadata {
-        ToolMetadata::new(
-            "PlanClear",
-            "Atomically clear the current confirmed plan.",
-            ApprovalTier::Write,
-            ToolResultKind::Control,
-        )
-        .mutating()
-        .storm_exempt()
-        .internal()
+        ToolMetadata::new("PlanClear", ApprovalTier::Write, ToolResultKind::Control)
+            .mutating()
+            .storm_exempt()
     }
 
     fn execute(&self, input: &serde_json::Value, ctx: &ToolContext) -> anyhow::Result<ToolOutcome> {

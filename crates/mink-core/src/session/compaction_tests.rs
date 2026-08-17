@@ -87,7 +87,6 @@ async fn add_tool_history(ctx: &crate::context::AgentSharedContext) -> anyhow::R
                 id: "bash-1".into(),
                 input_json: json!({"command":"cargo test"}),
                 fields: Default::default(),
-                order: Vec::new(),
             }],
         )
         .await?;

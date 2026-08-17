@@ -1,7 +1,5 @@
 use crate::context::ToolContext;
-use crate::resources::router::{
-    Resource, ResourceContentType, ResourceHandler, ResourceMetadata, ResourceRequest,
-};
+use crate::resources::router::{Resource, ResourceHandler, ResourceRequest};
 use anyhow::{Result, anyhow, bail};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -16,22 +14,8 @@ impl ResourceHandler for SessionResourceHandler {
 
     fn resolve(&self, req: &ResourceRequest, ctx: &ToolContext) -> Result<Resource> {
         let content = read_session_resource(&req.resource_url, ctx)?;
-        let total_lines = content.lines().count();
-        let total_bytes = content.len();
         Ok(Resource {
             canonical_url: req.resource_url.clone(),
-            content_type: if req.resource_url == "session://current/history" {
-                ResourceContentType::Markdown
-            } else {
-                ResourceContentType::PlainText
-            },
-            immutable: Some(false),
-            metadata: ResourceMetadata {
-                source_label: Some("current session".to_string()),
-                total_lines: Some(total_lines),
-                total_bytes: Some(total_bytes),
-                notes: Vec::new(),
-            },
             content,
         })
     }

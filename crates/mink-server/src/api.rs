@@ -1,6 +1,6 @@
 //! REST + SSE API. Unified `ApiResponse{code,message,data}` envelope.
 
-use crate::bridge::{read_conversation, read_history};
+use crate::bridge::read_history;
 use crate::session::registry::Registry;
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
@@ -268,35 +268,28 @@ async fn events_history(
     AxumPath(id): AxumPath<String>,
     Query(query): Query<HistoryQuery>,
 ) -> ApiResponse {
-    if !(1..=2000).contains(&query.limit) {
-        return ApiResponse::err(400, "history limit must be in 1..=2000");
-    }
-    let dir = match state
-        .registry
-        .session_dir(&id, query.project.as_deref())
-        .await
-    {
-        Ok(d) => d,
-        Err(error) => return registry_error(error),
-    };
-    let events_path = dir.join("events.jsonl");
-    match read_history(
-        &events_path,
-        query.from_seq,
-        query.limit,
-        query.tail,
-        query.before_seq,
-    )
-    .await
-    {
-        Ok(events) => ApiResponse::ok(json!(events)),
-        Err(e) => ApiResponse::err(500, e.to_string()),
-    }
+    history_endpoint(state, id, query, HistoryKind::Events).await
 }
+
 async fn conversation_history(
     State(state): State<Arc<ApiState>>,
     AxumPath(id): AxumPath<String>,
     Query(query): Query<HistoryQuery>,
+) -> ApiResponse {
+    history_endpoint(state, id, query, HistoryKind::Conversation).await
+}
+
+#[derive(Clone, Copy)]
+enum HistoryKind {
+    Events,
+    Conversation,
+}
+
+async fn history_endpoint(
+    state: Arc<ApiState>,
+    id: String,
+    query: HistoryQuery,
+    kind: HistoryKind,
 ) -> ApiResponse {
     if !(1..=2000).contains(&query.limit) {
         return ApiResponse::err(400, "history limit must be in 1..=2000");
@@ -306,12 +299,15 @@ async fn conversation_history(
         .session_dir(&id, query.project.as_deref())
         .await
     {
-        Ok(d) => d,
+        Ok(dir) => dir,
         Err(error) => return registry_error(error),
     };
-    let conv_path = dir.join("conversation.jsonl");
-    match read_conversation(
-        &conv_path,
+    let path = dir.join(match kind {
+        HistoryKind::Events => "events.jsonl",
+        HistoryKind::Conversation => "conversation.jsonl",
+    });
+    match read_history(
+        &path,
         query.from_seq,
         query.limit,
         query.tail,
@@ -320,7 +316,7 @@ async fn conversation_history(
     .await
     {
         Ok(events) => ApiResponse::ok(json!(events)),
-        Err(e) => ApiResponse::err(500, e.to_string()),
+        Err(error) => ApiResponse::err(500, error.to_string()),
     }
 }
 

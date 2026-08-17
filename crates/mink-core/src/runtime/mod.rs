@@ -25,6 +25,8 @@ pub use crate::llm::client::{
     OpenAiCompatibleOptions, TokenParamKind,
 };
 pub use crate::resources::ResourceHandler;
+/// 同目录临时文件 + rename 的原子替换（session 状态文件共用实现）。
+pub use crate::session::atomic_file::atomic_replace;
 pub use crate::session::paths::SessionLayout;
 pub use crate::tools::metadata::{
     ApprovalTier, ToolBlocker, ToolFailureKind, ToolResultKind, ToolStatus,
@@ -52,8 +54,36 @@ pub use handle::{
     RuntimeResult, TurnId, TurnOutcome,
 };
 pub use options::{AgentOptions, ContextPolicy, GenerationOptions, ProviderOptions, ToolOptions};
+
+/// Display trait 的唯一定义（此前在 mink-cli 逐字复制一份）。
+pub use crate::ui::Display;
+
+/// 运行时限值校验的唯一公共实现（CLI 与 SDK 请求层共用）。
+#[allow(clippy::too_many_arguments)]
+pub fn validate_runtime_limits(
+    edit_fuzzy_threshold: f64,
+    max_tokens: i32,
+    max_turns: i32,
+    context_compact_pct: u8,
+    context_reserve_tokens: usize,
+    context_compact_tail_tokens: usize,
+    context_compact_max_output_tokens: i32,
+    max_context_tokens: usize,
+) -> anyhow::Result<()> {
+    crate::config::validate_runtime_limits(
+        edit_fuzzy_threshold,
+        max_tokens,
+        max_turns,
+        context_compact_pct,
+        context_reserve_tokens,
+        context_compact_tail_tokens,
+        context_compact_max_output_tokens,
+        max_context_tokens,
+    )
+}
+
 pub use sdk_adapter::{
-    exit_code_from_turn, final_from_outcome, runtime_skills_from_sdk_request, sdk_status_from_turn,
+    exit_code_from_turn, final_from_outcome, runtime_skills_from_sdk_request,
     skill_discovery_policy_from_sdk_request,
 };
 pub use tools::{

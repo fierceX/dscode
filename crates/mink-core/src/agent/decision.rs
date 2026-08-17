@@ -34,10 +34,6 @@ pub struct DecisionEngine {
 }
 
 impl DecisionEngine {
-    pub fn new() -> Self {
-        Self::from_config(&crate::config::SignalConfig::default())
-    }
-
     /// 全参数构造（阈值与冷却来自 SignalConfig）。
     pub(crate) fn from_config(s: &crate::config::SignalConfig) -> Self {
         Self {
@@ -111,12 +107,6 @@ impl DecisionEngine {
     #[cfg(test)]
     pub fn cooldown_remaining(&self) -> usize {
         self.cooldown_remaining
-    }
-}
-
-impl Default for DecisionEngine {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

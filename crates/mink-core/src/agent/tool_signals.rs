@@ -174,8 +174,8 @@ impl ToolSignalProcessor {
                 signal.severity,
                 &signal.message,
             );
-            ctx.log_typed_event(crate::events::EventLog::Signal {
-                version: 1,
+            ctx.log_event(crate::events::EventLog::Signal {
+                version: Some(1),
                 signal_kind: format!("{:?}", signal.kind),
                 severity: signal.severity,
                 source_tool: signal.source_tool.clone(),

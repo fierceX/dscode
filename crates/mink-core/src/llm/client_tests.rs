@@ -356,8 +356,6 @@ async fn test_context(name: &str, api_url: &str) -> anyhow::Result<Arc<AgentShar
     let capability_snapshot = Arc::new(crate::capabilities::CapabilitySnapshot::load_default(
         &cwd,
         &home,
-        "client",
-        "client",
         &cfg.skills,
     )?);
     let llm_backend = Arc::new(OpenAiCompatibleBackend::deepseek_defaults());

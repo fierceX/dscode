@@ -4,6 +4,7 @@ pub mod compaction;
 pub mod compaction_input;
 pub(crate) mod event_log;
 pub mod init;
+pub(crate) mod jsonl;
 pub mod metadata;
 pub mod paths;
 pub mod plan;

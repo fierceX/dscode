@@ -87,12 +87,8 @@ pub struct TurnExecutor {
     sub_agent_config: crate::config::ResolvedConfig,
 }
 
-/// Represents the outcome of a turn that needs to be actioned.
-#[derive(Debug, Clone)]
-pub enum TurnEffect {
-    PlanCleared,
-    PlanConfirmed,
-}
+/// Turn-level side effects are already-formatting info messages.
+pub type TurnEffect = &'static str;
 
 #[derive(Debug, PartialEq)]
 pub enum TurnDecision {
@@ -124,8 +120,8 @@ impl TurnExecutor {
             model_name: resolved.actual,
             model_alias: resolved.alias,
             tools,
-            prefix,
-            compactor: crate::agent::compactor::TurnCompactor::new(ctx.clone()),
+            prefix: prefix.clone(),
+            compactor: crate::agent::compactor::TurnCompactor::new(ctx.clone(), prefix.clone()),
             signal_processor: crate::agent::tool_signals::ToolSignalProcessor::from_config(
                 &ctx.config.signal,
             ),
@@ -223,8 +219,10 @@ impl TurnExecutor {
         self.reconcile_todo_state(&mut messages).await?;
         self.ctx.store.add_user(user_input).await?;
         self.ctx.stats.record_turn().await;
-        self.ctx
-            .log_event(serde_json::json!({"type":"user_input","content":user_input}));
+        self.ctx.log_event(crate::events::EventLog::UserInput {
+            version: None,
+            content: user_input.to_string(),
+        });
 
         let mut turn = 0;
         let mut effects = Vec::new();
@@ -414,7 +412,6 @@ fn blocked_by_signal_recovery(
         conv_content: String::new(),
         spawns_sub_agent: false,
         sub_agent_prompt: None,
-        sub_agent_description: None,
         sub_agent_fork: false,
         exit_code: None,
         status: crate::tools::metadata::ToolStatus::Blocked(

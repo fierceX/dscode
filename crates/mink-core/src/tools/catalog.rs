@@ -219,38 +219,17 @@ pub(crate) fn validate_custom_tools(tools: &[crate::runtime::RegisteredCustomToo
             );
         }
     }
-    fn visit(
-        name: &str,
-        definitions: &BTreeMap<String, crate::runtime::ToolDefinition>,
-        visiting: &mut BTreeSet<String>,
-        visited: &mut BTreeSet<String>,
-    ) -> Result<()> {
-        if visited.contains(name) {
-            return Ok(());
-        }
-        ensure!(
-            visiting.insert(name.to_string()),
-            "custom tool dependency cycle includes '{name}'"
-        );
-        if let Some(definition) = definitions.get(name) {
-            for dependency in &definition.hard_dependencies {
-                if definitions.contains_key(dependency) {
-                    visit(dependency, definitions, visiting, visited)?;
-                }
-            }
-        }
-        visiting.remove(name);
-        visited.insert(name.to_string());
-        Ok(())
-    }
     let definitions = tools
         .iter()
         .map(|tool| (tool.definition.name.clone(), tool.definition.clone()))
         .collect::<BTreeMap<_, _>>();
-    let mut visiting = BTreeSet::new();
-    let mut visited = BTreeSet::new();
-    for name in definitions.keys() {
-        visit(name, &definitions, &mut visiting, &mut visited)?;
+    if let Some(name) = super::first_dependency_cycle(definitions.keys().cloned(), |name| {
+        definitions
+            .get(name)
+            .map(|definition| definition.hard_dependencies.clone())
+            .unwrap_or_default()
+    }) {
+        bail!("custom tool dependency cycle includes '{name}'");
     }
     Ok(())
 }

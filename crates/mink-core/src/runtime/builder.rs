@@ -116,7 +116,9 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
     });
 
     if new_session {
-        ctx.log_event(serde_json::json!({"type":"session_start","session_id":sid}));
+        ctx.log_event(crate::events::EventLog::SessionStart {
+            session_id: sid.clone(),
+        });
     }
     if let Err(error) = ctx.flush_event_log().await {
         ctx.display

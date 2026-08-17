@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-pub(crate) fn atomic_replace(path: &Path, content: &[u8]) -> Result<()> {
+pub fn atomic_replace(path: &Path, content: &[u8]) -> Result<()> {
     ensure_parent(path)?;
     let parent = path
         .parent()

@@ -340,7 +340,6 @@ impl super::runner::ToolExec for GlobTool {
     fn metadata(&self) -> super::metadata::ToolMetadata {
         super::metadata::ToolMetadata::new(
             "Glob",
-            "Find files matching a glob pattern.",
             super::metadata::ApprovalTier::Read,
             super::metadata::ToolResultKind::Search,
         )
@@ -385,7 +384,6 @@ impl super::runner::ToolExec for GrepTool {
     fn metadata(&self) -> super::metadata::ToolMetadata {
         super::metadata::ToolMetadata::new(
             "Grep",
-            "Search file contents with a regex pattern.",
             super::metadata::ApprovalTier::Read,
             super::metadata::ToolResultKind::Search,
         )

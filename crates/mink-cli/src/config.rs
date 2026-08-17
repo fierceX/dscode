@@ -497,6 +497,14 @@ fn parse_bool_value(name: &str, value: &str) -> Result<bool> {
     }
 }
 
+pub(crate) fn default_home() -> std::path::PathBuf {
+    std::path::PathBuf::from(
+        std::env::var("MINK_HOME")
+            .or_else(|_| std::env::var("HOME"))
+            .unwrap_or_else(|_| String::from(".")),
+    )
+}
+
 pub fn apply_config_file(cfg: &mut CliConfig) -> Result<()> {
     let defaults = CliConfig::default();
     apply_env_defaults(cfg, &defaults)?;
@@ -511,11 +519,7 @@ pub fn apply_config_file(cfg: &mut CliConfig) -> Result<()> {
     // Priority: CLI > project .minkrc > user ~/.minkrc > env > default.
     // CLI is inferred by comparing the already-parsed config to defaults.
     let cwd = std::env::current_dir().unwrap_or_default();
-    let home = std::path::PathBuf::from(
-        std::env::var("MINK_HOME")
-            .or_else(|_| std::env::var("HOME"))
-            .unwrap_or_else(|_| String::from(".")),
-    );
+    let home = default_home();
 
     let user_cfg = read_config_file(&home.join(".minkrc"))?;
     let project_cfg = read_config_file(&cwd.join(".minkrc"))?;
@@ -935,54 +939,17 @@ pub fn apply_provider_defaults(cfg: &mut CliConfig) -> Result<()> {
 }
 
 pub fn validate_runtime_config(cfg: &CliConfig) -> Result<()> {
-    if !cfg.edit_fuzzy_threshold.is_finite() || !(0.0..=1.0).contains(&cfg.edit_fuzzy_threshold) {
-        bail!("edit_fuzzy_threshold must be a finite number in 0.0..=1.0");
-    }
-    if cfg.max_tokens <= 0 {
-        bail!("max_tokens must be greater than 0");
-    }
-    if !(1..=100).contains(&cfg.context_compact_pct) {
-        bail!("context_compact_pct must be between 1 and 100");
-    }
-    if cfg.context_reserve_tokens == 0 {
-        bail!("context_reserve_tokens must be greater than 0");
-    }
-    if cfg.context_compact_tail_tokens == 0 {
-        bail!("context_compact_tail_tokens must be greater than 0");
-    }
-    if cfg.context_compact_max_output_tokens <= 0 {
-        bail!("context_compact_max_output_tokens must be greater than 0");
-    }
-    if cfg.max_context_tokens == 0 {
-        return Ok(());
-    }
-
-    let max_context = cfg.max_context_tokens;
-    if cfg.context_reserve_tokens >= max_context {
-        bail!(
-            "context_reserve_tokens ({}) must be less than max_context ({max_context})",
-            cfg.context_reserve_tokens
-        );
-    }
-    let compact_output = usize::try_from(cfg.context_compact_max_output_tokens)
-        .map_err(|_| anyhow::anyhow!("context_compact_max_output_tokens is too large"))?;
-    if compact_output >= max_context {
-        bail!(
-            "context_compact_max_output_tokens ({compact_output}) must be less than max_context ({max_context})"
-        );
-    }
-
-    let requested_output =
-        usize::try_from(cfg.max_tokens).map_err(|_| anyhow::anyhow!("max_tokens is too large"))?;
-    let response_budget = requested_output.min(cfg.context_reserve_tokens);
-    let request_input_budget = max_context - response_budget;
-    if cfg.context_compact_tail_tokens >= request_input_budget {
-        bail!(
-            "context_compact_tail_tokens ({}) must be less than the request input budget ({request_input_budget} = max_context {max_context} - response budget {response_budget})",
-            cfg.context_compact_tail_tokens
-        );
-    }
-    Ok(())
+    // 唯一实现位于 mink-core（此前整函数复制两份且已漂移）。
+    mink::runtime::validate_runtime_limits(
+        cfg.edit_fuzzy_threshold,
+        cfg.max_tokens,
+        cfg.max_turns,
+        cfg.context_compact_pct,
+        cfg.context_reserve_tokens,
+        cfg.context_compact_tail_tokens,
+        cfg.context_compact_max_output_tokens,
+        cfg.max_context_tokens,
+    )
 }
 
 /// Resolve the display label for the title bar.

@@ -106,12 +106,10 @@ impl super::runner::ToolExec for PythonTool {
     fn metadata(&self) -> super::metadata::ToolMetadata {
         super::metadata::ToolMetadata::new(
             "Python",
-            "Execute restricted Python code.",
             super::metadata::ApprovalTier::Exec,
             super::metadata::ToolResultKind::Command,
         )
         .storm_exempt()
-        .discoverable()
         // host Python 可执行任意文件写代码：成功后必须 bump mutation
         // epoch，使 read memo 失效（与 Bash/PythonSandbox 一致）。
         .mutating()
@@ -122,36 +120,8 @@ impl super::runner::ToolExec for PythonTool {
         input: &serde_json::Value,
         ctx: &crate::context::ToolContext,
     ) -> anyhow::Result<super::runner::ToolOutcome> {
-        #[derive(serde::Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Args {
-            script: Option<String>,
-            #[serde(default)]
-            script_file: Option<String>,
-            #[serde(default)]
-            timeout: Option<u64>,
-        }
-
-        let args: Args = serde_json::from_value(input.clone())?;
-
-        let script = match (args.script, args.script_file) {
-            (Some(s), None) => s,
-            (None, Some(path)) => {
-                let full_path = if std::path::Path::new(&path).is_absolute() {
-                    path
-                } else {
-                    format!("{}/{}", ctx.cwd.display(), path)
-                };
-                std::fs::read_to_string(&full_path)
-                    .map_err(|e| anyhow::anyhow!("Failed to read script file {full_path}: {e}"))?
-            }
-            (Some(_), Some(_)) => {
-                bail!("Error: provide either 'script' or 'script_file', not both");
-            }
-            (None, None) => {
-                bail!("Error: provide either 'script' or 'script_file'");
-            }
-        };
+        let args = super::process::PythonScriptArgs::parse(input)?;
+        let script = args.resolve_script(&ctx.cwd)?;
 
         let (stdout, stderr, exit_code) = execute_script_with_interrupt_in_dir(
             &script,

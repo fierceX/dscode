@@ -107,6 +107,7 @@ async fn turn_error_event_returns_error_and_logs_event() -> anyhow::Result<()> {
         .to_string();
 
     assert_eq!(err, "model error");
+    h.ctx.flush_event_log().await?;
     let events = tokio::fs::read_to_string(&h.ctx.events_path).await?;
     assert!(events.contains(r#""type":"error""#), "{events}");
     assert!(events.contains(r#""message":"model error""#), "{events}");
@@ -189,6 +190,7 @@ async fn turn_scavenges_text_tool_call_and_executes_it() -> anyhow::Result<()> {
             .unwrap()
             .contains("found")
     );
+    h.ctx.flush_event_log().await?;
     let events = tokio::fs::read_to_string(&h.ctx.events_path).await?;
     assert!(events.contains(r#""type":"scavenge""#), "{events}");
     Ok(())
@@ -279,6 +281,7 @@ async fn turn_llm_first_event_timeout_fails_with_clear_error() -> anyhow::Result
         .to_string();
 
     assert!(err.contains("first event timeout"), "{err}");
+    h.ctx.flush_event_log().await?;
     let events = tokio::fs::read_to_string(&h.ctx.events_path).await?;
     assert!(
         events.contains(r#""category":"llm_first_event_timeout""#),
@@ -309,6 +312,7 @@ async fn turn_llm_idle_timeout_fails_after_partial_stream() -> anyhow::Result<()
         .to_string();
 
     assert!(err.contains("idle timeout"), "{err}");
+    h.ctx.flush_event_log().await?;
     let events = tokio::fs::read_to_string(&h.ctx.events_path).await?;
     assert!(
         events.contains(r#""category":"llm_idle_timeout""#),
@@ -431,6 +435,7 @@ async fn invalid_scavenged_tool_call_is_logged_and_ignored() -> anyhow::Result<(
     assert_eq!(decision, TurnDecision::Stop);
     assert!(effects.is_empty());
     assert_eq!(executor.tool_call_count(), 0);
+    h.ctx.flush_event_log().await?;
     let events = tokio::fs::read_to_string(&h.ctx.events_path).await?;
     assert!(
         events.contains("discarded invalid scavenged call Read"),

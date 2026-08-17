@@ -51,11 +51,11 @@ impl From<anyhow::Error> for RegistryError {
 
 impl RegistryError {
     fn from_resolution(error: anyhow::Error) -> Self {
-        let message = error.to_string();
-        if message.contains("ambiguous") {
-            Self::Ambiguous(message)
-        } else {
-            Self::Internal(error)
+        match error.downcast_ref::<runtime_session::SessionReferenceError>() {
+            Some(runtime_session::SessionReferenceError::Ambiguous(message)) => {
+                Self::Ambiguous(message.clone())
+            }
+            Some(runtime_session::SessionReferenceError::Other(_)) | None => Self::Internal(error),
         }
     }
 
@@ -198,10 +198,6 @@ impl Registry {
         })
         .await??;
         for (dir, metadata, modified, usage) in scanned {
-            // 过滤子代理会话：parent 非空的 session 不单独展示
-            if metadata.as_ref().and_then(|m| m.parent.as_ref()).is_some() {
-                continue;
-            }
             let id = metadata.as_ref().map(|m| m.id.clone()).unwrap_or_else(|| {
                 dir.file_name()
                     .map(|n| n.to_string_lossy().to_string())
@@ -303,7 +299,7 @@ impl Registry {
             )
             .await?;
             let runtime = SessionRuntime::open(
-                self.build_options(&session_id, None, cwd)
+                self.build_options(&session_id, cwd)
                     .with_session(SessionPolicy::Resume(session_id.clone())),
             )
             .await?;
@@ -365,7 +361,7 @@ impl Registry {
         // 正确的 project 布局下解析，而不是服务启动目录）。
         let session_cwd = session_cwd_from_dir(&dir).map_err(RegistryError::Internal)?;
         let runtime = SessionRuntime::open(
-            self.build_options(id, None, &session_cwd)
+            self.build_options(id, &session_cwd)
                 .with_session(SessionPolicy::Resume(id.to_string())),
         )
         .await
@@ -704,12 +700,7 @@ impl Registry {
         }
     }
 
-    fn build_options(
-        &self,
-        session_ref: &str,
-        first_prompt: Option<&str>,
-        cwd: &Path,
-    ) -> AgentOptions {
+    fn build_options(&self, session_ref: &str, cwd: &Path) -> AgentOptions {
         let mut options = AgentOptions::new(&self.home, cwd)
             .with_model(&self.model)
             .with_session(SessionPolicy::UseOrCreate(session_ref.to_string()));
@@ -721,9 +712,6 @@ impl Registry {
         }
         if let Ok(model) = std::env::var("MODEL") {
             options = options.with_model(model);
-        }
-        if let Some(prompt) = first_prompt {
-            options = options.with_first_prompt(prompt);
         }
         options = options.with_project_scoped_sessions().with_log_events(true);
         if let Some(backend) = &self.llm_backend {

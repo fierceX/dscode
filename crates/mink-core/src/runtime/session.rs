@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 pub use crate::session::artifacts::{ArtifactManager, ArtifactRecord};
-pub use crate::session::metadata::{SessionMetadata, SessionSeed};
+pub use crate::session::metadata::{SessionMetadata, SessionReferenceError, SessionSeed};
 pub use crate::session::paths::Paths as SessionPaths;
 pub use crate::session::todo::{TodoSnapshot, TodoStatus};
 pub use crate::session::usage::{
@@ -84,6 +84,7 @@ impl SessionCatalog {
         )
         .await
         .map(|record| record.map(SessionRecord::from))
+        .map_err(anyhow::Error::from)
     }
 }
 
@@ -172,7 +173,9 @@ pub async fn resolve_record(
     reference: &str,
     layout: super::SessionLayout,
 ) -> Result<Option<crate::session::metadata::SessionRecord>> {
-    crate::session::metadata::resolve_session_record_with_layout(home, cwd, reference, layout).await
+    crate::session::metadata::resolve_session_record_with_layout(home, cwd, reference, layout)
+        .await
+        .map_err(anyhow::Error::from)
 }
 
 pub async fn ensure_metadata(paths: &SessionPaths, cwd: &Path, seed: SessionSeed) -> Result<()> {

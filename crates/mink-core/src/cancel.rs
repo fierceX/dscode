@@ -40,15 +40,6 @@ impl CancellationToken {
         }
     }
 
-    /// Create a child token from this parent. When parent is cancelled,
-    /// the child is also cancelled (via shared AtomicBool).
-    pub fn child_token(&self) -> Self {
-        Self {
-            cancelled: self.cancelled.clone(),
-            notify: self.notify.clone(),
-        }
-    }
-
     /// Create a linked child token. Parent cancellation propagates to the
     /// child, but cancelling the child does not cancel the parent.
     pub fn linked_child_token(&self) -> Self {

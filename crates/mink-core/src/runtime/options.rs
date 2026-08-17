@@ -255,11 +255,6 @@ impl AgentOptions {
         self
     }
 
-    pub fn with_agent_jsonl(mut self, enabled: bool) -> Self {
-        self.config.agent_jsonl = enabled;
-        self
-    }
-
     pub fn with_model_alias(mut self, alias: impl Into<String>, model: impl Into<String>) -> Self {
         self.config.model_aliases.insert(alias.into(), model.into());
         self
@@ -323,11 +318,6 @@ impl AgentOptions {
     pub fn with_openai_reasoning_effort(mut self, effort: impl Into<String>) -> Self {
         let effort = effort.into();
         self.config.openai_reasoning_effort = Some(effort);
-        self
-    }
-
-    pub fn without_openai_reasoning_effort(mut self) -> Self {
-        self.config.openai_reasoning_effort = None;
         self
     }
 
@@ -455,22 +445,22 @@ impl AgentOptions {
     }
 
     pub fn with_context_compact_pct(mut self, pct: u8) -> Self {
-        self.config.context_compact_pct = pct.clamp(1, 100);
+        self.config.context_compact_pct = pct;
         self
     }
 
     pub fn with_context_reserve_tokens(mut self, tokens: usize) -> Self {
-        self.config.context_reserve_tokens = tokens.max(1);
+        self.config.context_reserve_tokens = tokens;
         self
     }
 
     pub fn with_context_compact_tail_tokens(mut self, tokens: usize) -> Self {
-        self.config.context_compact_tail_tokens = tokens.max(1);
+        self.config.context_compact_tail_tokens = tokens;
         self
     }
 
     pub fn with_context_compact_max_output_tokens(mut self, tokens: i32) -> Self {
-        self.config.context_compact_max_output_tokens = tokens.max(1);
+        self.config.context_compact_max_output_tokens = tokens;
         self
     }
 
@@ -561,14 +551,6 @@ impl AgentOptions {
         self
     }
 
-    pub fn with_skills<I, S>(self, skills: I) -> Self
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        self.with_selected_skills(skills)
-    }
-
     pub fn with_mission_file(mut self, mission_file: impl Into<PathBuf>) -> Self {
         self.config.mission_file = Some(mission_file.into());
         self
@@ -603,27 +585,8 @@ impl AgentOptions {
         self
     }
 
-    pub fn with_default_tools(mut self) -> Self {
-        self.config.enabled_tools = None;
-        self
-    }
-
     pub fn with_tool_approval_mode(mut self, mode: ToolApprovalMode) -> Self {
         self.config.tool_approval_mode = mode;
-        self
-    }
-
-    pub fn with_tool_approval(mut self, approval: BTreeMap<String, ToolApprovalPolicy>) -> Self {
-        self.config.tool_approval = approval;
-        self
-    }
-
-    pub fn with_tool_approval_policy(
-        mut self,
-        tool_name: impl Into<String>,
-        policy: ToolApprovalPolicy,
-    ) -> Self {
-        self.config.tool_approval.insert(tool_name.into(), policy);
         self
     }
 

@@ -145,17 +145,9 @@ fn render_section(section: &PromptSection) -> String {
     match &section.name {
         Some(name) => format!(
             "<{tag} name=\"{}\">\n{}\n</{tag}>",
-            escape_attr(name),
+            super::escape_attr(name),
             section.content
         ),
         None => format!("<{tag}>\n{}\n</{tag}>", section.content),
     }
-}
-
-fn escape_attr(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('"', "&quot;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
 }

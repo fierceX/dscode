@@ -315,14 +315,7 @@ pub fn path_string(path: &Path) -> String {
 }
 
 fn validate_capability_name(name: &str, label: &str) -> Result<(), String> {
-    let trimmed = name.trim();
-    if trimmed.is_empty()
-        || trimmed != name
-        || trimmed.starts_with('.')
-        || trimmed.contains('/')
-        || trimmed.contains('\\')
-        || trimmed.contains("..")
-    {
+    if !crate::capabilities::source::is_valid_skill_name(name) {
         return Err(format!("invalid SDK request: invalid {label} name: {name}"));
     }
     Ok(())

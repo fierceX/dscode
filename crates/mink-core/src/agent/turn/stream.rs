@@ -61,7 +61,6 @@ impl super::TurnExecutor {
                 messages,
                 system_prompt,
                 tools_json,
-                &self.prefix,
                 LlmModelTarget::new(&model_name, model_alias.as_deref()),
             )
             .await?;
@@ -117,8 +116,9 @@ impl super::TurnExecutor {
 
         loop {
             if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.load(Ordering::SeqCst) {
-                self.ctx
-                    .log_event(serde_json::json!({"type":"stop","reason":"interrupted"}));
+                self.ctx.log_event(crate::events::EventLog::Stop {
+                    reason: "interrupted".into(),
+                });
                 stop = "interrupted".into();
                 saw_stop = true;
                 break;
@@ -142,8 +142,9 @@ impl super::TurnExecutor {
                         heartbeat,
                     );
                     if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.load(Ordering::SeqCst) {
-                        self.ctx
-                            .log_event(serde_json::json!({"type":"stop","reason":"interrupted"}));
+                        self.ctx.log_event(crate::events::EventLog::Stop {
+                            reason: "interrupted".into(),
+                        });
                         stop = "interrupted".into();
                         saw_stop = true;
                         break;
@@ -161,21 +162,30 @@ impl super::TurnExecutor {
             match evt {
                 Event::Thinking(t) => {
                     saw_visible_output = true;
-                    self.ctx
-                        .log_event(serde_json::json!({"type":"thinking","content":t.content}));
+                    self.ctx.log_event(crate::events::EventLog::Thinking {
+                        version: None,
+                        content: t.content.clone(),
+                    });
                     self.ctx.display.render_thinking(&t.content);
                     thinking.push_str(&t.content);
                 }
                 Event::Text(t) => {
                     saw_visible_output = true;
-                    self.ctx
-                        .log_event(serde_json::json!({"type":"text","content":t.content}));
+                    self.ctx.log_event(crate::events::EventLog::Text {
+                        version: None,
+                        content: t.content.clone(),
+                    });
                     self.ctx.display.render_text(&t.content);
                     text.push_str(&t.content);
                 }
                 Event::ToolCall(call) => {
                     saw_visible_output = true;
-                    self.ctx.log_event(serde_json::json!({"type":"tool_call","name":call.name,"id":call.id,"input":call.input_json}));
+                    self.ctx.log_event(crate::events::EventLog::ToolCall {
+                        version: None,
+                        name: call.name.clone(),
+                        id: call.id.clone(),
+                        input: call.input_json.clone(),
+                    });
                     let summary = build_tool_call_summary(&call.name, &call.fields);
                     self.ctx
                         .display
@@ -188,29 +198,32 @@ impl super::TurnExecutor {
                     calls.push(call);
                 }
                 Event::Usage(u) => {
-                    self.ctx.log_event(serde_json::json!({
-                        "type":"usage",
-                        "input_tokens":u.input_tokens,
-                        "output_tokens":u.output_tokens,
-                        "cache_read_input_tokens":u.cache_read_input_tokens,
-                        "cache_creation_input_tokens":u.cache_creation_input_tokens,
-                        "context_tokens": current_context_tokens,
-                        "max_context": self.ctx.config.max_context_tokens,
-                        "kind":"agent",
-                    }));
+                    self.ctx.log_event(crate::events::EventLog::Usage {
+                        version: None,
+                        input_tokens: u.input_tokens,
+                        output_tokens: u.output_tokens,
+                        cache_read_input_tokens: u.cache_read_input_tokens,
+                        cache_creation_input_tokens: u.cache_creation_input_tokens,
+                        context_tokens: Some(current_context_tokens),
+                        max_context: Some(self.ctx.config.max_context_tokens),
+                        kind: "agent".into(),
+                    });
                     usage = Some(u);
                 }
                 Event::UsageUnavailable => {}
                 Event::Stop(s) => {
-                    self.ctx
-                        .log_event(serde_json::json!({"type":"stop","reason":s.reason}));
+                    self.ctx.log_event(crate::events::EventLog::Stop {
+                        reason: s.reason.clone(),
+                    });
                     stop = s.reason;
                     saw_stop = true;
                     break;
                 }
                 Event::Error(e) => {
-                    self.ctx
-                        .log_event(serde_json::json!({"type":"error","message":e.message}));
+                    self.ctx.log_event(crate::events::EventLog::Error {
+                        version: None,
+                        message: e.message.clone(),
+                    });
                     if !saw_visible_output && is_context_overflow_message(&e.message) {
                         return Err(anyhow::Error::new(ContextOverflowError {
                             message: e.message,
@@ -219,7 +232,7 @@ impl super::TurnExecutor {
                     anyhow::bail!("{}", e.message);
                 }
                 Event::Retry(_) => {
-                    self.ctx.log_event(serde_json::json!({"type":"retry"}));
+                    self.ctx.log_event(crate::events::EventLog::Retry);
                     text.clear();
                     thinking.clear();
                     calls.clear();
@@ -261,12 +274,15 @@ impl super::TurnExecutor {
                     "LLM stream first event timeout after {} seconds",
                     timeout.as_secs()
                 );
-                self.ctx.log_event(serde_json::json!({
-                    "type": "turn_error",
-                    "category": "llm_first_event_timeout",
-                    "error": message,
-                    "elapsed_ms": now.duration_since(stream_started).as_millis(),
-                }));
+                self.ctx.log_event(crate::events::EventLog::TurnError {
+                    error: message.clone(),
+                    category: "llm_first_event_timeout".into(),
+                    severity: None,
+                    belief: None,
+                    model: None,
+                    elapsed_ms: Some(now.duration_since(stream_started).as_millis() as u64),
+                    idle_ms: None,
+                });
                 anyhow::bail!(message);
             }
             return Ok(());
@@ -279,12 +295,15 @@ impl super::TurnExecutor {
                 "LLM stream idle timeout after {} seconds without events",
                 timeout.as_secs()
             );
-            self.ctx.log_event(serde_json::json!({
-                "type": "turn_error",
-                "category": "llm_idle_timeout",
-                "error": message,
-                "idle_ms": now.duration_since(last_event_at).as_millis(),
-            }));
+            self.ctx.log_event(crate::events::EventLog::TurnError {
+                error: message.clone(),
+                category: "llm_idle_timeout".into(),
+                severity: None,
+                belief: None,
+                model: None,
+                elapsed_ms: None,
+                idle_ms: Some(now.duration_since(last_event_at).as_millis() as u64),
+            });
             anyhow::bail!(message);
         }
         Ok(())
@@ -309,12 +328,11 @@ impl super::TurnExecutor {
         let phase = if saw_any_event { "idle" } else { "first_event" };
         let elapsed = now.duration_since(stream_started).as_secs();
         let idle = now.duration_since(last_event_at).as_secs();
-        self.ctx.log_event(serde_json::json!({
-            "type": "llm_wait",
-            "phase": phase,
-            "elapsed_secs": elapsed,
-            "idle_secs": idle,
-        }));
+        self.ctx.log_event(crate::events::EventLog::LlmWait {
+            phase: phase.into(),
+            elapsed_secs: elapsed,
+            idle_secs: idle,
+        });
         self.ctx.display.render_info(&format!(
             "Waiting for model response... elapsed={}s idle={}s",
             elapsed, idle

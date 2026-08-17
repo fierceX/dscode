@@ -4,7 +4,7 @@
 //! current oh-my-pi Replace implementation. Mink keeps the pure core local so
 //! it can enforce its own file, approval, artifact, and cancellation bounds.
 
-use anyhow::{Result, anyhow, bail, ensure};
+use anyhow::{Result, bail, ensure};
 
 const DOMINANT_FUZZY_MIN_CONFIDENCE: f64 = 0.97;
 const DOMINANT_FUZZY_DELTA: f64 = 0.08;
@@ -98,27 +98,32 @@ pub fn replace_text(
 
         // Fuzzy all-replace path (old != new): replace every near candidate.
         let mut replacements: Vec<(Match, String)> = Vec::new();
-        loop {
-            let excluded = replacements
-                .iter()
-                .map(|(matched, _)| (matched.start, matched.end))
-                .collect::<Vec<_>>();
-            let outcome = find_match(content, old_text, allow_fuzzy, threshold, &excluded);
-            let Some(matched) = outcome.matched else {
-                break;
-            };
+        let mut last_outcome = find_match(content, old_text, allow_fuzzy, threshold, &[]);
+        while let Some(matched) = last_outcome.matched.as_ref() {
             let actual = &content[matched.start..matched.end];
             let replacement = adjust_indentation(old_text, actual, new_text);
             if replacement == actual {
                 break;
             }
-            replacements.push((matched, replacement));
+            replacements.push((matched.clone(), replacement));
+
+            let excluded = replacements
+                .iter()
+                .map(|(matched, _)| (matched.start, matched.end))
+                .collect::<Vec<_>>();
+            last_outcome = find_match(content, old_text, allow_fuzzy, threshold, &excluded);
         }
 
-        ensure!(
-            !replacements.is_empty(),
-            match_error(content, old_text, path, allow_fuzzy, threshold)
-        );
+        if replacements.is_empty() {
+            bail!(format_match_error(
+                content,
+                path,
+                old_text,
+                &last_outcome,
+                allow_fuzzy,
+                threshold
+            ));
+        }
         replacements.sort_by_key(|(matched, _)| matched.start);
         let mut result = String::with_capacity(content.len());
         let mut source_index = 0;
@@ -681,24 +686,6 @@ fn format_occurrence_error(content: &str, path: &str, matches: &[Match], total: 
     }
     message.push_str("\nAdd more context lines to disambiguate.");
     message
-}
-
-fn match_error(
-    content: &str,
-    old_text: &str,
-    path: &str,
-    allow_fuzzy: bool,
-    threshold: f64,
-) -> anyhow::Error {
-    let outcome = find_match(content, old_text, allow_fuzzy, threshold, &[]);
-    anyhow!(format_match_error(
-        content,
-        path,
-        old_text,
-        &outcome,
-        allow_fuzzy,
-        threshold
-    ))
 }
 
 fn format_match_error(

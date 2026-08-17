@@ -17,7 +17,7 @@ pub use skills::{
     skill_providers_for_policy,
 };
 #[cfg(test)]
-pub use skills::{ResolvedSkill, SkillInfo, SkillSource};
+pub use skills::{ResolvedSkill, SkillInfo};
 pub use source::{CapabilityExposure, SourceLevel, SourceMeta};
 
 #[derive(Debug, Clone, Default)]
@@ -39,20 +39,11 @@ impl CapabilitySnapshot {
     pub fn load_default(
         cwd: &std::path::Path,
         home: &std::path::Path,
-        session_id: &str,
-        resource_session_id: &str,
         selected_skills: &[String],
     ) -> anyhow::Result<Self> {
-        let skills = build_default_skill_snapshot(
-            cwd,
-            home,
-            session_id,
-            resource_session_id,
-            selected_skills,
-        )?;
-        let context_files =
-            build_default_context_file_snapshot(cwd, home, session_id, resource_session_id)?;
-        let rules = build_default_rule_snapshot(cwd, home, session_id, resource_session_id)?;
+        let skills = build_default_skill_snapshot(cwd, home, selected_skills)?;
+        let context_files = build_default_context_file_snapshot(cwd, home)?;
+        let rules = build_default_rule_snapshot(cwd, home)?;
         let warnings = collect_warnings(&skills, &context_files, &rules);
         let dependency_fingerprint = compute_dependency_fingerprint(&[
             &skills.dependency_fingerprint,
@@ -72,23 +63,15 @@ impl CapabilitySnapshot {
         providers: &[Arc<dyn SkillProvider>],
         cwd: &std::path::Path,
         home: &std::path::Path,
-        session_id: &str,
-        resource_session_id: &str,
         selected_skills: &[String],
     ) -> anyhow::Result<Self> {
         let skills = SkillSnapshot::load(
             providers,
-            &skills::LoadContext {
-                cwd,
-                home,
-                session_id,
-                resource_session_id,
-            },
+            &skills::LoadContext { cwd, home },
             selected_skills,
         )?;
-        let context_files =
-            build_default_context_file_snapshot(cwd, home, session_id, resource_session_id)?;
-        let rules = build_default_rule_snapshot(cwd, home, session_id, resource_session_id)?;
+        let context_files = build_default_context_file_snapshot(cwd, home)?;
+        let rules = build_default_rule_snapshot(cwd, home)?;
         let warnings = collect_warnings(&skills, &context_files, &rules);
         let dependency_fingerprint = compute_dependency_fingerprint(&[
             &skills.dependency_fingerprint,

@@ -65,22 +65,11 @@ fn execute_with_interrupt_in_dir(
     };
 
     let sync = execute_sync(command, timeout, interrupt, cwd)?;
-    let (output_bytes, stderr_bytes, exit_code) = (sync.stdout, sync.stderr, sync.code);
-
-    let mut out = String::from_utf8_lossy(&output_bytes).to_string();
-    let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
-    if !stderr.is_empty() {
-        if !out.is_empty() {
-            out.push('\n');
-        }
-        out.push_str(&stderr);
-    }
-    if let Some(code) = exit_code
-        && code != 0
-    {
-        out.push_str(&format!("\n\nProcess completed with exit code {}.", code));
-    }
-    Ok((out, exit_code))
+    // execute_sync 已把 stderr 合入 stdout（sync.stderr 恒为空）。
+    // 退出码由 runner 层统一加 "Exit code: N" header（tools.json 契约），
+    // 此处不再重复追加。
+    let out = String::from_utf8_lossy(&sync.stdout).to_string();
+    Ok((out, sync.code))
 }
 
 fn execute_sync(
@@ -145,14 +134,12 @@ fn execute_sync(
 
     Ok(SyncOutput {
         stdout: out.into_bytes(),
-        stderr: Vec::new(),
         code: completion.exit_code,
     })
 }
 
 struct SyncOutput {
     stdout: Vec<u8>,
-    stderr: Vec<u8>,
     code: Option<i32>,
 }
 
@@ -162,7 +149,6 @@ impl super::runner::ToolExec for BashTool {
     fn metadata(&self) -> super::metadata::ToolMetadata {
         super::metadata::ToolMetadata::new(
             "Bash",
-            "Execute a shell command.",
             super::metadata::ApprovalTier::Exec,
             super::metadata::ToolResultKind::Command,
         )
@@ -185,7 +171,6 @@ impl super::runner::ToolExec for BashTool {
         if let Some(guidance) =
             bash_misuse_guidance(&args.command, &ctx.tool_surface, &ctx.tool_capabilities)
         {
-            guidance.validate(&ctx.tool_surface)?;
             bail!("Error: {}", guidance.content);
         }
         Self::execute_with_context(&args.command, args.timeout, ctx)

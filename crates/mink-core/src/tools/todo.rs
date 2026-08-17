@@ -52,12 +52,7 @@ struct TodoAdvanceArgs {
 
 impl ToolExec for TodoReadTool {
     fn metadata(&self) -> ToolMetadata {
-        ToolMetadata::new(
-            "TodoRead",
-            "Read the persisted todo state for the current session.",
-            ApprovalTier::Read,
-            ToolResultKind::Text,
-        )
+        ToolMetadata::new("TodoRead", ApprovalTier::Read, ToolResultKind::Text)
     }
 
     fn execute(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutcome> {
@@ -76,14 +71,9 @@ impl ToolExec for TodoReadTool {
 
 impl ToolExec for TodoWriteTool {
     fn metadata(&self) -> ToolMetadata {
-        ToolMetadata::new(
-            "TodoWrite",
-            "Apply an incremental update to the persisted todo state.",
-            ApprovalTier::Write,
-            ToolResultKind::Control,
-        )
-        .mutating()
-        .storm_exempt()
+        ToolMetadata::new("TodoWrite", ApprovalTier::Write, ToolResultKind::Control)
+            .mutating()
+            .storm_exempt()
     }
 
     fn execute(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutcome> {
@@ -139,14 +129,9 @@ impl ToolExec for TodoWriteTool {
 
 impl ToolExec for TodoAdvanceTool {
     fn metadata(&self) -> ToolMetadata {
-        ToolMetadata::new(
-            "TodoAdvance",
-            "Apply progress transitions to persisted todo items.",
-            ApprovalTier::Write,
-            ToolResultKind::Control,
-        )
-        .mutating()
-        .storm_exempt()
+        ToolMetadata::new("TodoAdvance", ApprovalTier::Write, ToolResultKind::Control)
+            .mutating()
+            .storm_exempt()
     }
 
     fn execute(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutcome> {

@@ -56,6 +56,7 @@ async fn ensure_logs_prefix_snapshot_once_and_rebuild_replaces_it() -> anyhow::R
             .collect()
     };
 
+    ctx.flush_event_log().await?;
     let events = tokio::fs::read_to_string(&ctx.events_path).await?;
     let snapshots = snapshot(&events);
     assert_eq!(
@@ -79,12 +80,14 @@ async fn ensure_logs_prefix_snapshot_once_and_rebuild_replaces_it() -> anyhow::R
 
     // Cache hit must not duplicate the snapshot.
     manager.ensure()?;
+    ctx.flush_event_log().await?;
     let events = tokio::fs::read_to_string(&ctx.events_path).await?;
     assert_eq!(snapshot(&events).len(), 1);
 
     // Invalidation rebuild replaces the snapshot with the new fingerprint.
     manager.invalidate();
     manager.ensure()?;
+    ctx.flush_event_log().await?;
     let events = tokio::fs::read_to_string(&ctx.events_path).await?;
     let snapshots = snapshot(&events);
     assert_eq!(snapshots.len(), 2, "rebuild appends one more snapshot");

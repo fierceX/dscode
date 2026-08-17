@@ -344,8 +344,17 @@ impl AgentSharedContext {
         self.usage.scope(kind, self.config.session_id.clone())
     }
 
-    /// Append a JSON line to events.jsonl. In stream-json mode, also emit to stdout.
-    pub fn log_event(&self, value: Value) {
+    /// Append a typed event to events.jsonl. In stream-json mode, also emit
+    /// to stdout. Persistence requires a configured `EventLogWriter`; callers
+    /// that build a context by hand (tests, embedded builders) inject one.
+    pub fn log_event(&self, event: crate::events::EventLog) {
+        let value = match serde_json::to_value(event) {
+            Ok(value) => value,
+            Err(e) => {
+                self.warn_event_log_once(&format!("failed to serialize event: {e}"));
+                return;
+            }
+        };
         let line = match serde_json::to_string(&value) {
             Ok(s) => s,
             Err(e) => {
@@ -357,26 +366,7 @@ impl AgentSharedContext {
             if let Some(writer) = &self.event_log_writer {
                 writer.send(line.clone());
             } else {
-                match std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&self.events_path)
-                {
-                    Ok(mut file) => {
-                        if let Err(e) = writeln!(file, "{line}") {
-                            self.warn_event_log_once(&format!(
-                                "failed to write event log {}: {e}",
-                                self.events_path.display()
-                            ));
-                        }
-                    }
-                    Err(e) => {
-                        self.warn_event_log_once(&format!(
-                            "failed to open event log {}: {e}",
-                            self.events_path.display()
-                        ));
-                    }
-                }
+                self.warn_event_log_once("event log writer is not configured; event discarded");
             }
         }
         if self.config.output_format == OutputFormat::StreamJson {
@@ -398,12 +388,6 @@ impl AgentSharedContext {
             writer.flush().await?;
         }
         Ok(())
-    }
-
-    pub fn log_typed_event(&self, event: crate::events::EventLog) {
-        if let Ok(value) = serde_json::to_value(event) {
-            self.log_event(value);
-        }
     }
 
     fn warn_event_log_once(&self, message: &str) {

@@ -94,8 +94,6 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
             &providers,
             &params.cwd,
             &params.home,
-            &params.session_id,
-            &vfs_scope.resource_session_id,
             &config.skills,
         )?)
     };
@@ -166,29 +164,40 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
         event_log_writer,
         stream_flush_last: Mutex::new(None),
     });
-    ctx.log_event(serde_json::json!({
-        "type": "tool_surface",
-        "role": format!("{:?}", ctx.tool_resolution_context.role()),
-        "filesystem_backend": format!("{:?}", ctx.tool_resolution_context.filesystem_backend()),
-        "active": ctx.tool_surface.names().collect::<Vec<_>>(),
-        "hidden": ctx.tool_surface.hidden().iter().map(|(name, reason)| {
-            serde_json::json!({"name": name, "reason": format!("{reason:?}")})
-        }).collect::<Vec<_>>(),
-        "surface_fingerprint": ctx.tool_surface.fingerprint(),
-    }));
-    ctx.log_event(serde_json::json!({
-        "type": "tool_capability_resolution",
-        "bindings": ctx.tool_capabilities.iter().map(|(capability, binding)| {
-            serde_json::json!({
-                "capability": format!("{capability:?}"),
-                "primary": binding.primary.tool,
-                "tier": format!("{:?}", binding.primary.tier),
-                "alternatives": binding.alternatives.iter().map(|provider| provider.tool.clone()).collect::<Vec<_>>(),
-                "use_scope": format!("{:?}", binding.primary.use_scope),
+    ctx.log_event(crate::events::EventLog::ToolSurface {
+        role: format!("{:?}", ctx.tool_resolution_context.role()),
+        filesystem_backend: format!("{:?}", ctx.tool_resolution_context.filesystem_backend()),
+        active: ctx
+            .tool_surface
+            .names()
+            .map(str::to_string)
+            .collect::<Vec<_>>(),
+        hidden: ctx
+            .tool_surface
+            .hidden()
+            .iter()
+            .map(
+                |(name, reason)| serde_json::json!({"name": name, "reason": format!("{reason:?}")}),
+            )
+            .collect::<Vec<_>>(),
+        surface_fingerprint: ctx.tool_surface.fingerprint().to_string(),
+    });
+    ctx.log_event(crate::events::EventLog::ToolCapabilityResolution {
+        bindings: ctx
+            .tool_capabilities
+            .iter()
+            .map(|(capability, binding)| {
+                serde_json::json!({
+                    "capability": format!("{capability:?}"),
+                    "primary": binding.primary.tool,
+                    "tier": format!("{:?}", binding.primary.tier),
+                    "alternatives": binding.alternatives.iter().map(|provider| provider.tool.clone()).collect::<Vec<_>>(),
+                    "use_scope": format!("{:?}", binding.primary.use_scope),
+                })
             })
-        }).collect::<Vec<_>>(),
-        "capability_fingerprint": ctx.tool_capabilities.fingerprint(),
-    }));
+            .collect::<Vec<_>>(),
+        capability_fingerprint: ctx.tool_capabilities.fingerprint().to_string(),
+    });
 
     Ok(BuiltAgentContext { ctx, paths, is_new })
 }

@@ -6,13 +6,15 @@ use std::sync::Arc;
 
 pub struct TurnCompactor {
     ctx: Arc<AgentSharedContext>,
+    prefix: PrefixManager,
     compacted_this_turn: bool,
 }
 
 impl TurnCompactor {
-    pub fn new(ctx: Arc<AgentSharedContext>) -> Self {
+    pub fn new(ctx: Arc<AgentSharedContext>, prefix: PrefixManager) -> Self {
         Self {
             ctx,
+            prefix,
             compacted_this_turn: false,
         }
     }
@@ -31,7 +33,6 @@ impl TurnCompactor {
         messages: &mut Vec<serde_json::Value>,
         system_prompt: &mut String,
         tools_json: &mut Vec<serde_json::Value>,
-        prefix: &PrefixManager,
         target: LlmModelTarget<'_>,
     ) -> Result<bool> {
         if self.compacted_this_turn {
@@ -54,7 +55,7 @@ impl TurnCompactor {
             .await?;
         if did_compact {
             self.compacted_this_turn = true;
-            (*system_prompt, *tools_json) = prefix.ensure()?;
+            (*system_prompt, *tools_json) = self.prefix.ensure()?;
             *messages = self.ctx.compaction.active_messages().await?;
             return Ok(true);
         }

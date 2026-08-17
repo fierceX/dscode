@@ -1,4 +1,4 @@
-use super::normalize::strip_ansi;
+use crate::tui::sanitize::strip_ansi;
 use crate::tui::theme;
 use ratatui::text::{Line, Span};
 

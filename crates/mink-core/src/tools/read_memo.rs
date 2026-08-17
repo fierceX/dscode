@@ -116,13 +116,6 @@ impl ReadMemo {
         })
     }
 
-    /// Drop every entry (used on epoch changes so stale entries cannot linger).
-    pub fn clear(&mut self) {
-        self.entries.clear();
-        self.recency.clear();
-        self.total = 0;
-    }
-
     fn touch(&mut self, path: &PathBuf) {
         self.recency.retain(|candidate| candidate != path);
         self.recency.push_back(path.clone());

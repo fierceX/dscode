@@ -72,12 +72,10 @@ fn run_full_tui(
         &mut terminal,
         sig_rx,
         orch_tx,
-        TuiLoopConfig {
-            mode: TuiMode::Full,
-            session,
-            initial_model,
-            sandbox,
-        },
+        TuiMode::Full,
+        session,
+        initial_model,
+        sandbox,
     )
 }
 
@@ -122,34 +120,22 @@ fn run_inline_tui(
         &mut terminal,
         sig_rx,
         orch_tx,
-        TuiLoopConfig {
-            mode: effective_mode,
-            session,
-            initial_model,
-            sandbox,
-        },
+        effective_mode,
+        session,
+        initial_model,
+        sandbox,
     )
-}
-
-struct TuiLoopConfig<'a> {
-    mode: TuiMode,
-    session: &'a crate::runtime::SessionInfo,
-    initial_model: &'a str,
-    sandbox: &'a SandboxConfig,
 }
 
 fn tui_main_loop(
     terminal: &mut ratatui::DefaultTerminal,
     sig_rx: mpsc::Receiver<TuiSignal>,
     orch_tx: tokio::sync::mpsc::UnboundedSender<RuntimeCmd>,
-    config: TuiLoopConfig<'_>,
+    mode: TuiMode,
+    session: &crate::runtime::SessionInfo,
+    initial_model: &str,
+    sandbox: &SandboxConfig,
 ) -> anyhow::Result<()> {
-    let TuiLoopConfig {
-        mode,
-        session,
-        initial_model,
-        sandbox,
-    } = config;
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let mut state = TuiState {
         lines: load_session(&session.events_path),

@@ -4,7 +4,7 @@ use crate::capabilities::{CapabilityExposure, SourceLevel, SourceMeta};
 use crate::config::ResolvedConfig as Config;
 use crate::resources::{
     ResourceHandler,
-    router::{Resource, ResourceContentType, ResourceMetadata, ResourceRequest},
+    router::{Resource, ResourceRequest},
 };
 use crate::runtime::{
     AgentEvent, AgentOptions, AgentTool, EventSink, SkillDiscoveryPolicy, ToolDefinition,
@@ -603,9 +603,6 @@ impl ResourceHandler for KbResourceHandler {
         Ok(Resource {
             canonical_url: req.resource_url.clone(),
             content: format!("kb authority={} path={}", req.authority, req.path),
-            content_type: ResourceContentType::PlainText,
-            immutable: Some(true),
-            metadata: ResourceMetadata::default(),
         })
     }
 }
@@ -782,13 +779,11 @@ fn tool_call_event(
                 .collect()
         })
         .unwrap_or_default();
-    let order = fields.keys().cloned().collect();
     crate::protocol::ToolCallEvent {
         name: name.into(),
         id: id.into(),
         input_json: input,
         fields,
-        order,
     }
 }
 
@@ -1787,7 +1782,6 @@ fn mock_llm_tool_use() -> crate::llm::mock::MockLlmBackend {
                     id: "call_bash_1".into(),
                     input_json: json!({"command": "echo hello"}),
                     fields,
-                    order: vec!["command".into()],
                 })),
                 Ok(Event::Stop(StopEvent {
                     reason: "tool_use".into(),
@@ -1965,7 +1959,6 @@ fn mock_llm_single_tool(name: &str) -> crate::llm::mock::MockLlmBackend {
                     id: format!("call_{}", name.to_ascii_lowercase()),
                     input_json: serde_json::json!({}),
                     fields: Default::default(),
-                    order: Vec::new(),
                 })),
                 Ok(Event::Stop(StopEvent {
                     reason: "tool_use".into(),
@@ -1996,7 +1989,6 @@ fn mock_llm_custom_tool_use() -> crate::llm::mock::MockLlmBackend {
                     id: "call_echo_1".into(),
                     input_json: serde_json::json!({"text": "hello"}),
                     fields,
-                    order: vec!["text".into()],
                 })),
                 Ok(Event::Stop(StopEvent {
                     reason: "tool_use".into(),
@@ -2179,7 +2171,6 @@ async fn custom_tool_timeout_is_local_and_next_turn_still_runs() {
                             id: "call-timeout".into(),
                             input_json: serde_json::json!({}),
                             fields: Default::default(),
-                            order: Vec::new(),
                         },
                     )),
                     Ok(crate::protocol::Event::Stop(crate::protocol::StopEvent {

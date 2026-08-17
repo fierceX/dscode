@@ -87,11 +87,12 @@ impl SubAgentCoordinator {
                 self.ctx
                     .display
                     .render_sub_agent_status(&session_id, "launched", 0, 0);
-                self.ctx.log_event(serde_json::json!({
-                    "type": "sub_agent",
-                    "session_id": session_id.clone(),
-                    "status": "launched",
-                }));
+                self.ctx.log_event(crate::events::EventLog::SubAgent {
+                    session_id: session_id.clone(),
+                    status: "launched".into(),
+                    input_tokens: None,
+                    output_tokens: None,
+                });
 
                 let sub_idx = processed_results.len();
                 processed_results.push(result);
@@ -191,13 +192,12 @@ impl SubAgentCoordinator {
                             sa.usage.total_input_tokens,
                             sa.usage.total_output_tokens,
                         );
-                        self.ctx.log_event(serde_json::json!({
-                            "type": "sub_agent",
-                            "session_id": session_id,
-                            "status": sa.status,
-                            "input_tokens": sa.usage.total_input_tokens,
-                            "output_tokens": sa.usage.total_output_tokens,
-                        }));
+                        self.ctx.log_event(crate::events::EventLog::SubAgent {
+                            session_id,
+                            status: sa.status,
+                            input_tokens: Some(sa.usage.total_input_tokens),
+                            output_tokens: Some(sa.usage.total_output_tokens),
+                        });
                         self.ctx
                             .stats
                             .record_sub_agent(
@@ -228,11 +228,12 @@ impl SubAgentCoordinator {
                 self.ctx
                     .display
                     .render_sub_agent_status(&launch.session_id, reason, 0, 0);
-                self.ctx.log_event(serde_json::json!({
-                    "type": "sub_agent",
-                    "session_id": launch.session_id,
-                    "status": reason,
-                }));
+                self.ctx.log_event(crate::events::EventLog::SubAgent {
+                    session_id: launch.session_id.clone(),
+                    status: reason.into(),
+                    input_tokens: None,
+                    output_tokens: None,
+                });
                 if let Some(pr) = processed_results.get_mut(launch.idx) {
                     pr.status = if reason == "cancelled" {
                         ToolStatus::Interrupted

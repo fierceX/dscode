@@ -29,12 +29,7 @@ pub struct RuleSnapshot {
     pub dependency_fingerprint: String,
 }
 
-pub fn build_default_rule_snapshot(
-    _cwd: &Path,
-    _home: &Path,
-    _session_id: &str,
-    _resource_session_id: &str,
-) -> Result<RuleSnapshot> {
+pub fn build_default_rule_snapshot(_cwd: &Path, _home: &Path) -> Result<RuleSnapshot> {
     let content = "- Be concise and concrete. No pleasantries, no explanations unless asked. Raw results only.\n- Prefer safe, exact edits.\n- Report failures clearly.";
     let rule = LoadedRule {
         revision: crate::capabilities::fingerprint::sha256_hex(content),

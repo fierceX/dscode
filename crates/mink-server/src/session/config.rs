@@ -16,7 +16,6 @@ pub struct ServerConfig {
     /// Maximum concurrently running sessions.
     pub max_running: usize,
     /// Idle sessions are kept open at most this long before auto-close (secs).
-    #[allow(dead_code)] // P2: idle auto-close
     pub idle_close_secs: u64,
 }
 
@@ -43,15 +42,10 @@ impl ServerConfig {
             host: env_or("MINK_SERVER_HOST")
                 .or(file_cfg.host)
                 .unwrap_or_else(|| "0.0.0.0".to_string()),
-            port: env_or("MINK_SERVER_PORT")
-                .and_then(|v| v.parse().ok())
-                .or(file_cfg.port)
-                .unwrap_or(8765),
+            port: env_parsed_or("MINK_SERVER_PORT", file_cfg.port).unwrap_or(8765),
             mink_home,
             model,
-            max_running: env_or("MINK_SERVER_MAX_RUNNING")
-                .and_then(|v| v.parse().ok())
-                .or(file_cfg.max_running)
+            max_running: env_parsed_or("MINK_SERVER_MAX_RUNNING", file_cfg.max_running)
                 .unwrap_or(4),
             idle_close_secs: file_cfg.idle_close_secs.unwrap_or(1800),
         })
@@ -65,7 +59,7 @@ fn read_user_minkrc() -> TomlConfig {
     struct UserRc {
         model: Option<String>,
     }
-    let home = std::env::var("HOME").unwrap_or_default();
+    let home = env_or("HOME").unwrap_or_default();
     let path = std::path::Path::new(&home).join(".minkrc");
     let Ok(text) = std::fs::read_to_string(&path) else {
         return TomlConfig::default();
@@ -127,13 +121,22 @@ fn parse_toml(path: &std::path::Path) -> anyhow::Result<TomlConfig> {
 }
 
 fn default_home() -> PathBuf {
-    std::env::var_os("HOME")
+    env_or("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn env_or(key: &str) -> Option<String> {
-    std::env::var(key).ok().filter(|v| !v.is_empty())
+    std::env::var(key).ok().filter(|value| !value.is_empty())
+}
+
+fn env_parsed_or<T>(key: &str, fallback: Option<T>) -> Option<T>
+where
+    T: std::str::FromStr,
+{
+    env_or(key)
+        .and_then(|value| value.parse().ok())
+        .or(fallback)
 }
 
 /// Validate that the server can start: home exists or can be created.

@@ -67,7 +67,6 @@ fn tool_call_event(id: &str) -> ToolCallEvent {
         id: id.into(),
         input_json: json!({"command": "false"}),
         fields: Default::default(),
-        order: vec![],
     }
 }
 
@@ -203,7 +202,7 @@ async fn lossy_lines_skips_bad_json() {
         )
         .await
         .unwrap();
-    let lines = store.lines_lossy().await.unwrap();
+    let lines = store.lines_lossy_with_warnings(|_| {}).await.unwrap();
     assert_eq!(lines.len(), 2);
     assert_eq!(lines[0]["content"], "ok");
     assert_eq!(lines[1]["content"], "ok2");

@@ -138,7 +138,8 @@ fn dedup_hash_ignores_belief_value() {
     // 第二次不应被判定为新证据。
     assert_eq!(first.hash, second.hash);
     assert_ne!(first.text, second.text);
-    assert!(!t.is_fresh(first.hash) || true); // mark_injected 前恒 fresh
+    // mark_injected 前恒 fresh。
+    assert!(t.is_fresh(first.hash));
     t.mark_injected(first.hash);
     assert!(!t.is_fresh(second.hash));
 }

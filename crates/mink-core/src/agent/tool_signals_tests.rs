@@ -11,7 +11,6 @@ fn tool_result(content: &str) -> ToolExecution {
         conv_content: String::new(),
         spawns_sub_agent: false,
         sub_agent_prompt: None,
-        sub_agent_description: None,
         sub_agent_fork: false,
         exit_code: None,
         status: crate::tools::metadata::ToolStatus::Failed(

@@ -14,7 +14,6 @@ async fn successful_display_text_may_start_with_error_prefix() {
         id: "call-error-prefix".into(),
         input_json: serde_json::json!({}),
         fields: BTreeMap::new(),
-        order: Vec::new(),
     };
     let result = format_dispatched_result(
         &ctx,
@@ -175,13 +174,11 @@ fn tool_schema_order_is_stable_and_descriptions_are_self_contained() {
 
 #[test]
 fn registry_metadata_is_complete() {
+    // summary 字段已删除：模型可见描述来自 tools.json schema（由
+    // catalog 一致性测试钉住），registry 元数据只保留行为属性。
     for tool in tool_registry() {
         let meta = tool.metadata();
-        assert!(
-            !meta.summary.trim().is_empty(),
-            "{} summary is empty",
-            meta.name
-        );
+        assert!(!meta.name.is_empty(), "tool name is empty");
     }
 }
 
@@ -224,10 +221,7 @@ fn expected_tool_metadata_contracts() {
     assert_eq!(meta("SubAgent").approval, ApprovalTier::Exec);
     assert_eq!(meta("SubAgent").result_kind, ToolResultKind::SubAgent);
     assert!(meta("SubAgent").spawns_sub_agent);
-    assert!(meta("PlanDraft").internal);
-    assert!(meta("PlanConfirm").internal);
-    assert!(meta("PlanClear").internal);
-    assert!(meta("Python").discoverable);
+    // internal/discoverable 元数据字段已删除（零生产消费）。
 }
 
 #[test]
@@ -384,7 +378,6 @@ fn test_call(name: &str) -> ToolCallEvent {
         id: "call_test".to_string(),
         input_json: serde_json::json!({}),
         fields: BTreeMap::new(),
-        order: Vec::new(),
     }
 }
 

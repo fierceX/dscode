@@ -11,7 +11,6 @@ use anyhow::{Result, bail};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -434,30 +433,12 @@ impl CompactionEngine {
         if !self.config.log_events {
             return;
         }
-        let event = json!({
-            "type": "usage",
-            "input_tokens": usage.input_tokens,
-            "output_tokens": usage.output_tokens,
-            "cache_read_input_tokens": usage.cache_read_input_tokens,
-            "cache_creation_input_tokens": usage.cache_creation_input_tokens,
-            "kind": "compact",
-        });
+        let event = crate::events::EventLog::usage(usage, "compact");
         let Ok(line) = serde_json::to_string(&event) else {
             return;
         };
         if let Some(writer) = &self.event_log_writer {
             writer.send(line);
-            return;
-        }
-        // Test contexts without a session writer retain the direct append
-        // fallback so their synchronous event-log assertions keep working.
-        let events_path = self.summary_path.with_file_name("events.jsonl");
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&events_path)
-        {
-            let _ = writeln!(file, "{line}");
         }
     }
 }
@@ -569,9 +550,12 @@ fn find_compaction_cut_point(messages: &[Value], tail_target: usize) -> usize {
         // Not enough history to satisfy the guard; keep the token-based cut.
         return safe;
     }
-    while cut < messages.len() && !is_safe_context_start(&messages[cut]) {
-        cut += 1;
-    }
+    // `cut` 由 safe start 或真实 user 消息得出，必然是安全边界；
+    // 前向对齐循环不可达，以断言钉住该不变式。
+    debug_assert!(
+        cut >= messages.len() || is_safe_context_start(&messages[cut]),
+        "compaction cut point must land on a safe context start"
+    );
     cut
 }
 

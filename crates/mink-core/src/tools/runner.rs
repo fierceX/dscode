@@ -129,7 +129,6 @@ pub struct ToolExecution {
     pub conv_content: String,
     pub spawns_sub_agent: bool,
     pub sub_agent_prompt: Option<String>,
-    pub sub_agent_description: Option<String>,
     pub sub_agent_fork: bool,
     pub exit_code: Option<i32>,
     pub status: ToolStatus,
@@ -177,7 +176,6 @@ impl ToolExecution {
             conv_content: String::new(),
             spawns_sub_agent: false,
             sub_agent_prompt: None,
-            sub_agent_description: None,
             sub_agent_fork: false,
             exit_code: None,
             status: ToolStatus::Succeeded,
@@ -192,9 +190,13 @@ impl ToolExecution {
     }
 }
 
+// Immediate results are short-lived by construction and already owned by the
+// caller; boxing them only to make the enum smaller added an unnecessary
+// allocation on the policy-block hot path.
+#[allow(clippy::large_enum_variant)]
 enum PreparedCall {
     Execute(ToolCallEvent),
-    Immediate(Box<ToolExecution>),
+    Immediate(ToolExecution),
 }
 
 struct ToolPolicyGate<'a> {
@@ -307,7 +309,7 @@ impl ToolRunner {
         for call in calls {
             match self.prepare_call(call) {
                 PreparedCall::Immediate(result) => {
-                    handles.push(tokio::spawn(async move { Ok(*result) }));
+                    handles.push(tokio::spawn(async move { Ok(result) }));
                 }
                 PreparedCall::Execute(call) => {
                     if let Some(tool) = self.find_custom_tool(&call.name).cloned() {
@@ -341,7 +343,7 @@ impl ToolRunner {
 
     async fn execute_prepared_call(&self, call: ToolCallEvent) -> Result<ToolExecution> {
         match self.prepare_call(call) {
-            PreparedCall::Immediate(result) => Ok(*result),
+            PreparedCall::Immediate(result) => Ok(result),
             PreparedCall::Execute(call) => {
                 if let Some(tool) = self.find_custom_tool(&call.name).cloned() {
                     return execute_custom(&self.ctx, &call, tool).await;
@@ -359,14 +361,14 @@ impl ToolRunner {
         }
     }
 
-    fn prepare_call(&self, mut call: ToolCallEvent) -> PreparedCall {
+    fn prepare_call(&self, call: ToolCallEvent) -> PreparedCall {
         let tool_metadata = self.metadata_for(&call.name);
         let policy = ToolPolicyGate {
             surface: &self.ctx.tool_surface,
             storm: &self.storm,
         };
         if let Some(blocked) = policy.evaluate(&call, tool_metadata) {
-            return PreparedCall::Immediate(Box::new(blocked));
+            return PreparedCall::Immediate(blocked);
         }
 
         PreparedCall::Execute(call)
@@ -728,11 +730,6 @@ fn format_dispatched_result(
     } else {
         None
     };
-    let sub_agent_description = if spawns_sub_agent && success {
-        call.fields.get("description").cloned()
-    } else {
-        None
-    };
     let sub_agent_fork = spawns_sub_agent
         && success
         && call
@@ -749,7 +746,6 @@ fn format_dispatched_result(
         conv_content,
         spawns_sub_agent,
         sub_agent_prompt,
-        sub_agent_description,
         sub_agent_fork,
         exit_code,
         status,
@@ -891,7 +887,6 @@ pub(crate) fn blocked_tool_result(
         conv_content: String::new(),
         spawns_sub_agent: false,
         sub_agent_prompt: None,
-        sub_agent_description: None,
         sub_agent_fork: false,
         exit_code: None,
         status: ToolStatus::Blocked(blocker),
@@ -930,15 +925,9 @@ pub struct SubAgentTool;
 
 impl ToolExec for SubAgentTool {
     fn metadata(&self) -> ToolMetadata {
-        ToolMetadata::new(
-            "SubAgent",
-            "Spawn a child agent for isolated or forked work.",
-            ApprovalTier::Exec,
-            ToolResultKind::SubAgent,
-        )
-        .storm_exempt()
-        .discoverable()
-        .spawns_sub_agent()
+        ToolMetadata::new("SubAgent", ApprovalTier::Exec, ToolResultKind::SubAgent)
+            .storm_exempt()
+            .spawns_sub_agent()
     }
 
     fn execute(
@@ -1170,10 +1159,13 @@ fn utf8_prefix_by_bytes(s: &str, max_bytes: usize) -> &str {
     &s[..end]
 }
 
+static RE_ANSI_ESCAPE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+    regex::Regex::new("\x1b\\[[0-9;]*[a-zA-Z]").expect("valid ANSI regex")
+});
+
 fn filter_bash_noise(s: &str) -> String {
     // Strip ANSI escape sequences
-    let ansi_re = regex::Regex::new("\x1b\\[[0-9;]*[a-zA-Z]").unwrap();
-    let no_ansi = ansi_re.replace_all(s, "");
+    let no_ansi = RE_ANSI_ESCAPE.replace_all(s, "");
 
     // Compress consecutive identical lines
     let lines: Vec<&str> = no_ansi.lines().collect();

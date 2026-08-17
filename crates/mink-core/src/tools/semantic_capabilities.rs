@@ -1,7 +1,7 @@
 use crate::resources::ResourceRouter;
 use crate::tools::catalog::ToolCatalog;
 use crate::tools::surface::{FilesystemBackend, ModelToolSurface, ToolResolutionContext};
-use anyhow::{Result, ensure};
+use anyhow::{Result, bail, ensure};
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -368,12 +368,7 @@ impl ToolCapabilityRegistry {
             if !surface.has(&definition.name) {
                 continue;
             }
-            let provider_tool = surface
-                .get(&definition.name)
-                .expect("active custom tool must be present")
-                .metadata
-                .name
-                .to_string();
+            let provider_tool = definition.name.to_string();
             for offer in &definition.semantic_capabilities {
                 ensure!(
                     offer.priority > 0,
@@ -452,30 +447,10 @@ impl ToolCapabilityRegistry {
             }
         }
         let graph: BTreeMap<_, _> = CAPABILITY_HARD_DEPENDENCIES.iter().copied().collect();
-        fn visit(
-            node: ToolSemanticCapability,
-            graph: &BTreeMap<ToolSemanticCapability, &[ToolSemanticCapability]>,
-            visiting: &mut BTreeSet<ToolSemanticCapability>,
-            visited: &mut BTreeSet<ToolSemanticCapability>,
-        ) -> Result<()> {
-            if visited.contains(&node) {
-                return Ok(());
-            }
-            ensure!(
-                visiting.insert(node),
-                "cycle in capability hard dependencies at '{node:?}'"
-            );
-            for dependency in graph.get(&node).copied().unwrap_or_default() {
-                visit(*dependency, graph, visiting, visited)?;
-            }
-            visiting.remove(&node);
-            visited.insert(node);
-            Ok(())
-        }
-        let mut visiting = BTreeSet::new();
-        let mut visited = BTreeSet::new();
-        for node in graph.keys().copied() {
-            visit(node, &graph, &mut visiting, &mut visited)?;
+        if let Some(node) = super::first_dependency_cycle(graph.keys().copied(), |node| {
+            graph.get(node).copied().unwrap_or_default().to_vec()
+        }) {
+            bail!("cycle in capability hard dependencies at '{node:?}'");
         }
         Ok(())
     }

@@ -30,25 +30,23 @@ impl super::TurnExecutor {
                         .iter()
                         .any(|c| c.name == call.name && c.input_json == call.input_json);
                     if !duplicate {
-                        self.ctx.log_event(serde_json::json!({
-                            "type": "scavenge",
-                            "note": format!("recovered tool call {}", call.name),
-                        }));
+                        self.ctx.log_event(crate::events::EventLog::Scavenge {
+                            note: format!("recovered tool call {}", call.name),
+                        });
                         calls.push(call);
                         recovered = true;
                     }
                 }
                 Err(e) => {
-                    self.ctx.log_event(serde_json::json!({
-                        "type":"scavenge",
-                        "note": format!("discarded invalid scavenged call {}: {e}", sc.name),
-                    }));
+                    self.ctx.log_event(crate::events::EventLog::Scavenge {
+                        note: format!("discarded invalid scavenged call {}: {e}", sc.name),
+                    });
                 }
             }
         }
         for note in &notes {
             self.ctx
-                .log_event(serde_json::json!({"type":"scavenge","note":note}));
+                .log_event(crate::events::EventLog::Scavenge { note: note.clone() });
         }
         (calls, recovered)
     }
@@ -135,18 +133,17 @@ impl super::TurnExecutor {
             } else {
                 truncate_str(&r.content, 200) + "\n"
             };
-            self.ctx.log_event(serde_json::json!({
-                "type":"tool_result",
-                "version": 2,
-                "tool_use_id": r.tool_use_id,
-                "name": r.tool_name,
-                "content": r.content,
-                "status": r.status,
-                "exit_code": r.exit_code,
-                "result_kind": r.result_kind,
-                "presentation": r.presentation,
-                "artifacts": r.artifacts,
-            }));
+            self.ctx.log_event(crate::events::EventLog::ToolResult {
+                version: Some(2),
+                tool_use_id: r.tool_use_id.clone(),
+                name: r.tool_name.clone(),
+                content: r.content.clone(),
+                status: r.status,
+                exit_code: r.exit_code,
+                result_kind: r.result_kind,
+                presentation: r.presentation.clone(),
+                artifacts: r.artifacts.clone(),
+            });
             self.ctx
                 .display
                 .render_tool_result(&crate::ui::PresentedToolResultDisplay {

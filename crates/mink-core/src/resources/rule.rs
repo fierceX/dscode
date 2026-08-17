@@ -1,8 +1,6 @@
 use crate::capabilities::CapabilityExposure;
 use crate::context::ToolContext;
-use crate::resources::router::{
-    Resource, ResourceContentType, ResourceHandler, ResourceMetadata, ResourceRequest,
-};
+use crate::resources::router::{Resource, ResourceHandler, ResourceRequest};
 use anyhow::{Result, anyhow, bail};
 
 pub struct RuleResourceHandler;
@@ -16,9 +14,6 @@ impl ResourceHandler for RuleResourceHandler {
         let content = read_rule_resource(&req.resource_url, ctx)?;
         Ok(Resource {
             canonical_url: req.resource_url.clone(),
-            content_type: ResourceContentType::Markdown,
-            immutable: Some(true),
-            metadata: ResourceMetadata::default(),
             content,
         })
     }

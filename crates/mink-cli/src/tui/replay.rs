@@ -1,13 +1,12 @@
+use crate::replay::ReplayEventKind;
 use crate::session::store::first_line;
 use crate::tui::signal::TuiSignal;
 use crate::tui::state::{TranscriptItem, TranscriptKind, TuiState};
 use crate::ui::{ArtifactDisplay, ToolPresentation, ToolResultKind};
-use crate::util::truncate_str;
+use crate::util::truncate_display;
 use std::collections::VecDeque;
 use std::io::BufRead;
 use std::path::Path;
-
-const REPLAY_TURNS: usize = 10;
 
 pub(crate) fn load_session(events_path: &Path) -> Vec<TranscriptItem> {
     if !events_path.exists() {
@@ -39,14 +38,10 @@ fn load_recent_turn_events(file: std::fs::File) -> Vec<serde_json::Value> {
         let Ok(evt) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
-        let t = evt
-            .get("type")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
-        if t == "user_input" || t == "user_message" {
+        if crate::replay::classify_event(&evt) == ReplayEventKind::UserInput {
             if seen_turn && !current.is_empty() {
                 turns.push_back(std::mem::take(&mut current));
-                while turns.len() > REPLAY_TURNS {
+                while turns.len() > crate::replay::REPLAY_TURNS {
                     turns.pop_front();
                 }
             }
@@ -58,7 +53,7 @@ fn load_recent_turn_events(file: std::fs::File) -> Vec<serde_json::Value> {
     }
     if seen_turn && !current.is_empty() {
         turns.push_back(current);
-        while turns.len() > REPLAY_TURNS {
+        while turns.len() > crate::replay::REPLAY_TURNS {
             turns.pop_front();
         }
     }
@@ -68,20 +63,14 @@ fn load_recent_turn_events(file: std::fs::File) -> Vec<serde_json::Value> {
 fn build_lines_from_events(events: &[serde_json::Value]) -> Vec<TranscriptItem> {
     let mut state = TuiState::default();
     for evt in events {
-        let t = evt
-            .get("type")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
-        let c = evt
-            .get("content")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
-        match t {
+        let kind = crate::replay::classify_event(evt);
+        let c = crate::replay::event_content(evt);
+        match kind {
             // 前缀快照只用于离线重建，重放不渲染。
-            "prefix_snapshot" => {}
-            "user_input" | "user_message" => {
+            ReplayEventKind::PrefixSnapshot | ReplayEventKind::Ignored => {}
+            ReplayEventKind::UserInput => {
                 state.finalize_stream();
-                let preview = truncate_str(first_line(c), 77);
+                let preview = truncate_display(first_line(c), 77);
                 if !preview.is_empty() {
                     state.push_line(TranscriptItem::new(
                         format!("> {preview}"),
@@ -89,14 +78,11 @@ fn build_lines_from_events(events: &[serde_json::Value]) -> Vec<TranscriptItem> 
                     ));
                 }
             }
-            "thinking" => state.apply(&TuiSignal::Thinking(c.to_string())),
-            "text" => state.apply(&TuiSignal::Text(c.to_string())),
-            "tool_call" => {
-                let name = evt
-                    .get("name")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("");
-                let summary = build_replay_tool_summary(name, evt);
+            ReplayEventKind::Thinking => state.apply(&TuiSignal::Thinking(c.to_string())),
+            ReplayEventKind::Text => state.apply(&TuiSignal::Text(c.to_string())),
+            ReplayEventKind::ToolCall => {
+                let name = crate::replay::event_name(evt);
+                let summary = crate::replay::build_tool_summary(name, evt);
                 state.apply(&TuiSignal::ToolCall {
                     tool_use_id: evt
                         .get("id")
@@ -106,11 +92,8 @@ fn build_lines_from_events(events: &[serde_json::Value]) -> Vec<TranscriptItem> 
                     summary,
                 });
             }
-            "tool_result" => {
-                let tool_name = evt
-                    .get("name")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("");
+            ReplayEventKind::ToolResult => {
+                let tool_name = crate::replay::event_name(evt);
                 let presentation = evt
                     .get("presentation")
                     .cloned()
@@ -146,14 +129,11 @@ fn build_lines_from_events(events: &[serde_json::Value]) -> Vec<TranscriptItem> 
                     artifacts,
                 });
             }
-            "error" => {
-                let msg = evt
-                    .get("message")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("");
+            ReplayEventKind::Error => {
+                let msg = crate::replay::event_message(evt);
                 state.apply(&TuiSignal::Error(msg.to_string()));
             }
-            _ => {}
+            ReplayEventKind::AssistantMessage | ReplayEventKind::Unknown => {}
         }
     }
     state.finalize_stream();
@@ -170,8 +150,4 @@ fn build_lines_from_events(events: &[serde_json::Value]) -> Vec<TranscriptItem> 
         }
     }
     state.lines
-}
-
-fn build_replay_tool_summary(name: &str, evt: &serde_json::Value) -> String {
-    crate::session::store::build_tool_summary_from_json(name, evt)
 }

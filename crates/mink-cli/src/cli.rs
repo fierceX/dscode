@@ -195,11 +195,7 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
     };
 
     let cwd = std::env::current_dir()?;
-    let home = PathBuf::from(
-        std::env::var("MINK_HOME")
-            .or_else(|_| std::env::var("HOME"))
-            .unwrap_or_else(|_| String::from(".")),
-    );
+    let home = crate::config::default_home();
 
     if cfg.list_sessions {
         list_sessions(&home, &cwd).await?;
@@ -467,8 +463,7 @@ fn assemble_runtime_options(
         .with_selected_skills(cfg.skills.clone())
         .with_sandbox(cfg.sandbox.clone())
         .with_sandbox_python(cfg.sandbox_python.clone())
-        .with_interactive(cfg.interactive)
-        .with_agent_jsonl(cfg.agent_jsonl);
+        .with_interactive(cfg.interactive);
     if !cfg.prompt.trim().is_empty() {
         options = options.with_first_prompt(cfg.prompt.clone());
     }
@@ -493,55 +488,46 @@ async fn read_session_alias(session: &crate::runtime::SessionInfo) -> Option<Str
 /// interactive/TUI sessions show a meaningful name in `--list-sessions`.
 async fn auto_set_session_title(session: &crate::runtime::SessionInfo) {
     let metadata_path = session.events_path.with_file_name("session.json");
-    let metadata_text = match tokio::fs::read_to_string(&metadata_path).await {
-        Ok(t) => t,
-        Err(_) => return,
-    };
-    let mut metadata: serde_json::Value = match serde_json::from_str(&metadata_text) {
-        Ok(v) => v,
-        Err(_) => return,
-    };
-    // Already has a non-empty title
+    derive_and_persist_title(&metadata_path, &session.conversation_path).await;
+}
+
+/// 从 conversation.jsonl 首条真实 user 消息生成标题并原子写回 session.json。
+/// 已有非空标题时不动。此前该逻辑在 auto_set_session_title 与
+/// resolve_session_title 各实现一份且都是非原子写。
+async fn derive_and_persist_title(
+    metadata_path: &Path,
+    conversation_path: &Path,
+) -> Option<String> {
+    let metadata_text = tokio::fs::read_to_string(metadata_path).await.ok()?;
+    let mut metadata: serde_json::Value = serde_json::from_str(&metadata_text).ok()?;
     if metadata
         .get("title")
         .and_then(|v| v.as_str())
-        .is_some_and(|s| !s.is_empty())
+        .is_some_and(|t| !t.is_empty())
     {
-        return;
+        return None;
     }
-    let conversation_path = &session.conversation_path;
-    let conv_text = match tokio::fs::read_to_string(conversation_path).await {
-        Ok(t) => t,
-        Err(_) => return,
-    };
-    for line in conv_text.lines() {
+    let conv_text = tokio::fs::read_to_string(conversation_path).await.ok()?;
+    let title = conv_text.lines().find_map(|line| {
         let line = line.trim();
         if line.is_empty() {
-            continue;
+            return None;
         }
-        let msg: serde_json::Value = match serde_json::from_str(line) {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-        if msg.get("role").and_then(|v| v.as_str()) == Some("user") {
-            let content = match msg.get("content").and_then(|v| v.as_str()) {
-                Some(c) => c,
-                None => continue,
-            };
-            let title = crate::session::metadata::title_from_prompt(content);
-            if let Some(title) = title {
-                metadata["title"] = serde_json::Value::String(title);
-                let now = time::OffsetDateTime::now_utc();
-                let fmt = time::format_description::well_known::Rfc3339;
-                let updated_at = now.format(&fmt).unwrap_or_default();
-                metadata["updated_at"] = serde_json::Value::String(updated_at);
-                if let Ok(text) = serde_json::to_string_pretty(&metadata) {
-                    let _ = tokio::fs::write(&metadata_path, format!("{text}\n")).await;
-                }
-            }
-            break;
+        let msg: serde_json::Value = serde_json::from_str(line).ok()?;
+        if msg.get("role")?.as_str()? != "user" {
+            return None;
         }
+        let content = msg.get("content")?.as_str()?;
+        crate::session::metadata::title_from_prompt(content)
+    })?;
+    metadata["title"] = serde_json::Value::String(title.clone());
+    let now = time::OffsetDateTime::now_utc();
+    let fmt = time::format_description::well_known::Rfc3339;
+    metadata["updated_at"] = serde_json::Value::String(now.format(&fmt).unwrap_or_default());
+    if let Ok(text) = serde_json::to_string_pretty(&metadata) {
+        let _ = mink::runtime::atomic_replace(metadata_path, format!("{text}\n").as_bytes());
     }
+    Some(title)
 }
 
 fn reexec_if_sandbox(cfg: &crate::config::CliConfig) {
@@ -570,36 +556,7 @@ fn emit_stream_json_final_if_needed(cfg: &crate::config::CliConfig, outcome: &Tu
 }
 
 fn list_skills() {
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let home = std::path::PathBuf::from(
-        std::env::var("MINK_HOME")
-            .or_else(|_| std::env::var("HOME"))
-            .unwrap_or_else(|_| String::from(".")),
-    );
-    let snapshot = crate::capabilities::CapabilitySnapshot::load_default(
-        &cwd,
-        &home,
-        "skills-list",
-        "skills-list",
-        &[],
-    );
-
-    println!("SKILLS");
-    println!("{}", "-".repeat(60));
-    match snapshot {
-        Ok(snapshot) => {
-            for skill in &snapshot.skills.discoverable {
-                println!("   {} [{}]", skill.skill.name, skill.source_label());
-                println!("      {}", skill.skill.description);
-                println!();
-            }
-        }
-        Err(e) => {
-            println!("Error loading skills: {e}");
-        }
-    }
-
-    println!("Load with --skill NAME or Read skill://NAME.");
+    crate::local::print_skills();
 }
 
 async fn run_interactive(cmd_tx: mpsc::UnboundedSender<RuntimeCmd>, home: &Path) -> Result<()> {
@@ -781,16 +738,12 @@ fn dispatch_local_command(
 ) -> LocalCommandOutcome {
     match line {
         "/help" => {
-            println!("Commands:");
-            println!("  /flash        Switch to flash alias");
-            println!("  /pro          Switch to pro alias");
-            println!("  /model NAME   Switch to a model name or alias");
-            println!("  /compact      Force context compaction");
-            println!("  /skills       List available skills");
-            println!("  /help         Show this help");
-            println!("  Ctrl+C        Interrupt current task");
-            println!("  Ctrl+C again  Exit REPL");
-            println!("  exit / quit   Exit REPL");
+            for line in crate::local::COMMON_COMMAND_HELP
+                .iter()
+                .chain(crate::local::REPL_EXIT_HELP)
+            {
+                println!("{line}");
+            }
             LocalCommandOutcome::Handled
         }
         "/skills" => {
@@ -880,79 +833,22 @@ async fn resolve_session_title(
     session_dir: &Path,
     meta: &crate::session::metadata::SessionRecord,
 ) -> String {
-    // Fast path: title already in metadata
     if let Some(title) = meta.title.as_deref().filter(|t| !t.is_empty()) {
         return title.to_string();
     }
     if let Some(summary) = meta.summary.as_deref().filter(|s| !s.is_empty()) {
         return summary.to_string();
     }
-    // Lazy path: generate title from first user input
+    // Lazy path: 生成并原子写回（与交互路径共用同一实现）。
     let metadata_path = session_dir.join("session.json");
-    let metadata_text = match tokio::fs::read_to_string(&metadata_path).await {
-        Ok(t) => t,
-        Err(_) => return "-".to_string(),
-    };
-    let mut value: serde_json::Value = match serde_json::from_str(&metadata_text) {
-        Ok(v) => v,
-        Err(_) => return "-".to_string(),
-    };
-    // Double-check title in the raw JSON (may differ from cached struct)
-    if let Some(t) = value.get("title").and_then(|v| v.as_str())
-        && !t.is_empty()
-    {
-        return t.to_string();
-    }
-    let conv_path = session_dir.join("conversation.jsonl");
-    let conv_text = match tokio::fs::read_to_string(&conv_path).await {
-        Ok(t) => t,
-        Err(_) => return "-".to_string(),
-    };
-    let title = conv_text
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            if line.is_empty() {
-                return None;
-            }
-            let msg: serde_json::Value = serde_json::from_str(line).ok()?;
-            if msg.get("role")?.as_str()? != "user" {
-                return None;
-            }
-            let content = msg.get("content")?.as_str()?;
-            crate::session::metadata::title_from_prompt(content)
-        })
-        .next();
-    let title = match title {
-        Some(t) => t,
-        None => return "-".to_string(),
-    };
-    // Write only the title field back, preserving all others
-    value["title"] = serde_json::Value::String(title.clone());
-    if let Ok(text) = serde_json::to_string_pretty(&value) {
-        let _ = tokio::fs::write(&metadata_path, format!("{text}\n")).await;
-    }
-    title
+    let conversation_path = session_dir.join("conversation.jsonl");
+    derive_and_persist_title(&metadata_path, &conversation_path)
+        .await
+        .unwrap_or_else(|| "-".to_string())
 }
 
 fn truncate_display(s: &str, max_width: usize) -> String {
-    use unicode_width::UnicodeWidthStr;
-    if UnicodeWidthStr::width(s) <= max_width {
-        return s.to_string();
-    }
-    let keep = max_width.saturating_sub(3);
-    let mut out = String::new();
-    let mut w = 0usize;
-    for c in s.chars() {
-        let cw = UnicodeWidthStr::width(c.to_string().as_str());
-        if w + cw > keep {
-            out.push_str("...");
-            break;
-        }
-        out.push(c);
-        w += cw;
-    }
-    out
+    crate::util::truncate_display(s, max_width)
 }
 
 fn pad_display(s: &str, width: usize) -> String {

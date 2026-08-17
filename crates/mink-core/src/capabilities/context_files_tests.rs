@@ -16,7 +16,7 @@ fn context_file_snapshot_loads_project_and_user_files() {
     std::fs::write(home.join(".mink/AGENTS.md"), "global instructions").unwrap();
     std::fs::write(cwd.join("AGENTS.md"), "project instructions").unwrap();
 
-    let snapshot = build_default_context_file_snapshot(&cwd, &home, "session", "session").unwrap();
+    let snapshot = build_default_context_file_snapshot(&cwd, &home).unwrap();
 
     assert_eq!(snapshot.always_apply.len(), 2);
     assert!(

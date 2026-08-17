@@ -513,7 +513,7 @@ fail closed。
 1. 在 `crates/mink-core/src/tools/*.rs` 中实现 `ToolExec` 或辅助函数。
 2. 在 `crates/mink-core/src/tools/runner.rs` 的 `TOOL_REGISTRY` 中注册工具。
 3. 在 `crates/mink-core/src/assets/tools.json` 中添加 schema。
-4. 在 `metadata()` 中声明 `ApprovalTier`、`ToolResultKind`、副作用、discoverable/internal/storm_exempt 等属性。
+4. 在 `metadata()` 中声明 `ApprovalTier`、`ToolResultKind`、副作用（mutating）、spawns_sub_agent、storm_exempt 等属性。
 5. 如果工具需要压缩给 LLM 的内容，设置 `ToolOutcome.conversation_content`。
 6. 添加单元测试，包括 schema/registry 一致性、approval、错误路径、截断、artifact、信号和安全边界。
 

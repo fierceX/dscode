@@ -11,7 +11,6 @@ use std::sync::LazyLock;
 pub enum PromptFact {
     ToolCapability(ToolSemanticCapability),
     SpecializedWithFallback(ToolSemanticCapability),
-    Workflow(&'static str),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -35,23 +34,11 @@ impl WorkflowRequirement {
             }
         }
     }
-
-    fn workflow_dependencies(&self) -> impl Iterator<Item = &'static str> {
-        let facts: Vec<PromptFact> = match self {
-            Self::All(facts) | Self::Any(facts) => facts.to_vec(),
-            Self::AllWithAny { all, any } => all.iter().chain(*any).copied().collect(),
-        };
-        facts.into_iter().filter_map(|fact| match fact {
-            PromptFact::Workflow(id) => Some(id),
-            _ => None,
-        })
-    }
 }
 
 #[derive(Debug)]
 pub struct PromptWorkflowSpec {
     pub id: &'static str,
-    pub tag: &'static str,
     pub requires: WorkflowRequirement,
     pub exclusive_group: Option<&'static str>,
     pub priority: u16,
@@ -118,7 +105,6 @@ const TODO_PROGRESS: &[PromptFact] = &[
 static WORKFLOWS: &[PromptWorkflowSpec] = &[
     PromptWorkflowSpec {
         id: "search-then-inspect",
-        tag: "search-then-inspect",
         requires: WorkflowRequirement::All(SEARCH_FACTS),
         exclusive_group: None,
         priority: 100,
@@ -126,7 +112,6 @@ static WORKFLOWS: &[PromptWorkflowSpec] = &[
     },
     PromptWorkflowSpec {
         id: "hashline-edit",
-        tag: "hashline-edit",
         requires: WorkflowRequirement::All(HASHLINE_EDIT_FACTS),
         exclusive_group: Some("edit-protocol"),
         priority: 100,
@@ -134,7 +119,6 @@ static WORKFLOWS: &[PromptWorkflowSpec] = &[
     },
     PromptWorkflowSpec {
         id: "replace-edit",
-        tag: "replace-edit",
         requires: WorkflowRequirement::All(REPLACE_EDIT_FACTS),
         exclusive_group: Some("edit-protocol"),
         priority: 100,
@@ -142,7 +126,6 @@ static WORKFLOWS: &[PromptWorkflowSpec] = &[
     },
     PromptWorkflowSpec {
         id: "specialized-provider-routing",
-        tag: "specialized-provider-routing",
         requires: WorkflowRequirement::Any(ROUTING_FACTS),
         exclusive_group: None,
         priority: 100,
@@ -150,7 +133,6 @@ static WORKFLOWS: &[PromptWorkflowSpec] = &[
     },
     PromptWorkflowSpec {
         id: "specialized-mutation-routing",
-        tag: "specialized-mutation-routing",
         requires: WorkflowRequirement::AllWithAny {
             all: MUTATION_ROUTING_ALL,
             any: MUTATION_ROUTING_ANY,
@@ -161,7 +143,6 @@ static WORKFLOWS: &[PromptWorkflowSpec] = &[
     },
     PromptWorkflowSpec {
         id: "python-execution-routing",
-        tag: "python-execution-routing",
         requires: WorkflowRequirement::Any(PYTHON_FACTS),
         exclusive_group: None,
         priority: 100,
@@ -169,7 +150,6 @@ static WORKFLOWS: &[PromptWorkflowSpec] = &[
     },
     PromptWorkflowSpec {
         id: "todo-inspection",
-        tag: "todo-inspection",
         requires: WorkflowRequirement::All(TODO_INSPECT),
         exclusive_group: None,
         priority: 100,
@@ -177,7 +157,6 @@ static WORKFLOWS: &[PromptWorkflowSpec] = &[
     },
     PromptWorkflowSpec {
         id: "todo-structure",
-        tag: "todo-structure",
         requires: WorkflowRequirement::All(TODO_STRUCTURE),
         exclusive_group: None,
         priority: 100,
@@ -185,7 +164,6 @@ static WORKFLOWS: &[PromptWorkflowSpec] = &[
     },
     PromptWorkflowSpec {
         id: "todo-progress",
-        tag: "todo-progress",
         requires: WorkflowRequirement::All(TODO_PROGRESS),
         exclusive_group: None,
         priority: 100,
@@ -193,7 +171,6 @@ static WORKFLOWS: &[PromptWorkflowSpec] = &[
     },
     PromptWorkflowSpec {
         id: "plan-lifecycle",
-        tag: "plan-lifecycle",
         requires: WorkflowRequirement::All(PLAN_ALL),
         exclusive_group: None,
         priority: 100,
@@ -201,7 +178,6 @@ static WORKFLOWS: &[PromptWorkflowSpec] = &[
     },
     PromptWorkflowSpec {
         id: "memory-recall",
-        tag: "memory-recall",
         requires: WorkflowRequirement::All(SEARCH_FACTS),
         exclusive_group: None,
         priority: 90,
@@ -219,7 +195,7 @@ impl PromptWorkflowResolver {
 
     pub fn resolve(&self, tools: &ResolvedToolCapabilities) -> Result<ResolvedPromptWorkflows> {
         self.validate()?;
-        let mut facts = facts_from_capabilities(tools);
+        let facts = facts_from_capabilities(tools);
         let mut active = BTreeSet::new();
         let mut claimed_exclusive_groups = BTreeSet::new();
         loop {
@@ -264,7 +240,6 @@ impl PromptWorkflowResolver {
                     if let Some(group) = spec.exclusive_group {
                         claimed_exclusive_groups.insert(group);
                     }
-                    facts.insert(PromptFact::Workflow(spec.id));
                     changed = true;
                 }
             }
@@ -287,14 +262,8 @@ impl PromptWorkflowResolver {
 
     fn validate(&self) -> Result<()> {
         let mut ids = BTreeSet::new();
-        let mut tags = BTreeSet::new();
         for spec in self.specs {
             ensure!(ids.insert(spec.id), "duplicate workflow id '{}'", spec.id);
-            ensure!(
-                tags.insert(spec.tag),
-                "duplicate workflow tag '{}'",
-                spec.tag
-            );
             match spec.requires {
                 WorkflowRequirement::All(facts) | WorkflowRequirement::Any(facts) => {
                     ensure!(!facts.is_empty(), "workflow requirement cannot be empty");
@@ -303,54 +272,6 @@ impl PromptWorkflowResolver {
                     ensure!(!all.is_empty() && !any.is_empty());
                 }
             }
-        }
-        for spec in self.specs {
-            for dependency in spec.requires.workflow_dependencies() {
-                ensure!(
-                    ids.contains(dependency),
-                    "unknown upstream workflow '{dependency}'"
-                );
-                ensure!(
-                    dependency != spec.id,
-                    "workflow '{}' depends on itself",
-                    spec.id
-                );
-            }
-        }
-        let graph: BTreeMap<_, Vec<_>> = self
-            .specs
-            .iter()
-            .map(|spec| {
-                (
-                    spec.id,
-                    spec.requires.workflow_dependencies().collect::<Vec<_>>(),
-                )
-            })
-            .collect();
-        fn visit(
-            node: &'static str,
-            graph: &BTreeMap<&'static str, Vec<&'static str>>,
-            visiting: &mut BTreeSet<&'static str>,
-            visited: &mut BTreeSet<&'static str>,
-        ) -> Result<()> {
-            if visited.contains(node) {
-                return Ok(());
-            }
-            ensure!(
-                visiting.insert(node),
-                "cycle in prompt workflow dependencies at '{node}'"
-            );
-            for dependency in graph.get(node).into_iter().flatten() {
-                visit(dependency, graph, visiting, visited)?;
-            }
-            visiting.remove(node);
-            visited.insert(node);
-            Ok(())
-        }
-        let mut visiting = BTreeSet::new();
-        let mut visited = BTreeSet::new();
-        for node in graph.keys().copied() {
-            visit(node, &graph, &mut visiting, &mut visited)?;
         }
         Ok(())
     }

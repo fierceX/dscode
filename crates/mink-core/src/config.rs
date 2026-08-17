@@ -293,8 +293,6 @@ pub struct ResolvedConfig {
     pub session_id: String,
     pub continue_session: bool,
     pub log_events: bool,
-    /// Stable single-shot SDK protocol: stdin request + stdout JSONL events + final.
-    pub agent_jsonl: bool,
     /// 沙箱配置（从 .minkrc 加载）
     pub sandbox: SandboxConfig,
     /// CPython WASI 沙箱工具配置
@@ -354,7 +352,6 @@ impl Default for ResolvedConfig {
             session_id: String::new(),
             continue_session: false,
             log_events: true,
-            agent_jsonl: false,
             sandbox: SandboxConfig::default(),
             sandbox_python: SandboxPythonConfig::default(),
             mission_file: None,
@@ -382,42 +379,66 @@ pub fn model_resolver(cfg: &ResolvedConfig) -> ModelResolver {
 }
 
 pub fn validate_runtime_config(cfg: &ResolvedConfig) -> Result<()> {
-    if !cfg.edit_fuzzy_threshold.is_finite() || !(0.0..=1.0).contains(&cfg.edit_fuzzy_threshold) {
+    validate_runtime_limits(
+        cfg.edit_fuzzy_threshold,
+        cfg.max_tokens,
+        cfg.max_turns,
+        cfg.context_compact_pct,
+        cfg.context_reserve_tokens,
+        cfg.context_compact_tail_tokens,
+        cfg.context_compact_max_output_tokens,
+        cfg.max_context_tokens,
+    )
+}
+
+/// 与配置来源无关的运行时限值校验（CLI / SDK / 库入口共用的唯一实现）。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn validate_runtime_limits(
+    edit_fuzzy_threshold: f64,
+    max_tokens: i32,
+    max_turns: i32,
+    context_compact_pct: u8,
+    context_reserve_tokens: usize,
+    context_compact_tail_tokens: usize,
+    context_compact_max_output_tokens: i32,
+    max_context_tokens: usize,
+) -> Result<()> {
+    if !edit_fuzzy_threshold.is_finite() || !(0.0..=1.0).contains(&edit_fuzzy_threshold) {
         bail!("edit_fuzzy_threshold must be a finite number in 0.0..=1.0");
     }
-    if cfg.max_tokens <= 0 {
+    if max_tokens <= 0 {
         bail!("max_tokens must be greater than 0");
     }
-    if cfg.max_turns <= 0 {
+    if max_turns <= 0 {
         bail!("max_turns must be greater than 0");
     }
-    if !(1..=100).contains(&cfg.context_compact_pct) {
+    if !(1..=100).contains(&context_compact_pct) {
         bail!("context_compact_pct must be between 1 and 100");
     }
-    if cfg.context_reserve_tokens == 0 {
+    if context_reserve_tokens == 0 {
         bail!("context_reserve_tokens must be greater than 0");
     }
-    if cfg.context_compact_tail_tokens == 0 {
+    if context_compact_tail_tokens == 0 {
         bail!("context_compact_tail_tokens must be greater than 0");
     }
-    if cfg.context_compact_max_output_tokens <= 0 {
+    if context_compact_max_output_tokens <= 0 {
         bail!("context_compact_max_output_tokens must be greater than 0");
     }
     // NOTE: signal thresholds/weights are not validated here — SignalConfig is
     // crate-private with no production mutation path (only SignalPolicy is
     // externally settable), so validating the constant defaults was dead code.
-    if cfg.max_context_tokens == 0 {
+    if max_context_tokens == 0 {
         return Ok(());
     }
 
-    let max_context = cfg.max_context_tokens;
-    if cfg.context_reserve_tokens >= max_context {
+    let max_context = max_context_tokens;
+    if context_reserve_tokens >= max_context {
         bail!(
             "context_reserve_tokens ({}) must be less than max_context ({max_context})",
-            cfg.context_reserve_tokens
+            context_reserve_tokens
         );
     }
-    let compact_output = usize::try_from(cfg.context_compact_max_output_tokens)
+    let compact_output = usize::try_from(context_compact_max_output_tokens)
         .map_err(|_| anyhow::anyhow!("context_compact_max_output_tokens is too large"))?;
     if compact_output >= max_context {
         bail!(
@@ -426,24 +447,24 @@ pub fn validate_runtime_config(cfg: &ResolvedConfig) -> Result<()> {
     }
 
     let requested_output =
-        usize::try_from(cfg.max_tokens).map_err(|_| anyhow::anyhow!("max_tokens is too large"))?;
-    let response_budget = requested_output.min(cfg.context_reserve_tokens);
+        usize::try_from(max_tokens).map_err(|_| anyhow::anyhow!("max_tokens is too large"))?;
+    let response_budget = requested_output.min(context_reserve_tokens);
     let request_input_budget = max_context - response_budget;
-    if cfg.context_compact_tail_tokens >= request_input_budget {
+    if context_compact_tail_tokens >= request_input_budget {
         bail!(
             "context_compact_tail_tokens ({}) must be less than the request input budget ({request_input_budget} = max_context {max_context} - response budget {response_budget})",
-            cfg.context_compact_tail_tokens
+            context_compact_tail_tokens
         );
     }
     // Post-compaction context = summary output + hot tail + response budget;
     // the combination must still fit the window or compaction can never
     // prevent provider overflow (each individual check above can pass while
     // the sum exceeds max_context).
-    let post_compact_total = compact_output + cfg.context_compact_tail_tokens + response_budget;
+    let post_compact_total = compact_output + context_compact_tail_tokens + response_budget;
     if post_compact_total > max_context {
         bail!(
             "compaction budget exceeds the context window: context_compact_max_output_tokens ({compact_output}) + context_compact_tail_tokens ({}) + response budget ({response_budget}) = {post_compact_total} > max_context ({max_context})",
-            cfg.context_compact_tail_tokens
+            context_compact_tail_tokens
         );
     }
     Ok(())
@@ -526,8 +547,10 @@ mod validation_tests {
 
     #[test]
     fn max_turns_must_be_positive() {
-        let mut cfg = ResolvedConfig::default();
-        cfg.max_turns = 0;
+        let mut cfg = ResolvedConfig {
+            max_turns: 0,
+            ..ResolvedConfig::default()
+        };
         assert!(
             validate_runtime_config(&cfg)
                 .unwrap_err()
@@ -543,15 +566,17 @@ mod validation_tests {
         // Each individual limit passes but summary + tail + response budget
         // together overflow the window: compaction could never prevent
         // provider overflow.
-        let mut cfg = ResolvedConfig::default();
-        cfg.max_context_tokens = 200_000;
-        cfg.context_reserve_tokens = 190_000;
-        cfg.max_tokens = 180_000;
-        // tail (10k) < input budget (20k) and each limit is individually
-        // below the window, yet summary (150k) + tail + response (180k)
-        // = 340k > 200k.
-        cfg.context_compact_tail_tokens = 10_000;
-        cfg.context_compact_max_output_tokens = 150_000;
+        let mut cfg = ResolvedConfig {
+            max_context_tokens: 200_000,
+            context_reserve_tokens: 190_000,
+            max_tokens: 180_000,
+            // tail (10k) < input budget (20k) and each limit is individually
+            // below the window, yet summary (150k) + tail + response (180k)
+            // = 340k > 200k.
+            context_compact_tail_tokens: 10_000,
+            context_compact_max_output_tokens: 150_000,
+            ..ResolvedConfig::default()
+        };
         let err = validate_runtime_config(&cfg).unwrap_err().to_string();
         assert!(
             err.contains("compaction budget exceeds the context window"),
@@ -565,9 +590,11 @@ mod validation_tests {
 
     #[test]
     fn zero_max_context_disables_window_checks() {
-        let mut cfg = ResolvedConfig::default();
-        cfg.max_context_tokens = 0;
-        cfg.context_reserve_tokens = usize::MAX;
+        let cfg = ResolvedConfig {
+            max_context_tokens: 0,
+            context_reserve_tokens: usize::MAX,
+            ..ResolvedConfig::default()
+        };
         assert!(validate_runtime_config(&cfg).is_ok());
     }
 }

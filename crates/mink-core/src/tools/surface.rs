@@ -131,13 +131,10 @@ impl ModelToolSurface {
             }
             let metadata = ToolMetadata {
                 name: std::borrow::Cow::Owned(definition.name.clone()),
-                summary: std::borrow::Cow::Owned(definition.summary.clone()),
                 approval: definition.approval,
                 result_kind: definition.result_kind,
                 mutating: definition.mutating,
                 storm_exempt: definition.storm_exempt,
-                internal: false,
-                discoverable: definition.discoverable,
                 spawns_sub_agent: false,
             };
             match authorize_tool(&metadata, config) {
@@ -479,30 +476,10 @@ fn validate_dependency_graph(catalog: &ToolCatalog) -> Result<()> {
         }
         graph.insert(dependency.tool, dependency.requires);
     }
-    fn visit(
-        node: &'static str,
-        graph: &BTreeMap<&'static str, &'static [&'static str]>,
-        visiting: &mut BTreeSet<&'static str>,
-        visited: &mut BTreeSet<&'static str>,
-    ) -> Result<()> {
-        if visited.contains(node) {
-            return Ok(());
-        }
-        ensure!(
-            visiting.insert(node),
-            "cycle in tool hard dependencies at '{node}'"
-        );
-        for dependency in graph.get(node).copied().unwrap_or_default() {
-            visit(dependency, graph, visiting, visited)?;
-        }
-        visiting.remove(node);
-        visited.insert(node);
-        Ok(())
-    }
-    let mut visiting = BTreeSet::new();
-    let mut visited = BTreeSet::new();
-    for node in graph.keys().copied() {
-        visit(node, &graph, &mut visiting, &mut visited)?;
+    if let Some(node) = super::first_dependency_cycle(graph.keys().copied(), |node| {
+        graph.get(node).copied().unwrap_or_default().to_vec()
+    }) {
+        bail!("cycle in tool hard dependencies at '{node}'");
     }
     Ok(())
 }

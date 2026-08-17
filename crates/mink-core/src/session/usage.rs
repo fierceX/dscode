@@ -2,7 +2,6 @@ use crate::protocol::UsageEvent;
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -256,16 +255,11 @@ recovering salvageable records",
 
     fn append(&self, record: &UsageRecord) -> Result<()> {
         let _guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
-        repair_unterminated_tail(&self.path)?;
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)?;
-        // 单缓冲区追加（含换行）：to_writer 半途失败留下的无换行尾行
+        let mut line = serde_json::to_vec(record)?;
+        line.push(b'\n');
+        // 单缓冲区追加（含换行）：序列化/写文件半途失败留下的无换行尾行
         // 由下一次 append 前的修复处理，不会粘坏后续记录。
-        serde_json::to_writer(&mut file, record)?;
-        writeln!(file)?;
-        file.flush()?;
+        crate::session::jsonl::append_line(&self.path, &line, false)?;
         let mut summary = self
             .summary
             .lock()
@@ -339,43 +333,10 @@ fn read_records_lossy(path: &Path) -> Vec<UsageRecord> {
     let Ok(data) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
-    data.lines()
-        .filter(|line| !line.trim().is_empty())
-        .filter_map(|line| serde_json::from_str(line).ok())
+    crate::session::jsonl::parse_lossy_lines(path, &data, &mut |_| {})
+        .into_iter()
+        .filter_map(|value| serde_json::from_value(value).ok())
         .collect()
-}
-
-/// 追加前修复未换行的尾行：完整合法 JSON 补换行保留，非法半截行截断。
-fn repair_unterminated_tail(path: &Path) -> Result<()> {
-    let Ok(data) = std::fs::read(path) else {
-        return Ok(());
-    };
-    if data.is_empty() || data.last() == Some(&b'\n') {
-        return Ok(());
-    }
-    let tail_start = data
-        .iter()
-        .rposition(|&b| b == b'\n')
-        .map(|pos| pos + 1)
-        .unwrap_or(0);
-    let tail = &data[tail_start..];
-    let keep = std::str::from_utf8(tail)
-        .ok()
-        .and_then(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .is_some();
-    use std::io::Write as _;
-    if keep {
-        let mut file = OpenOptions::new().append(true).open(path)?;
-        file.write_all(b"\n")?;
-        file.flush()?;
-    } else {
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .truncate(false)
-            .open(path)?;
-        file.set_len(tail_start as u64)?;
-    }
-    Ok(())
 }
 
 pub(crate) fn read_records(path: &Path) -> Result<Vec<UsageRecord>> {

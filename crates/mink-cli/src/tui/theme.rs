@@ -29,10 +29,6 @@ pub(crate) fn info() -> Style {
     Style::default().fg(Color::Yellow)
 }
 
-pub(crate) fn inline_code() -> Style {
-    info()
-}
-
 pub(crate) fn error() -> Style {
     Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
 }

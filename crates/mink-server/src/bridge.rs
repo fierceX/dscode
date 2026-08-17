@@ -73,16 +73,3 @@ fn read_jsonl_page(
         })
         .collect())
 }
-
-/// Read conversation.jsonl（完整轮次视图：user/assistant/tool 消息）。
-/// 与 read_history 相同的分页语义（tail / before_seq / from_seq），
-/// 前端历史展示基于此文件（一轮一条，含完整工具调用）。
-pub async fn read_conversation(
-    path: &std::path::Path,
-    from_seq: u64,
-    limit: usize,
-    tail: bool,
-    before_seq: Option<u64>,
-) -> Result<Vec<serde_json::Value>> {
-    read_history(path, from_seq, limit, tail, before_seq).await
-}

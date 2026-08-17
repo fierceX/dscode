@@ -32,7 +32,7 @@ fn focused_execution_is_fail_closed() {
         filesystem_backend: FilesystemBackend::Local,
     };
     assert!(matches!(
-        policy.classify_first_call(&allowed, ToolCatalog::builtin().unwrap()),
+        policy.classify_first_call(&allowed),
         RecoveryFirstCallDecision::Allowed
     ));
     let blocked = CapabilityCallContext {
@@ -42,7 +42,7 @@ fn focused_execution_is_fail_closed() {
         filesystem_backend: FilesystemBackend::Local,
     };
     assert!(matches!(
-        policy.classify_first_call(&blocked, ToolCatalog::builtin().unwrap()),
+        policy.classify_first_call(&blocked),
         RecoveryFirstCallDecision::Blocked(_)
     ));
 }
@@ -57,7 +57,7 @@ fn no_inspection_surface_blocks_every_tool_call_without_references() {
         resource_router: &router,
         filesystem_backend: FilesystemBackend::Local,
     };
-    match policy.classify_first_call(&call, ToolCatalog::builtin().unwrap()) {
+    match policy.classify_first_call(&call) {
         RecoveryFirstCallDecision::Allowed => panic!("write cannot inspect state"),
         RecoveryFirstCallDecision::Blocked(guidance) => {
             assert!(guidance.referenced_tools.is_empty());

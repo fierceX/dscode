@@ -61,7 +61,6 @@ impl RecoveryPolicy {
     pub fn classify_first_call(
         &self,
         call: &CapabilityCallContext<'_>,
-        _catalog: &ToolCatalog,
     ) -> RecoveryFirstCallDecision {
         if self
             .inspection_actions

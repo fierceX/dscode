@@ -19,7 +19,6 @@ pub struct FileSnapshot {
     /// UTF-8 BOM-free, LF-normalized complete file text.
     pub text: String,
     pub seen_lines: BTreeSet<usize>,
-    sequence: u64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -38,7 +37,6 @@ pub struct FileSnapshotStore {
     read_latest_order: VecDeque<PathBuf>,
     path_recency: VecDeque<PathBuf>,
     total_bytes: usize,
-    sequence: u64,
     named_clipboard: BTreeMap<String, Vec<String>>,
     noop_by_path: HashMap<PathBuf, NoopState>,
     edit_result_tags: HashMap<PathBuf, BTreeSet<String>>,
@@ -70,7 +68,6 @@ impl FileSnapshotStore {
             .into_iter()
             .filter(|line| *line > 0)
             .collect::<BTreeSet<_>>();
-        self.sequence = self.sequence.wrapping_add(1);
 
         let versions = self.by_path.entry(path.clone()).or_default();
         if let Some(index) = versions.iter().position(|version| version.text == text) {
@@ -78,7 +75,6 @@ impl FileSnapshotStore {
                 .remove(index)
                 .expect("snapshot index came from this history");
             existing.seen_lines.extend(visible);
-            existing.sequence = self.sequence;
             let snapshot = existing.clone();
             versions.push_front(existing);
             // versions 借用在 push_front 后结束，才能更新基线映射。
@@ -94,7 +90,6 @@ impl FileSnapshotStore {
             path: path.clone(),
             text,
             seen_lines: visible,
-            sequence: self.sequence,
         };
         self.total_bytes = self.total_bytes.saturating_add(snapshot.text.len());
         versions.push_front(snapshot.clone());

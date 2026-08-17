@@ -280,7 +280,6 @@ fn selected_skill_resource_hint_requires_resource_read_capability() {
                 info: crate::capabilities::SkillInfo {
                     name: "review".into(),
                     description: "review code".into(),
-                    source: crate::capabilities::SkillSource::FileSystem,
                     base_dir: "/skills/review".into(),
                 },
                 content: "Review the target carefully.".into(),

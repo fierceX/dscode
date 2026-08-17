@@ -231,9 +231,6 @@ fn push_external(
 fn nested_named(tag: &str, name: &str, content: &str) -> String {
     format!(
         "<{tag} name=\"{}\">\n{content}\n</{tag}>",
-        name.replace('&', "&amp;")
-            .replace('"', "&quot;")
-            .replace('<', "&lt;")
-            .replace('>', "&gt;")
+        super::escape_attr(name)
     )
 }

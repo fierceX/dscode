@@ -193,6 +193,7 @@ impl OpenAiCompatibleBackend {
         .with_optional_tool_choice(config.openai_tool_choice.clone())
     }
 
+    #[cfg(test)]
     pub fn deepseek_defaults() -> Self {
         Self::new(OpenAiCompatibleOptions::default())
     }
