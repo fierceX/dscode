@@ -371,7 +371,10 @@ impl super::TurnExecutor {
                         && self.run_replan(b).await?.is_some()
                     {
                         // 策略重启成功：重置信念并继续本轮（新证据基线）。
+                        // 同时清除恢复守卫和绕过标记，避免旧计划被上一次的守卫继续拦截。
                         bt.reset();
+                        self.local.signal_recovery_guard = false;
+                        self.local.guard_bypassed = false;
                         self.ctx.display.render_info(&format!(
                             "DecisionEngine: belief {b:.2} — retrying with a fresh replan instead of handing over",
                         ));

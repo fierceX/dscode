@@ -179,4 +179,24 @@ describe("session authoritative recovery", () => {
     expect(api.conversation).toHaveBeenCalledTimes(2);
     expect(appState.sessionState?.desynced).toBe(false);
   });
+
+  it("stops reconnecting when the session is deleted on disconnect", async () => {
+    vi.spyOn(api, "openSession").mockResolvedValue({ code: 200, message: "", data: {} });
+    vi.spyOn(api, "getSession").mockResolvedValue({
+      code: 404,
+      message: "",
+      data: { id: summary.id, open: false, running: false },
+    });
+    vi.spyOn(api, "conversation").mockResolvedValue({ code: 200, message: "", data: [] });
+    const controller = await import("./sessionController");
+
+    await controller.openSession(summary);
+    FakeEventSource.instances[0].open();
+    await settle();
+
+    FakeEventSource.instances[0].onerror?.();
+    await settle();
+    expect(FakeEventSource.instances).toHaveLength(1);
+  });
+
 });

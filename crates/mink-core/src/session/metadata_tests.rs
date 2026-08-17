@@ -160,5 +160,8 @@ fn title_from_prompt_uses_first_non_empty_line() {
 #[test]
 fn sanitize_alias_rejects_path_like_names() {
     assert_eq!(sanitize_alias("../x"), None);
+    assert_eq!(sanitize_alias("."), None);
+    assert_eq!(sanitize_alias(".."), None);
+    assert_eq!(sanitize_alias(" . "), None);
     assert_eq!(sanitize_alias("feature x").as_deref(), Some("feature-x"));
 }

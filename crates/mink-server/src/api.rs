@@ -374,7 +374,14 @@ async fn stream_events(
                             );
                             break;
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            // 会话 runtime 已关闭：显式告知浏览器停止自动重连。
+                            let line = serde_json::json!({"type":"session_closed"}).to_string();
+                            yield Ok::<http_body::Frame<axum::body::Bytes>, std::convert::Infallible>(
+                                http_body::Frame::data(axum::body::Bytes::from(format!("data: {line}\n\n"))),
+                            );
+                            break;
+                        }
                     }
                 }
                 _ = heartbeat.tick() => {

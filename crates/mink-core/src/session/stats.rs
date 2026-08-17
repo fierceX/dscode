@@ -4,7 +4,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::RwLock;
 
 /// Accumulated session statistics: token usage, context, and turn counts.
@@ -30,6 +30,10 @@ pub struct StatsTracker {
     stats: RwLock<Stats>,
     path: std::path::PathBuf,
     dirty: AtomicBool,
+    /// Incremented on every mutation. `flush()` compares this before/after the
+    /// async write so a concurrent record can never have its dirty bit cleared
+    /// by an older flush.
+    version: AtomicU64,
 }
 
 impl StatsTracker {
@@ -51,10 +55,12 @@ impl StatsTracker {
             stats: RwLock::new(stats),
             path: path.to_path_buf(),
             dirty: AtomicBool::new(false),
+            version: AtomicU64::new(0),
         }))
     }
 
     pub async fn flush(&self) -> Result<()> {
+        let version = self.version.load(Ordering::Acquire);
         let stats = self.stats.read().await;
         let data = serde_json::to_string(&*stats)?;
         let path = self.path.clone();
@@ -62,7 +68,11 @@ impl StatsTracker {
             crate::session::atomic_file::atomic_replace(&path, format!("{data}\n").as_bytes())
         })
         .await??;
-        self.dirty.store(false, Ordering::Release);
+        // Only clear dirty if no record landed while this flush was in flight.
+        // Otherwise the newer mutation stays dirty and will be flushed later.
+        if self.version.load(Ordering::Acquire) == version {
+            self.dirty.store(false, Ordering::Release);
+        }
         Ok(())
     }
 
@@ -78,6 +88,7 @@ impl StatsTracker {
         s.current_turn_count = s.current_turn_count.saturating_add(1);
         s.last_updated = chrono_now_rfc3339();
         self.dirty.store(true, Ordering::Release);
+        self.version.fetch_add(1, Ordering::Release);
     }
 
     pub async fn record_usage(&self, u: &UsageEvent) {
@@ -102,6 +113,7 @@ impl StatsTracker {
 
         s.last_updated = chrono_now_rfc3339();
         self.dirty.store(true, Ordering::Release);
+        self.version.fetch_add(1, Ordering::Release);
     }
 
     pub async fn record_compact(&self, u: &UsageEvent) {
@@ -124,6 +136,7 @@ impl StatsTracker {
             .saturating_add(tokens.cache_creation_tokens);
         s.last_updated = chrono_now_rfc3339();
         self.dirty.store(true, Ordering::Release);
+        self.version.fetch_add(1, Ordering::Release);
     }
 
     pub async fn record_sub_agent(
@@ -144,6 +157,7 @@ impl StatsTracker {
             s.total_cache_creation_tokens.saturating_add(cache_creation);
         s.last_updated = chrono_now_rfc3339();
         self.dirty.store(true, Ordering::Release);
+        self.version.fetch_add(1, Ordering::Release);
     }
 
     pub async fn snapshot(&self) -> Stats {

@@ -140,10 +140,26 @@ export async function openSession(summary: SessionSummary): Promise<void> {
   if (!isCurrent(summary, token)) return;
 
   let client: SseClient;
-  const recover = () => {
+  const reconnectNow = () => {
     if (!isCurrent(summary, token)) return;
     connected = false;
     invalidateRecovery(summary, token);
+    client.reconnect();
+  };
+  const recover = async () => {
+    if (!isCurrent(summary, token)) return;
+    connected = false;
+    invalidateRecovery(summary, token);
+    const detail = await recoveryRequest((signal) =>
+      api.getSession(summary.id, summary.project_key, signal));
+    if (!isCurrent(summary, token)) return;
+    // Session deleted (404) or explicitly closed: stop the SSE reconnect loop.
+    // The UI remains desynced and the user can reopen the session explicitly.
+    if (detail?.code === 404
+      || (detail?.code === 200 && (detail.data as { open?: boolean } | null)?.open === false)) {
+      client.close();
+      return;
+    }
     client.reconnect();
   };
   const onOpen = () => {
@@ -157,7 +173,7 @@ export async function openSession(summary: SessionSummary): Promise<void> {
     (raw) => {
       if (!isCurrent(summary, token)) return;
       if (raw.type === "stream_gap") {
-        recover();
+        reconnectNow();
         return;
       }
       if (LIFECYCLE_EVENTS.has(raw.type)) liveGeneration++;

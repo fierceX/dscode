@@ -423,7 +423,13 @@ async fn session_activity_mod_time(session_dir: &Path) -> Result<SystemTime> {
 
 pub fn sanitize_alias(raw: &str) -> Option<String> {
     let raw = raw.trim();
-    if raw.is_empty() || raw.contains('/') || raw.contains('\\') || raw.contains("..") {
+    if raw.is_empty()
+        || raw == "."
+        || raw == ".."
+        || raw.contains('/')
+        || raw.contains('\\')
+        || raw.contains("..")
+    {
         return None;
     }
     Some(

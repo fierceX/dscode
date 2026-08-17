@@ -95,20 +95,29 @@ pub struct SessionSummary {
     pub last_context_tokens: u64,
 }
 
-/// 逐行读取 usage.jsonl 并汇总 tokens/费用。缺失表示尚无用量，其他 I/O 错误传播。
-fn summarize_usage(dir: &Path) -> Result<(u64, u64, u64, UsageCost, u64)> {
-    let usage = runtime_session::SessionReader::new(dir).usage_snapshot()?;
-    Ok((
-        usage.summary.tokens.input_tokens,
-        usage.summary.tokens.output_tokens,
-        usage
-            .summary
-            .tokens
-            .cache_read_tokens
-            .saturating_add(usage.summary.tokens.cache_creation_tokens),
-        usage.summary.cost,
-        usage.last_context_tokens,
-    ))
+/// 逐行读取 usage.jsonl 并汇总 tokens/费用。缺失表示尚无用量；单个会话的
+/// usage 读取错误（包括 I/O 级损坏）降级为零，避免拖垮整个会话列表。
+fn summarize_usage(dir: &Path) -> (u64, u64, u64, UsageCost, u64) {
+    match runtime_session::SessionReader::new(dir).usage_snapshot() {
+        Ok(usage) => (
+            usage.summary.tokens.input_tokens,
+            usage.summary.tokens.output_tokens,
+            usage
+                .summary
+                .tokens
+                .cache_read_tokens
+                .saturating_add(usage.summary.tokens.cache_creation_tokens),
+            usage.summary.cost,
+            usage.last_context_tokens,
+        ),
+        Err(error) => {
+            eprintln!(
+                "[mink-server] warning: failed to summarize usage for {}: {error:#}",
+                dir.display()
+            );
+            (0, 0, 0, UsageCost::default(), 0)
+        }
+    }
 }
 
 struct ActiveSession {
@@ -191,7 +200,7 @@ impl Registry {
             scan_all_sessions(&home)?
                 .into_iter()
                 .map(|(dir, metadata, modified)| {
-                    let usage = summarize_usage(&dir)?;
+                    let usage = summarize_usage(&dir);
                     Ok((dir, metadata, modified, usage))
                 })
                 .collect()
@@ -260,7 +269,7 @@ impl Registry {
                 Some(record.metadata),
                 Some(record.modified),
                 &record.path,
-                summarize_usage(&record.path)?,
+                summarize_usage(&record.path),
             );
             if let Some(status) = self.active_status(&session_locator) {
                 summary.status = status;
@@ -311,7 +320,7 @@ impl Registry {
                     .and_then(|metadata| metadata.modified())
                     .ok(),
                 &paths.session_dir,
-                summarize_usage(&paths.session_dir)?,
+                summarize_usage(&paths.session_dir),
             ))
         }
         .await;
@@ -1052,6 +1061,29 @@ mod tests {
             .join("ok");
         std::fs::create_dir_all(&session_dir).unwrap();
         std::fs::write(session_dir.join("usage.jsonl"), "not-json\n").unwrap();
+
+        let registry = Registry::new(home, "flash".to_string(), 1);
+        let sessions = registry.list().await.unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "ok");
+        assert_eq!(sessions[0].tokens_in, 0);
+        assert_eq!(sessions[0].tokens_out, 0);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn list_degrades_when_usage_path_is_io_corrupt() {
+        let root = unique_temp_dir("io-corrupt-usage-list");
+        let home = root.join("home");
+        let session_dir = home
+            .join(".mink")
+            .join("projects")
+            .join("project-key")
+            .join("ok");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        // usage.jsonl 被替换成同名目录：read_to_string 会报 "Is a directory"。
+        std::fs::create_dir_all(session_dir.join("usage.jsonl")).unwrap();
 
         let registry = Registry::new(home, "flash".to_string(), 1);
         let sessions = registry.list().await.unwrap();

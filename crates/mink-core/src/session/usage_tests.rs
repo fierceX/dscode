@@ -106,6 +106,45 @@ fn resilient_reader_skips_corrupt_lines_but_strict_reader_errors() {
 }
 
 #[test]
+fn journal_records_for_and_all_records_skip_corrupt_lines() {
+    let path = temp_path("journal-resilient");
+    let record = UsageRecord {
+        version: USAGE_RECORD_VERSION,
+        billing_turn_id: "turn-abc".into(),
+        request_id: "req-abc".into(),
+        kind: UsageKind::Agent,
+        origin_session_id: "session-1".into(),
+        model: "deepseek-v4-flash".into(),
+        attempt_count: 1,
+        status: UsageStatus::Reported,
+        tokens: Some(TokenUsage {
+            input_tokens: 10,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            output_tokens: 2,
+        }),
+        cost_nano_cny: Some(0),
+        reason: None,
+        completed_at: "2026-01-01T00:00:00Z".into(),
+    };
+    let mut data = String::from("not-json\n");
+    data.push_str(&serde_json::to_string(&record).unwrap());
+    data.push('\n');
+    data.push_str("{also not json\n");
+    std::fs::write(&path, data).unwrap();
+
+    let journal = UsageJournal::new(path.clone());
+    let all = journal.all_records().unwrap();
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].request_id, "req-abc");
+
+    let turn_records = journal.records_for("turn-abc").unwrap();
+    assert_eq!(turn_records.len(), 1);
+    assert_eq!(turn_records[0].request_id, "req-abc");
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn unreported_record_does_not_fabricate_zero_tokens() {
     let path = temp_path("unreported");
     let journal = UsageJournal::new(path.clone());

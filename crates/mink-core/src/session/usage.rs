@@ -159,7 +159,7 @@ pub struct UsageJournal {
 impl UsageJournal {
     pub fn new(path: PathBuf) -> Arc<Self> {
         // 损坏的 usage.jsonl 不再静默把汇总归零：跳过坏行尽力恢复并告警
-        //（磁盘记录仍保留；all_records() 显式读取时照常报错）。
+        //（磁盘记录仍保留；all_records()/records_for() 同样使用 resilient 读取）。
         let summary = match read_records(&path) {
             Ok(records) => UsageSummary::from_records(&records),
             Err(error) => {
@@ -221,7 +221,7 @@ recovering salvageable records",
     }
 
     pub fn records_for(&self, billing_turn_id: &str) -> Result<Vec<UsageRecord>> {
-        read_records(&self.path).map(|records| {
+        read_records_resilient(&self.path).map(|records| {
             records
                 .into_iter()
                 .filter(|record| record.billing_turn_id == billing_turn_id)
@@ -230,7 +230,7 @@ recovering salvageable records",
     }
 
     pub fn all_records(&self) -> Result<Vec<UsageRecord>> {
-        read_records(&self.path)
+        read_records_resilient(&self.path)
     }
 
     pub fn summary(&self) -> UsageSummary {

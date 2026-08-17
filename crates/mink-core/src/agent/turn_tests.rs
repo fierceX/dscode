@@ -1,5 +1,6 @@
 use super::*;
 use crate::llm::mock::MockLlmBackend;
+use crate::protocol::{Event, StopEvent, TextEvent};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
@@ -56,6 +57,50 @@ async fn signal_recovery_decision_noops_when_signal_policy_is_off() {
         .await
         .unwrap();
     assert!(decision.is_none());
+}
+
+#[tokio::test]
+async fn abort_replan_success_clears_signal_recovery_guard() {
+    let replan_child = vec![
+        Ok(Event::Text(TextEvent {
+            content: "Plan: re-read the failing module, add a unit test, then fix the root cause."
+                .into(),
+        })),
+        Ok(Event::Stop(StopEvent {
+            reason: "end_turn".into(),
+        })),
+    ];
+    let llm = Arc::new(MockLlmBackend::new("flash", vec![replan_child]));
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "abort-replan-guard-clear",
+        |_| {},
+        llm.clone(),
+    )
+    .await
+    .unwrap();
+    let mut executor = TurnExecutor::new(ctx, llm.clone());
+    executor.local.signal_recovery_guard = true;
+    executor.local.guard_bypassed = false;
+    executor.signal_processor.evidence_mut().hard_failures = 8;
+    let mut belief = crate::agent::belief::BeliefTracker::new(16);
+    for _ in 0..8 {
+        belief.observe(&[crate::guard::collector::Signal {
+            kind: crate::guard::collector::SignalKind::ToolFailed,
+            severity: 1.0,
+            source_tool: "Bash".into(),
+            exit_code: Some(1),
+            matched_pattern: None,
+            message: "failed".into(),
+        }]);
+    }
+
+    let decision = executor
+        .decide_signal_recovery(true, Some(&mut belief))
+        .await
+        .unwrap();
+    assert!(decision.is_none());
+    assert!(!executor.local.signal_recovery_guard);
+    assert!(!executor.local.guard_bypassed);
 }
 
 #[tokio::test]
