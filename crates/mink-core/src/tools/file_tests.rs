@@ -1,4 +1,5 @@
 use super::*;
+use crate::tools::runner::ToolExec;
 
 #[test]
 fn text_shape_round_trips_bom_and_crlf() {
@@ -93,4 +94,30 @@ fn memo_end_line_open_ended_reads_cover_eof() {
     // 有界选择器：记实际末行。
     assert_eq!(memo_end_line(Some(5), Some(3), 3), Some(7));
     assert_eq!(memo_end_line(Some(5), Some(30), 10), Some(14));
+}
+
+#[tokio::test]
+async fn replace_mode_write_records_rollback_baseline() {
+    let shared =
+        crate::regression::test_context_for_agent_with_config("replace-write-baseline", |cfg| {
+            cfg.edit_mode = crate::config::EditMode::Replace
+        })
+        .await
+        .unwrap();
+    let ctx = crate::context::ToolContext::from(shared.as_ref());
+    let path = ctx.cwd.join("a.txt");
+    let result = WriteTool
+        .execute(
+            &serde_json::json!({ "path": "a.txt", "content": "new content\n" }),
+            &ctx,
+        )
+        .unwrap();
+    assert!(result.content.contains("wrote"));
+    let baseline = ctx
+        .snapshots
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .latest_read_snapshot(&path)
+        .expect("Replace-mode Write must update the rollback baseline");
+    assert_eq!(baseline.text, "new content\n");
 }

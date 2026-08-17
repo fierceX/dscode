@@ -27,6 +27,8 @@ fn failure_adapter_covers_stable_failure_kinds() {
         ),
         ("invalid argument", None, ToolFailureKind::ArgumentInvalid),
         ("interrupted by user", None, ToolFailureKind::Aborted),
+        ("interrupted by user", Some(130), ToolFailureKind::Aborted),
+        ("command interrupted", Some(130), ToolFailureKind::Aborted),
         (
             "unclassified internal failure",
             None,

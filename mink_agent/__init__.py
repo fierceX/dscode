@@ -290,6 +290,26 @@ class SandboxConfig:
     cwd: Optional[str] = None
 
 
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Recursively merge ``override`` into a copy of ``base``.
+
+    Nested dictionaries are merged key-by-key so SDK-computed option groups
+    (notably ``tools``) are preserved when a caller overrides only a subset
+    via ``extra_options``. Non-dict values from ``override`` replace the base
+    value.
+    """
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict):
+            if isinstance(merged.get(key), dict):
+                merged[key] = _deep_merge(merged[key], value)
+            else:
+                merged[key] = _deep_merge({}, value)
+        else:
+            merged[key] = value
+    return merged
+
+
 # ── AgentSession ─────────────────────────────────────────────────────
 
 class AgentSession:
@@ -852,7 +872,18 @@ class AgentSession:
         if self._config.signal_policy is not None:
             options["signal"] = {"policy": self._config.signal_policy}
         if extra_options:
-            options.update(extra_options)
+            options = _deep_merge(options, extra_options)
+        signal = options.get("signal")
+        if isinstance(signal, dict) and "policy" in signal:
+            signal_policy = signal["policy"]
+            if not isinstance(signal_policy, str):
+                raise ValueError("signal.policy must be a string")
+            signal_policy = signal_policy.strip().lower()
+            if signal_policy not in ("off", "evidence", "state_ops", "restart", "full"):
+                raise ValueError(
+                    "signal_policy must be one of: off, evidence, state_ops, restart, full"
+                )
+            signal["policy"] = signal_policy
 
         req: dict[str, Any] = {"version": 3, "prompt": prompt}
         if self._config.mission_content:

@@ -1040,4 +1040,26 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(root);
     }
+
+    #[tokio::test]
+    async fn list_skips_corrupt_usage_jsonl_without_failing_whole_list() {
+        let root = unique_temp_dir("corrupt-usage-list");
+        let home = root.join("home");
+        let session_dir = home
+            .join(".mink")
+            .join("projects")
+            .join("project-key")
+            .join("ok");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        std::fs::write(session_dir.join("usage.jsonl"), "not-json\n").unwrap();
+
+        let registry = Registry::new(home, "flash".to_string(), 1);
+        let sessions = registry.list().await.unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "ok");
+        assert_eq!(sessions[0].tokens_in, 0);
+        assert_eq!(sessions[0].tokens_out, 0);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

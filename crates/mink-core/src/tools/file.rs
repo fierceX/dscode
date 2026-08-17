@@ -638,20 +638,19 @@ impl super::runner::ToolExec for WriteTool {
             &args.content,
             ctx.tool_config.file_write_max_bytes,
         )?;
-        if ctx.tool_config.edit_mode == crate::config::EditMode::Hashline
-            && args.content.len()
-                <= (4 * 1024 * 1024usize).min(ctx.tool_config.file_write_max_bytes)
-        {
+        if args.content.len() <= (4 * 1024 * 1024usize).min(ctx.tool_config.file_write_max_bytes) {
             let line_count = crate::tools::snapshot::split_content_lines(&args.content).len();
             let snapshot = ctx
                 .snapshots
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .record(&path, &args.content, 1..=line_count);
-            return Ok(super::runner::ToolOutcome::text(format!(
-                "{result}\n[{}#{}]",
-                args.path, snapshot.tag
-            )));
+            if ctx.tool_config.edit_mode == crate::config::EditMode::Hashline {
+                return Ok(super::runner::ToolOutcome::text(format!(
+                    "{result}\n[{}#{}]",
+                    args.path, snapshot.tag
+                )));
+            }
         }
         Ok(super::runner::ToolOutcome::text(result))
     }

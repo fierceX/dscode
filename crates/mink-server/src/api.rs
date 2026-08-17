@@ -15,6 +15,12 @@ use std::sync::Arc;
 pub struct ApiState {
     pub registry: Arc<Registry>,
     pub cwd: PathBuf,
+    /// Set to `true` when the server begins graceful shutdown. SSE handlers
+    /// subscribe to this sender so long-lived streams can terminate without
+    /// waiting for the runtime broadcast senders to be dropped. Keeping the
+    /// sender in state also prevents receiver `Closed` errors in tests where
+    /// no external shutdown sender is held.
+    pub shutdown: tokio::sync::watch::Sender<bool>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -337,11 +343,22 @@ async fn stream_events(
         Ok(None) => return ApiResponse::err(404, format!("session {id} not open")).into_response(),
     };
     let mut rx = session.event_receiver();
+    let mut shutdown = state.shutdown.subscribe();
     let stream = async_stream::stream! {
         // 心跳：30s 无事件时发 `: ping` 注释帧，防止中间代理按空闲超时断开
         let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(30));
         loop {
+            // If shutdown was already signaled before this stream subscribed,
+            // close immediately instead of waiting for another watch change.
+            if *shutdown.borrow() {
+                break;
+            }
             tokio::select! {
+                _ = shutdown.changed() => {
+                    if *shutdown.borrow() {
+                        break;
+                    }
+                }
                 recv = rx.recv() => {
                     match recv {
                         Ok(line) => {
@@ -648,9 +665,11 @@ mod tests {
         std::fs::write(sess.join("artifacts/abc.txt"), "artifact body").unwrap();
 
         let registry = Arc::new(Registry::new(home, "flash".to_string(), 4));
+        let (shutdown, _) = tokio::sync::watch::channel(false);
         let state = Arc::new(ApiState {
             registry,
             cwd: std::env::temp_dir(),
+            shutdown,
         });
         router(state)
     }
@@ -789,9 +808,11 @@ mod tests {
         ));
         let created = registry.create("mock-sse", &cwd).await.unwrap();
         let project = created.project_key.clone();
+        let (shutdown, _) = tokio::sync::watch::channel(false);
         let state = Arc::new(ApiState {
             registry: registry.clone(),
             cwd,
+            shutdown,
         });
         let app = router(state);
 
@@ -867,6 +888,71 @@ mod tests {
         assert!(types.contains(&"text".into()));
         assert!(types.contains(&"stop".into()));
         assert_eq!(types.last().map(String::as_str), Some("turn_final"));
+        registry.close(&created.id, Some(&project)).await.unwrap();
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[tokio::test]
+    async fn sse_stream_ends_when_shutdown_signal_is_sent() {
+        let home = std::env::temp_dir().join(format!(
+            "mink-server-shutdown-sse-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let cwd = home.join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let registry = Arc::new(Registry::with_llm_backend(
+            home.clone(),
+            "mock".into(),
+            1,
+            Arc::new(MockRuntimeBackend),
+        ));
+        let created = registry.create("shutdown-sse", &cwd).await.unwrap();
+        let project = created.project_key.clone();
+        let (shutdown_tx, _) = tokio::sync::watch::channel(false);
+        let state = Arc::new(ApiState {
+            registry: registry.clone(),
+            cwd,
+            shutdown: shutdown_tx.clone(),
+        });
+        let app = router(state);
+
+        let (status, _) = req(
+            &app,
+            Method::POST,
+            &format!("/api/sessions/{}/open?project={project}", created.id),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let stream_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/sessions/{}/stream?project={project}",
+                        created.id
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(stream_response.status(), StatusCode::OK);
+        let mut body = stream_response.into_body();
+
+        let _ = shutdown_tx.send(true);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while let Some(frame) = body.frame().await {
+                let _ = frame.unwrap();
+            }
+        })
+        .await
+        .expect("SSE stream should close after the shutdown signal is sent");
+
         registry.close(&created.id, Some(&project)).await.unwrap();
         let _ = std::fs::remove_dir_all(home);
     }

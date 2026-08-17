@@ -339,6 +339,27 @@ fn read_records_lossy(path: &Path) -> Vec<UsageRecord> {
         .collect()
 }
 
+/// 读取 usage 记录并跳过损坏行，但保留 I/O 错误。
+///
+/// 用于只读会话发现/列表等“单个会话损坏不应拖垮整体”的场景；需要严格
+/// 失败语义的写入路径仍应使用 [`read_records`]。
+pub(crate) fn read_records_resilient(path: &Path) -> Result<Vec<UsageRecord>> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let data = std::fs::read_to_string(path)?;
+    let mut records = Vec::new();
+    for line in data.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(record) = serde_json::from_str(line) {
+            records.push(record);
+        }
+    }
+    Ok(records)
+}
+
 pub(crate) fn read_records(path: &Path) -> Result<Vec<UsageRecord>> {
     if !path.exists() {
         return Ok(Vec::new());

@@ -115,7 +115,8 @@ impl SessionReader {
     }
 
     pub fn usage_snapshot(&self) -> Result<SessionUsage> {
-        let records = crate::session::usage::read_records(&self.directory.join("usage.jsonl"))?;
+        let records =
+            crate::session::usage::read_records_resilient(&self.directory.join("usage.jsonl"))?;
         let last_context_tokens = records
             .iter()
             .rev()

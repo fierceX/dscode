@@ -54,9 +54,11 @@ async fn main() -> Result<()> {
             }
         }
     });
+    let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
     let state = Arc::new(api::ApiState {
         registry: registry.clone(),
         cwd: cwd.clone(),
+        shutdown: shutdown_tx.clone(),
     });
     // Web UI：默认服务嵌入二进制的前端产物（build.rs 自动构建并 include_str! 嵌入）。
     // MINK_SERVER_DEV_WEB=1 时回退磁盘 ServeDir（web/dist）——前端开发热迭代场景。
@@ -78,8 +80,13 @@ async fn main() -> Result<()> {
         "mink-server listening on http://{addr} (home: {})",
         cfg.mink_home.display()
     );
-    let server = axum::serve(listener, app).with_graceful_shutdown(async {
+    let server = axum::serve(listener, app).with_graceful_shutdown(async move {
         let _ = tokio::signal::ctrl_c().await;
+        // Tell open SSE streams to close before waiting for in-flight requests
+        // to drain. Without this, axum waits for every SSE connection to end,
+        // but those streams only end after shutdown_all() drops the broadcast
+        // senders — which is unreachable until server.await returns.
+        let _ = shutdown_tx.send(true);
     });
     let serve_result = server.await;
     reaper.abort();

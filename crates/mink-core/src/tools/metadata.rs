@@ -84,6 +84,12 @@ pub fn classify_failure_kind(content: &str, exit_code: Option<i32>) -> ToolFailu
     if lower.contains("timed out") || lower.contains("timeout") {
         return ToolFailureKind::Timeout;
     }
+    // SIGINT (128 + 2) is an intentional user/agent interruption, not a generic
+    // process failure. Check it before the non-zero exit code fallback so Bash
+    // and Python Ctrl+C are classified as Aborted/Interrupted.
+    if exit_code == Some(130) {
+        return ToolFailureKind::Aborted;
+    }
     if let Some(code) = exit_code
         && code != 0
     {
