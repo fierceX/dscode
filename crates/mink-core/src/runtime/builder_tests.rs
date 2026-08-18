@@ -1057,47 +1057,6 @@ impl crate::runtime::LlmBackend for MessageCaptureBackend {
     }
 }
 
-#[cfg(feature = "prefab")]
-type SeenPrefabRequests = Arc<Mutex<Vec<(String, Vec<serde_json::Value>, Vec<serde_json::Value>)>>>;
-
-#[cfg(feature = "prefab")]
-struct PrefabCaptureBackend {
-    seen: SeenPrefabRequests,
-}
-
-#[cfg(feature = "prefab")]
-#[async_trait::async_trait]
-impl crate::runtime::LlmBackend for PrefabCaptureBackend {
-    fn name(&self) -> &str {
-        "prefab-capture"
-    }
-
-    async fn stream(
-        &self,
-        request: crate::runtime::LlmRequest,
-    ) -> anyhow::Result<crate::runtime::LlmResponseStream> {
-        self.seen
-            .lock()
-            .unwrap()
-            .push((request.system_prompt, request.messages, request.tools));
-        Ok(crate::runtime::LlmResponseStream {
-            events: Box::pin(futures::stream::iter(vec![
-                Ok(crate::runtime::LlmEvent::Text(
-                    crate::runtime::LlmTextEvent {
-                        content: "ok".into(),
-                    },
-                )),
-                Ok(crate::runtime::LlmEvent::Stop(
-                    crate::runtime::LlmStopEvent {
-                        reason: "end_turn".into(),
-                    },
-                )),
-            ])),
-            attempt_count: 1,
-        })
-    }
-}
-
 #[tokio::test]
 async fn injected_backend_receives_resolved_model_alias() {
     let home = unique_temp_dir("backend-alias-home");
@@ -2364,679 +2323,217 @@ async fn stream_turn_without_event_sink_emits_tool_events() {
     let _ = tokio::fs::remove_dir_all(cwd).await;
 }
 
-#[cfg(feature = "prefab")]
-#[tokio::test]
-async fn prefab_seed_is_visible_to_first_turn_llm_request() {
-    let home = unique_temp_dir("prefab-seed-home");
-    let cwd = unique_temp_dir("prefab-seed-cwd");
-    tokio::fs::create_dir_all(&cwd).await.unwrap();
+type SeenSystemPrompts = Arc<Mutex<Vec<String>>>;
 
-    let seen: SeenPrefabRequests = Arc::new(Mutex::new(Vec::new()));
-    let options = crate::runtime::AgentOptions::new(home.clone(), cwd.clone())
-        .with_llm_backend(Arc::new(PrefabCaptureBackend { seen: seen.clone() }))
-        .with_prefab(true)
-        .with_api_key("test-key")
-        .with_base_url("https://example.invalid/v1");
-    let runtime = crate::runtime::AgentRuntime::start(options).await.unwrap();
-
-    let outcome = runtime.run_turn("continue").await.unwrap();
-    assert_eq!(outcome.status, crate::agent::orchestrator::TurnStatus::Ok);
-
-    let captured = seen.lock().unwrap().clone();
-    assert_eq!(captured.len(), 1);
-    let (system_prompt, messages, _tools) = &captured[0];
-    assert!(system_prompt.contains("You are a helpful software engineer assistant."));
-    assert!(!system_prompt.contains("system-conventions"));
-    let joined = messages
-        .iter()
-        .map(|m| serde_json::to_string(m).unwrap())
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(joined.contains("Read the workspace-root AGENTS.md"));
-    assert!(joined.contains("Instructions loaded."));
-    assert!(joined.contains("Ready."));
-
-    runtime.shutdown().await.unwrap();
-    let _ = tokio::fs::remove_dir_all(home).await;
-    let _ = tokio::fs::remove_dir_all(cwd).await;
+struct SystemPromptCaptureBackend {
+    seen: SeenSystemPrompts,
 }
 
-#[cfg(feature = "prefab")]
-#[tokio::test]
-async fn prefab_named_template_changes_system_prompt() {
-    let home = unique_temp_dir("prefab-flash-home");
-    let cwd = unique_temp_dir("prefab-flash-cwd");
-    tokio::fs::create_dir_all(&cwd).await.unwrap();
-
-    let seen: SeenPrefabRequests = Arc::new(Mutex::new(Vec::new()));
-    let options = crate::runtime::AgentOptions::new(home.clone(), cwd.clone())
-        .with_prefab_named("flash")
-        .unwrap()
-        .with_llm_backend(Arc::new(PrefabCaptureBackend { seen: seen.clone() }))
-        .with_api_key("test-key")
-        .with_base_url("https://example.invalid/v1");
-    let runtime = crate::runtime::AgentRuntime::start(options).await.unwrap();
-
-    let outcome = runtime.run_turn("continue").await.unwrap();
-    assert_eq!(outcome.status, crate::agent::orchestrator::TurnStatus::Ok);
-
-    let captured = seen.lock().unwrap().clone();
-    assert_eq!(captured.len(), 1);
-    let (system_prompt, messages, _tools) = &captured[0];
-    assert!(
-        system_prompt.contains("Before acting"),
-        "flash template system prompt should be used"
-    );
-    assert!(
-        !system_prompt.contains("You are a helpful software engineer assistant."),
-        "default pro template system prompt should not be used"
-    );
-    let joined = messages
-        .iter()
-        .map(|m| serde_json::to_string(m).unwrap())
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(joined.contains("Read the workspace-root AGENTS.md"));
-    assert!(joined.contains("Ready."));
-
-    runtime.shutdown().await.unwrap();
-    let _ = tokio::fs::remove_dir_all(home).await;
-    let _ = tokio::fs::remove_dir_all(cwd).await;
-}
-
-#[cfg(feature = "prefab")]
-#[tokio::test]
-async fn prefab_uses_full_promoted_surface() {
-    let home = unique_temp_dir("prefab-full-home");
-    let cwd = unique_temp_dir("prefab-full-cwd");
-    tokio::fs::create_dir_all(&cwd).await.unwrap();
-
-    let seen: SeenPrefabRequests = Arc::new(Mutex::new(Vec::new()));
-    let options = crate::runtime::AgentOptions::new(home.clone(), cwd.clone())
-        .with_llm_backend(Arc::new(PrefabCaptureBackend { seen: seen.clone() }))
-        .with_prefab(true)
-        .with_api_key("test-key")
-        .with_base_url("https://example.invalid/v1");
-    let runtime = crate::runtime::AgentRuntime::start(options).await.unwrap();
-
-    let outcome = runtime.run_turn("continue").await.unwrap();
-    assert_eq!(outcome.status, crate::agent::orchestrator::TurnStatus::Ok);
-
-    let captured = seen.lock().unwrap().clone();
-    assert_eq!(captured.len(), 1);
-    let (system_prompt, _messages, tools) = &captured[0];
-    assert!(!system_prompt.contains("system-conventions"));
-
-    let tool_names: Vec<&str> = tools
-        .iter()
-        .filter_map(|tool| tool["name"].as_str())
-        .collect();
-    assert!(tool_names.len() > 3);
-    assert!(tool_names.contains(&"Bash"));
-    assert!(tool_names.contains(&"Read"));
-    assert!(tool_names.contains(&"Edit"));
-
-    runtime.shutdown().await.unwrap();
-    let _ = tokio::fs::remove_dir_all(home).await;
-    let _ = tokio::fs::remove_dir_all(cwd).await;
-}
-
-#[cfg(feature = "prefab")]
-fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() {
-        return Some(0);
+#[async_trait::async_trait]
+impl crate::runtime::LlmBackend for SystemPromptCaptureBackend {
+    fn name(&self) -> &str {
+        "system-prompt-capture"
     }
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
-}
 
-#[cfg(feature = "prefab")]
-#[tokio::test]
-async fn prefab_wire_request_strictly_matches_dsh_prefix() {
-    use std::sync::Arc;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
-
-    let home = unique_temp_dir("prefab-wire-home");
-    let cwd = unique_temp_dir("prefab-wire-cwd");
-    tokio::fs::create_dir_all(&cwd).await.unwrap();
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let captured = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
-
-    let server_captured = captured.clone();
-    let server = tokio::spawn(async move {
-        let response = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n\
-data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":null}]}\n\n\
-data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}\n\n\
-data: [DONE]\n\n";
-        loop {
-            let accepted =
-                tokio::time::timeout(std::time::Duration::from_millis(300), listener.accept())
-                    .await;
-            let Ok(Ok((mut socket, _))) = accepted else {
-                break;
-            };
-            let mut total = Vec::new();
-            let mut tmp = [0u8; 4096];
-            let header_end;
-            loop {
-                let n = socket.read(&mut tmp).await.unwrap();
-                if n == 0 {
-                    panic!("connection closed before headers");
-                }
-                total.extend_from_slice(&tmp[..n]);
-                if let Some(pos) = find_subsequence(&total, b"\r\n\r\n") {
-                    header_end = pos;
-                    break;
-                }
-            }
-            let headers = String::from_utf8_lossy(&total[..header_end]).to_string();
-            let content_length = headers
-                .lines()
-                .find_map(|line| {
-                    let line = line.trim().to_ascii_lowercase();
-                    line.strip_prefix("content-length:")
-                        .and_then(|value| value.trim().parse::<usize>().ok())
-                })
-                .unwrap_or(0);
-            let mut body = total[header_end + 4..].to_vec();
-            while body.len() < content_length {
-                let n = socket.read(&mut tmp).await.unwrap();
-                if n == 0 {
-                    break;
-                }
-                body.extend_from_slice(&tmp[..n]);
-            }
-            let request_body: serde_json::Value =
-                serde_json::from_slice(&body[..content_length]).unwrap();
-            server_captured.lock().unwrap().push(request_body);
-            socket.write_all(response.as_bytes()).await.unwrap();
-        }
-    });
-
-    let base_url = format!("http://{addr}/v1");
-    let options = AgentOptions::new(home.clone(), cwd.clone())
-        .with_prefab(true)
-        .with_api_key("test-key")
-        .with_base_url(&base_url)
-        .with_model("deepseek-v4-pro");
-    let runtime = crate::runtime::AgentRuntime::start(options).await.unwrap();
-    let session = runtime.session_info().clone();
-    // Capture the seeded conversation before the live turn mutates it.
-    let conversation_text = tokio::fs::read_to_string(&session.conversation_path)
-        .await
-        .unwrap();
-    let seeded_conversation: Vec<serde_json::Value> = conversation_text
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
-    let outcome = runtime.run_turn("continue").await.unwrap();
-    assert_eq!(outcome.status, crate::agent::orchestrator::TurnStatus::Ok);
-    runtime.shutdown().await.unwrap();
-    server.await.unwrap();
-
-    let body = captured
-        .lock()
-        .unwrap()
-        .first()
-        .cloned()
-        .expect("no HTTP request captured");
-
-    // Save the raw captured request locally for inspection.
-    std::fs::create_dir_all("target").unwrap();
-    std::fs::write(
-        "target/prefab-captured-request.json",
-        serde_json::to_string_pretty(&body).unwrap(),
-    )
-    .unwrap();
-
-    // Strictly align the entire messages array with the actual seeded session
-    // directory conversation plus the single live user turn. The Prefab
-    // system prompt is stored as a standard `prefix_snapshot` event.
-    let events_text = std::fs::read_to_string(&session.events_path).unwrap();
-    let prefix_value = events_text
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .find(|value| {
-            value.get("type").and_then(serde_json::Value::as_str) == Some("prefix_snapshot")
+    async fn stream(
+        &self,
+        request: crate::runtime::LlmRequest,
+    ) -> anyhow::Result<crate::runtime::LlmResponseStream> {
+        self.seen.lock().unwrap().push(request.system_prompt);
+        Ok(crate::runtime::LlmResponseStream {
+            events: Box::pin(futures::stream::iter(vec![
+                Ok(crate::runtime::LlmEvent::Text(
+                    crate::runtime::LlmTextEvent {
+                        content: "ok".into(),
+                    },
+                )),
+                Ok(crate::runtime::LlmEvent::Stop(
+                    crate::runtime::LlmStopEvent {
+                        reason: "end_turn".into(),
+                    },
+                )),
+            ])),
+            attempt_count: 1,
         })
-        .expect("prefab prefix_snapshot event");
-    let mut expected_messages = vec![serde_json::json!({
-        "role": "system",
-        "content": prefix_value["system_prompt"].as_str().unwrap(),
-    })];
-    expected_messages
-        .extend(crate::llm::transport::convert_messages_to_openai(&seeded_conversation).unwrap());
-    expected_messages.push(serde_json::json!({"role": "user", "content": "continue"}));
-    assert_eq!(
-        body["messages"],
-        serde_json::Value::Array(expected_messages)
-    );
-
-    // Tool schemas are Mink-native (the runtime must be able to execute them),
-    // while the conversation and system prompt strictly match the DSH prefab.
-    let tools = body["tools"].as_array().expect("tools must be present");
-    assert!(!tools.is_empty());
-    let tools_json = serde_json::to_string(&body["tools"]).unwrap();
-    assert!(tools_json.contains("Bash"));
-
-    let _ = tokio::fs::remove_dir_all(home).await;
-    let _ = tokio::fs::remove_dir_all(cwd).await;
+    }
 }
 
-#[cfg(feature = "prefab")]
-#[tokio::test]
-async fn prefab_wire_request_promoted_surface() {
-    use std::sync::Arc;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
-
-    let home = unique_temp_dir("router-flash-wire-home");
-    let cwd = unique_temp_dir("router-flash-wire-cwd");
-    tokio::fs::create_dir_all(&cwd).await.unwrap();
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let captured = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
-
-    let server_captured = captured.clone();
-    let server = tokio::spawn(async move {
-        let response = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n\
-data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":null}]}\n\n\
-data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}\n\n\
-data: [DONE]\n\n";
-        loop {
-            let accepted =
-                tokio::time::timeout(std::time::Duration::from_millis(300), listener.accept())
-                    .await;
-            let Ok(Ok((mut socket, _))) = accepted else {
-                break;
-            };
-            let mut total = Vec::new();
-            let mut tmp = [0u8; 4096];
-            let header_end;
-            loop {
-                let n = socket.read(&mut tmp).await.unwrap();
-                if n == 0 {
-                    panic!("connection closed before headers");
-                }
-                total.extend_from_slice(&tmp[..n]);
-                if let Some(pos) = find_subsequence(&total, b"\r\n\r\n") {
-                    header_end = pos;
-                    break;
-                }
-            }
-            let headers = String::from_utf8_lossy(&total[..header_end]).to_string();
-            let content_length = headers
-                .lines()
-                .find_map(|line| {
-                    let line = line.trim().to_ascii_lowercase();
-                    line.strip_prefix("content-length:")
-                        .and_then(|value| value.trim().parse::<usize>().ok())
-                })
-                .unwrap_or(0);
-            let mut body = total[header_end + 4..].to_vec();
-            while body.len() < content_length {
-                let n = socket.read(&mut tmp).await.unwrap();
-                if n == 0 {
-                    break;
-                }
-                body.extend_from_slice(&tmp[..n]);
-            }
-            let request_body: serde_json::Value =
-                serde_json::from_slice(&body[..content_length]).unwrap();
-            server_captured.lock().unwrap().push(request_body);
-            socket.write_all(response.as_bytes()).await.unwrap();
-        }
-    });
-
-    let base_url = format!("http://{addr}/v1");
-    let options = AgentOptions::new(home.clone(), cwd.clone())
-        .with_prefab(true)
-        .with_api_key("test-key")
-        .with_base_url(&base_url)
-        .with_model("deepseek-v4-flash");
-    let runtime = crate::runtime::AgentRuntime::start(options).await.unwrap();
-    let outcome = runtime.run_turn("continue").await.unwrap();
-    assert_eq!(outcome.status, crate::agent::orchestrator::TurnStatus::Ok);
-    runtime.shutdown().await.unwrap();
-    server.await.unwrap();
-
-    let body = captured
-        .lock()
-        .unwrap()
-        .first()
-        .cloned()
-        .expect("no HTTP request captured");
-
-    // Save the raw captured request locally for inspection.
-    std::fs::create_dir_all("target").unwrap();
-    std::fs::write(
-        "target/router-flash-captured-request.json",
-        serde_json::to_string_pretty(&body).unwrap(),
-    )
-    .unwrap();
-
-    let system = body["messages"][0]["content"].as_str().unwrap();
-    assert!(system.contains("You are a helpful software engineer assistant."));
-    assert!(!system.contains("system-conventions"));
-
-    let tools = body["tools"].as_array().expect("tools must be present");
-    assert!(tools.len() > 3);
-    let names: Vec<&str> = tools
-        .iter()
-        .filter_map(|tool| tool["function"]["name"].as_str())
-        .collect();
-    assert!(names.contains(&"Bash"));
-    assert!(names.contains(&"Read"));
-    assert!(names.contains(&"Edit"));
-
-    let all_messages = serde_json::to_string(&body["messages"]).unwrap();
-    assert!(all_messages.contains("Read the workspace-root AGENTS.md"));
-    assert!(all_messages.contains("Ready."));
-
-    let _ = tokio::fs::remove_dir_all(home).await;
-    let _ = tokio::fs::remove_dir_all(cwd).await;
+struct StaticPrefixSource {
+    system_prompt: String,
 }
 
-#[cfg(feature = "prefab")]
-#[tokio::test]
-async fn prefab_session_resumes_with_history() {
-    use crate::runtime::SessionPolicy;
-
-    let home = unique_temp_dir("prefab-resume-home");
-    let cwd = unique_temp_dir("prefab-resume-cwd");
-    tokio::fs::create_dir_all(&cwd).await.unwrap();
-
-    let create_options = crate::runtime::AgentOptions::new(home.clone(), cwd.clone())
-        .with_prefab(true)
-        .with_api_key("test-key")
-        .with_base_url("https://example.invalid/v1");
-    let runtime = crate::runtime::AgentRuntime::start(create_options)
-        .await
-        .unwrap();
-    let original = runtime.session_info().clone();
-    assert!(original.is_new);
-    runtime.shutdown().await.unwrap();
-
-    let resume_options = crate::runtime::AgentOptions::new(home.clone(), cwd.clone())
-        .with_session(SessionPolicy::ContinueLatest)
-        .with_api_key("test-key")
-        .with_base_url("https://example.invalid/v1");
-    let resumed = crate::runtime::AgentRuntime::start(resume_options)
-        .await
-        .unwrap();
-    let info = resumed.session_info().clone();
-    assert!(!info.is_new);
-    assert_eq!(info.session_id, original.session_id);
-
-    let conv = tokio::fs::read_to_string(&info.conversation_path)
-        .await
-        .unwrap();
-    assert!(conv.contains("Ready."));
-    assert!(conv.contains("load_full_instructions"));
-
-    let events = tokio::fs::read_to_string(&info.events_path).await.unwrap();
-    assert!(events.contains("\"type\":\"user_input\""));
-
-    resumed.shutdown().await.unwrap();
-    let _ = tokio::fs::remove_dir_all(home).await;
-    let _ = tokio::fs::remove_dir_all(cwd).await;
+impl crate::runtime::PrefixSource for StaticPrefixSource {
+    fn prefix(&self, _events_path: &std::path::Path) -> Option<(String, Vec<serde_json::Value>)> {
+        Some((self.system_prompt.clone(), Vec::new()))
+    }
 }
 
-#[cfg(feature = "prefab")]
 #[tokio::test]
-async fn prefab_restructures_existing_session_system_prompt() {
-    use crate::runtime::SessionPolicy;
-
-    let home = unique_temp_dir("prefab-existing-home");
-    let cwd = unique_temp_dir("prefab-existing-cwd");
+async fn prefix_source_overrides_compiled_prefix() {
+    let home = unique_temp_dir("prefix-source-home");
+    let cwd = unique_temp_dir("prefix-source-cwd");
     tokio::fs::create_dir_all(&cwd).await.unwrap();
 
-    // Create a normal session first.
-    let normal_seen: SeenMessages = Arc::new(Mutex::new(Vec::new()));
-    let normal = crate::runtime::AgentRuntime::start(
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let runtime = crate::runtime::AgentRuntime::start(
         crate::runtime::AgentOptions::new(home.clone(), cwd.clone())
-            .with_project_scoped_sessions()
-            .with_llm_backend(Arc::new(MessageCaptureBackend {
-                seen: normal_seen.clone(),
-            }))
+            .with_llm_backend(Arc::new(SystemPromptCaptureBackend { seen: seen.clone() }))
             .with_api_key("test-key")
-            .with_base_url("https://example.invalid/v1"),
+            .with_base_url("https://example.invalid/v1")
+            .with_prefix_source(Arc::new(StaticPrefixSource {
+                system_prompt: "CUSTOM-PREFIX-SYSTEM-PROMPT".into(),
+            })),
     )
     .await
     .unwrap();
-    let normal_info = normal.session_info().clone();
-    normal.run_turn("hello").await.unwrap();
-    normal.shutdown().await.unwrap();
-    let normal_conv = tokio::fs::read_to_string(&normal_info.conversation_path)
-        .await
-        .unwrap();
 
-    // Resume the same session WITH prefab enabled. It must not create a new session.
-    let seen: SeenPrefabRequests = Arc::new(Mutex::new(Vec::new()));
-    let options = crate::runtime::AgentOptions::new(home.clone(), cwd.clone())
-        .with_project_scoped_sessions()
-        .with_session(SessionPolicy::ContinueLatest)
-        .with_prefab(true)
-        .with_llm_backend(Arc::new(PrefabCaptureBackend { seen: seen.clone() }))
-        .with_api_key("test-key")
-        .with_base_url("https://example.invalid/v1");
-    let runtime = crate::runtime::AgentRuntime::start(options).await.unwrap();
-    let info = runtime.session_info().clone();
-    assert_eq!(info.session_id, normal_info.session_id);
-    let restructured_conv = tokio::fs::read_to_string(&info.conversation_path)
-        .await
-        .unwrap();
-    assert_eq!(restructured_conv, normal_conv);
-    runtime.run_turn("continue").await.unwrap();
+    let outcome = runtime.run_turn("hi").await.unwrap();
+    assert_eq!(outcome.status, crate::agent::orchestrator::TurnStatus::Ok);
+    // Second turn in the same process must still consult the source (the
+    // compiled prefix cache must never shadow a configured source).
+    let outcome = runtime.run_turn("hi again").await.unwrap();
+    assert_eq!(outcome.status, crate::agent::orchestrator::TurnStatus::Ok);
+    let captured = seen.lock().unwrap().clone();
+    assert_eq!(
+        captured.len(),
+        2,
+        "both requests must consult the prefix source"
+    );
+    assert_eq!(captured[0], "CUSTOM-PREFIX-SYSTEM-PROMPT");
+    assert_eq!(captured[1], "CUSTOM-PREFIX-SYSTEM-PROMPT");
+
     runtime.shutdown().await.unwrap();
+    let _ = tokio::fs::remove_dir_all(home).await;
+    let _ = tokio::fs::remove_dir_all(cwd).await;
+}
 
+type SeenHookViews = Arc<Mutex<Option<(String, usize, usize, String, String, String, String)>>>;
+
+struct RecordingPostInitHook {
+    seen: SeenHookViews,
+}
+
+impl crate::runtime::PostInitHook for RecordingPostInitHook {
+    fn run(&self, ctx: &crate::runtime::PostInitContext<'_>) -> anyhow::Result<()> {
+        *self.seen.lock().unwrap() = Some((
+            ctx.system_prompt().to_string(),
+            ctx.tools().len(),
+            ctx.workflow_ids().len(),
+            ctx.workflow_fingerprint().to_string(),
+            ctx.tool_surface_fingerprint().to_string(),
+            ctx.tool_capabilities_fingerprint().to_string(),
+            ctx.dependency_fingerprint().to_string(),
+        ));
+        assert!(!ctx.cwd().as_os_str().is_empty());
+        assert!(!ctx.capabilities().skills.discoverable.is_empty());
+        ctx.log_event(serde_json::json!({ "type": "hook_test_event" }))?;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn post_init_hook_receives_resolved_view_and_logs_events() {
+    let home = unique_temp_dir("post-init-hook-home");
+    let cwd = unique_temp_dir("post-init-hook-cwd");
+    tokio::fs::create_dir_all(&cwd).await.unwrap();
+
+    let seen_hook = Arc::new(Mutex::new(None));
+    let runtime = crate::runtime::AgentRuntime::start(
+        crate::runtime::AgentOptions::new(home.clone(), cwd.clone())
+            .with_llm_backend(Arc::new(MessageCaptureBackend {
+                seen: Arc::new(Mutex::new(Vec::new())),
+            }))
+            .with_api_key("test-key")
+            .with_base_url("https://example.invalid/v1")
+            .with_post_init_hook(Arc::new(RecordingPostInitHook {
+                seen: seen_hook.clone(),
+            })),
+    )
+    .await
+    .unwrap();
+
+    let info = runtime.session_info().clone();
+    let view = seen_hook.lock().unwrap().clone().expect("hook ran");
+    assert!(
+        view.0.contains("system-conventions"),
+        "resolved system prompt must carry the core section"
+    );
+    assert!(view.1 > 0, "tool schemas must be visible to the hook");
+    assert!(view.2 > 0, "workflow ids must be visible to the hook");
+    assert!(!view.3.is_empty());
+    assert!(!view.4.is_empty());
+    assert!(!view.5.is_empty());
+    assert!(!view.6.is_empty());
+
+    let events_text = tokio::fs::read_to_string(&info.events_path).await.unwrap();
+    assert!(
+        events_text.contains("\"type\":\"hook_test_event\""),
+        "hook event must be persisted"
+    );
+
+    let outcome = runtime.run_turn("hi").await.unwrap();
+    assert_eq!(outcome.status, crate::agent::orchestrator::TurnStatus::Ok);
+
+    runtime.shutdown().await.unwrap();
+    let _ = tokio::fs::remove_dir_all(home).await;
+    let _ = tokio::fs::remove_dir_all(cwd).await;
+}
+
+struct RewritingHook;
+
+impl crate::runtime::PostInitHook for RewritingHook {
+    fn run(&self, ctx: &crate::runtime::PostInitContext<'_>) -> anyhow::Result<()> {
+        // Simulate a host that rewrites session files before the first turn
+        // (prefab-style restructuring): append a user line to the
+        // conversation and record a prefix_snapshot event.
+        let mut conversation =
+            std::fs::read_to_string(&ctx.session_paths().conversation).unwrap_or_default();
+        conversation.push_str("{\"role\":\"user\",\"content\":\"HOOK-INJECTED-LINE\"}\n");
+        std::fs::write(&ctx.session_paths().conversation, conversation)?;
+        ctx.log_event(serde_json::json!({
+            "type": "prefix_snapshot",
+            "version": 1,
+            "fingerprint": "hook-test",
+            "dependency_fingerprint": "hook-test",
+            "system_prompt": "HOOK-PROMPT",
+            "tools_json": [],
+        }))?;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn post_init_hook_rewrites_are_visible_to_first_turn() {
+    let home = unique_temp_dir("hook-rewrite-home");
+    let cwd = unique_temp_dir("hook-rewrite-cwd");
+    tokio::fs::create_dir_all(&cwd).await.unwrap();
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let runtime = crate::runtime::AgentRuntime::start(
+        crate::runtime::AgentOptions::new(home.clone(), cwd.clone())
+            .with_llm_backend(Arc::new(MessageCaptureBackend { seen: seen.clone() }))
+            .with_api_key("test-key")
+            .with_base_url("https://example.invalid/v1")
+            .with_post_init_hook(Arc::new(RewritingHook)),
+    )
+    .await
+    .unwrap();
+
+    let outcome = runtime.run_turn("hi").await.unwrap();
+    assert_eq!(outcome.status, crate::agent::orchestrator::TurnStatus::Ok);
     let captured = seen.lock().unwrap().clone();
     assert_eq!(captured.len(), 1);
-    let (system_prompt, _messages, _tools) = &captured[0];
-    assert!(system_prompt.contains("You are a helpful software engineer assistant."));
-    assert!(!system_prompt.contains("system-conventions"));
+    let messages = &captured[0];
+    assert!(
+        messages.iter().any(|m| m
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|c| c.contains("HOOK-INJECTED-LINE"))),
+        "the hook's conversation rewrite must be visible to the first turn \
+         (conversation store cache must not shadow disk rewrites)"
+    );
 
-    let _ = tokio::fs::remove_dir_all(home).await;
-    let _ = tokio::fs::remove_dir_all(cwd).await;
-}
-
-#[cfg(feature = "prefab")]
-#[tokio::test]
-async fn normal_session_ignores_prefab_prefix_file() {
-    let home = unique_temp_dir("normal-ignore-prefix-home");
-    let cwd = unique_temp_dir("normal-ignore-prefix-cwd");
-    tokio::fs::create_dir_all(&cwd).await.unwrap();
-
-    let seen: SeenPrefabRequests = Arc::new(Mutex::new(Vec::new()));
-    let options = crate::runtime::AgentOptions::new(home.clone(), cwd.clone())
-        .with_project_scoped_sessions()
-        .with_llm_backend(Arc::new(PrefabCaptureBackend { seen: seen.clone() }))
-        .with_api_key("test-key")
-        .with_base_url("https://example.invalid/v1");
-    let runtime = crate::runtime::AgentRuntime::start(options).await.unwrap();
-    let info = runtime.session_info().clone();
     runtime.shutdown().await.unwrap();
-
-    let session_dir = info.events_path.parent().unwrap();
-    std::fs::write(
-        session_dir.join("prefab-prefix.json"),
-        serde_json::json!({
-            "system_prompt": "PREFAB INJECTED MINIMAL PROMPT",
-            "tools_json": [],
-            "fingerprint": "bogus",
-        })
-        .to_string(),
-    )
-    .unwrap();
-
-    let resume_options = crate::runtime::AgentOptions::new(home.clone(), cwd.clone())
-        .with_project_scoped_sessions()
-        .with_session(crate::runtime::SessionPolicy::Resume(
-            info.session_id.clone(),
-        ))
-        .with_llm_backend(Arc::new(PrefabCaptureBackend { seen: seen.clone() }))
-        .with_api_key("test-key")
-        .with_base_url("https://example.invalid/v1");
-    let runtime = crate::runtime::AgentRuntime::start(resume_options)
-        .await
-        .unwrap();
-    runtime.run_turn("hi").await.unwrap();
-    runtime.shutdown().await.unwrap();
-
-    let captured = seen.lock().unwrap().clone();
-    let (system_prompt, _messages, _tools) = captured.last().unwrap();
-    assert!(!system_prompt.contains("PREFAB INJECTED MINIMAL PROMPT"));
-    assert!(system_prompt.contains("system-conventions"));
-
-    let _ = tokio::fs::remove_dir_all(home).await;
-    let _ = tokio::fs::remove_dir_all(cwd).await;
-}
-
-#[cfg(feature = "prefab")]
-#[tokio::test]
-async fn prefab_migrates_legacy_prefab_prefix_file() {
-    let home = unique_temp_dir("prefab-migrate-home");
-    let cwd = unique_temp_dir("prefab-migrate-cwd");
-    tokio::fs::create_dir_all(&cwd).await.unwrap();
-
-    // Create a normal session, then simulate a session written by the older
-    // staged-code prefab layout (prefab-prefix.json / prefab-phases.json).
-    let seen: SeenPrefabRequests = Arc::new(Mutex::new(Vec::new()));
-    let options = crate::runtime::AgentOptions::new(home.clone(), cwd.clone())
-        .with_project_scoped_sessions()
-        .with_llm_backend(Arc::new(PrefabCaptureBackend { seen: seen.clone() }))
-        .with_api_key("test-key")
-        .with_base_url("https://example.invalid/v1");
-    let runtime = crate::runtime::AgentRuntime::start(options).await.unwrap();
-    let info = runtime.session_info().clone();
-    runtime.shutdown().await.unwrap();
-
-    let session_dir = info.events_path.parent().unwrap();
-    std::fs::write(
-        session_dir.join("prefab-prefix.json"),
-        serde_json::json!({
-            "system_prompt": "LEGACY OLD PREFIX",
-            "tools_json": [],
-            "fingerprint": "legacy",
-        })
-        .to_string(),
-    )
-    .unwrap();
-    std::fs::write(
-        session_dir.join("prefab-phases.json"),
-        serde_json::json!({"first": {}, "promoted": {}}).to_string(),
-    )
-    .unwrap();
-
-    // Resuming with prefab + a selected template should migrate the session to
-    // the standard prefix_snapshot event format and use the selected template.
-    let resume_options = crate::runtime::AgentOptions::new(home.clone(), cwd.clone())
-        .with_project_scoped_sessions()
-        .with_session(crate::runtime::SessionPolicy::Resume(
-            info.session_id.clone(),
-        ))
-        .with_prefab_named("flash")
-        .unwrap()
-        .with_llm_backend(Arc::new(PrefabCaptureBackend { seen: seen.clone() }))
-        .with_api_key("test-key")
-        .with_base_url("https://example.invalid/v1");
-    let runtime = crate::runtime::AgentRuntime::start(resume_options)
-        .await
-        .unwrap();
-    runtime.run_turn("continue").await.unwrap();
-    runtime.shutdown().await.unwrap();
-
-    let captured = seen.lock().unwrap().clone();
-    let (system_prompt, _messages, _tools) = captured.last().unwrap();
-    assert!(!system_prompt.contains("LEGACY OLD PREFIX"));
-    assert!(system_prompt.contains("Before acting"));
-
-    let events = std::fs::read_to_string(&info.events_path).unwrap();
-    let prefab_events: Vec<_> = events
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .filter(|value| {
-            value.get("type").and_then(serde_json::Value::as_str) == Some("prefix_snapshot")
-                && !value
-                    .get("system_prompt")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("")
-                    .contains("<system-conventions>")
-        })
-        .collect();
-    assert_eq!(prefab_events.len(), 1);
-
-    let _ = tokio::fs::remove_dir_all(home).await;
-    let _ = tokio::fs::remove_dir_all(cwd).await;
-}
-
-#[cfg(feature = "prefab")]
-#[tokio::test]
-async fn prefab_existing_prefab_session_is_not_reseeded() {
-    use crate::runtime::SessionPolicy;
-
-    let home = unique_temp_dir("prefab-not-reseed-home");
-    let cwd = unique_temp_dir("prefab-not-reseed-cwd");
-    tokio::fs::create_dir_all(&cwd).await.unwrap();
-
-    let create_options = crate::runtime::AgentOptions::new(home.clone(), cwd.clone())
-        .with_project_scoped_sessions()
-        .with_prefab(true)
-        .with_api_key("test-key")
-        .with_base_url("https://example.invalid/v1");
-    let created = crate::runtime::AgentRuntime::start(create_options)
-        .await
-        .unwrap();
-    let info = created.session_info().clone();
-    created.shutdown().await.unwrap();
-
-    let conv_before = tokio::fs::read_to_string(&info.conversation_path)
-        .await
-        .unwrap();
-    let events_before = tokio::fs::read_to_string(&info.events_path).await.unwrap();
-    let prefix_before: serde_json::Value = events_before
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .find(|value| {
-            value.get("type").and_then(serde_json::Value::as_str) == Some("prefix_snapshot")
-        })
-        .expect("prefab prefix_snapshot event");
-
-    let resume_options = crate::runtime::AgentOptions::new(home.clone(), cwd.clone())
-        .with_project_scoped_sessions()
-        .with_session(SessionPolicy::ContinueLatest)
-        .with_prefab(true)
-        .with_api_key("test-key")
-        .with_base_url("https://example.invalid/v1");
-    let resumed = crate::runtime::AgentRuntime::start(resume_options)
-        .await
-        .unwrap();
-    let resumed_info = resumed.session_info().clone();
-    assert_eq!(resumed_info.session_id, info.session_id);
-    resumed.shutdown().await.unwrap();
-
-    let conv_after = tokio::fs::read_to_string(&resumed_info.conversation_path)
-        .await
-        .unwrap();
-    assert_eq!(conv_before, conv_after);
-    let events_after = tokio::fs::read_to_string(&resumed_info.events_path)
-        .await
-        .unwrap();
-    let prefix_after: serde_json::Value = events_after
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .find(|value| {
-            value.get("type").and_then(serde_json::Value::as_str) == Some("prefix_snapshot")
-        })
-        .expect("prefab prefix_snapshot event");
-    assert_eq!(prefix_before, prefix_after);
-
     let _ = tokio::fs::remove_dir_all(home).await;
     let _ = tokio::fs::remove_dir_all(cwd).await;
 }

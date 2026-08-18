@@ -30,10 +30,8 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
         llm_backend,
         resource_session_id,
         custom_tools,
-        #[cfg(feature = "prefab")]
-        prefab_enabled,
-        #[cfg(feature = "prefab")]
-        prefab_template,
+        prefix_source,
+        post_init_hook,
     } = config;
 
     crate::config::validate_runtime_config(&config)?;
@@ -89,35 +87,46 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
         resource_router: None,
         capability_snapshot: None,
         custom_tools,
-        #[cfg(feature = "prefab")]
-        prefab_mode: prefab_enabled,
+        prefix_source,
     })
     .await?;
     let ctx = built.ctx;
     let spaths = built.paths;
     let new_session = built.is_new;
 
-    #[cfg(feature = "prefab")]
-    if prefab_enabled {
-        let template = prefab_template
-            .clone()
-            .unwrap_or(crate::runtime::prefab::load_builtin()?);
-        let tools_json = ctx.tool_surface.schemas();
+    if let Some(hook) = &post_init_hook {
         let system_prompt = ctx.build_system_prompt()?;
-        crate::runtime::prefab::ensure_session(
-            ctx.as_ref(),
-            &spaths,
-            &system_prompt,
-            &tools_json,
-            &template,
-        )?;
-        crate::runtime::prefab::log_prefix_snapshot(
-            ctx.as_ref(),
-            &spaths,
-            &system_prompt,
-            &tools_json,
-            &template,
-        )?;
+        let tools_json = ctx.tool_surface.schemas();
+        let workflows = crate::prompt::workflows::PromptWorkflowResolver::builtin()
+            .resolve(&ctx.tool_capabilities)?;
+        let workflow_ids: Vec<String> = workflows
+            .ordered()
+            .iter()
+            .map(|spec| spec.id.to_string())
+            .collect();
+        let workflow_fingerprint = workflows.fingerprint().to_string();
+        let dependency_fingerprint = ctx.capability_snapshot.dependency_fingerprint.clone();
+        let tool_surface_fingerprint = ctx.tool_surface.fingerprint().to_string();
+        let tool_capabilities_fingerprint = ctx.tool_capabilities.fingerprint().to_string();
+        let log_ctx = ctx.clone();
+        let log_event = |value: serde_json::Value| -> anyhow::Result<()> {
+            log_ctx.log_raw_event(value);
+            Ok(())
+        };
+        let view = crate::runtime::PostInitContext {
+            paths: &spaths,
+            cwd: &cwd,
+            system_prompt: &system_prompt,
+            tools: &tools_json,
+            capabilities: &ctx.capability_snapshot,
+            workflow_ids: &workflow_ids,
+            workflow_fingerprint: &workflow_fingerprint,
+            tool_surface_fingerprint: &tool_surface_fingerprint,
+            tool_capabilities_fingerprint: &tool_capabilities_fingerprint,
+            dependency_fingerprint: &dependency_fingerprint,
+            log_event: &log_event,
+        };
+        hook.run(&view)?;
         ctx.flush_event_log().await?;
     }
 

@@ -8,6 +8,8 @@
 //! The runtime never calls back into this crate after seeding; the feature is
 //! a pure startup-time injection.
 
+#[cfg(feature = "mink-integration")]
+pub mod adapter;
 pub mod builtin;
 pub mod seed;
 pub mod template;

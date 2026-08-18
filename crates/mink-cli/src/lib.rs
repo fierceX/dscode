@@ -1,7 +1,6 @@
 pub(crate) use mink::{runtime, sdk_protocol};
 
 pub(crate) mod config;
-
 pub(crate) mod capabilities {
     pub(crate) use mink::runtime::CapabilitySnapshot;
 }

@@ -1,5 +1,9 @@
 //! Example: run Mink with the router backend, optionally combined with Prefab.
 //!
+//! The Prefab wiring uses `mink-prefab`'s runtime adapter
+//! (`mink_prefab::adapter`, feature `mink-integration`), the same integration
+//! the CLI uses — no duplicate glue in this example.
+//!
 //! Environment variables:
 //! - `MOCK_BASE_URL` (required): base URL of the LLM API/mock server.
 //! - `MINK_HOME`: session home (default `./target/router-e2e-home`).
@@ -47,7 +51,8 @@ async fn main() -> anyhow::Result<()> {
         .with_session(SessionPolicy::UseOrCreate(session.clone()));
 
     if let Ok(prefab) = std::env::var("PREFAB") {
-        options = options.with_prefab_spec(&prefab)?;
+        let template = mink_prefab::adapter::resolve_template(&prefab)?;
+        options = mink_prefab::adapter::install_template(options, template);
     }
 
     let runtime = AgentRuntime::start(options).await?;

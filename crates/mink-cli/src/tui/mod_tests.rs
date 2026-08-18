@@ -147,7 +147,7 @@ fn load_session_replays_recent_turns() {
 #[cfg(feature = "prefab")]
 #[test]
 fn seeded_prefab_session_events_are_replayable_in_tui() {
-    use mink::runtime::prefab::{PrefabSeed, PrefabSeedOptions, seed_session};
+    use mink_prefab::{PrefabSeed, PrefabSeedOptions, seed_session};
 
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2054,7 +2054,12 @@ async fn resumed_prefab_session_is_visible_in_tui() {
 
     let create_options = mink::runtime::AgentOptions::new(home.clone(), cwd.clone())
         .with_project_scoped_sessions()
-        .with_prefab(true)
+        .with_prefix_source(std::sync::Arc::new(
+            mink_prefab::adapter::PrefabPrefixSource,
+        ))
+        .with_post_init_hook(std::sync::Arc::new(
+            mink_prefab::adapter::PrefabRestructureHook::builtin().unwrap(),
+        ))
         .with_api_key("test-key")
         .with_base_url("https://example.invalid/v1");
     let created = mink::runtime::AgentRuntime::start(create_options)

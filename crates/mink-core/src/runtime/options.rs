@@ -8,15 +8,12 @@ use crate::resources::ResourceHandler;
 use crate::runtime::config::{
     AgentRuntimeConfig, first_prompt_from_config, session_policy_from_config,
 };
-#[cfg(feature = "prefab")]
-use crate::runtime::prefab::PrefabTemplate;
+use crate::runtime::extensions::{PostInitHook, PrefixSource};
 use crate::runtime::{EventSink, SessionPolicy};
 use crate::session::paths::SessionLayout;
 use crate::tools::vfs::ReadOnlyFileSystem;
 use crate::ui::SubAgentStreamSink;
 use std::collections::BTreeMap;
-#[cfg(feature = "prefab")]
-use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -162,10 +159,8 @@ pub struct AgentOptions {
     llm_backend: Option<Arc<dyn LlmBackend>>,
     resource_session_id: Option<String>,
     custom_tools: Vec<Arc<dyn crate::runtime::AgentTool>>,
-    #[cfg(feature = "prefab")]
-    prefab_enabled: bool,
-    #[cfg(feature = "prefab")]
-    prefab_template: Option<PrefabTemplate>,
+    prefix_source: Option<Arc<dyn PrefixSource>>,
+    post_init_hook: Option<Arc<dyn PostInitHook>>,
 }
 
 impl AgentOptions {
@@ -203,10 +198,8 @@ impl AgentOptions {
             llm_backend: None,
             resource_session_id: None,
             custom_tools: Vec::new(),
-            #[cfg(feature = "prefab")]
-            prefab_enabled: false,
-            #[cfg(feature = "prefab")]
-            prefab_template: None,
+            prefix_source: None,
+            post_init_hook: None,
         }
     }
 
@@ -415,6 +408,21 @@ impl AgentOptions {
         self
     }
 
+    /// Supply an alternative immutable prefix (system prompt + tool schemas)
+    /// consulted before the compiled prompt on every prefix build.
+    pub fn with_prefix_source(mut self, source: Arc<dyn PrefixSource>) -> Self {
+        self.prefix_source = Some(source);
+        self
+    }
+
+    /// Run a hook once after the session context is built, before the first
+    /// LLM request, with a read-only view of the resolved prompt/tools and an
+    /// event appender (see [`PostInitContext`]).
+    pub fn with_post_init_hook(mut self, hook: Arc<dyn PostInitHook>) -> Self {
+        self.post_init_hook = Some(hook);
+        self
+    }
+
     pub fn with_tools<I>(mut self, tools: I) -> Self
     where
         I: IntoIterator<Item = Arc<dyn crate::runtime::AgentTool>>,
@@ -612,49 +620,6 @@ impl AgentOptions {
         self
     }
 
-    /// Enable Prefab session restructuring. After Mink initializes the session,
-    /// the Prefab module checks the session's system prompt format and performs
-    /// session restructuring when needed. Requires the `prefab` feature.
-    #[cfg(feature = "prefab")]
-    pub fn with_prefab(mut self, enabled: bool) -> Self {
-        self.prefab_enabled = enabled;
-        if !enabled {
-            self.prefab_template = None;
-        }
-        self
-    }
-
-    /// Enable Prefab with an already-loaded template. Requires the `prefab`
-    /// feature. Prefer [`AgentOptions::with_prefab_named`] or
-    /// [`AgentOptions::with_prefab_path`] when loading from a name/path.
-    #[cfg(feature = "prefab")]
-    pub fn with_prefab_template(mut self, template: PrefabTemplate) -> Self {
-        self.prefab_enabled = true;
-        self.prefab_template = Some(template);
-        self
-    }
-
-    /// Enable Prefab using a bundled template name (`pro`, `flash`, ...).
-    /// Requires the `prefab` feature.
-    #[cfg(feature = "prefab")]
-    pub fn with_prefab_named(self, name: &str) -> anyhow::Result<Self> {
-        Ok(self.with_prefab_template(crate::runtime::prefab::load_named(name)?))
-    }
-
-    /// Enable Prefab using a template directory containing `meta.json` and
-    /// `conversation.jsonl`. Requires the `prefab` feature.
-    #[cfg(feature = "prefab")]
-    pub fn with_prefab_path(self, path: impl AsRef<Path>) -> anyhow::Result<Self> {
-        Ok(self.with_prefab_template(crate::runtime::prefab::load_path(path.as_ref())?))
-    }
-
-    /// Enable Prefab using either a bundled template name or a template path.
-    /// Requires the `prefab` feature.
-    #[cfg(feature = "prefab")]
-    pub fn with_prefab_spec(self, spec: &str) -> anyhow::Result<Self> {
-        Ok(self.with_prefab_template(crate::runtime::prefab::resolve_template(spec)?))
-    }
-
     pub(crate) fn into_runtime_config(mut self) -> AgentRuntimeConfig {
         if !self.session_overridden {
             self.session = session_policy_from_config(&self.config);
@@ -679,10 +644,8 @@ impl AgentOptions {
             llm_backend: self.llm_backend,
             resource_session_id: self.resource_session_id,
             custom_tools: self.custom_tools,
-            #[cfg(feature = "prefab")]
-            prefab_enabled: self.prefab_enabled,
-            #[cfg(feature = "prefab")]
-            prefab_template: self.prefab_template,
+            prefix_source: self.prefix_source,
+            post_init_hook: self.post_init_hook,
         }
     }
 }

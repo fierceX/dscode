@@ -25,7 +25,7 @@ Mink 是一个 Rust 实现的轻量 AI coding agent，专为 DeepSeek/OpenAI-com
 - Edit 双模式：默认 Hashline snapshot/stale 恢复，或 Replace exact/行窗口 fuzzy 内容匹配；runtime 启动后固定
 - 两种终端交互模式：REPL + TUI
 - 子代理：统一使用父 session 下的 isolated home；可从空目录启动或目录级 fork 当前 session 状态
-- Prefab 启动注入：可选 `prefab` feature 在 session 初始化后重组 session（写入模板会话/标准 `prefix_snapshot` 事件），并让系统提示词从 session 重建缓存前缀；CLI 通过 `--prefab[=TEMPLATE]`，Rust 通过 `AgentOptions::with_prefab(true)` / `with_prefab_named()` / `with_prefab_path()` / `with_prefab_spec()`（临时功能，后续 DeepSeek 更新模型后可能撤销）
+- Prefab 启动注入：可选集成层在 session 初始化后重组 session（写入模板会话/标准 `prefix_snapshot` 事件），并让系统提示词从 session 重建缓存前缀；CLI 通过 `--prefab[=TEMPLATE]`（经 `mink-prefab` 的 `adapter` 模块 + core 的 `PrefixSource` / `PostInitHook` 扩展点），子代理继承前缀源（临时功能，后续 DeepSeek 更新模型后可能撤销）
 
 ---
 
@@ -313,8 +313,8 @@ DecisionEngine.decide_with_signals()
 | `crates/mink-core/src/runtime/builder.rs` | crate-private `build_runtime()` — 从 `AgentOptions` 内部 resolved 配置构造 runtime |
 | `crates/mink-core/src/runtime/config.rs` | 私有 resolved 配置 / `SessionPolicy` / `SessionInfo` |
 | `crates/mink-core/src/runtime/handle.rs` | `AgentRuntime`（唯一 shutdown owner）/ 可克隆 `AgentRuntimeHandle` — `start()`, `handle()`, `run_turn()`, `stream_turn()`, `compact()`, `set_model()`, `interrupt_current_turn()`, `shutdown()` |
-| `crates/mink-core/src/runtime/options.rs` | `AgentOptions` ergonomic builder，含 `with_tool()` 自定义工具注册与 `with_prefab()` / `with_prefab_named()` / `with_prefab_path()` / `with_prefab_spec()`（`prefab` feature） |
-| `crates/mink-core/src/runtime/prefab.rs` | `prefab` feature 适配层：`ensure_session()` / `resolve_template()`，复用 `mink-prefab` 的 `PrefabSeed` / `PrefabTemplate` |
+| `crates/mink-core/src/runtime/options.rs` | `AgentOptions` ergonomic builder，含 `with_tool()` 自定义工具注册与 `with_prefix_source()` / `with_post_init_hook()` 扩展点注入 |
+| `crates/mink-core/src/runtime/extensions.rs` | 中立扩展点：`PrefixSource`（替代编译前缀）与 `PostInitHook`（初始化后钩子，带只读视图与事件写入） |
 | `crates/mink-core/src/runtime/events.rs` | turn-scoped `AgentEvent` envelope / 异步 `EventSink` + dispatcher / `EventDisplay` adapter |
 | `crates/mink-core/src/runtime/tools.rs` | 稳定异步 `AgentTool` 自定义工具 API：`ToolDefinition` / `ToolExecutionContext` / `ToolOutput` / `ToolError` |
 | `crates/mink-core/src/runtime/sdk_adapter.rs` | SDK option/status/exit code 映射，CLI/SDK 去重 |
@@ -468,7 +468,7 @@ fail closed。
 - 子代理 fork 在 runtime 初始化前以目录级克隆继承父 session 状态
 - Prefab 模式使用标准 `prefix_snapshot` 事件记录特殊 system prompt/tools，不创建额外 `prefab-*.json` 文件；普通 runtime 忽略该事件中的 Prefab 前缀
 - Prefab 重组只允许写入全新 conversation；已有 conversation 的 session 不重新写入模板，缺少 `prefix_snapshot` 事件时只补写标准前缀事件，不得修改 conversation
-- `AgentOptions::with_prefab(true)` / `with_prefab_named()` / `with_prefab_path()` / `with_prefab_spec()` / CLI `--prefab[=TEMPLATE]` 需要 `prefab` feature；子代理继承父 `prefab_mode`
+- `mink-prefab` 提供独立 seeder（`seed`/`template`）与可选 `mink-integration` 适配层（`adapter::PrefixPrefixSource` / `PrefabRestructureHook` / `install_template`）；CLI `--prefab[=TEMPLATE]` 经适配层接线，core 通过 `PrefixSource` / `PostInitHook` 扩展点接入，子代理继承父前缀源
 - `ArtifactManager` 初始化必须从已有 index 的最大序号继续，正文文件必须使用独占创建，禁止覆盖恢复或 fork 继承的 artifact
 - `ConversationStore` append 写入通过内部写锁串行化；读盘只容忍文件末尾未换行的半截 JSONL
 - `StormBreaker` 每个新用户输入重置；同轮内所有调用（包括 mutating 调用）统一计数，相同调用连续 3 次触发抑制，不同调用不误伤
@@ -542,7 +542,7 @@ cargo test              # 日常测试（跳过重型测试，~5 秒）
 cargo test -p mink-cli --all-features tui  # 仅 TUI 模块测试
 cargo test -p mink-prefab                # 仅 prefab seeder 测试
 cargo test -p mink-router                # 仅 router 测试
-cargo test -p mink-core --features prefab prefab  # prefab runtime 测试
+cargo test -p mink-prefab --features mink-integration  # prefab runtime 适配层测试
 cargo test -p mink-cli --features prefab prefab   # prefab CLI/TUI 测试
 cargo build -p mink-cli --features prefab         # 构建带 prefab 的终端二进制
 cargo clippy --all-targets

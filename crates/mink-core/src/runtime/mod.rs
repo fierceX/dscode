@@ -2,10 +2,9 @@ mod builder;
 mod config;
 pub(crate) mod context_build;
 mod events;
+mod extensions;
 mod handle;
 mod options;
-#[cfg(feature = "prefab")]
-pub mod prefab;
 mod sdk_adapter;
 pub mod session;
 mod tools;
@@ -27,6 +26,7 @@ pub use crate::llm::client::{
     OpenAiCompatibleOptions, TokenParamKind,
 };
 pub use crate::resources::ResourceHandler;
+pub use crate::runtime::extensions::{PostInitContext, PostInitHook, PrefixSource};
 /// 同目录临时文件 + rename 的原子替换（session 状态文件共用实现）。
 pub use crate::session::atomic_file::atomic_replace;
 pub use crate::session::paths::SessionLayout;

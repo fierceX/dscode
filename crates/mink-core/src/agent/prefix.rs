@@ -13,34 +13,10 @@ impl PrefixManager {
         Self { ctx }
     }
 
-    /// In prefab mode only, rebuild the complete prefix from the session's
-    /// standard `prefix_snapshot` event in `events.jsonl` instead of compiling
-    /// it from code.
-    #[cfg(feature = "prefab")]
-    fn prefab_prefix_from_session(&self) -> Option<(String, Vec<serde_json::Value>)> {
-        if !self.ctx.prefab_mode {
-            return None;
-        }
-        let text = std::fs::read_to_string(&self.ctx.events_path).ok()?;
-        for line in text.lines() {
-            let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
-                continue;
-            };
-            if value.get("type").and_then(serde_json::Value::as_str) != Some("prefix_snapshot") {
-                continue;
-            }
-            let system_prompt = value.get("system_prompt")?.as_str()?.to_string();
-            let tools_json = value.get("tools_json")?.as_array()?.clone();
-            if !system_prompt.contains("<system-conventions>") {
-                return Some((system_prompt, tools_json));
-            }
-        }
-        None
-    }
-
     pub fn ensure(&self) -> Result<(String, Vec<serde_json::Value>)> {
-        #[cfg(feature = "prefab")]
-        if let Some(prefix) = self.prefab_prefix_from_session() {
+        if let Some(source) = &self.ctx.prefix_source
+            && let Some(prefix) = source.prefix(&self.ctx.events_path)
+        {
             return Ok(prefix);
         }
 

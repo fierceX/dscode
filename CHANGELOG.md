@@ -94,12 +94,13 @@
 
 ### Prefab 会话重组（新，临时功能）
 
-- 新增独立 `mink-prefab` crate 与 `prefab` feature：session 初始化后按模板重组会话
-  （写入模板会话 + 标准 `prefix_snapshot` 事件），系统提示词从 session 事件重建缓存
-  前缀。CLI `--prefab[=TEMPLATE]`；Rust `with_prefab(true)` / `with_prefab_named()` /
-  `with_prefab_path()` / `with_prefab_spec()`。
+- 新增独立 `mink-prefab` crate：独立 seeder（模板加载/校验/会话写入）与可选 `mink-integration`
+  适配层（`adapter::PrefabPrefixSource` / `PrefabRestructureHook` / `install_template`）；
+  会话重组写入模板会话 + 标准 `prefix_snapshot` 事件，系统提示词从 session 事件重建缓存
+  前缀。CLI `--prefab[=TEMPLATE]` 经适配层接线；core 提供中立扩展点 `PrefixSource` /
+  `PostInitHook`（`runtime/extensions.rs`），本身零 mink-prefab 依赖。
 - 重组只允许写入全新 conversation；已有会话不重写模板，缺 `prefix_snapshot` 事件时
-  只补写标准前缀事件；子代理继承父 `prefab_mode`。（临时功能：后续 DeepSeek 更新模型
+  只补写标准前缀事件；子代理继承父前缀源。（临时功能：后续 DeepSeek 更新模型
   后可能撤销。）
 
 ### mink-router：Flash 推理模式路由（新）

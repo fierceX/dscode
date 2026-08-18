@@ -309,7 +309,8 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
         assemble_runtime_options(&cfg, home.clone(), cwd.clone()).with_project_scoped_sessions();
     #[cfg(feature = "prefab")]
     if let Some(spec) = &cfg.prefab {
-        runtime_options = runtime_options.with_prefab_spec(spec)?;
+        let template = mink_prefab::adapter::resolve_template(spec)?;
+        runtime_options = mink_prefab::adapter::install_template(runtime_options, template);
     }
     #[cfg(not(feature = "prefab"))]
     if cfg.prefab.is_some() {

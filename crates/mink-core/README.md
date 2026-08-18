@@ -126,27 +126,36 @@ into `mink-core`.
 
 ## Prefab session restructuring
 
-With the `prefab` feature, `AgentOptions::with_prefab(true)` enables Prefab
-session restructuring after normal session initialization. The Prefab module
-checks whether the session already carries a Prefab `prefix_snapshot` event in
-`events.jsonl`; if not, it writes the selected template conversation/events for
-a fresh session and records the special prefix as a standard `prefix_snapshot`
-event. Use `with_prefab_named("flash")`, `with_prefab_path(path)`, or
-`with_prefab_spec("name-or-path")` to choose a non-default template:
+Prefab is implemented as an optional integration layer in the independent
+`mink-prefab` crate (`mink-integration` feature), wired through Mink's neutral
+extension points `PrefixSource` / `PostInitHook` — `mink-core` itself has no
+`mink-prefab` dependency. The host restructures the session after normal
+initialization: the hook writes the selected template conversation/events for
+a fresh session and records the special prefix as a standard
+`prefix_snapshot` event; the prefix source then serves that system prompt /
+tool schemas instead of the compiled prompt.
 
 ```rust
 use mink::prelude::{AgentOptions, AgentRuntime};
 
 let options = AgentOptions::new(home, cwd)
-    .with_prefab_named("flash")? // or .with_prefab_path("./template")? / .with_prefab_spec("flash")?
+    .with_prefix_source(std::sync::Arc::new(mink_prefab::adapter::PrefabPrefixSource))
+    .with_post_init_hook(std::sync::Arc::new(
+        mink_prefab::adapter::PrefabRestructureHook::new(
+            mink_prefab::adapter::resolve_template("flash")?,
+        ),
+    ))
     .with_api_key("sk-...");
 let runtime = AgentRuntime::start(options).await?;
 ```
 
-`with_prefab(true)` uses the bundled default template. Seeding/restructuring refuses to
-touch an existing conversation; resuming a prefab session does not re-run the
-restructure. A prefab-enabled runtime rebuilds its prefix from the standard
-`prefix_snapshot` event in `events.jsonl`; a normal runtime ignores it.
+The CLI wires both automatically behind `--prefab[=TEMPLATE]` via
+`mink_prefab::adapter::install_template`.
+
+Seeding/restructuring refuses to touch an existing conversation; resuming a
+prefab session does not re-run the restructure. A prefab-enabled runtime
+rebuilds its prefix from the standard `prefix_snapshot` event in
+`events.jsonl`; a normal runtime ignores it.
 
 ## Custom LLM backend
 
@@ -199,7 +208,6 @@ zero unless the host computes pricing separately.
 | Feature | 说明 |
 |---------|------|
 | `runtime` | 默认启用。构建可嵌入 runtime、工具核心、session、LLM 客户端和协议层 |
-| `prefab` | 启用 `mink-prefab` session 重组：`with_prefab(true)` / `with_prefab_named()` / `with_prefab_path()` / `with_prefab_spec()` / `ensure_session()` / `events.jsonl` 的 `prefix_snapshot` 事件 |
 | `python-sandbox` | 启用 `PythonSandbox` WASI 工具，额外引入 wasmtime 依赖 |
 | `web-api` | 仅用于 `examples/web_api.rs` 示例，启用 axum |
 | `slow-tests` | 启用重型测试开关 |

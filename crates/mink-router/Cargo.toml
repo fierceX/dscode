@@ -15,7 +15,8 @@ anyhow.workspace = true
 async-trait.workspace = true
 regex.workspace = true
 serde_json.workspace = true
-mink-core = { path = "../mink-core", default-features = false, features = ["runtime", "prefab"] }
+mink-core = { version = "0.5.0", path = "../mink-core", default-features = false, features = ["runtime"] }
 
 [dev-dependencies]
+mink-prefab = { version = "0.5.0", path = "../mink-prefab", features = ["mink-integration"] }
 tokio.workspace = true

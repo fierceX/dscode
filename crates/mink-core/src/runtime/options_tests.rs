@@ -173,26 +173,3 @@ fn options_can_override_session_layout() {
         .into_runtime_config();
     assert_eq!(runtime_config.session_layout, SessionLayout::Direct);
 }
-
-#[cfg(feature = "prefab")]
-#[test]
-fn options_prefab_template_selection_is_preserved() {
-    let runtime_config = AgentOptions::new("/tmp/mink-home", "/tmp/project")
-        .with_prefab_named("flash")
-        .unwrap()
-        .into_runtime_config();
-    assert!(runtime_config.prefab_enabled);
-    let template = runtime_config
-        .prefab_template
-        .expect("template should be set");
-    assert_eq!(template.meta.name, "flash");
-    assert!(template.meta.system_prompt.contains("Before acting"));
-
-    let disabled = AgentOptions::new("/tmp/mink-home", "/tmp/project")
-        .with_prefab_named("flash")
-        .unwrap()
-        .with_prefab(false)
-        .into_runtime_config();
-    assert!(!disabled.prefab_enabled);
-    assert!(disabled.prefab_template.is_none());
-}

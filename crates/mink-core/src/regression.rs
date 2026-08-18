@@ -372,8 +372,7 @@ async fn harness_with_config(
         tool_surface,
         tool_capabilities,
         custom_tools: Arc::new(Vec::new()),
-        #[cfg(feature = "prefab")]
-        prefab_mode: false,
+        prefix_source: None,
         events_path: spaths.events,
         summary_path: spaths.summary,
         plan_path: spaths.plan,
@@ -471,8 +470,7 @@ fn test_context_with_llm_backend(
         tool_surface: ctx.tool_surface.clone(),
         tool_capabilities: ctx.tool_capabilities.clone(),
         custom_tools: ctx.custom_tools.clone(),
-        #[cfg(feature = "prefab")]
-        prefab_mode: ctx.prefab_mode,
+        prefix_source: ctx.prefix_source.clone(),
         events_path: ctx.events_path.clone(),
         summary_path: ctx.summary_path.clone(),
         plan_path: ctx.plan_path.clone(),

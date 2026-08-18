@@ -288,8 +288,7 @@ pub struct AgentSharedContext {
     pub tool_surface: Arc<ModelToolSurface>,
     pub tool_capabilities: Arc<ResolvedToolCapabilities>,
     pub(crate) custom_tools: Arc<Vec<crate::runtime::RegisteredCustomTool>>,
-    #[cfg(feature = "prefab")]
-    pub prefab_mode: bool,
+    pub(crate) prefix_source: Option<Arc<dyn crate::runtime::PrefixSource>>,
     pub events_path: PathBuf,
     pub summary_path: PathBuf,
     pub plan_path: PathBuf,
@@ -388,6 +387,38 @@ impl AgentSharedContext {
                 return;
             }
         };
+        let line = match serde_json::to_string(&value) {
+            Ok(s) => s,
+            Err(e) => {
+                self.warn_event_log_once(&format!("failed to serialize event: {e}"));
+                return;
+            }
+        };
+        if self.config.log_events {
+            if let Some(writer) = &self.event_log_writer {
+                writer.send(line.clone());
+            } else {
+                self.warn_event_log_once("event log writer is not configured; event discarded");
+            }
+        }
+        if self.config.output_format == OutputFormat::StreamJson {
+            let mut stdout = std::io::stdout().lock();
+            let write_result = writeln!(stdout, "{line}");
+            let flush_result = if write_result.is_ok() && self.should_flush_stream_event(&value) {
+                stdout.flush()
+            } else {
+                Ok(())
+            };
+            if let Err(e) = write_result.and(flush_result) {
+                self.warn_event_log_once(&format!("failed to write stream-json event: {e}"));
+            }
+        }
+    }
+
+    /// Append a raw JSON event line to events.jsonl (and stream-json stdout
+    /// when enabled), without going through the typed `EventLog` enum. Used by
+    /// public extension hooks that write host-defined event shapes.
+    pub(crate) fn log_raw_event(&self, value: serde_json::Value) {
         let line = match serde_json::to_string(&value) {
             Ok(s) => s,
             Err(e) => {

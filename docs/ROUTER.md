@@ -37,7 +37,7 @@ AgentOptions::new(home, cwd)
     ...
 ```
 
-> `with_prefab_named("router-flash-weak")` 仅用于实验/兼容验证，不是推荐用法。
+> Prefab 组合通过 `mink_prefab::adapter`（`mink-integration` feature）接入，已不是推荐用法，仅保留实验/兼容验证。
 
 ## 测试
 
