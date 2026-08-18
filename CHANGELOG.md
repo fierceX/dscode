@@ -1,5 +1,167 @@
 # Changelog
 
+## v0.5.0 (2026-08-18)
+
+### 信号系统：分层响应模型（Breaking）
+
+信号系统从"命令式恢复指令"重构为"轨迹事实注入 + 分级响应"：
+
+- **轨迹证据层**（新增 `guard/evidence.rs`）：EvidenceTracker 聚合重复调用、失败聚类与
+  编辑路径统计，注入 `[trajectory]` / `[detector]` **事实帧**（替代旧
+  "Enter SIGNAL_RECOVERY" 祈使句）；证据去重哈希只覆盖事实文本
+  （`evidence_dedup_window` 控制窗口），同一证据批不重复注入，响应事件携带证据文本
+  （可回溯 conversation.jsonl）。
+- **信念跨轮衰减**：每用户输入按 `decay_per_input`（默认 0.6）衰减替代硬重置——跨轮
+  重复失败累积升级、偶然失败自然消退；`DecisionEngine` 冷却与 StormBreaker 仍每输入
+  reset。
+- **决策门控**：单次软失败（ToolError/EditLoop/ArgumentError）且信念 ≥ warn_threshold
+  时记录但不干预；累计 ≥ 2 次软失败或出现硬信号（ToolFailed/SafetyBlocked/
+  CompileError/TestFailure 与结构化错误码）才参与决策。
+- **五级响应**：Reminder（仅证据注入）→ Warning（证据注入 + 快照回滚 + 恢复首步守卫）
+  → guard_max_blocks 绕过守卫强制注入 → Restart（策略重启子代理）→ Abort（用户接管：
+  `signal_handover` 事件 + Failed）。回滚只作用于循环窗口内被编辑路径，回滚目标是
+  最后一次 Read/Write 完整内容基线，写回经原子替换。
+- **策略枚举**：`SignalMode{Off,Full}` → `SignalPolicy{Off,Evidence,StateOps,Restart,Full}`；
+  `MINK_SIGNAL_MODE` → `MINK_SIGNAL_POLICY`。阈值/超参（remind 0.70 / warn 0.50 /
+  abort 0.30 / window 16 / seq 6 / decay 0.6 / cooldown 3 / guard_max 3）内部化为
+  `Config.signal` 常量，不再对外配置。
+- **中断语义修正**：Interrupted 不再作为 ToolFailed 喂信念、不再触发回滚；中断不泄漏
+  并发 permit。
+- **StormBreaker 修复**：mutating 调用不再清空整个窗口（旧实现每次写入/编辑先
+  `window.clear()` 再入队，使断路器对最易死循环的写操作永久失效）；抑制时机改为
+  threshold+1 次（第 4 次才抑制，保留前 N 次放行）。
+- **守卫反馈**：拦截批次全量生成 Blocked 结果反馈模型并喂信念（旧实现只反馈首调用）；
+  连续拦截达 guard_max_blocks 必须绕过守卫并强制注入。
+- `MINK_SIGNAL_POLICY=off` 完整旁路：不生成 belief-awareness 段、不采集/注入/回滚/接管。
+
+### 配置分组化与公共 API 收紧（Breaking）
+
+- `Config` 从 mink-core 迁至 mink-cli 并分组化：`[provider]` / `[generation]` /
+  `[context]` / `[tools]` / `[tools.edit]` / `[signal]` / `[sandbox]`；扁平键
+  `deny_unknown_fields` 拒绝，旧配置文件直接不可用。
+- `CliOverrides` 18 → 10 收敛（删除无生产者的死标记与 24 个 `cli_X = overrides ||
+  != default` 启发式）；`--print` / `--agent-jsonl` 显式置 `output_format` override，
+  修复配置文件反向压过 `--print` 的问题。
+- env 优先级修正：4 个 `MINK_EDIT_*` 变量从"高于文件"翻转为"低于文件"
+  （CLI > `--config` > 项目 `.minkrc` > 用户 `~/.minkrc` > env > 默认）。
+- `max_turns ≤ 0` 启动即失败（v0.4.0 负值经 `as usize` 回绕为无上限 turn 循环）；
+  压缩预算组合校验 fail-fast（`compact_max_output + tail + reserve ≤ max_context`）。
+- Rust 公共 API 删除：`mink::config::Config`、`start_with_options()`、
+  `try_stream_turn()`、同步 `EventSink`、`command_sender()` / `cancel_token()` /
+  `interrupt_flag()`、`with_config()` / `config()` / `config_mut()` /
+  `with_tool_approval(_policy)` / `with_skills()` / `with_default_tools()` /
+  `with_display()` / `into_runtime_config()` / `TryFrom` 等（迁移文档见下文）。
+- 新增分组策略 setter：`with_provider_options` / `with_generation_options` /
+  `with_context_policy` / `with_tool_options` / `with_signal_policy` /
+  `with_model_alias` / `with_interactive` / `with_tool` / `with_tools`；setter 不再
+  静默 clamp，非法值启动 fail-fast。
+- 模块面收敛：仅公开 `mink::{runtime, prelude, sdk_protocol, ui}`；`SandboxConfig` /
+  `reexec_in_sandbox` 移至 `mink::runtime`；`public_api_boundary` 测试强制。
+- SDK 协议 v2 → v3：`SdkOptions` 七组分组、`version` 必须 3、扁平 options 拒绝；
+  Python SDK 同步（`_build_request` v3 + `--config` 分组 TOML）；模型名白名单移除
+  （任意非空透传，与 ModelResolver 一致）。
+- `UsageSummary.cost_nano_cny: u64` → `cost: UsageCost{known_nano_cny,
+  unpriced_requests}`；`UsageRecord.cost_nano_cny` 改 `Option<u64>`；未定价模型计
+  `unpriced_requests` 而非 0 成本。
+
+### 会话、事件日志与持久化
+
+- `events.jsonl` 统一类型化 EventLog（10 → 30+ 变体），每 session 后台写线程
+  （有界 1024 队列，满则阻塞背压）；`jsonl.rs` 共享尾部修复助手。
+- **`prefix_snapshot` 事件**：前缀构建/失效重建时落日志
+  （fingerprint / dependency_fingerprint / system_prompt / tools_json），任意请求模型
+  的前缀可离线重建；缓存命中不重复写（invariant 测试钉住）。
+- project key 改为可读前缀(48) + `--` + SHA-256 前 8 字节；旧 key 目录双读兼容、
+  新目录写入；同身份跨目录歧义 fail-closed。
+- `usage.jsonl` 半截尾修复；metadata/stats 损坏 fail-closed（不再静默重建）；
+  Windows 原子替换改用 `MoveFileExW`；stats 脏标记竞态修复（record 与 flush 时序）。
+- compaction 重构：`new()` fail-closed 加载、启动投影修复、commit 走原子替换、
+  `flush_projection()` 兜底、摘要请求接入共享 interrupt（20ms 轮询 + commit 前复查）、
+  cut 不变式 debug_assert 化。
+- **events.jsonl 字段级破坏**（严格解析的第三方受影响，仓库内 reader 全 loose 解析）：
+  `signal_recovery_guard` 新增必填 `guard_blocks`；`tool_result` 的 `success` 删除改
+  `status` 对象；`TurnFinal.usage` 形状变化。
+
+### 计划、提示词与 REPL/TUI
+
+- **计划投影默认尾置**：`<current-plan>` 作为最后一条 system message 投影
+  （`plan_projection_tail=false` 可回退前置），计划修订不失效前缀缓存。
+- 提示词文本层优化：删除 -574 行死机制（`PromptFact::Workflow` / tag / 依赖环从未被
+  使用），除 belief-awareness 一节外逐段字节等价；caps 占位符注入先于
+  `surface_fingerprint`；`prompt_discipline` 机械检查（bullet 数/词数/禁词/占位符/
+  示例置尾）护航。
+- REPL SIGINT 双按退出修复；标题栏信念度同步；`--session` 值收紧（裸用 / `-` 开头拒绝）。
+
+### Prefab 会话重组（新，临时功能）
+
+- 新增独立 `mink-prefab` crate 与 `prefab` feature：session 初始化后按模板重组会话
+  （写入模板会话 + 标准 `prefix_snapshot` 事件），系统提示词从 session 事件重建缓存
+  前缀。CLI `--prefab[=TEMPLATE]`；Rust `with_prefab(true)` / `with_prefab_named()` /
+  `with_prefab_path()` / `with_prefab_spec()`。
+- 重组只允许写入全新 conversation；已有会话不重写模板，缺 `prefix_snapshot` 事件时
+  只补写标准前缀事件；子代理继承父 `prefab_mode`。（临时功能：后续 DeepSeek 更新模型
+  后可能撤销。）
+
+### mink-router：Flash 推理模式路由（新）
+
+- 新增独立 `mink-router` crate：将 pi-deepseek-route 的 Flash 路由策略移植为
+  `LlmBackend` 装饰器（`RouterLlmBackend`），纯逻辑与 Prefab 感知 helper 分离，
+  与 mink-core agent 循环解耦。
+- 任务分类（build/fix/chat/complex）、四档 persona（spec / mixed / react / weak）、
+  weak 模式近场引导注入、首轮工具面收窄（`narrow_first_turn_tools`）、Prefab 预热
+  消息感知；仅路由 `LlmPurpose::Agent` 请求，压缩/子代理透传。
+- CLI/TUI 集成：`--router[=flash]`，`router` feature（`full-cli` 默认包含）；
+  非 Flash 模型自动透传。22 个单元测试 + mock e2e 捕获脚本
+  （`scripts/e2e_router_mock.py`）。
+
+### 运行时缺陷修复群（约 15 个 fix 提交）
+
+- **7 项 P0**：Bash/Python 超时误报成功、输出读取线程挂起、恢复守卫反馈、execute_all
+  失败合成结果落库、429 重试不可取消、REPL SIGINT 双按退出、replan 会话 id 碰撞。
+- Bash/Python 显式 timeout 上限 fail-closed（600s/300s），模型不可再传任意大 timeout
+  挂住进程；Bash 超时结果语义反转（v0.4.0 报 success=true 为缺陷，现报失败 124/None）。
+- 进程监督收敛："超时不设 exit_code → `unwrap_or(0)==0` 误判成功"修复；124/130 退出码
+  区分；1s 有界 join 防孙进程挂起。PythonSandbox 接入 wasmtime epoch interruption
+  真停执行线程（旧 detached 线程超时后仍继续写盘）。
+- LLM/SSE：reqwest client 缓存复用；重试全面可取消 + 429 retry-after 上限 10s；
+  EOF 残留末帧送 parser 再 finish；DeepSeek 原生 `prompt_cache_hit_tokens` 拼写兜底。
+- 文件子系统：raw 读取不再生成可编辑 snapshot；memo 端行语义/UTF-8 边界/CRLF 判定
+  修正；行选择器 `N+K` 饱和、offset 超总行数报错（不回读幻影行号）；session id 后缀
+  u16 → u32 修并发碰撞。
+- 持久化：`usage.jsonl` 半截尾修复；alias 消毒；stats flush 时序修复；execute_all
+  失败路径合成结果落库。
+
+### mink-server / Web
+
+- graceful shutdown、session listing、SDK options、tool baseline 处理修复；SSE 断线
+  重连加固；stats flush 与 alias 消毒。
+- SSE 协议自 v0.4.0 起为 core `AgentEvent` envelope 全量透传（`turn_started` /
+  `turn_final` 语义分工、`stream_sequence`、30s 心跳、`stream_gap` 对账）；
+  `turn_error` 字段名为 `error`（文档已同步）。
+
+### 测试与稳定性
+
+- mink-core **663 passed**（v0.4.0 为 633，+30）；mink-cli 147、mink-router 22、
+  server/Web 用例全绿；`cargo fmt --check`、`cargo clippy --all-targets` 零警告。
+- 新增 invariant 测试：请求重建（prefix_snapshot 缓存命中不重复写）、展示透传
+  （ToolCallDisplay / PresentedToolResultDisplay 结构化字段完整转发）。
+- 全量测试套件稳健性修复；prompt_discipline 机械检查纳入常规测试。
+
+### 迁移（Breaking 汇总）
+
+- `MINK_SIGNAL_MODE`（off/full）→ `MINK_SIGNAL_POLICY`（off/evidence/state_ops/
+  restart/full）；旧值静默失效。
+- `.minkrc` / `--config` 扁平键全部拒绝，必须按 `[provider]` / `[generation]` /
+  `[context]` / `[tools]` / `[tools.edit]` / `[signal]` 分组。
+- agent-jsonl v2 → v3：扁平 options 被拒、`version` 必须 3、options 七组；Python
+  `extra_options` 必须分组形状。
+- Rust：`start_with_options()` → `start()`；`try_stream_turn()` → 返回 Result 的
+  `stream_turn()`；`AgentEvent` 通过 `ev.kind` 匹配 `AgentEventKind`；同步 `EventSink`
+  迁移到异步 `on_event`；`mink::config::Config` 移除；信号阈值不再可配置。
+- events.jsonl：`guard_blocks` 必填、`success` → `status`、usage 形状变化（见上）。
+- StormBreaker 抑制时机第 3 → 4 次；Bash 显式超时语义反转；`--session` 裸用 /
+  `-` 开头拒绝；4 个 `MINK_EDIT_*` env 优先级翻转。
+
 ## v0.4.0 (2026-08-13)
 
 ### Runtime 所有权与统一事件（Breaking）

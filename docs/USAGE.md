@@ -1,6 +1,6 @@
 # 使用手册
 
-> 更新日期：2026-08-06
+> 更新日期：2026-08-18
 
 本文面向终端用户，覆盖 CLI 交互模式、配置参数、沙箱、session、计划、压缩、工具、技能和
 常见工作流。Rust 库 / Python SDK 嵌入见 [嵌入与 SDK 使用](EMBEDDING.md)；机器协议
@@ -282,6 +282,9 @@ read_dirs = ["./data"]
 
 `~/.minkrc`（用户级）和 `<project>/.minkrc`（项目级）可选配置。
 优先级：CLI 参数 > `--config` TOML > 项目 `.minkrc` > 用户 `~/.minkrc` > 环境变量 > 默认值。
+例外：`MINK_LIMITS`（JSON sandbox 限制）仍是 CLI 之后最高优先级，高于所有配置文件；
+4 个 `MINK_EDIT_*` 变量则低于全部文件层（CLI > `--config` > 项目 `.minkrc` > 用户
+`~/.minkrc` > env > 默认）。
 环境变量在文件层之前应用，因此 `[tools]` / `[generation]` 等文件配置会覆盖同名环境变量。
 
 ```toml
@@ -518,6 +521,8 @@ mink --list-sessions                            # 列出所有 session
 ```
 
 `--session my-fix` 按 alias、完整 id、id 前缀和 title 匹配已有 session；匹配不到时创建新 session 并写入 alias。
+值收紧：`--session` 后必须跟非空且不以 `-` 开头的参数（`--session` 裸用或 `--session -x`
+直接报 missing value，避免与后续选项混淆）。
 `--continue` 选择最近修改的 session，恢复时 replay 最近 10 轮 LLM 响应。
 
 ---

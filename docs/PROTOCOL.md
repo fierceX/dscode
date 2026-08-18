@@ -1,6 +1,6 @@
 # 机器协议
 
-> 更新日期：2026-07-30
+> 更新日期：2026-08-18
 
 本文面向机器消费方：通过 `--print`（stream-json）或 `--agent-jsonl`（Agent JSONL
 single-shot 协议）与 Mink 集成。终端交互与配置见 [使用手册](USAGE.md)；Rust/Python

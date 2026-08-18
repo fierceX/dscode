@@ -1,6 +1,6 @@
 # Agents Guide
 
-> 更新日期：2026-08-14
+> 更新日期：2026-08-18
 
 [TOC]
 
@@ -290,6 +290,7 @@ DecisionEngine.decide_with_signals()
 | `crates/mink-cli/src/main.rs` | `mink` binary thin wrapper → `mink_cli::cli::main_entry()` |
 | `crates/mink-cli/src/bin/mink-core.rs` | `mink-core` SDK binary thin wrapper → `mink_cli::cli::main_entry()` |
 | `crates/mink-prefab/` | 独立 prefab seeder crate：模板加载、校验、会话/事件/prefix 写入 |
+| `crates/mink-router/` | 独立 Flash 路由 crate：pi-deepseek-route 策略 Rust 移植，`RouterLlmBackend` LlmBackend 装饰器（`--router`，`router` feature） |
 | `config.rs` | Config 结构体、CLI/env/配置文件合并、API key 和 sandbox 配置 |
 | `context.rs` | AgentSharedContext + ToolContext |
 | `assets.rs` | 嵌入 tools.json、内置 skills |
@@ -540,6 +541,7 @@ cargo build --release
 cargo test              # 日常测试（跳过重型测试，~5 秒）
 cargo test -p mink-cli --all-features tui  # 仅 TUI 模块测试
 cargo test -p mink-prefab                # 仅 prefab seeder 测试
+cargo test -p mink-router                # 仅 router 测试
 cargo test -p mink-core --features prefab prefab  # prefab runtime 测试
 cargo test -p mink-cli --features prefab prefab   # prefab CLI/TUI 测试
 cargo build -p mink-cli --features prefab         # 构建带 prefab 的终端二进制

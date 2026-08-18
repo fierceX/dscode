@@ -1,6 +1,6 @@
 # 架构说明
 
-> 更新日期：2026-08-13
+> 更新日期：2026-08-18
 
 本文描述 Mink 当前代码结构、模块职责和运行时数据流。终端用户命令、配置和工作流见
 [USAGE.md](USAGE.md)；Rust/Python 嵌入见 [EMBEDDING.md](EMBEDDING.md)；机器协议见

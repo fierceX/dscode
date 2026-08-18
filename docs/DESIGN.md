@@ -1,6 +1,6 @@
 # 设计文档
 
-> 更新日期：2026-08-10
+> 更新日期：2026-08-18
 
 本文记录 Mink 的设计取舍和关键不变式，不作为用户手册或工具协议参考。终端用户入口、
 配置和运行方式见 [USAGE.md](USAGE.md)；Rust/Python 嵌入见 [EMBEDDING.md](EMBEDDING.md)；
