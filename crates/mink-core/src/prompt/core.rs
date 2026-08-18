@@ -80,9 +80,8 @@ pub(super) fn append_core_sections(builder: &Builder, document: &mut PromptDocum
             consumed_facts: BTreeSet::new(),
         })?;
     }
-    let output_language = format!(
-            "Use \"{locale}\" for all Reply. Code, commands, and file content remain as-is."
-        );
+    let output_language =
+        format!("Use \"{locale}\" for all Reply. Code, commands, and file content remain as-is.");
     push_core(document, "output-language", &output_language)?;
     Ok(())
 }
