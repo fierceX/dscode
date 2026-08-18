@@ -16,6 +16,8 @@ use crate::ui::engine::TerminalDisplay;
 use crate::ui::replay::replay_last_turns;
 use crate::ui::{Display, SubAgentStreamSink};
 use anyhow::Result;
+#[cfg(feature = "router")]
+use mink_router::{RouterConfig, RouterLlmBackend};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -312,6 +314,23 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
     #[cfg(not(feature = "prefab"))]
     if cfg.prefab.is_some() {
         anyhow::bail!("--prefab requires building mink with the `prefab` feature");
+    }
+    #[cfg(feature = "router")]
+    if cfg.router.is_some() {
+        let inner = Arc::new(mink::runtime::OpenAiCompatibleBackend::new(
+            mink::runtime::OpenAiCompatibleOptions::default(),
+        ));
+        let router = RouterLlmBackend::new(
+            inner,
+            RouterConfig::flash_only()
+                .with_prefab_aware(true)
+                .with_narrow_first_turn_tools(true),
+        );
+        runtime_options = runtime_options.with_llm_backend(Arc::new(router));
+    }
+    #[cfg(not(feature = "router"))]
+    if cfg.router.is_some() {
+        anyhow::bail!("--router requires building mink with the `router` feature");
     }
     if let Some(prompt) = prompt_for_title {
         runtime_options = runtime_options.with_first_prompt(prompt);
@@ -897,6 +916,8 @@ fn print_usage() {
     println!("  --mission PATH          Load custom system prompt from MISSION.md file");
     #[cfg(feature = "prefab")]
     println!("  --prefab[=TEMPLATE]     Enable prefab with a template (pro, flash, or path)");
+    #[cfg(feature = "router")]
+    println!("  --router[=flash]        Enable Flash reasoning-mode routing (default flash)");
     println!("  --session NAME          Use named session");
     println!("  --continue              Continue most recent session");
     println!("  --list-sessions         List saved sessions");

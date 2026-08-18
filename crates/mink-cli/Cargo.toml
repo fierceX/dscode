@@ -22,6 +22,7 @@ anyhow.workspace = true
 crossterm = { workspace = true, optional = true }
 ignore = { workspace = true, optional = true }
 mink = { package = "mink-core", path = "../mink-core", default-features = false }
+mink-router = { path = "../mink-router", optional = true }
 ratatui = { workspace = true, optional = true }
 rustyline = { workspace = true, optional = true }
 serde_json.workspace = true
@@ -38,8 +39,9 @@ cli = ["runtime", "repl"]
 repl = ["runtime", "dep:rustyline"]
 tui = ["runtime", "dep:crossterm", "dep:ignore", "dep:ratatui"]
 prefab = ["mink/prefab"]
+router = ["dep:mink-router", "prefab"]
 python-sandbox = ["mink/python-sandbox"]
-full-cli = ["cli", "tui", "python-sandbox", "prefab"]
+full-cli = ["cli", "tui", "python-sandbox", "prefab", "router"]
 sdk-bin = ["runtime"]
 sdk = ["sdk-bin"]
 slow-tests = ["mink/slow-tests"]

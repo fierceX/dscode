@@ -49,6 +49,7 @@ cargo build -p mink-cli --release --no-default-features --features "sdk-bin pyth
 | `sdk-bin` | 构建 `mink-core` SDK 二进制所需的最小 runtime |
 | `python-sandbox` | 透传启用 `mink-core/python-sandbox` |
 | `prefab` | 透传启用 `mink-core/prefab`，提供 `--prefab[=TEMPLATE]` 会话重组能力（TEMPLATE 为内置名或模板目录） |
+| `router` | 启用 `mink-router`，提供 `--router[=flash]` Flash 推理模式路由 |
 
 ## 验证
 

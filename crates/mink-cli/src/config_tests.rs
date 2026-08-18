@@ -135,6 +135,21 @@ fn parse_args_skill_flag_collects_unique_names() {
 }
 
 #[test]
+fn parse_args_router_accepts_flash_and_off() {
+    let enabled = parse_args(vec!["--router".into()]).unwrap();
+    assert_eq!(enabled.router.as_deref(), Some("flash"));
+
+    let named = parse_args(vec!["--router=flash".into()]).unwrap();
+    assert_eq!(named.router.as_deref(), Some("flash"));
+
+    let off = parse_args(vec!["--router=off".into()]).unwrap();
+    assert_eq!(off.router, None);
+
+    let empty = parse_args(vec!["--router=".into()]).unwrap_err();
+    assert!(empty.to_string().contains("missing value for --router"));
+}
+
+#[test]
 fn parse_args_prefab_accepts_default_and_path() {
     let default = parse_args(vec!["--prefab".into()]).unwrap();
     assert_eq!(default.prefab.as_deref(), Some("default"));

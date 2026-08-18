@@ -1,0 +1,21 @@
+[package]
+name = "mink-router"
+version.workspace = true
+edition.workspace = true
+description = "Flash reasoning-mode router for Mink, ported from pi-deepseek-route"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["ai", "coding-agent", "deepseek", "router", "agent"]
+categories = ["development-tools"]
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+regex.workspace = true
+serde_json.workspace = true
+mink-core = { path = "../mink-core", default-features = false, features = ["runtime", "prefab"] }
+
+[dev-dependencies]
+tokio.workspace = true

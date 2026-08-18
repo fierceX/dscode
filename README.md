@@ -163,6 +163,7 @@ async fn main() -> anyhow::Result<()> {
 | [crates/mink-core](crates/mink-core/README.md) | Rust 发布包 `mink-core`，库 crate 名 `mink`，包含可嵌入 runtime、工具核心、session、sandbox 和 SDK 协议 |
 | [crates/mink-cli](crates/mink-cli/README.md) | workspace 内部二进制包，生成 `mink` 终端二进制和 `mink-core` SDK 精简二进制，持有 REPL/TUI 实现 |
 | [crates/mink-prefab](crates/mink-prefab/README.md) | 独立 prefab seeder：模板加载、校验、Mink 兼容 session/event/prefix 写入 |
+| [crates/mink-router](crates/mink-router/README.md) | 独立 Flash 路由：pi-deepseek-route 策略的 Rust 移植，LlmBackend 装饰器 |
 | [mink_agent](mink_agent/README.md) | Python SDK，wheel 内置无 TUI 的 `mink-core` 二进制 |
 | [crates/mink-server](crates/mink-server/README.md) | Web 工作区服务器：REST + SSE + 嵌入前端，`build.rs` 自动构建并嵌入 web 产物 |
 

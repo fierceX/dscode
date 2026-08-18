@@ -223,6 +223,8 @@ pub struct CliConfig {
     /// Prefab template to seed/restructure with; `Some("default")` uses the
     /// bundled generic template, `Some(path)` loads a template directory.
     pub prefab: Option<String>,
+    /// Router mode; `Some("flash")` enables the Flash routing backend.
+    pub router: Option<String>,
     /// 从 --config CLI 参数解析的 TOML 配置（最高优先级，在 apply_config_sources 中应用）
     pub cli_config: Option<MinkConfigFile>,
     /// 工具选择：`None` 使用默认工具集；`Some(vec![])` 不启用任何工具。
@@ -303,6 +305,7 @@ impl Default for CliConfig {
             mission_file: None,
             mission_content: None,
             prefab: None,
+            router: None,
             enabled_tools: None,
             cli_config: None,
             tool_approval_mode: ToolApprovalMode::Yolo,
@@ -343,6 +346,22 @@ pub fn parse_args(args: Vec<String>) -> Result<CliConfig> {
                     bail!("missing value for --prefab");
                 }
                 cfg.prefab = Some(value.to_string());
+                i += 1;
+            }
+            "--router" => {
+                cfg.router = Some("flash".to_string());
+                i += 1;
+            }
+            arg if arg.starts_with("--router=") => {
+                let value = arg.strip_prefix("--router=").unwrap_or_default().trim();
+                if value.is_empty() {
+                    bail!("missing value for --router");
+                }
+                if value.eq_ignore_ascii_case("off") {
+                    cfg.router = None;
+                } else {
+                    cfg.router = Some(value.to_string());
+                }
                 i += 1;
             }
             "--api-key" => {

@@ -1978,6 +1978,7 @@ dependencies = [
  "crossterm",
  "ignore",
  "mink-core",
+ "mink-router",
  "ratatui",
  "rustyline",
  "serde",
@@ -2028,6 +2029,18 @@ dependencies = [
  "serde",
  "serde_json",
  "time",
+]
+
+[[package]]
+name = "mink-router"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "mink-core",
+ "regex",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
