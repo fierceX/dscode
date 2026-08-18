@@ -49,12 +49,21 @@ MINK_SERVER_PORT=9000 ./target/debug/mink-server
 | 监听地址 | `MINK_SERVER_HOST` | `[server] host` | `0.0.0.0` |
 | 端口 | `MINK_SERVER_PORT` | `[server] port` | `8765` |
 | Mink home | `MINK_HOME` | `[server] mink_home` | `$HOME` |
-| 默认模型 | `MODEL` | `[server] model` / `~/.minkrc` `model` | `flash` |
+| 默认模型 | `MODEL` | `[server] model` / `~/.minkrc` `[provider] model` | `flash` |
 | 最大并发会话 | `MINK_SERVER_MAX_RUNNING` | `[server] max_running` | `4` |
 | 闲置自动关闭 | — | `[server] idle_close_secs` | `1800` |
 | turn 超时 | `MINK_SERVER_TURN_TIMEOUT` | — | `1200`（秒） |
 
-`~/.minkrc` 与 TUI/CLI 共享同一配置文件；mink-server 目前读取其中的顶层 `model` 作为默认模型（CLI/TUI 使用分组 `[provider] model`，两者 schema 不完全一致）。
+`~/.minkrc` 与 TUI/CLI 共享同一配置文件，**schema 完全一致**（分组格式，扁平键拒绝，与 CLI 相同的 `deny_unknown_fields` 规则）：
+
+- 每个会话启动时按 **项目级 `<cwd>/.minkrc` 覆盖用户级 `~/.minkrc`** 的层级合并，覆盖 CLI 的同一套分组：
+  `[provider]`（model/api_key/base_url/model_aliases/openai_*）、`[generation]`、`[context]`、
+  `[tools]` / `[tools.edit]`、`[signal]`、`[sandbox]`、`[sandbox_python]`。
+- 会话运行时选项（provider/generation/context/tools/signal/sandbox）完整应用到 `AgentOptions`，
+  与 CLI 的 `assemble_runtime_options` 行为一致。
+- 环境变量 `MODEL` / `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` / `MINK_SIGNAL_POLICY` /
+  `LOG_EVENTS` 在文件层之上覆盖（server 文档化优先级：环境变量 > `mink-server.toml` >
+  项目 `.minkrc` > 用户 `~/.minkrc` > 默认值）。
 
 ## 4. REST API
 

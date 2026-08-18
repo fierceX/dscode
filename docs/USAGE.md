@@ -390,7 +390,7 @@ MINK_SERVER_PORT=9000 ./target/debug/mink-server
 MINK_SERVER_DEV_WEB=1 ./target/debug/mink-server   # 开发模式：服务磁盘 web/dist
 ```
 
-- 配置优先级：环境变量 > `mink-server.toml` > `~/.minkrc` > 默认
+- 配置优先级：环境变量 > `mink-server.toml` > 项目 `<cwd>/.minkrc` > 用户 `~/.minkrc` > 默认；agent 配置（`[provider]`/`[generation]`/`[context]`/`[tools]`/`[signal]`/`[sandbox]`）与 CLI 同一分组 schema
 - 关键环境变量：`MINK_SERVER_HOST/PORT`、`MINK_HOME`、`MODEL`、`MINK_SERVER_MAX_RUNNING`、`MINK_SERVER_TURN_TIMEOUT`、`MINK_SERVER_DEV_WEB`
 - REST/SSE API 与事件格式详见 [server.md](server.md)
 

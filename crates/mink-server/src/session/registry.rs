@@ -147,6 +147,8 @@ pub struct Registry {
     create_locks: Mutex<HashMap<CreateLocator, std::sync::Weak<tokio::sync::Mutex<()>>>>,
     max_running: usize,
     llm_backend: Option<Arc<dyn mink::runtime::LlmBackend>>,
+    /// User-level agent config from `~/.minkrc`（与 CLI 同格式同文件）。
+    agent_layer: crate::session::agent_config::AgentConfig,
 }
 
 impl Registry {
@@ -159,7 +161,14 @@ impl Registry {
             create_locks: Mutex::new(HashMap::new()),
             max_running,
             llm_backend: None,
+            agent_layer: crate::session::agent_config::AgentConfig::default(),
         }
+    }
+
+    /// Attach the user-level `~/.minkrc` layer parsed once at startup.
+    pub fn with_agent_layer(mut self, layer: crate::session::agent_config::AgentConfig) -> Self {
+        self.agent_layer = layer;
+        self
     }
 
     #[cfg(test)]
@@ -710,17 +719,29 @@ impl Registry {
     }
 
     fn build_options(&self, session_ref: &str, cwd: &Path) -> AgentOptions {
+        use crate::session::agent_config;
+
+        // Layered merge mirroring the CLI: project .minkrc overrides user
+        // ~/.minkrc; server env vars override both (documented server
+        // precedence: env > mink-server.toml > project .minkrc > user .minkrc).
+        let mut cfg = agent_config::merge(
+            self.agent_layer.clone(),
+            agent_config::load_project_layer(cwd),
+        );
+        agent_config::apply_env_overrides(&mut cfg);
+        let model = cfg.model.clone().unwrap_or_else(|| self.model.clone());
+
         let mut options = AgentOptions::new(&self.home, cwd)
-            .with_model(&self.model)
             .with_session(SessionPolicy::UseOrCreate(session_ref.to_string()));
-        if let Ok(key) = std::env::var("DEEPSEEK_API_KEY") {
+        options = agent_config::apply_to(options, &cfg);
+        // Re-apply identity fields after `with_provider_options` replaced them
+        // with defaults.
+        options = options.with_model(&model);
+        if let Some(key) = &cfg.api_key {
             options = options.with_api_key(key);
         }
-        if let Ok(url) = std::env::var("DEEPSEEK_BASE_URL") {
+        if let Some(url) = &cfg.base_url {
             options = options.with_base_url(url);
-        }
-        if let Ok(model) = std::env::var("MODEL") {
-            options = options.with_model(model);
         }
         options = options.with_project_scoped_sessions().with_log_events(true);
         if let Some(backend) = &self.llm_backend {
@@ -1092,6 +1113,108 @@ mod tests {
         assert_eq!(sessions[0].tokens_in, 0);
         assert_eq!(sessions[0].tokens_out, 0);
 
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn build_options_applies_project_minkrc_and_env_overrides() {
+        use crate::session::agent_config;
+        use std::sync::{Arc, Mutex};
+
+        struct CapturingBackend {
+            seen: Arc<Mutex<Vec<(String, String, String)>>>, // (model, api_key, api_url)
+        }
+
+        #[async_trait::async_trait]
+        impl mink::runtime::LlmBackend for CapturingBackend {
+            fn name(&self) -> &str {
+                "server-config-capture"
+            }
+
+            async fn stream(
+                &self,
+                request: mink::runtime::LlmRequest,
+            ) -> anyhow::Result<mink::runtime::LlmResponseStream> {
+                self.seen.lock().unwrap().push((
+                    request.model.clone(),
+                    request.api_key.clone(),
+                    request.api_url.clone(),
+                ));
+                Ok(mink::runtime::LlmResponseStream {
+                    events: Box::pin(futures::stream::iter(vec![
+                        Ok(mink::runtime::LlmEvent::Text(mink::runtime::LlmTextEvent {
+                            content: "ok".into(),
+                        })),
+                        Ok(mink::runtime::LlmEvent::Stop(mink::runtime::LlmStopEvent {
+                            reason: "end_turn".into(),
+                        })),
+                    ])),
+                    attempt_count: 1,
+                })
+            }
+        }
+
+        let root = unique_temp_dir("build-options");
+        let home = root.join("home");
+        let cwd = root.join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        // Project-level .minkrc（与 CLI 相同的分组格式）。
+        std::fs::write(
+            cwd.join(".minkrc"),
+            "[provider]\nmodel = \"project-model\"\napi_key = \"project-key\"\nbase_url = \"https://project.invalid/v1\"\n",
+        )
+        .unwrap();
+
+        // 保留/恢复真实环境变量，避免测试互相污染。
+        let env_keys = ["MODEL", "DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL"];
+        let saved: Vec<Option<String>> = env_keys.iter().map(|k| std::env::var(k).ok()).collect();
+        for key in env_keys {
+            unsafe { std::env::remove_var(key) };
+        }
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let user_layer = agent_config::parse_layer(
+            "[provider]\nmodel = \"user-model\"\napi_key = \"user-key\"\n",
+            "test",
+        );
+        let mut registry = Registry::new(home.clone(), "server-default".to_string(), 4);
+        registry.agent_layer = user_layer;
+        registry.llm_backend = Some(Arc::new(CapturingBackend { seen: seen.clone() }));
+
+        let options = registry.build_options("cfg-test", &cwd);
+        let runtime = mink::runtime::AgentRuntime::start(options).await.unwrap();
+        runtime.run_turn("hi").await.unwrap();
+        runtime.shutdown().await.unwrap();
+
+        let captured = seen.lock().unwrap().clone();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(
+            captured[0].0, "project-model",
+            "project .minkrc model must override the user layer and server default"
+        );
+        assert_eq!(captured[0].1, "project-key");
+        assert_eq!(
+            captured[0].2, "https://project.invalid/v1/chat/completions",
+            "runtime appends the chat completions path to base_url"
+        );
+
+        // 环境变量覆盖文件层（server 文档化优先级：env 最高）。
+        unsafe { std::env::set_var("MODEL", "env-model") };
+        unsafe { std::env::set_var("DEEPSEEK_API_KEY", "env-key") };
+        let options = registry.build_options("cfg-test", &cwd);
+        let runtime = mink::runtime::AgentRuntime::start(options).await.unwrap();
+        runtime.run_turn("hi").await.unwrap();
+        runtime.shutdown().await.unwrap();
+        let captured = seen.lock().unwrap().clone();
+        assert_eq!(captured[1].0, "env-model");
+        assert_eq!(captured[1].1, "env-key");
+
+        for (key, value) in env_keys.iter().zip(saved) {
+            match value {
+                Some(v) => unsafe { std::env::set_var(key, v) },
+                None => unsafe { std::env::remove_var(key) },
+            }
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 }

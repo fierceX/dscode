@@ -24,8 +24,8 @@ impl ServerConfig {
     /// 优先级：环境变量 > mink-server.toml > ~/.minkrc > 默认值。
     pub fn load(toml_path: Option<&std::path::Path>) -> anyhow::Result<Self> {
         let file_cfg = toml_path.map(parse_toml).transpose()?.unwrap_or_default();
-        // 默认读取用户 home 目录下的 ~/.minkrc（与 TUI/CLI 共享同一配置文件）
-        let user_rc = read_user_minkrc();
+        // 用户层 agent 配置：~/.minkrc（分组格式，与 CLI 同一文件）。
+        let user_layer = crate::session::agent_config::load_user_layer();
 
         let mink_home = env_or("MINK_HOME")
             .map(PathBuf::from)
@@ -33,7 +33,7 @@ impl ServerConfig {
             .unwrap_or_else(default_home);
         let model = env_or("MODEL")
             .or(file_cfg.model)
-            .or(user_rc.model)
+            .or(user_layer.model)
             .unwrap_or_else(|| "flash".to_string());
 
         // Base mink config: environment keys are the canonical source for a
@@ -49,32 +49,6 @@ impl ServerConfig {
                 .unwrap_or(4),
             idle_close_secs: file_cfg.idle_close_secs.unwrap_or(1800),
         })
-    }
-}
-
-/// 读取用户 home 目录下的 `~/.minkrc`（TOML 顶层字段，与 mink-core 的 MinkConfigFile 兼容）。
-/// 缺失或解析失败时静默返回默认值（不阻断启动）。
-fn read_user_minkrc() -> TomlConfig {
-    #[derive(serde::Deserialize)]
-    struct UserRc {
-        model: Option<String>,
-    }
-    let home = env_or("HOME").unwrap_or_default();
-    let path = std::path::Path::new(&home).join(".minkrc");
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return TomlConfig::default();
-    };
-    let Ok(rc) = toml::from_str::<UserRc>(&text) else {
-        eprintln!("[mink-server] warning: failed to parse ~/.minkrc");
-        return TomlConfig::default();
-    };
-    TomlConfig {
-        model: rc.model,
-        host: None,
-        port: None,
-        mink_home: None,
-        max_running: None,
-        idle_close_secs: None,
     }
 }
 
@@ -180,7 +154,7 @@ fn user_minkrc_model_is_default_when_no_env() {
     let home = std::env::var_os("HOME");
     let rc_path = std::path::Path::new("/tmp/mink-rc-test").join(".minkrc");
     std::fs::create_dir_all("/tmp/mink-rc-test").unwrap();
-    std::fs::write(&rc_path, "model = \"deepseek-v4\"\n").unwrap();
+    std::fs::write(&rc_path, "[provider]\nmodel = \"deepseek-v4\"\n").unwrap();
     unsafe { std::env::set_var("HOME", "/tmp/mink-rc-test") };
     unsafe { std::env::remove_var("MODEL") };
     let cfg = ServerConfig::load(None).unwrap();
