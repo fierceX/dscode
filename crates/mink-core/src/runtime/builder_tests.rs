@@ -2382,22 +2382,19 @@ async fn prefab_seed_is_visible_to_first_turn_llm_request() {
     let outcome = runtime.run_turn("continue").await.unwrap();
     assert_eq!(outcome.status, crate::agent::orchestrator::TurnStatus::Ok);
 
-    let captured = seen.lock().unwrap();
+    let captured = seen.lock().unwrap().clone();
     assert_eq!(captured.len(), 1);
     let (system_prompt, messages, _tools) = &captured[0];
-    assert_eq!(
-        system_prompt.contains("You are a helpful software engineer assistant."),
-        true
-    );
-    assert_eq!(system_prompt.contains("system-conventions"), false);
+    assert!(system_prompt.contains("You are a helpful software engineer assistant."));
+    assert!(!system_prompt.contains("system-conventions"));
     let joined = messages
         .iter()
         .map(|m| serde_json::to_string(m).unwrap())
         .collect::<Vec<_>>()
         .join("\n");
-    assert_eq!(joined.contains("Read the workspace-root AGENTS.md"), true);
-    assert_eq!(joined.contains("Instructions loaded."), true);
-    assert_eq!(joined.contains("Ready."), true);
+    assert!(joined.contains("Read the workspace-root AGENTS.md"));
+    assert!(joined.contains("Instructions loaded."));
+    assert!(joined.contains("Ready."));
 
     runtime.shutdown().await.unwrap();
     let _ = tokio::fs::remove_dir_all(home).await;
@@ -2423,17 +2420,15 @@ async fn prefab_named_template_changes_system_prompt() {
     let outcome = runtime.run_turn("continue").await.unwrap();
     assert_eq!(outcome.status, crate::agent::orchestrator::TurnStatus::Ok);
 
-    let captured = seen.lock().unwrap();
+    let captured = seen.lock().unwrap().clone();
     assert_eq!(captured.len(), 1);
     let (system_prompt, messages, _tools) = &captured[0];
-    assert_eq!(
+    assert!(
         system_prompt.contains("Before acting"),
-        true,
         "flash template system prompt should be used"
     );
-    assert_eq!(
-        system_prompt.contains("You are a helpful software engineer assistant."),
-        false,
+    assert!(
+        !system_prompt.contains("You are a helpful software engineer assistant."),
         "default pro template system prompt should not be used"
     );
     let joined = messages
@@ -2441,8 +2436,8 @@ async fn prefab_named_template_changes_system_prompt() {
         .map(|m| serde_json::to_string(m).unwrap())
         .collect::<Vec<_>>()
         .join("\n");
-    assert_eq!(joined.contains("Read the workspace-root AGENTS.md"), true);
-    assert_eq!(joined.contains("Ready."), true);
+    assert!(joined.contains("Read the workspace-root AGENTS.md"));
+    assert!(joined.contains("Ready."));
 
     runtime.shutdown().await.unwrap();
     let _ = tokio::fs::remove_dir_all(home).await;
@@ -2467,19 +2462,19 @@ async fn prefab_uses_full_promoted_surface() {
     let outcome = runtime.run_turn("continue").await.unwrap();
     assert_eq!(outcome.status, crate::agent::orchestrator::TurnStatus::Ok);
 
-    let captured = seen.lock().unwrap();
+    let captured = seen.lock().unwrap().clone();
     assert_eq!(captured.len(), 1);
     let (system_prompt, _messages, tools) = &captured[0];
-    assert_eq!(system_prompt.contains("system-conventions"), false);
+    assert!(!system_prompt.contains("system-conventions"));
 
     let tool_names: Vec<&str> = tools
         .iter()
         .filter_map(|tool| tool["name"].as_str())
         .collect();
-    assert_eq!(tool_names.len() > 3, true);
-    assert_eq!(tool_names.contains(&"Bash"), true);
-    assert_eq!(tool_names.contains(&"Read"), true);
-    assert_eq!(tool_names.contains(&"Edit"), true);
+    assert!(tool_names.len() > 3);
+    assert!(tool_names.contains(&"Bash"));
+    assert!(tool_names.contains(&"Read"));
+    assert!(tool_names.contains(&"Edit"));
 
     runtime.shutdown().await.unwrap();
     let _ = tokio::fs::remove_dir_all(home).await;
@@ -2584,8 +2579,12 @@ data: [DONE]\n\n";
     runtime.shutdown().await.unwrap();
     server.await.unwrap();
 
-    let bodies = captured.lock().unwrap();
-    let body = bodies.first().cloned().expect("no HTTP request captured");
+    let body = captured
+        .lock()
+        .unwrap()
+        .first()
+        .cloned()
+        .expect("no HTTP request captured");
 
     // Save the raw captured request locally for inspection.
     std::fs::create_dir_all("target").unwrap();
@@ -2621,9 +2620,9 @@ data: [DONE]\n\n";
     // Tool schemas are Mink-native (the runtime must be able to execute them),
     // while the conversation and system prompt strictly match the DSH prefab.
     let tools = body["tools"].as_array().expect("tools must be present");
-    assert_eq!(tools.is_empty(), false);
+    assert!(!tools.is_empty());
     let tools_json = serde_json::to_string(&body["tools"]).unwrap();
-    assert_eq!(tools_json.contains("Bash"), true);
+    assert!(tools_json.contains("Bash"));
 
     let _ = tokio::fs::remove_dir_all(home).await;
     let _ = tokio::fs::remove_dir_all(cwd).await;
@@ -2707,8 +2706,12 @@ data: [DONE]\n\n";
     runtime.shutdown().await.unwrap();
     server.await.unwrap();
 
-    let bodies = captured.lock().unwrap();
-    let body = bodies.first().cloned().expect("no HTTP request captured");
+    let body = captured
+        .lock()
+        .unwrap()
+        .first()
+        .cloned()
+        .expect("no HTTP request captured");
 
     // Save the raw captured request locally for inspection.
     std::fs::create_dir_all("target").unwrap();
@@ -2719,28 +2722,22 @@ data: [DONE]\n\n";
     .unwrap();
 
     let system = body["messages"][0]["content"].as_str().unwrap();
-    assert_eq!(
-        system.contains("You are a helpful software engineer assistant."),
-        true
-    );
-    assert_eq!(system.contains("system-conventions"), false);
+    assert!(system.contains("You are a helpful software engineer assistant."));
+    assert!(!system.contains("system-conventions"));
 
     let tools = body["tools"].as_array().expect("tools must be present");
-    assert_eq!(tools.len() > 3, true);
+    assert!(tools.len() > 3);
     let names: Vec<&str> = tools
         .iter()
         .filter_map(|tool| tool["function"]["name"].as_str())
         .collect();
-    assert_eq!(names.contains(&"Bash"), true);
-    assert_eq!(names.contains(&"Read"), true);
-    assert_eq!(names.contains(&"Edit"), true);
+    assert!(names.contains(&"Bash"));
+    assert!(names.contains(&"Read"));
+    assert!(names.contains(&"Edit"));
 
     let all_messages = serde_json::to_string(&body["messages"]).unwrap();
-    assert_eq!(
-        all_messages.contains("Read the workspace-root AGENTS.md"),
-        true
-    );
-    assert_eq!(all_messages.contains("Ready."), true);
+    assert!(all_messages.contains("Read the workspace-root AGENTS.md"));
+    assert!(all_messages.contains("Ready."));
 
     let _ = tokio::fs::remove_dir_all(home).await;
     let _ = tokio::fs::remove_dir_all(cwd).await;
@@ -2763,7 +2760,7 @@ async fn prefab_session_resumes_with_history() {
         .await
         .unwrap();
     let original = runtime.session_info().clone();
-    assert_eq!(original.is_new, true);
+    assert!(original.is_new);
     runtime.shutdown().await.unwrap();
 
     let resume_options = crate::runtime::AgentOptions::new(home.clone(), cwd.clone())
@@ -2774,17 +2771,17 @@ async fn prefab_session_resumes_with_history() {
         .await
         .unwrap();
     let info = resumed.session_info().clone();
-    assert_eq!(info.is_new, false);
+    assert!(!info.is_new);
     assert_eq!(info.session_id, original.session_id);
 
     let conv = tokio::fs::read_to_string(&info.conversation_path)
         .await
         .unwrap();
-    assert_eq!(conv.contains("Ready."), true);
-    assert_eq!(conv.contains("load_full_instructions"), true);
+    assert!(conv.contains("Ready."));
+    assert!(conv.contains("load_full_instructions"));
 
     let events = tokio::fs::read_to_string(&info.events_path).await.unwrap();
-    assert_eq!(events.contains("\"type\":\"user_input\""), true);
+    assert!(events.contains("\"type\":\"user_input\""));
 
     resumed.shutdown().await.unwrap();
     let _ = tokio::fs::remove_dir_all(home).await;
@@ -2839,14 +2836,11 @@ async fn prefab_restructures_existing_session_system_prompt() {
     runtime.run_turn("continue").await.unwrap();
     runtime.shutdown().await.unwrap();
 
-    let captured = seen.lock().unwrap();
+    let captured = seen.lock().unwrap().clone();
     assert_eq!(captured.len(), 1);
     let (system_prompt, _messages, _tools) = &captured[0];
-    assert_eq!(
-        system_prompt.contains("You are a helpful software engineer assistant."),
-        true
-    );
-    assert_eq!(system_prompt.contains("system-conventions"), false);
+    assert!(system_prompt.contains("You are a helpful software engineer assistant."));
+    assert!(!system_prompt.contains("system-conventions"));
 
     let _ = tokio::fs::remove_dir_all(home).await;
     let _ = tokio::fs::remove_dir_all(cwd).await;
@@ -2895,13 +2889,10 @@ async fn normal_session_ignores_prefab_prefix_file() {
     runtime.run_turn("hi").await.unwrap();
     runtime.shutdown().await.unwrap();
 
-    let captured = seen.lock().unwrap();
+    let captured = seen.lock().unwrap().clone();
     let (system_prompt, _messages, _tools) = captured.last().unwrap();
-    assert_eq!(
-        system_prompt.contains("PREFAB INJECTED MINIMAL PROMPT"),
-        false
-    );
-    assert_eq!(system_prompt.contains("system-conventions"), true);
+    assert!(!system_prompt.contains("PREFAB INJECTED MINIMAL PROMPT"));
+    assert!(system_prompt.contains("system-conventions"));
 
     let _ = tokio::fs::remove_dir_all(home).await;
     let _ = tokio::fs::remove_dir_all(cwd).await;
@@ -2961,10 +2952,10 @@ async fn prefab_migrates_legacy_prefab_prefix_file() {
     runtime.run_turn("continue").await.unwrap();
     runtime.shutdown().await.unwrap();
 
-    let captured = seen.lock().unwrap();
+    let captured = seen.lock().unwrap().clone();
     let (system_prompt, _messages, _tools) = captured.last().unwrap();
-    assert_eq!(system_prompt.contains("LEGACY OLD PREFIX"), false);
-    assert_eq!(system_prompt.contains("Before acting"), true);
+    assert!(!system_prompt.contains("LEGACY OLD PREFIX"));
+    assert!(system_prompt.contains("Before acting"));
 
     let events = std::fs::read_to_string(&info.events_path).unwrap();
     let prefab_events: Vec<_> = events

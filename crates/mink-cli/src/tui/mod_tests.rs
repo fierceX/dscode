@@ -2061,7 +2061,7 @@ async fn resumed_prefab_session_is_visible_in_tui() {
         .await
         .unwrap();
     let original = created.session_info().clone();
-    assert_eq!(original.is_new, true);
+    assert!(original.is_new);
     created.shutdown().await.unwrap();
 
     let resume_options = mink::runtime::AgentOptions::new(home.clone(), cwd.clone())
@@ -2073,12 +2073,12 @@ async fn resumed_prefab_session_is_visible_in_tui() {
         .await
         .unwrap();
     let info = resumed.session_info().clone();
-    assert_eq!(info.is_new, false);
+    assert!(!info.is_new);
     assert_eq!(info.session_id, original.session_id);
     resumed.shutdown().await.unwrap();
 
     let lines = load_session(&info.events_path);
-    assert_eq!(lines.is_empty(), false);
+    assert!(!lines.is_empty());
     assert!(
         lines
             .iter()
@@ -2086,6 +2086,6 @@ async fn resumed_prefab_session_is_visible_in_tui() {
     );
     assert!(lines.iter().any(|line| line.text.contains("Ready.")));
 
-    let _ = std::fs::remove_dir_all(&home).unwrap();
-    let _ = std::fs::remove_dir_all(&cwd).unwrap();
+    std::fs::remove_dir_all(&home).unwrap();
+    std::fs::remove_dir_all(&cwd).unwrap();
 }

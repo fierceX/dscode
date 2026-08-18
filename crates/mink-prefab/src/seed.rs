@@ -481,6 +481,22 @@ fn build_replacements(options: &PrefabSeedOptions) -> Vec<(&'static str, String)
     ]
 }
 
+fn build_metadata(options: &PrefabSeedOptions) -> serde_json::Value {
+    let now = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
+    let mut metadata = json!({
+        "id": options.session_id,
+        "created_at": now,
+        "updated_at": now,
+        "cwd": options.cwd.display().to_string(),
+    });
+    if let Some(title) = &options.title {
+        metadata["title"] = json!(title);
+    }
+    metadata
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -533,20 +549,4 @@ mod tests {
 
         fs::remove_dir_all(&dir).unwrap();
     }
-}
-
-fn build_metadata(options: &PrefabSeedOptions) -> serde_json::Value {
-    let now = time::OffsetDateTime::now_utc()
-        .format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
-    let mut metadata = json!({
-        "id": options.session_id,
-        "created_at": now,
-        "updated_at": now,
-        "cwd": options.cwd.display().to_string(),
-    });
-    if let Some(title) = &options.title {
-        metadata["title"] = json!(title);
-    }
-    metadata
 }
