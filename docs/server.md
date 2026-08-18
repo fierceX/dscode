@@ -54,7 +54,7 @@ MINK_SERVER_PORT=9000 ./target/debug/mink-server
 | 闲置自动关闭 | — | `[server] idle_close_secs` | `1800` |
 | turn 超时 | `MINK_SERVER_TURN_TIMEOUT` | — | `1200`（秒） |
 
-`~/.minkrc` 与 TUI/CLI 共享同一配置文件（TOML 顶层字段，`model` 已生效；更多字段随 runtime 配置扩展）。
+`~/.minkrc` 与 TUI/CLI 共享同一配置文件；mink-server 目前读取其中的顶层 `model` 作为默认模型（CLI/TUI 使用分组 `[provider] model`，两者 schema 不完全一致）。
 
 ## 4. REST API
 
@@ -65,7 +65,7 @@ MINK_SERVER_PORT=9000 ./target/debug/mink-server
 | GET | `/api/sessions/{id}` | 会话状态（open/running） |
 | DELETE | `/api/sessions/{id}` | 删除会话（先持有系统文件锁，阻止并发删除） |
 | POST | `/api/sessions/{id}/open` | 打开（建立 session lease） |
-| POST | `/api/sessions/{id}/close` | 关闭（释放 lease；任务继续后台由 idle reaper 兜底） |
+| POST | `/api/sessions/{id}/close` | 关闭（中断当前 turn、释放 lease；关闭后由 idle reaper 兜底） |
 | POST | `/api/sessions/{id}/turn` | 发送消息执行 turn |
 | POST | `/api/sessions/{id}/interrupt` | 中断当前 turn |
 | GET | `/api/sessions/{id}/events` | events.jsonl 分页（`from_seq`/`limit`/`tail`/`before_seq`） |
@@ -91,13 +91,13 @@ MINK_SERVER_PORT=9000 ./target/debug/mink-server
 | `turn_started` | — | turn 开始 |
 | `thinking` / `text` | content | 流式输出 |
 | `tool_call` | id/name/summary/input | 工具调用（含完整参数，前端结构化渲染） |
-| `tool_result` | tool_use_id/tool_name/content/success/exit_code/result_kind/presentation/artifacts | 工具结果（presentation 携带 Plan/Todo 结构化状态） |
+| `tool_result` | tool_use_id/tool_name/content_preview/content/status/exit_code/result_kind/presentation/artifacts | 工具结果（status 为 ToolStatus，presentation 携带 Plan/Todo 结构化状态） |
 | `signal` | signal_kind/severity/message | 信念信号 |
 | `stop` / `retry` / `error` / `info` / `prompt` / `clear_line` | reason/message | 生命周期事件 |
 | `title_update` | model/stats | 轮结束权威统计（`StatsSnapshot` 快照） |
 | `sub_agent_status` / `sub_agent_output` | session_id/status/thinking/text/in_tokens/out_tokens | 子代理状态与输出 |
 | `turn_final` | outcome | 权威终态：完整 `TurnOutcome`（含 status/error/usage） |
-| `turn_error` | message | 超时/取消后的强制错误终态 |
+| `turn_error` | error | 超时/取消后的强制错误终态 |
 | `stream_gap` | missed | 广播落后 N 条；随后连接结束 |
 
 - **语义分工**：`turn_started` / `turn_final` 与 `stop` 职责分离——stop 只记录结束原因，

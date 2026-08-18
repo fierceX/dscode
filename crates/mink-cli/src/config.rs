@@ -220,6 +220,9 @@ pub struct CliConfig {
     pub mission_file: Option<PathBuf>,
     /// 内联 mission 内容（通过 SDK 协议传入，不写临时文件）
     pub mission_content: Option<String>,
+    /// Prefab template to seed/restructure with; `Some("default")` uses the
+    /// bundled generic template, `Some(path)` loads a template directory.
+    pub prefab: Option<String>,
     /// 从 --config CLI 参数解析的 TOML 配置（最高优先级，在 apply_config_sources 中应用）
     pub cli_config: Option<MinkConfigFile>,
     /// 工具选择：`None` 使用默认工具集；`Some(vec![])` 不启用任何工具。
@@ -299,6 +302,7 @@ impl Default for CliConfig {
             sandbox_python: SandboxPythonConfig::default(),
             mission_file: None,
             mission_content: None,
+            prefab: None,
             enabled_tools: None,
             cli_config: None,
             tool_approval_mode: ToolApprovalMode::Yolo,
@@ -328,6 +332,18 @@ pub fn parse_args(args: Vec<String>) -> Result<CliConfig> {
             "--mission" => {
                 cfg.mission_file = Some(require_value(&args, i)?.into());
                 i += 2;
+            }
+            "--prefab" => {
+                cfg.prefab = Some("default".to_string());
+                i += 1;
+            }
+            arg if arg.starts_with("--prefab=") => {
+                let value = arg.strip_prefix("--prefab=").unwrap_or_default().trim();
+                if value.is_empty() {
+                    bail!("missing value for --prefab");
+                }
+                cfg.prefab = Some(value.to_string());
+                i += 1;
             }
             "--api-key" => {
                 cfg.api_key = require_value(&args, i)?;

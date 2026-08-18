@@ -4,6 +4,8 @@ pub(crate) mod context_build;
 mod events;
 mod handle;
 mod options;
+#[cfg(feature = "prefab")]
+pub mod prefab;
 mod sdk_adapter;
 pub mod session;
 mod tools;

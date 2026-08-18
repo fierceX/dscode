@@ -3,6 +3,7 @@ members = [
     "crates/mink-core",
     "crates/mink-cli",
     "crates/mink-server",
+    "crates/mink-prefab",
 ]
 resolver = "2"
 

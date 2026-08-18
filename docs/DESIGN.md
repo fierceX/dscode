@@ -393,7 +393,8 @@ StormDecision::Suppress(reason) => {
 - 信念计算：Beta-Binomial 拉普拉斯平滑，先验 `α=3, β=1`（无观测时 `B=0.75`），
   滑动窗口 W=16，跨输入按 `Config.signal.decay_per_input`（默认 0.6）衰减替代硬重置
 - 分层响应：`B ≥ remind` 不干预（单次软信号只记录）；提醒区注入轨迹证据；警告区叠加
-  快照回滚与恢复首步守卫（拦截喂回信念）；`B < abort` 用户接管；阈值/超参/档位全可配置
+  快照回滚与恢复首步守卫（拦截喂回信念）；`B < abort` 用户接管；档位由 `SignalPolicy`
+  配置，阈值/超参为内部策略常量
 - 注入协议：以独立 User 消息（`[trajectory]`/`[detector]` 事实帧）写入 conversation，
   不污染 system prefix；`RecoveryPolicy` 按 resolved capabilities 校验恢复首步
 - `MINK_SIGNAL_POLICY=off`：不生成 `<belief-awareness>` prompt 段，不采集、不注入、
@@ -549,6 +550,16 @@ session 恢复和重放仍可按需读取全部原始消息；`session://current
 
 恢复时会 replay 最近 10 轮 LLM 响应事件（从 events.jsonl 读取），在交互式终端重新渲染历史对话。
 
+### Prefab 会话播种
+
+`prefab` feature 的定位是 session 初始化后的重组：在 `AgentRuntime` 完成正常 session 构建后，Prefab 模块检查目标 session 目录，必要时把模板轨迹写入 conversation/events，并通过标准 `prefix_snapshot` 事件记录特殊 system prompt/tools，使首次 LLM 请求已经带有“读 AGENTS.md → 加载完整使用说明 → Ready”的完整历史。运行时不会在重组后回调 `mink-prefab`，agent loop 不感知重组过程。
+
+- `prefab::ensure_session()` 只重组需要重组的 session；`seed_session()` 仍用于直接播种场景。
+- CLI `--prefab[=TEMPLATE]` / Rust `with_prefab(true)` / `with_prefab_named()` / `with_prefab_path()` / `with_prefab_spec()` 会在 session 初始化后由 Prefab 模块生成 `conversation.jsonl` 和 `events.jsonl`（仅当 conversation 为空），使 REPL/TUI 恢复时能直接重放预置轨迹。
+- 启用 prefab 的 runtime 在 `PrefixManager::ensure()` 中优先读取 `events.jsonl` 的 Prefab `prefix_snapshot` 事件；该事件不存在时回退编译期 prompt builder。
+- 普通 runtime 忽略 Prefab `prefix_snapshot`；`prefab_mode` 只随启用 prefab 的 runtime 传给子代理。
+- 对已有普通 session 启用 prefab 不创建新 session，也不改写 conversation；只补写标准 `prefix_snapshot` 事件，让后续请求使用 prefab system prompt。
+
 ---
 
 ## 主题九：SubAgent（子代理）
@@ -609,10 +620,10 @@ if let Some(message) = child_store.last_assistant_message().await? {
 ### 合并优先级
 
 ```
-CLI 参数 > 项目 .minkrc > 用户 ~/.minkrc > 环境变量 > 代码默认值
+CLI 参数 > --config TOML > 项目 .minkrc > 用户 ~/.minkrc > 环境变量 > 代码默认值
 ```
 
-`config.rs` 中，配置加载先读取环境变量和默认值，再合并用户级 / 项目级 `.minkrc`，最后用 CLI 参数覆盖。
+`config.rs` 中，配置加载先读取环境变量和默认值，再依次合并用户级 / 项目级 `.minkrc` 和 `--config`，最后用 CLI 参数覆盖。
 
 ```rust
 pub fn apply_provider_defaults(cfg: &mut Config) -> Result<()> {
@@ -626,17 +637,18 @@ pub fn apply_provider_defaults(cfg: &mut Config) -> Result<()> {
 ```
 
 `flash` / `pro` 是默认模型别名，分别解析到 DeepSeek 默认模型。`.minkrc` 或 `--config` 的
-`[model_aliases]` 可覆盖这些别名，也可新增自定义别名。未命中别名的 `model` 会作为真实模型名原样传给 LLM backend。
+`[provider.model_aliases]` 可覆盖这些别名，也可新增自定义别名。未命中别名的 `model` 会作为真实模型名原样传给 LLM backend。
 
-OpenAI-compatible 请求还可通过顶层字段控制：
+OpenAI-compatible 请求通过 `[provider]` 段控制：
 
 ```toml
+[provider]
 openai_reasoning_effort = "max"       # off/none/false/disabled 表示不发送
 openai_include_usage = true
 openai_token_param = "max_tokens"     # max_tokens | max_completion_tokens
 openai_tool_choice = "auto"           # auto | none | required，或 JSON 对象
 
-[openai_extra_body]
+[provider.openai_extra_body]
 custom_boolean = true
 custom_budget = 8192
 ```
@@ -645,7 +657,7 @@ custom_budget = 8192
 `tools`、`tool_choice`、`max_tokens` 和 `max_completion_tokens`。非 OpenAI-compatible
 协议由 `LlmBackend` 注入处理。
 
-显式 CLI `--config <toml>` 解析失败必须 fail fast；用户级/项目级 `.minkrc` 解析失败只输出 warning 并继续。
+显式 CLI `--config <toml>` 解析失败必须 fail fast；用户级/项目级 `.minkrc` 解析失败同样 fail fast（读取文件时非 NotFound 错误会先输出 warning 再返回错误）。
 
 ### size 解析
 
@@ -659,7 +671,7 @@ custom_budget = 8192
 "2M"    → 2000000
 ```
 
-用于 `max_context`、`max_tokens` 等配置字段。CLI 中低频配置通过 `--config <toml>` 或
+用于 `max_context` 字段。CLI 中低频配置通过 `--config <toml>` 或
 `.minkrc` 传入。
 
 ### 环境变量分类
@@ -674,7 +686,7 @@ custom_budget = 8192
 
 `context_compact_pct`、`context_reserve_tokens`、`context_compact_tail_tokens`、
 `context_compact_max_output_tokens`、`context_compact_input_reduction`、`enabled_tools`、
-OpenAI-compatible 参数和 `[tools] approval_mode` 可通过 `.minkrc` 或 `--config` 配置。
+`[provider]` 的 OpenAI-compatible 参数和 `[tools] approval_mode` 可通过 `.minkrc` 或 `--config` 配置。
 Agent JSONL `SdkOptions` 和 Python `SandboxConfig` 同样直接暴露 `max_context` 及五个压缩参数，
 由 `runtime::sdk_adapter` 映射到共享的 `Config`。
 
@@ -838,7 +850,7 @@ pub enum Event {
 | 所有嵌入入口映射完整压缩参数 | `sdk_protocol.rs`、`sdk_adapter.rs`、`mink_agent/__init__.py` | 私有小窗口模型只能依赖外部 TOML |
 | runtime 在 session 创建前校验上下文预算组合 | `config.rs`、`runtime/builder.rs` | 首次请求才因零输入预算或不可压缩热尾部失败 |
 | StormBreaker 窗口每用户输入重置 | `agent/turn.rs` | 跨意图抑制误判 |
-| BeliefTracker、ToolSignalProcessor 和 DecisionEngine 每用户输入重置 | `agent/orchestrator.rs`、`agent/turn.rs` | 跨意图信号累积误升级 |
+| BeliefTracker 每用户输入衰减、ToolSignalProcessor/DecisionEngine 每用户输入重置 | `agent/orchestrator.rs`、`agent/turn.rs` | 跨意图信号累积误升级 |
 | 同一用户输入最多压缩一次 | `agent/turn.rs`、`agent/compactor.rs` | 多次无用压缩 |
 | PrefixManager 校验完整依赖 fingerprint，漂移时重建 ImmutablePrefix | `agent/prefix.rs`、`session/prefix.rs` | 缓存偏移不可检测 |
 | Plan/SubAgent 延迟结果完成并执行大小保护后才能采集信号 | `agent/turn.rs`、`tools/runner.rs` | 信号观察占位结果或未保护正文 |
@@ -846,6 +858,8 @@ pub enum Event {
 | compact 提交后按 active_start 裁剪 store 缓存 | `compaction.rs` | 冷历史继续常驻内存 |
 | 压缩不删除 conversation 历史 | `compaction.rs` | session 无法完整恢复或重放 |
 | artifact 序号恢复且正文独占创建 | `artifacts.rs` | fork/恢复后覆盖历史 artifact |
+| Prefab prefix 只在 prefab runtime 生效 | `agent/prefix.rs` | 普通 runtime 误读 Prefab `prefix_snapshot` 会破坏默认提示词 |
+| Prefab 重组不覆盖已有 session | `crates/mink-prefab/src/seed.rs` | 覆盖已有历史会丢失对话 |
 
 ## 主题十五：Rust 库 API 设计
 

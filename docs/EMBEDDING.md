@@ -24,7 +24,7 @@ Rust 发布包为 `mink-core`，库 crate 名为 `mink`。发布包只包含可�
 mink = { package = "mink-core", version = "0.5.0", default-features = false, features = ["runtime"] }
 ```
 
-公开入口仅为 `mink::prelude`、`mink::runtime` 和 `mink::sdk_protocol`。
+公开入口为 `mink::prelude`、`mink::runtime`、`mink::sdk_protocol` 和 `mink::ui`；启用 `prefab` feature 时 `mink::runtime::prefab` 提供 `ensure_session()`。
 
 ### 最小示例
 
@@ -105,6 +105,7 @@ observer 通过固定容量队列与核心 turn 隔离；溢出或 observer 失�
 | OpenAI | `with_openai_reasoning_effort()` / `with_openai_tool_choice()` / `with_openai_extra_body()` / `with_openai_token_param()` / `with_openai_include_usage()` |
 | 能力 | `with_mission_content()` / `with_selected_skills()` / `with_runtime_skill_content()` / `with_skill_discovery_policy()` / `with_resource_handler()` / `with_read_only_file_system()` / `with_resource_session_id()` |
 | 后端 | `with_llm_backend()` / `with_sandbox()` / `with_sandbox_python()` |
+| Prefab | `with_prefab(true)` / `with_prefab_named("flash")` / `with_prefab_path(path)` / `with_prefab_spec("name-or-path")`；需要启用 `prefab` feature |
 
 ### 自定义 LLM backend
 
@@ -176,6 +177,26 @@ let runtime = AgentRuntime::start(
 `artifact://`、`skill://`、`rule://`、`session://` 不进入 VFS。
 完整 redb 示例见
 [`crates/mink-core/examples/redb_vfs.rs`](../crates/mink-core/examples/redb_vfs.rs)。
+
+### Prefab 会话播种
+
+启用 `prefab` feature 后，可以在 `AgentOptions` 上调用 `with_prefab(true)` 使用内置默认模板，或用 `with_prefab_named()` / `with_prefab_path()` / `with_prefab_spec()` 指定模板。Mink 会先正常初始化 session，然后由 Prefab 模块检查/重组 session：若 `events.jsonl` 中没有 Prefab `prefix_snapshot` 事件，则写入模板会话并补写标准前缀事件。
+
+```toml
+[dependencies]
+mink = { package = "mink-core", version = "0.5.0", default-features = false, features = ["runtime", "prefab"] }
+```
+
+```rust
+use mink::prelude::{AgentOptions, AgentRuntime};
+
+let options = AgentOptions::new(home, cwd)
+    .with_prefab_spec("flash")? // 或 .with_prefab_path("./my-template")? / .with_prefab_named("pro")?
+    .with_api_key(std::env::var("DEEPSEEK_API_KEY")?);
+let runtime = AgentRuntime::start(options).await?;
+```
+
+`with_prefab(true)` 使用内置默认模板；`with_prefab_named()` / `with_prefab_path()` / `with_prefab_spec()` 可指定模板。已有 prefab session 恢复时不会重复重组；对已有普通 session 使用 prefab 只补写标准 `prefix_snapshot` 事件，不修改 conversation。
 
 ### 沙箱
 
@@ -276,7 +297,7 @@ for event in session.stream_events("解释这段代码"):
 |-----------|------------|------|
 | `billing_turn_id` | `billing_turn_id` | 本轮稳定标识；Agent、压缩、子代理共用 |
 | `usage_records` | `usage_records` | 每笔 LLM 请求明细 |
-| `usage` | `usage` | `UsageSummary` 汇总：请求数、attempt 数、Token、纳元费用 |
+| `usage` | `usage` | `UsageSummary` 汇总：请求数、attempt 数、Token、费用明细 |
 | `session.usage_path` | `usage_path` | `usage.jsonl` 路径 |
 
 ### UsageSummary
@@ -288,7 +309,7 @@ for event in session.stream_events("解释这段代码"):
 | `unreported_request_count` | 未返回 usage 的请求数 |
 | `attempt_count` | HTTP 重试合计 |
 | `tokens` | [TokenUsage](#tokenusage) |
-| `cost_nano_cny` | 预估费用（纳元，`1 元 = 10⁹ 纳元`） |
+| `cost` | `UsageCost`：`known_nano_cny`（已知费用，纳元，`1 元 = 10⁹ 纳元`）+ `unpriced_requests`（未定价请求数） |
 
 ### TokenUsage
 
@@ -319,15 +340,17 @@ DeepSeek API 官方单价（纳元整数运算）：
 
 计算公式：`input × input_nano + cache_creation × input_nano + cache_read × cache_read_nano + output × output_nano`
 
-未报告 usage 的请求 `cost_nano_cny` 为 `None`。未知模型只记录 Token，费用按 0 统计。
+`UsageRecord` 的 `cost_nano_cny` 对未定价请求为 `None`。`UsageSummary.cost.known_nano_cny`
+汇总已知费用，`unpriced_requests` 统计未定价请求数；未知模型只记录 Token，不产生 known 费用。
 
 ### usage.jsonl 格式
 
 ```json
-{"version":2,"billing_turn_id":"turn-...","request_id":"request-...",
- "kind":"agent","model":"deepseek-v4-flash","attempt_count":1,"status":"reported",
+{"version":1,"billing_turn_id":"turn-...","request_id":"request-...",
+ "kind":"agent","origin_session_id":"session-...","model":"deepseek-v4-flash",
+ "attempt_count":1,"status":"reported",
  "tokens":{"input_tokens":100,"cache_read_tokens":40,...},
- "cost_nano_cny":140800,"completed_at":"2026-06-18T00:00:00Z"}
+ "cost_nano_cny":140800,"reason":null,"completed_at":"2026-06-18T00:00:00Z"}
 ```
 
 ### Rust 库中访问
@@ -342,7 +365,7 @@ let outcome = AgentRuntime::start(
 ).await?.run_turn("解释这段代码").await?;
 
 println!("input: {}, cost: {} 纳元",
-    outcome.usage.tokens.input_tokens, outcome.usage.cost_nano_cny);
+    outcome.usage.tokens.input_tokens, outcome.usage.cost.known_nano_cny);
 for record in &outcome.usage_records {
     println!("  {}: kind={:?}, status={:?}", record.request_id, record.kind, record.status);
 }
@@ -355,7 +378,7 @@ from mink_agent import AgentSession, SandboxConfig
 
 session = AgentSession(SandboxConfig(api_key="sk-...", read_dirs=["."]))
 result = session.run("解释这段代码")
-print(f"cost: {result['usage']['cost_nano_cny']} nano-cny")
+print(f"cost: {result['usage']['cost']['known_nano_cny']} nano-cny")
 for record in result['usage_records']:
     print(f"  {record['request_id']}: kind={record['kind']}")
 session.close()

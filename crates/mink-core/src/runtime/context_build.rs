@@ -43,6 +43,8 @@ pub(crate) struct AgentContextBuild {
     pub resource_router: Option<Arc<ResourceRouter>>,
     pub capability_snapshot: Option<Arc<CapabilitySnapshot>>,
     pub custom_tools: Vec<crate::runtime::RegisteredCustomTool>,
+    #[cfg(feature = "prefab")]
+    pub prefab_mode: bool,
 }
 
 pub(crate) struct BuiltAgentContext {
@@ -153,6 +155,8 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
         tool_surface,
         tool_capabilities,
         custom_tools: Arc::new(params.custom_tools),
+        #[cfg(feature = "prefab")]
+        prefab_mode: params.prefab_mode,
         events_path: paths.events.clone(),
         summary_path: paths.summary.clone(),
         plan_path: paths.plan.clone(),

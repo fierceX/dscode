@@ -2002,6 +2002,7 @@ dependencies = [
  "grep-searcher",
  "ignore",
  "libc",
+ "mink-prefab",
  "once_cell",
  "redb",
  "regex",
@@ -2017,6 +2018,16 @@ dependencies = [
  "wasmtime-wasi",
  "windows-sys 0.61.2",
  "xxhash-rust",
+]
+
+[[package]]
+name = "mink-prefab"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "time",
 ]
 
 [[package]]

@@ -13,7 +13,37 @@ impl PrefixManager {
         Self { ctx }
     }
 
+    /// In prefab mode only, rebuild the complete prefix from the session's
+    /// standard `prefix_snapshot` event in `events.jsonl` instead of compiling
+    /// it from code.
+    #[cfg(feature = "prefab")]
+    fn prefab_prefix_from_session(&self) -> Option<(String, Vec<serde_json::Value>)> {
+        if !self.ctx.prefab_mode {
+            return None;
+        }
+        let text = std::fs::read_to_string(&self.ctx.events_path).ok()?;
+        for line in text.lines() {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            if value.get("type").and_then(serde_json::Value::as_str) != Some("prefix_snapshot") {
+                continue;
+            }
+            let system_prompt = value.get("system_prompt")?.as_str()?.to_string();
+            let tools_json = value.get("tools_json")?.as_array()?.clone();
+            if !system_prompt.contains("<system-conventions>") {
+                return Some((system_prompt, tools_json));
+            }
+        }
+        None
+    }
+
     pub fn ensure(&self) -> Result<(String, Vec<serde_json::Value>)> {
+        #[cfg(feature = "prefab")]
+        if let Some(prefix) = self.prefab_prefix_from_session() {
+            return Ok(prefix);
+        }
+
         loop {
             let mut guard = self
                 .ctx
@@ -32,23 +62,7 @@ impl PrefixManager {
                 continue;
             }
 
-            let system_prompt = crate::prompt::Builder {
-                cwd: self.ctx.cwd.clone(),
-                home: self.ctx.home.clone(),
-                skill_snapshot: Arc::new(self.ctx.capability_snapshot.skills.clone()),
-                context_file_snapshot: Arc::new(self.ctx.capability_snapshot.context_files.clone()),
-                rule_snapshot: Arc::new(self.ctx.capability_snapshot.rules.clone()),
-                mission_file: self.ctx.config.mission_file.clone(),
-                mission_content: self.ctx.config.mission_content.clone(),
-                tool_surface: self.ctx.tool_surface.clone(),
-                tool_capabilities: self.ctx.tool_capabilities.clone(),
-                edit_mode: self.ctx.tool_config.edit_mode,
-                edit_fuzzy_match: self.ctx.tool_config.edit_fuzzy_match,
-                edit_fuzzy_threshold: self.ctx.tool_config.edit_fuzzy_threshold,
-                edit_enforce_seen_lines: self.ctx.tool_config.edit_enforce_seen_lines,
-                signal_policy: self.ctx.config.signal_policy,
-            }
-            .build_system_prompt()?;
+            let system_prompt = self.ctx.build_system_prompt()?;
             let tools_json = self.ctx.tool_surface.schemas();
             let workflows = crate::prompt::workflows::PromptWorkflowResolver::builtin()
                 .resolve(&self.ctx.tool_capabilities)?;

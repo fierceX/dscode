@@ -30,12 +30,22 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
         llm_backend,
         resource_session_id,
         custom_tools,
+        #[cfg(feature = "prefab")]
+        prefab_enabled,
+        #[cfg(feature = "prefab")]
+        prefab_template,
     } = config;
 
     crate::config::validate_runtime_config(&config)?;
     crate::tools::catalog::validate_tool_config(&crate::context::ToolConfig::from_config(&config))?;
     let custom_tools = crate::runtime::tools::freeze_custom_tools(custom_tools);
     crate::tools::catalog::validate_custom_tools(&custom_tools)?;
+
+    let cancel = CancellationToken::new();
+    let event_dispatcher = event_sink.map(EventDispatcher::new);
+    let event_display = Arc::new(EventDisplay::new(event_dispatcher));
+    let display: Arc<dyn crate::ui::Display> = event_display.clone();
+    let interrupt = Arc::new(AtomicBool::new(false));
 
     let (sid, session_ref, session_alias, resolved_paths) =
         resolve_session(&home, &cwd, session, session_layout).await?;
@@ -51,11 +61,6 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
     }
     config.session_id = sid.clone();
 
-    let cancel = CancellationToken::new();
-    let event_dispatcher = event_sink.map(EventDispatcher::new);
-    let event_display = Arc::new(EventDisplay::new(event_dispatcher));
-    let display: Arc<dyn crate::ui::Display> = event_display.clone();
-    let interrupt = Arc::new(AtomicBool::new(false));
     let api_url_str = api_url(&config);
     let llm_backend =
         llm_backend.unwrap_or_else(|| Arc::new(OpenAiCompatibleBackend::from_config(&config)));
@@ -84,11 +89,37 @@ pub(crate) async fn build_runtime(config: AgentRuntimeConfig) -> Result<AgentRun
         resource_router: None,
         capability_snapshot: None,
         custom_tools,
+        #[cfg(feature = "prefab")]
+        prefab_mode: prefab_enabled,
     })
     .await?;
     let ctx = built.ctx;
     let spaths = built.paths;
     let new_session = built.is_new;
+
+    #[cfg(feature = "prefab")]
+    if prefab_enabled {
+        let template = prefab_template
+            .clone()
+            .unwrap_or(crate::runtime::prefab::load_builtin()?);
+        let tools_json = ctx.tool_surface.schemas();
+        let system_prompt = ctx.build_system_prompt()?;
+        crate::runtime::prefab::ensure_session(
+            ctx.as_ref(),
+            &spaths,
+            &system_prompt,
+            &tools_json,
+            &template,
+        )?;
+        crate::runtime::prefab::log_prefix_snapshot(
+            ctx.as_ref(),
+            &spaths,
+            &system_prompt,
+            &tools_json,
+            &template,
+        )?;
+        ctx.flush_event_log().await?;
+    }
 
     ctx.compaction.validate_startup().await?;
 

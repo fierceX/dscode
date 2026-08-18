@@ -24,8 +24,8 @@ mink -m flash --print "explain this"
 {"type":"thinking","content":"Let me analyze..."}
 {"type":"text","content":"Here is the explanation..."}
 {"type":"tool_call","name":"Read","id":"...","input":{"path":"/x"}}
-{"type":"tool_result","tool_use_id":"...","name":"Read","content":"..."}
-{"type":"usage","input_tokens":100,"output_tokens":50}
+{"type":"tool_result","tool_use_id":"...","name":"Read","content":"...","status":{"state":"succeeded"},"result_kind":"file_read","artifacts":[]}
+{"type":"usage","input_tokens":100,"output_tokens":50,"cache_read_input_tokens":20,"cache_creation_input_tokens":0,"kind":"agent"}
 {"type":"stop","reason":"end_turn"}
 ```
 
@@ -46,8 +46,8 @@ mink -m flash --print "fix the bug" | jq 'select(.type=="text") | .content'
 ## Agent JSONL（`--agent-jsonl`）
 
 SDK 专用 single-shot 协议：stdin 读入一个 versioned JSON request，stdout 输出事件流，
-最后以 `final` 结束。协议版本为 **3**；v3 对未知字段直接拒绝（`deny_unknown_fields`），
-不兼容 v2 的扁平 options。
+最后以 `final` 结束。协议版本为 **3**；v3 的 `options` 各分组对未知字段直接拒绝
+（`deny_unknown_fields`），不兼容 v2 的扁平 options。
 
 ```bash
 # 最小请求
@@ -129,7 +129,7 @@ echo '{"version":3,"prompt":"scan this repo"}' | mink-core --agent-jsonl
   "tool_error_count": 0,
   "error": null,
   "usage_records": [],
-  "usage": {"request_count": 1, "tokens": {...}, "cost_nano_cny": 140800}
+  "usage": {"request_count": 1, "tokens": {...}, "cost": {"known_nano_cny": 140800, "unpriced_requests": 0}}
 }
 ```
 

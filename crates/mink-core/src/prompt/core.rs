@@ -21,11 +21,7 @@ pub(super) fn append_core_sections(builder: &Builder, document: &mut PromptDocum
         .find_map(|key| std::env::var(key).ok().filter(|value| !value.is_empty()))
         .unwrap_or_else(|| "en_US".to_string());
     let locale = locale_raw.split('.').next().unwrap_or(&locale_raw);
-    let identity = if locale.starts_with("zh") {
-        "你是 mink，一个在终端中运行的轻量级编码智能体。"
-    } else {
-        "You are mink, a lightweight coding agent that works in a terminal."
-    };
+    let identity = "You are mink, a lightweight coding agent that works in a terminal.";
     push_core(document, "agent-identity", identity)?;
     push_core(
         document,
@@ -84,13 +80,9 @@ pub(super) fn append_core_sections(builder: &Builder, document: &mut PromptDocum
             consumed_facts: BTreeSet::new(),
         })?;
     }
-    let output_language = if locale.starts_with("zh") {
-        "必须使用中文进行所有输出。代码、命令和文件原文保持其自身语言。".to_string()
-    } else {
-        format!(
-            "Use \"{locale}\" for all explanations. Code, commands, and file content remain as-is."
-        )
-    };
+    let output_language = format!(
+            "Use \"{locale}\" for all Reply. Code, commands, and file content remain as-is."
+        );
     push_core(document, "output-language", &output_language)?;
     Ok(())
 }

@@ -12,7 +12,7 @@
 
 ## 包内容
 
-- `src/cli.rs`：`mink` / `mink-core` 共用 CLI adapter，负责参数解析、配置合并、sandbox re-exec 和模式分发。
+- `src/cli.rs`：`mink` / `mink-core` 共用 CLI adapter，负责参数解析、配置合并、sandbox re-exec、模式分发和 `--prefab[=TEMPLATE]` 启用。
 - `src/ui`：REPL / 普通终端输出实现。
 - `src/tui`：ratatui Full / Inline 双 TUI surface，共享结构化 transcript、工具卡片、
   Markdown、输入、详情、通知和 session replay。
@@ -24,6 +24,9 @@
 ```bash
 # 完整终端二进制，包含 REPL/TUI/PythonSandbox
 cargo build -p mink-cli --release
+
+# 显式启用 prefab 重组能力（full-cli 默认已包含）
+cargo build -p mink-cli --release --features "prefab"
 
 # 无默认 feature 的最小 mink 二进制
 cargo build -p mink-cli --release --no-default-features --bin mink
@@ -39,12 +42,13 @@ cargo build -p mink-cli --release --no-default-features --features "sdk-bin pyth
 
 | Feature | 说明 |
 |---------|------|
-| `full-cli` | 默认 feature，等价于完整终端能力：CLI + REPL + TUI + PythonSandbox |
+| `full-cli` | 默认 feature，等价于完整终端能力：CLI + REPL + TUI + PythonSandbox + Prefab |
 | `cli` | 普通 CLI / REPL 基础能力 |
 | `repl` | rustyline 交互输入 |
 | `tui` | ratatui Full / Inline 双 TUI 界面 |
 | `sdk-bin` | 构建 `mink-core` SDK 二进制所需的最小 runtime |
 | `python-sandbox` | 透传启用 `mink-core/python-sandbox` |
+| `prefab` | 透传启用 `mink-core/prefab`，提供 `--prefab[=TEMPLATE]` 会话重组能力（TEMPLATE 为内置名或模板目录） |
 
 ## 验证
 

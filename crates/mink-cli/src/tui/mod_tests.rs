@@ -144,6 +144,45 @@ fn load_session_replays_recent_turns() {
     assert!(tool.text.contains("file contents"));
 }
 
+#[cfg(feature = "prefab")]
+#[test]
+fn seeded_prefab_session_events_are_replayable_in_tui() {
+    use mink::runtime::prefab::{PrefabSeed, PrefabSeedOptions, seed_session};
+
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("mink_tui_prefab_{unique}"));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let seed = PrefabSeed::builtin().unwrap();
+    let options = PrefabSeedOptions {
+        session_id: "tui-prefab".to_string(),
+        title: None,
+        cwd: dir.clone(),
+        agents_md: None,
+        skill_result_code: None,
+        skill_result_document: None,
+        skill_result_list: None,
+        system_reminder_agents: None,
+        skill_catalog_reminder: None,
+        instruction_hint: None,
+        full_system_prompt: None,
+    };
+    seed_session(&dir, &seed.template, &options).unwrap();
+
+    let lines = load_session(&dir.join("events.jsonl"));
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.text.contains("Read the workspace-root AGENTS.md"))
+    );
+    assert!(lines.iter().any(|line| line.text.contains("Ready.")));
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 #[test]
 fn apply_switches_stream_kinds_and_collapses_thinking() {
     let mut state = TuiState::default();
@@ -1998,4 +2037,55 @@ fn line_text(line: &Line<'static>) -> String {
         .iter()
         .map(|span| span.content.as_ref())
         .collect::<String>()
+}
+
+#[cfg(feature = "prefab")]
+#[tokio::test]
+async fn resumed_prefab_session_is_visible_in_tui() {
+    use mink::runtime::SessionPolicy;
+
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let home = std::env::temp_dir().join(format!("mink_tui_prefab_resume_home_{unique}"));
+    let cwd = std::env::temp_dir().join(format!("mink_tui_prefab_resume_cwd_{unique}"));
+    std::fs::create_dir_all(&cwd).unwrap();
+
+    let create_options = mink::runtime::AgentOptions::new(home.clone(), cwd.clone())
+        .with_project_scoped_sessions()
+        .with_prefab(true)
+        .with_api_key("test-key")
+        .with_base_url("https://example.invalid/v1");
+    let created = mink::runtime::AgentRuntime::start(create_options)
+        .await
+        .unwrap();
+    let original = created.session_info().clone();
+    assert_eq!(original.is_new, true);
+    created.shutdown().await.unwrap();
+
+    let resume_options = mink::runtime::AgentOptions::new(home.clone(), cwd.clone())
+        .with_project_scoped_sessions()
+        .with_session(SessionPolicy::ContinueLatest)
+        .with_api_key("test-key")
+        .with_base_url("https://example.invalid/v1");
+    let resumed = mink::runtime::AgentRuntime::start(resume_options)
+        .await
+        .unwrap();
+    let info = resumed.session_info().clone();
+    assert_eq!(info.is_new, false);
+    assert_eq!(info.session_id, original.session_id);
+    resumed.shutdown().await.unwrap();
+
+    let lines = load_session(&info.events_path);
+    assert_eq!(lines.is_empty(), false);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.text.contains("Read the workspace-root AGENTS.md"))
+    );
+    assert!(lines.iter().any(|line| line.text.contains("Ready.")));
+
+    let _ = std::fs::remove_dir_all(&home).unwrap();
+    let _ = std::fs::remove_dir_all(&cwd).unwrap();
 }

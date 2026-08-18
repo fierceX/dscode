@@ -125,6 +125,26 @@ cat main.rs | ./target/release/mink -m flash "review"
 
 prompt 为空且 stdin 是终端时自动进入交互模式。非终端 stdin 时读取 stdin 作为 prompt。
 
+### Prefab 预置会话（`--prefab[=TEMPLATE]`）
+
+`--prefab[=TEMPLATE]` 在 session 初始化后启用 Prefab 重组：检查 `events.jsonl` 是否已有 Prefab 特殊 `prefix_snapshot` 事件，没有则写入模板会话，并从该事件重建系统提示词。`TEMPLATE` 可以是内置名称（`pro` / `default` / `anchored-standard`、`flash` / `router-flash-weak`）或一个模板目录路径：
+
+> 注意：Prefab 属于临时功能，后续 DeepSeek 更新模型后可能撤销该功能。
+
+```bash
+# 使用内置默认轨迹（pro / anchored-standard）
+mink --prefab "review this repo"
+
+# 使用 flash 模板
+mink --prefab=flash "review this repo"
+
+# 使用本地模板目录
+mink --prefab=./my-prefab-template "review this repo"
+```
+
+- 需要构建时启用 `prefab` feature：`full-cli` 默认已包含；精简二进制需同时启用，例如 `--no-default-features --features "sdk-bin prefab"`。
+- 新 session 会在初始化后由 Prefab 模块写入模板会话；已有 prefab 会话直接恢复，不会重复重组；对已有普通会话使用 `--prefab` 只补写标准 `prefix_snapshot` 事件，不修改 conversation。
+- 生成的 `prefix_snapshot` 事件会让 prefab runtime 用它重建 system prompt + tools schema，而不是编译期 prompt builder。
 
 ---
 
@@ -137,6 +157,7 @@ prompt 为空且 stdin 是终端时自动进入交互模式。非终端 stdin �
 | `PROMPT` | — | 用户输入（位置参数） |
 | `-m` / `--model` | `flash` | 模型名。`flash` / `pro` 是默认别名，也可直接指定任意 OpenAI-compatible 模型名 |
 | `--mission PATH` | — | 加载 MISSION.md |
+| `--prefab[=TEMPLATE]` | `default` | 启用 Prefab：session 初始化后重组 session，并从 `events.jsonl` 的 `prefix_snapshot` 事件重建前缀；`TEMPLATE` 为内置模板名或模板目录路径（需要 `prefab` feature） |
 | `--session NAME` | 自动生成 | 命名会话 |
 | `--continue` | — | 恢复最近的 session |
 | `--list-sessions` | — | 列出所有 session |
@@ -294,6 +315,9 @@ enforce_seen_lines = false
 [tools.approval]
 Bash = "prompt"                      # allow | deny | prompt
 Read = "allow"
+
+[signal]
+policy = "full"                      # off | evidence | state_ops | restart | full
 ```
 
 `tool_timeout` 是 Bash/Python/自定义工具未显式指定 `timeout` 时的默认值；`tool_timeout_max`
@@ -699,7 +723,7 @@ MISSION.md 使用行首一级标题（`# section-id`）分段。section 分三�
 
 ```bash
 mink --mission ./my-task.mission.md -i
-mink --mission ./my-task.mission.md --config 'skills=["debugging"]' -i
+mink --mission ./my-task.mission.md --config $'[tools]\nskills=["debugging"]' -i
 ```
 
 Python SDK 使用 `SandboxConfig(mission_file=...)` 或内联 `mission_content`，见

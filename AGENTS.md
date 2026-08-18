@@ -14,7 +14,7 @@ Mink 是一个 Rust 实现的轻量 AI coding agent，专为 DeepSeek/OpenAI-com
 
 - LLM 流式请求 -> 工具执行 -> 决策的内循环
 - **Rust 库 API**：`AgentRuntime::start() → run_turn() / stream_turn() → shutdown()`，无需子进程
-- 信号驱动的信念系统：自动错误检测、轨迹证据注入（`[trajectory]`）、编辑循环快照回滚与恢复首步守卫，阈值/超参全可配置（`Config.signal`），可用 `MINK_SIGNAL_POLICY=off` 关闭
+- 信号驱动的信念系统：自动错误检测、轨迹证据注入（`[trajectory]`）、编辑循环快照回滚与恢复首步守卫；响应档位由 `SignalPolicy` 门控，阈值/超参为内部 `Config.signal` 常量，可用 `MINK_SIGNAL_POLICY=off` 关闭
 - 上下文自适应压缩：显式阈值、响应预留、热尾部和摘要预算；可选摘要输入降噪
 - 维修流水线：Scavenge 回收、Truncation 修复、StormBreaker 重复调用抑制
 - Session 持久化：JSONL 追加写入，支持恢复和重放
@@ -25,6 +25,7 @@ Mink 是一个 Rust 实现的轻量 AI coding agent，专为 DeepSeek/OpenAI-com
 - Edit 双模式：默认 Hashline snapshot/stale 恢复，或 Replace exact/行窗口 fuzzy 内容匹配；runtime 启动后固定
 - 两种终端交互模式：REPL + TUI
 - 子代理：统一使用父 session 下的 isolated home；可从空目录启动或目录级 fork 当前 session 状态
+- Prefab 启动注入：可选 `prefab` feature 在 session 初始化后重组 session（写入模板会话/标准 `prefix_snapshot` 事件），并让系统提示词从 session 重建缓存前缀；CLI 通过 `--prefab[=TEMPLATE]`，Rust 通过 `AgentOptions::with_prefab(true)` / `with_prefab_named()` / `with_prefab_path()` / `with_prefab_spec()`（临时功能，后续 DeepSeek 更新模型后可能撤销）
 
 ---
 
@@ -184,9 +185,9 @@ TurnExecutor (agent/turn.rs)
 ┌─────── 信号层 ────────┐
 │ guard/collector.rs    │ ToolFailed/ToolError/EditLoop 信号采集（soft/hard 分级）
 │ guard/evidence.rs     │ 轨迹证据跟踪：重复调用/失败聚类/预算消耗（证据注入、回滚定位）
-│ agent/belief.rs       │ 信念度计算（先验/窗口/衰减可配置）
+│ agent/belief.rs       │ 信念度计算（内部先验/窗口/衰减常量）
 │ agent/decision.rs     │ 分层响应决策（证据注入/回滚/接管）
- │ config.rs             │ MINK_SIGNAL_POLICY 覆盖 / SignalPolicy 枚举 / Config.signal 参数组
+ │ config.rs             │ MINK_SIGNAL_POLICY 覆盖 / SignalPolicy 枚举 / 内部 SignalConfig 常量
 └───────────────────────┘
          │
 ┌─────── 持久化层 ──────┐
@@ -258,7 +259,7 @@ SignalCollector.collect()
        ├── ToolError：regex 匹配编译错、测试失败等
        └── EditLoop：编辑-检查循环窗口检测
        │
-BeliefTracker.observe()      # 参数来自 Config.signal（阈值/先验/窗口/衰减）
+BeliefTracker.observe()      # 参数来自内部 SignalConfig 常量（阈值/先验/窗口/衰减）
        │  滑动窗口 + 拉普拉斯平滑
        ▼
 DecisionEngine.decide_with_signals()
@@ -269,9 +270,10 @@ DecisionEngine.decide_with_signals()
        └── B < abort_threshold -> 用户接管（HandOver 事件 + 证据报告）
 ```
 
-阈值/超参/响应档位全部可配置（`Config.signal`：`remind/warn/abort_threshold`、
-`alpha/beta_prior`、`window_size`、`decay_per_input`、`evidence_max_chars`、
-`guard_max_blocks`、`rollback_enabled` 等）。设计依据见
+响应档位由 `MINK_SIGNAL_POLICY` / `SignalPolicy` 配置；阈值与超参是内部策略常量
+（`Config.signal`：`remind/warn/abort_threshold`、`alpha/beta_prior`、
+`window_size`、`decay_per_input`、`evidence_max_chars`、`guard_max_blocks`、
+`rollback_enabled` 等），不通过 `.minkrc` / `--config` 暴露。设计依据见
 `docs/设计哲学-信号系统.md`。
 
 `MINK_SIGNAL_POLICY=off` 时，不生成 `<belief-awareness>` prompt 段，也不执行信号采集、信念更新、证据注入、回滚、接管和恢复守卫。
@@ -287,6 +289,7 @@ DecisionEngine.decide_with_signals()
 | `crates/mink-cli/src/cli.rs` | **Mink / mink-core 共用 CLI adapter**，参数解析、配置合并、sandbox re-exec、模式分发 |
 | `crates/mink-cli/src/main.rs` | `mink` binary thin wrapper → `mink_cli::cli::main_entry()` |
 | `crates/mink-cli/src/bin/mink-core.rs` | `mink-core` SDK binary thin wrapper → `mink_cli::cli::main_entry()` |
+| `crates/mink-prefab/` | 独立 prefab seeder crate：模板加载、校验、会话/事件/prefix 写入 |
 | `config.rs` | Config 结构体、CLI/env/配置文件合并、API key 和 sandbox 配置 |
 | `context.rs` | AgentSharedContext + ToolContext |
 | `assets.rs` | 嵌入 tools.json、内置 skills |
@@ -309,7 +312,8 @@ DecisionEngine.decide_with_signals()
 | `crates/mink-core/src/runtime/builder.rs` | crate-private `build_runtime()` — 从 `AgentOptions` 内部 resolved 配置构造 runtime |
 | `crates/mink-core/src/runtime/config.rs` | 私有 resolved 配置 / `SessionPolicy` / `SessionInfo` |
 | `crates/mink-core/src/runtime/handle.rs` | `AgentRuntime`（唯一 shutdown owner）/ 可克隆 `AgentRuntimeHandle` — `start()`, `handle()`, `run_turn()`, `stream_turn()`, `compact()`, `set_model()`, `interrupt_current_turn()`, `shutdown()` |
-| `crates/mink-core/src/runtime/options.rs` | `AgentOptions` ergonomic builder，含 `with_tool()` 自定义工具注册 |
+| `crates/mink-core/src/runtime/options.rs` | `AgentOptions` ergonomic builder，含 `with_tool()` 自定义工具注册与 `with_prefab()` / `with_prefab_named()` / `with_prefab_path()` / `with_prefab_spec()`（`prefab` feature） |
+| `crates/mink-core/src/runtime/prefab.rs` | `prefab` feature 适配层：`ensure_session()` / `resolve_template()`，复用 `mink-prefab` 的 `PrefabSeed` / `PrefabTemplate` |
 | `crates/mink-core/src/runtime/events.rs` | turn-scoped `AgentEvent` envelope / 异步 `EventSink` + dispatcher / `EventDisplay` adapter |
 | `crates/mink-core/src/runtime/tools.rs` | 稳定异步 `AgentTool` 自定义工具 API：`ToolDefinition` / `ToolExecutionContext` / `ToolOutput` / `ToolError` |
 | `crates/mink-core/src/runtime/sdk_adapter.rs` | SDK option/status/exit code 映射，CLI/SDK 去重 |
@@ -330,7 +334,7 @@ DecisionEngine.decide_with_signals()
 | `guard/evidence.rs` | 轨迹证据构造与渲染：重复调用/失败聚类/预算截断/新鲜度去重 |
 | `agent/sub_coordinator.rs` | 子代理启动、并发限制、结果收集 |
 | `agent/sub_executor.rs` | 子代理执行 |
-| `agent/prefix.rs` | agent 层 prefix manager |
+| `agent/prefix.rs` | agent 层 prefix manager；prefab 模式下从 session `events.jsonl` 的 `prefix_snapshot` 事件重建完整 prefix |
 
 ### 工具系统
 
@@ -461,6 +465,9 @@ fail closed。
 - `max_context_tokens=0` 禁用 auto/preflight 和本地输入预算上限，但保留手动压缩
 - provider context overflow 只允许在无部分输出且本轮尚未压缩时触发一次 LLM 压缩和一次重试
 - 子代理 fork 在 runtime 初始化前以目录级克隆继承父 session 状态
+- Prefab 模式使用标准 `prefix_snapshot` 事件记录特殊 system prompt/tools，不创建额外 `prefab-*.json` 文件；普通 runtime 忽略该事件中的 Prefab 前缀
+- Prefab 重组只允许写入全新 conversation；已有 conversation 的 session 不重新写入模板，缺少 `prefix_snapshot` 事件时只补写标准前缀事件，不得修改 conversation
+- `AgentOptions::with_prefab(true)` / `with_prefab_named()` / `with_prefab_path()` / `with_prefab_spec()` / CLI `--prefab[=TEMPLATE]` 需要 `prefab` feature；子代理继承父 `prefab_mode`
 - `ArtifactManager` 初始化必须从已有 index 的最大序号继续，正文文件必须使用独占创建，禁止覆盖恢复或 fork 继承的 artifact
 - `ConversationStore` append 写入通过内部写锁串行化；读盘只容忍文件末尾未换行的半截 JSONL
 - `StormBreaker` 每个新用户输入重置；同轮内所有调用（包括 mutating 调用）统一计数，相同调用连续 3 次触发抑制，不同调用不误伤
@@ -532,6 +539,10 @@ cargo build
 cargo build --release
 cargo test              # 日常测试（跳过重型测试，~5 秒）
 cargo test -p mink-cli --all-features tui  # 仅 TUI 模块测试
+cargo test -p mink-prefab                # 仅 prefab seeder 测试
+cargo test -p mink-core --features prefab prefab  # prefab runtime 测试
+cargo test -p mink-cli --features prefab prefab   # prefab CLI/TUI 测试
+cargo build -p mink-cli --features prefab         # 构建带 prefab 的终端二进制
 cargo clippy --all-targets
 make build
 make check

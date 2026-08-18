@@ -1,98 +1,97 @@
 # mink 配置示例
 #
 # 配置文件加载顺序（高优先级覆盖低）：
-#   1. CLI --config TOML 字符串
-#   2. <project>/.minkrc（项目级）
-#   3. ~/.minkrc（用户级）
-#   4. 环境变量
-#   5. 默认值
+#   1. CLI 参数
+#   2. --config TOML 字符串
+#   3. <project>/.minkrc（项目级）
+#   4. ~/.minkrc（用户级）
+#   5. 环境变量
+#   6. 默认值
 #
 # 所有字段可选，未设置的字段使用默认值或环境变量。
+# 注意：.minkrc 必须使用分组 TOML；旧的顶层扁平字段会被拒绝。
 
-# ── API ─────────────────────────────────────────────────────
+# ── API / Provider ─────────────────────────────────────────────
+[provider]
 api_key = "sk-xxx"                          # API 密钥（也可用 DEEPSEEK_API_KEY 环境变量）
 base_url = "https://api.deepseek.com/v1"    # API 端点（也可用 DEEPSEEK_BASE_URL 环境变量）
 model = "flash"                             # 默认模型：flash / pro / 任意真实模型名
-
-# ── OpenAI-compatible 请求选项 ───────────────────────────────
 openai_reasoning_effort = "max"             # reasoning_effort；设为 off/none/false/disabled 表示不发送
 openai_include_usage = true                 # 是否请求 stream_options.include_usage
 openai_token_param = "max_tokens"           # max_tokens / max_completion_tokens
-#openai_tool_choice = "auto"                 # 可选：auto / none / required，或在 --config 中传 JSON 对象
+# openai_tool_choice = "auto"               # 可选：auto / none / required，或 JSON 对象
+
+# 模型别名：覆盖默认 flash / pro，或新增自定义别名
+[provider.model_aliases]
+# flash = "deepseek-v4-flash"
+# pro = "deepseek-v4-pro"
+# local = "private-model-v1"
 
 # 透传给 OpenAI-compatible /chat/completions 的额外请求字段。
 # 适用于兼容端点的模型参数、采样参数、结构化输出参数等扩展字段。
-#[openai_extra_body]
+#[provider.openai_extra_body]
 #custom_boolean = true
 #custom_budget = 8192
 #temperature = 0.2
 #min_p = 0.05
 #
 # 嵌套扩展参数示例：
-#[openai_extra_body.custom_options]
+#[provider.openai_extra_body.custom_options]
 #enabled = true
 
-# ── 模型别名 ─────────────────────────────────────────────────
-#[model_aliases]
-#flash = "deepseek-v4-flash"
-#pro = "deepseek-v4-pro"
-#local = "private-model-v1"
-
-# ── LLM ──────────────────────────────────────────────────────
+# ── Generation ─────────────────────────────────────────────────
+[generation]
 max_tokens = 81920                          # 最大输出 token
 max_turns = 40                              # 最大对话轮次
-max_context = "1M"                          # 最大上下文 token（支持 K/M 后缀，如 500K, 1M）
-
-# ── 超时 ─────────────────────────────────────────────────────
-tool_timeout = 600                          # 工具超时（秒）
-sub_agent_timeout = 300                     # 子代理超时（秒）
-llm_first_event_timeout = 60               # 等待首个 LLM stream event 的秒数
+llm_first_event_timeout = 60                # 等待首个 LLM stream event 的秒数
 llm_idle_timeout = 90                       # LLM stream 空闲超时（秒）
 llm_wait_heartbeat = 30                     # 等待 LLM 响应时的提示间隔（秒，0=关闭）
+log_events = true                           # 是否记录 events.jsonl
+# output_format = "human"                   # human / stream-json
 
-# ── 上下文压缩 ───────────────────────────────────────────────
+# ── Context / 压缩 ─────────────────────────────────────────────
+[context]
+max_context = "1M"                          # 最大上下文 token（支持 K/M/G 后缀，如 500K, 1M）
 context_compact_pct = 94                    # 自动压缩百分比（1-100）
 context_reserve_tokens = 64000              # 主请求响应预留及 max_tokens 上限
 context_compact_tail_tokens = 256000        # 压缩后原样保留的热尾部目标
 context_compact_max_output_tokens = 8192    # 摘要请求输出上限
 context_compact_input_reduction = false     # 摘要前是否过滤 thinking 和工具噪声
+plan_projection_tail = true                 # 已确认计划尾置投影（最后一条消息），false 回退前置投影
 
-# ── 日志 ─────────────────────────────────────────────────────
-log_events = true                           # 是否记录 events.jsonl
-
-# ── 输出格式 ─────────────────────────────────────────────────
-# output_format = "human"                   # human / stream-json
-
-# ── 搜索工具限制 ─────────────────────────────────────────────
+# ── Tools ──────────────────────────────────────────────────────
+[tools]
+tool_timeout = 600                          # Bash/Python/自定义工具默认超时（秒）
+tool_timeout_max = 600                      # 单次工具调用硬上限（秒，最低 5）
+sub_agent_timeout = 300                     # 子代理超时（秒）
 max_search_files = 5000                     # Glob/Grep 最大遍历文件数
 max_search_results = 1000                   # Grep 最大匹配结果行数
-
-# ── 工具结果限制 ─────────────────────────────────────────────
-# 也可通过 TOOL_RESULT_MAX_BYTES 和 FILE_WRITE_MAX_BYTES 环境变量设置
-
-# ── Edit 协议 ────────────────────────────────────────────────
-edit_mode = "hashline"                    # hashline（默认）/ replace；runtime 启动后固定
-edit_fuzzy_match = true                    # 仅 replace：启用归一化行窗口 fuzzy 匹配
-edit_fuzzy_threshold = 0.95                # 仅 replace：有限数，范围 0.0..=1.0
-edit_enforce_seen_lines = false            # 仅 hashline：锚点必须已由 Read/Grep 展示
-
-# ── 工具审批 ─────────────────────────────────────────────────
-
-# ── 工具选择（同时限制模型可见工具和真实执行）───────────────
 # enabled_tools = ["Read", "Write", "Edit", "Grep", "Glob", "Bash"]
-#[tools]
-#approval_mode = "yolo"                    # yolo / write / always-ask
-#
+# skills = ["debugging", "tdd"]
+
+# 工具审批模式：yolo / write / always-ask
+# approval_mode = "yolo"
+
+# 单工具审批覆盖：allow / deny / prompt
 #[tools.approval]
-#Bash = "prompt"                           # allow / deny / prompt
+#Bash = "prompt"
+#Read = "allow"
 
-# ── 技能 ─────────────────────────────────────────────────────
-#skills = ["debugging", "tdd"]
+# Edit 双模式：runtime 启动后固定
+[tools.edit]
+mode = "hashline"                           # hashline（默认）/ replace
+fuzzy_match = true                          # 仅 replace：启用归一化行窗口 fuzzy 匹配
+fuzzy_threshold = 0.95                      # 仅 replace：有限数，范围 0.0..=1.0
+enforce_seen_lines = false                  # 仅 hashline：锚点必须已由 Read/Grep 展示
 
-# ── 沙箱 ─────────────────────────────────────────────────────
+# ── Signal ─────────────────────────────────────────────────────
+[signal]
+policy = "full"                             # off / evidence / state_ops / restart / full
+
+# ── 进程级沙箱 ─────────────────────────────────────────────────
 #[sandbox]
 #enabled = true
-#backend = "auto"                         # nsjail / bwrap / sandbox-exec / off
+#backend = "auto"                           # nsjail / bwrap / sandbox-exec / off
 #read_dirs = ["src"]
 #write_dirs = ["src"]
 #allow_network = true
@@ -100,8 +99,8 @@ edit_enforce_seen_lines = false            # 仅 hashline：锚点必须已由 R
 #max_pids = 64
 #timeout_secs = 600
 
-# ── PythonSandbox ───────────────────────────────────────────
-# 运行参数在此配置；工具是否启用只由顶层 enabled_tools 决定。
+# ── PythonSandbox ──────────────────────────────────────────────
+# 运行参数在此配置；工具是否启用只由 [tools].enabled_tools 决定。
 #[sandbox_python]
 #wasm_path = "cpython-wasi/python.wasm"
 #stdlib_dir = "cpython-wasi"
@@ -109,3 +108,7 @@ edit_enforce_seen_lines = false            # 仅 hashline：锚点必须已由 R
 #read_dirs = ["./data"]
 #write_dirs = ["./output"]
 #package_dirs = ["./packages"]
+
+# ── 工具结果限制（仅环境变量）─────────────────────────────────
+# TOOL_RESULT_MAX_BYTES=100000              # 单条工具结果截断上限
+# FILE_WRITE_MAX_BYTES=1048576              # Write/Edit 工具写入上限

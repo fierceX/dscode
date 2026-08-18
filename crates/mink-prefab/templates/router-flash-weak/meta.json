@@ -1,0 +1,20 @@
+{
+  "name": "flash",
+  "description": "Flash weak internal-routing trajectory aligned with dsh-routing-suite WEAK_FLASH",
+  "version": 1,
+  "source": "dsh-routing-suite/preset/preset/router-standard",
+  "dsh_preset": "router-standard",
+  "model": "deepseek-v4-flash",
+  "created_at": "2026-08-17T00:00:00Z",
+  "system_prompt": "You are a helpful assistant.\nBefore acting, decide the task type (build or fix) and adopt the matching style: build → hands-on production; fix → inspect-and-plan.\nBefore acting, briefly review what you have already done in this session and continue from where you left off; do not repeat completed steps. Do not run environment checks (echo, whoami, uname, node --version, date) or exhaustive grep/glob scans.\nThink deeply first, then produce.",
+  "tool_surface": [
+    "Bash",
+    "Read"
+  ],
+  "placeholders": [
+    "{{CWD}}",
+    "{{AGENTS_MD}}",
+    "{{FULL_SYSTEM_PROMPT}}",
+    "{{SKILL_RESULT_LIST}}"
+  ]
+}

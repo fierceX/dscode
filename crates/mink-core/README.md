@@ -13,6 +13,7 @@
 - `mink::runtime` / `mink::prelude`：Rust 嵌入式入口，提供唯一 shutdown owner `AgentRuntime`、可克隆 `AgentRuntimeHandle`、异步 `EventSink`、流式事件和 turn outcome。
 - `mink::sdk_protocol`：Agent JSONL 协议类型和 SDK 适配。
 - `mink::runtime::session`：只读 session 发现、读取与统一 usage 汇总。
+- `mink::runtime::prefab`（启用 `prefab` feature）：`ensure_session()` / `PrefabSeed` 会话重组。
 - `src/agent`、`src/tools`、`src/session`、`src/llm`：Mink 的主循环、工具、持久化和 LLM 流式客户端核心。
 
 ## 上下文与会话历史
@@ -64,8 +65,8 @@ async fn main() -> anyhow::Result<()> {
     println!("billing_turn_id: {}", outcome.billing_turn_id);
     println!("input: {}, cache_read: {}, output: {}",
              u.tokens.input_tokens, u.tokens.cache_read_tokens, u.tokens.output_tokens);
-    println!("cost: {} 纳元 (≈ {:.4} 元)", u.cost_nano_cny,
-             u.cost_nano_cny as f64 / 1_000_000_000.0);
+    println!("cost: {} 纳元 (≈ {:.4} 元)", u.cost.known_nano_cny,
+             u.cost.known_nano_cny as f64 / 1_000_000_000.0);
 
     // 每笔 LLM 请求明细
     for record in &outcome.usage_records {
@@ -123,6 +124,30 @@ implementation. See [`examples/redb_vfs.rs`](examples/redb_vfs.rs) for a
 complete redb adapter; redb is an example-only dependency and is not linked
 into `mink-core`.
 
+## Prefab session restructuring
+
+With the `prefab` feature, `AgentOptions::with_prefab(true)` enables Prefab
+session restructuring after normal session initialization. The Prefab module
+checks whether the session already carries a Prefab `prefix_snapshot` event in
+`events.jsonl`; if not, it writes the selected template conversation/events for
+a fresh session and records the special prefix as a standard `prefix_snapshot`
+event. Use `with_prefab_named("flash")`, `with_prefab_path(path)`, or
+`with_prefab_spec("name-or-path")` to choose a non-default template:
+
+```rust
+use mink::prelude::{AgentOptions, AgentRuntime};
+
+let options = AgentOptions::new(home, cwd)
+    .with_prefab_named("flash")? // or .with_prefab_path("./template")? / .with_prefab_spec("flash")?
+    .with_api_key("sk-...");
+let runtime = AgentRuntime::start(options).await?;
+```
+
+`with_prefab(true)` uses the bundled default template. Seeding/restructuring refuses to
+touch an existing conversation; resuming a prefab session does not re-run the
+restructure. A prefab-enabled runtime rebuilds its prefix from the standard
+`prefix_snapshot` event in `events.jsonl`; a normal runtime ignores it.
+
 ## Custom LLM backend
 
 By default, `AgentRuntime` uses the built-in OpenAI-compatible streaming
@@ -174,6 +199,7 @@ zero unless the host computes pricing separately.
 | Feature | 说明 |
 |---------|------|
 | `runtime` | 默认启用。构建可嵌入 runtime、工具核心、session、LLM 客户端和协议层 |
+| `prefab` | 启用 `mink-prefab` session 重组：`with_prefab(true)` / `with_prefab_named()` / `with_prefab_path()` / `with_prefab_spec()` / `ensure_session()` / `events.jsonl` 的 `prefix_snapshot` 事件 |
 | `python-sandbox` | 启用 `PythonSandbox` WASI 工具，额外引入 wasmtime 依赖 |
 | `web-api` | 仅用于 `examples/web_api.rs` 示例，启用 axum |
 | `slow-tests` | 启用重型测试开关 |
@@ -182,6 +208,7 @@ zero unless the host computes pricing separately.
 
 ```bash
 cargo check -p mink-core --no-default-features --features runtime
+cargo check -p mink-core --no-default-features --features "runtime prefab"
 ```
 
 ## 沙箱说明

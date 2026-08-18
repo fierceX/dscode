@@ -3,6 +3,8 @@ use crate::config::ResolvedConfig as Config;
 use crate::llm::client::LlmBackend;
 use crate::resources::ResourceHandler;
 use crate::runtime::EventSink;
+#[cfg(feature = "prefab")]
+use crate::runtime::prefab::PrefabTemplate;
 use crate::session::paths::Paths;
 use crate::session::paths::SessionLayout;
 use crate::tools::vfs::ReadOnlyFileSystem;
@@ -33,6 +35,10 @@ pub(crate) struct AgentRuntimeConfig {
     /// resolved runtime session id.
     pub resource_session_id: Option<String>,
     pub custom_tools: Vec<Arc<dyn crate::runtime::AgentTool>>,
+    #[cfg(feature = "prefab")]
+    pub prefab_enabled: bool,
+    #[cfg(feature = "prefab")]
+    pub prefab_template: Option<PrefabTemplate>,
 }
 
 #[cfg(test)]
@@ -64,6 +70,10 @@ impl AgentRuntimeConfig {
             llm_backend: None,
             resource_session_id: None,
             custom_tools: Vec::new(),
+            #[cfg(feature = "prefab")]
+            prefab_enabled: false,
+            #[cfg(feature = "prefab")]
+            prefab_template: None,
         }
     }
 

@@ -135,6 +135,18 @@ fn parse_args_skill_flag_collects_unique_names() {
 }
 
 #[test]
+fn parse_args_prefab_accepts_default_and_path() {
+    let default = parse_args(vec!["--prefab".into()]).unwrap();
+    assert_eq!(default.prefab.as_deref(), Some("default"));
+
+    let path = parse_args(vec!["--prefab=./templates/custom".into()]).unwrap();
+    assert_eq!(path.prefab.as_deref(), Some("./templates/custom"));
+
+    let empty = parse_args(vec!["--prefab=".into()]).unwrap_err();
+    assert!(empty.to_string().contains("missing value for --prefab"));
+}
+
+#[test]
 fn skill_flag_outranks_file_and_sdk_skills() {
     let mut cfg = parse_args(vec!["--skill".into(), "from_cli".into()]).unwrap();
     let defaults = CliConfig::default();

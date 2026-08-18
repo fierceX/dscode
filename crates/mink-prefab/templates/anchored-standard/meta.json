@@ -1,0 +1,23 @@
+{
+  "name": "pro",
+  "description": "Generic Prefab Anchored Standard warm-up trajectory aligned with dsh-anchored-standard/prefab/template.jsonl",
+  "version": 1,
+  "source": "dsh-anchored-standard/prefab/template.jsonl",
+  "dsh_preset": "prefab-anchored-standard",
+  "model": "deepseek-v4-pro",
+  "created_at": "2026-08-17T00:00:00Z",
+  "system_prompt": "You are a helpful software engineer assistant.when you thought, thought in ENGLISH, start with \"We need...\"",
+  "tool_surface": [
+    "Bash",
+    "Read"
+  ],
+  "placeholders": [
+    "{{CWD}}",
+    "{{AGENTS_MD}}",
+    "{{SYSTEM_REMINDER_AGENTS}}",
+    "{{SKILL_CATALOG_REMINDER}}",
+    "{{INSTRUCTION_HINT}}",
+    "{{SKILL_RESULT_CODE}}",
+    "{{SKILL_RESULT_DOCUMENT}}"
+  ]
+}

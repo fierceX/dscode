@@ -12,7 +12,7 @@
 
 ## 执行模型
 
-所有工具通过 `tools/runner.rs` 中的 `ToolExec` trait 注册到 `TOOL_REGISTRY`，由 `ToolRunner::execute_all()` 调度。只读工具会按连续批次并发执行；写入、执行、控制和 SubAgent 类工具按模型调用顺序串行执行，避免同批工具之间出现读写竞态。每个工具同时声明 `ToolMetadata`，包含 approval tier、结果类型、副作用、storm 例外和 discoverable 标记。
+所有工具通过 `tools/runner.rs` 中的 `ToolExec` trait 注册到 `TOOL_REGISTRY`，由 `ToolRunner::execute_all()` 调度。只读工具会按连续批次并发执行；写入、执行、控制和 SubAgent 类工具按模型调用顺序串行执行，避免同批工具之间出现读写竞态。每个工具同时声明 `ToolMetadata`，包含 approval tier、结果类型、副作用、storm 例外和 `spawns_sub_agent` 标记。
 
 统一流程：
 
@@ -90,7 +90,7 @@ handler 拥有，不能把 `skill://`、`rule://` 等协议视为 `Read` 工具�
 [`crates/mink-core/examples/redb_vfs.rs`](../crates/mink-core/examples/redb_vfs.rs)
 提供按 `resource_session_id` 隔离并惰性扫描的 redb 完整示例。
 
-工具审批模式由 `--config 'approval_mode=\"write\"'` 或 `.minkrc` 的 `[tools]` 配置控制：
+工具审批模式由 `--config $'[tools]\napproval_mode="write"'` 或 `.minkrc` 的 `[tools]` 配置控制：
 
 | 模式 | 自动允许 | 阻止/等待审批 |
 |------|----------|---------------|
@@ -339,7 +339,7 @@ open("/absolute/path/to/project/output/f.txt", "w")  # 绝对路径 ✅
 - 没有匹配时返回空输出，和 `rg --files -g` 一致。
 - 遍历达到上限或跳过不可读路径时，会在结果末尾追加诊断行，提示结果可能不完整。
 限制：
-- 最多遍历 `max_search_files`（默认 5000）个文件后截断，可通过 `.minkrc` 的 `max_search_files` 或环境变量 `MAX_SEARCH_FILES` 调整。
+- 最多遍历 `max_search_files`（默认 5000）个文件后截断，可通过 `.minkrc` 的 `[tools] max_search_files` 或环境变量 `MAX_SEARCH_FILES` 调整。
 - 输出超过 100KB 时搜索工具会先截断；最终工具结果还会受 `tool_result_max_bytes` 保护，超长内容可能落到 `artifact://<id>`。
 - 遍历跳过不可读路径时追加诊断行。
 
@@ -365,7 +365,7 @@ open("/absolute/path/to/project/output/f.txt", "w")  # 绝对路径 ✅
 限制：
 - 最多遍历 `max_search_files`（默认 5000）个文件后截断。
 - 最多返回 `max_search_results`（默认 1000）行匹配结果后截断。
-- 可通过 `.minkrc` 的 `max_search_files`/`max_search_results` 或环境变量 `MAX_SEARCH_FILES`/`MAX_SEARCH_RESULTS` 调整。
+- 可通过 `.minkrc` 的 `[tools] max_search_files`/`max_search_results` 或环境变量 `MAX_SEARCH_FILES`/`MAX_SEARCH_RESULTS` 调整。
 - 输出超过 100KB 时搜索工具会先截断；最终工具结果还会受 `tool_result_max_bytes` 保护，超长内容可能落到 `artifact://<id>`。
 
 截断提示含义：

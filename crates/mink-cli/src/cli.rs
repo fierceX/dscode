@@ -305,6 +305,14 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
 
     let mut runtime_options =
         assemble_runtime_options(&cfg, home.clone(), cwd.clone()).with_project_scoped_sessions();
+    #[cfg(feature = "prefab")]
+    if let Some(spec) = &cfg.prefab {
+        runtime_options = runtime_options.with_prefab_spec(spec)?;
+    }
+    #[cfg(not(feature = "prefab"))]
+    if cfg.prefab.is_some() {
+        anyhow::bail!("--prefab requires building mink with the `prefab` feature");
+    }
     if let Some(prompt) = prompt_for_title {
         runtime_options = runtime_options.with_first_prompt(prompt);
     }
@@ -887,6 +895,8 @@ fn print_usage() {
     println!("  --api-key KEY           API key (default from env)");
     println!("  --base-url URL          Override API base URL");
     println!("  --mission PATH          Load custom system prompt from MISSION.md file");
+    #[cfg(feature = "prefab")]
+    println!("  --prefab[=TEMPLATE]     Enable prefab with a template (pro, flash, or path)");
     println!("  --session NAME          Use named session");
     println!("  --continue              Continue most recent session");
     println!("  --list-sessions         List saved sessions");

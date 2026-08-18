@@ -127,7 +127,7 @@ fn is_reserved_body_key(key: &str) -> bool {
     )
 }
 
-fn convert_messages_to_openai(messages: &[Value]) -> Result<Vec<Value>> {
+pub(crate) fn convert_messages_to_openai(messages: &[Value]) -> Result<Vec<Value>> {
     let mut result = Vec::new();
     for msg in messages {
         let role = msg.get("role").and_then(Value::as_str).unwrap_or("");

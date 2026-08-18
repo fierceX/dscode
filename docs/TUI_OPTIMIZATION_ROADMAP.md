@@ -33,7 +33,7 @@ plan.draft / plan.md / todos.json
   -> current Plan / Todo detail baseline
 ```
 
-工具调用和结果通过 `tool_use_id` 合并。`PresentedToolResultDisplay` 携带 success、
+工具调用和结果通过 `tool_use_id` 合并。`PresentedToolResultDisplay` 携带 `ToolStatus`、
 `ToolResultKind`、Plan/Todo presentation 和 Artifact 元数据；两个 surface 均不得从展示文本
 反向解析结构化状态。
 
@@ -42,7 +42,7 @@ plan.draft / plan.md / todos.json
 工具卡片由同一 renderer 产生：
 
 - `ToolResultKind` 决定 Read/Search/Edit/Command/Control/SubAgent 的语义颜色。
-- `tool_success` 决定 pending/success/failure 状态标记。
+- `ToolStatus` 决定 pending/success/failure/blocked/interrupted 状态标记。
 - `CollapsePolicy` 决定初始自动折叠。
 - Plan、Todo、Artifact 和普通工具正文使用同一份 presentation。
 - 含 Artifact 元数据的折叠卡片保留首个 `artifact://ID`，详情按 ID 有界读取正文。

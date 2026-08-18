@@ -45,6 +45,9 @@ cargo build --release        # 或 make build
 
 # 使用自定义系统提示词
 ./target/release/mink --mission ./my-task.mission.md -i
+
+# 使用 prefab 重组会话（默认模板，也可 --prefab=flash 或 --prefab=路径）
+./target/release/mink --prefab "review this repo"
 ```
 
 ### Python SDK
@@ -98,7 +101,7 @@ async fn main() -> anyhow::Result<()> {
 
 - **可嵌入的运行时内核** — `AgentRuntime::start() → run_turn() / stream_turn() → shutdown()` 完整生命周期。CLI、REPL、TUI 和 Rust 嵌入共享 in-process 运行时；Python SDK 通过内置 `mink-core` 二进制复用同一 Rust 内核，不需要维护多套 agent 内核。
 - **长上下文与长任务可控** — 显式压缩参数 + LLM 摘要非破坏式投影 + 持久化 session 共同工作，上下文不无限膨胀，长任务可持续推进；`enabled_tools` 统一工具边界。
-- **编辑与状态管理更可靠** — Anchored Edit（`Read` snapshot + `Edit.patch` 行锚定）、artifact 超长输出回读、Plan/Todo revision 原子提交和 session 恢复机制，不把正确性交给运气。
+- **编辑与状态管理更可靠** — Hashline / Replace 双模式编辑（`Read` snapshot + 行锚定，或 exact/fuzzy 内容匹配）、artifact 超长输出回读、Plan/Todo revision 原子提交和 session 恢复机制，不把正确性交给运气。
 
 ---
 
@@ -115,7 +118,7 @@ async fn main() -> anyhow::Result<()> {
 ### 🖥️ 终端与界面
 
 - **三种交互 surface** — REPL 行模式（`-i`）、Full TUI 全屏模式（`--tui`）、Inline TUI 原生 scrollback 模式（`--tui=inline`）
-- **Anchored Edit 协议** — `Read` 生成带行 hash 的 snapshot header，`Edit.patch` 按行锚定修改，stale snapshot fail closed，防止并发漂移
+- **Hashline / Replace 双模式编辑** — Hashline 使用 `Read` 生成的 `[PATH#TAG]` 快照和行/文本锚点；Replace 使用唯一 `old_text` exact/fuzzy 匹配；两者都在歧义时 fail closed
 - **结构化 transcript** — 统一的工具卡片渲染、Markdown 子集、自动折叠、实时信念 / token / 费用状态栏
 - **机器协议** — `--print` 输出 ndjson 事件流；`--agent-jsonl` 提供 single-shot Agent JSONL 协议
 
@@ -139,6 +142,7 @@ async fn main() -> anyhow::Result<()> {
 - **非破坏式压缩** — 只更新 `context-state.json` 投影边界，不重写 `conversation.jsonl`；压缩统一使用 LLM 摘要
 - **Plan & Todo 状态** — 确认计划按请求动态投影为 `<current-plan>`；Todo 使用稳定 ID、revision 和原子批量提交
 - **Artifact 超长输出** — 工具结果超限自动落盘至 `artifacts/`，序号可恢复且禁止覆盖；`Read artifact://<id>` 读取
+- **Prefab 会话重组** — 可选 `prefab` feature 在 session 初始化后重组 session，并从 `events.jsonl` 的标准 `prefix_snapshot` 事件重建完整 system prompt + tools schema；CLI 使用 `--prefab[=TEMPLATE]`，Rust 使用 `with_prefab(true)` / `with_prefab_named()` / `with_prefab_path()` / `with_prefab_spec()`（临时功能，后续 DeepSeek 更新模型后可能撤销）
 - **Token 用量与费用** — LLM 请求级 `usage.jsonl` journal，纳元级定价，覆盖主 Agent、自动压缩和子代理
 
 ### 🔌 集成与扩展
@@ -158,6 +162,7 @@ async fn main() -> anyhow::Result<()> {
 |------|------|
 | [crates/mink-core](crates/mink-core/README.md) | Rust 发布包 `mink-core`，库 crate 名 `mink`，包含可嵌入 runtime、工具核心、session、sandbox 和 SDK 协议 |
 | [crates/mink-cli](crates/mink-cli/README.md) | workspace 内部二进制包，生成 `mink` 终端二进制和 `mink-core` SDK 精简二进制，持有 REPL/TUI 实现 |
+| [crates/mink-prefab](crates/mink-prefab/README.md) | 独立 prefab seeder：模板加载、校验、Mink 兼容 session/event/prefix 写入 |
 | [mink_agent](mink_agent/README.md) | Python SDK，wheel 内置无 TUI 的 `mink-core` 二进制 |
 | [crates/mink-server](crates/mink-server/README.md) | Web 工作区服务器：REST + SSE + 嵌入前端，`build.rs` 自动构建并嵌入 web 产物 |
 

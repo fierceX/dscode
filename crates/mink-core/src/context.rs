@@ -288,6 +288,8 @@ pub struct AgentSharedContext {
     pub tool_surface: Arc<ModelToolSurface>,
     pub tool_capabilities: Arc<ResolvedToolCapabilities>,
     pub(crate) custom_tools: Arc<Vec<crate::runtime::RegisteredCustomTool>>,
+    #[cfg(feature = "prefab")]
+    pub prefab_mode: bool,
     pub events_path: PathBuf,
     pub summary_path: PathBuf,
     pub plan_path: PathBuf,
@@ -329,6 +331,32 @@ impl AgentSharedContext {
             .resolve(&self.config.model)
             .actual
     }
+
+    /// Build the compiled-in Mink system prompt for the current context
+    /// without logging a `prefix_snapshot` event. Prefab uses this to render
+    /// `{{FULL_SYSTEM_PROMPT}}` and as a fallback when a template does not
+    /// provide its own system prompt.
+    pub(crate) fn build_system_prompt(&self) -> anyhow::Result<String> {
+        let system_prompt = crate::prompt::Builder {
+            cwd: self.cwd.clone(),
+            home: self.home.clone(),
+            skill_snapshot: Arc::new(self.capability_snapshot.skills.clone()),
+            context_file_snapshot: Arc::new(self.capability_snapshot.context_files.clone()),
+            rule_snapshot: Arc::new(self.capability_snapshot.rules.clone()),
+            mission_file: self.config.mission_file.clone(),
+            mission_content: self.config.mission_content.clone(),
+            tool_surface: self.tool_surface.clone(),
+            tool_capabilities: self.tool_capabilities.clone(),
+            edit_mode: self.tool_config.edit_mode,
+            edit_fuzzy_match: self.tool_config.edit_fuzzy_match,
+            edit_fuzzy_threshold: self.tool_config.edit_fuzzy_threshold,
+            edit_enforce_seen_lines: self.tool_config.edit_enforce_seen_lines,
+            signal_policy: self.config.signal_policy,
+        }
+        .build_system_prompt()?;
+        Ok(system_prompt)
+    }
+
     pub fn max_turns(&self) -> i32 {
         self.config.max_turns
     }

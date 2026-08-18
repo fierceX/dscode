@@ -16,7 +16,7 @@ Mink 是一个 Rust 实现的轻量 AI coding agent，默认面向 DeepSeek / Op
 
 核心目标：
 
-- 单二进制分发，终端优先，REPL / TUI / stream-json 三种使用形态
+- 单二进制分发，终端优先，REPL / TUI / stream-json / Agent JSONL 四种使用形态
 - 可作为 Rust 库嵌入：Rust 发布包名为 `mink-core`，库 crate 名为 `mink`，`mink::runtime` / `mink::prelude` 提供同进程调用
 - LLM backend 可注入：默认 OpenAI-compatible streaming backend 支持兼容端点扩展请求字段，宿主也可替换为私有模型、内网网关或厂商 SDK
 - Session 是一等公民，使用 JSONL 追加持久化，支持恢复、重放和压缩
@@ -28,6 +28,7 @@ Mink 是一个 Rust 实现的轻量 AI coding agent，默认面向 DeepSeek / Op
 - registered resource 与 capability snapshot 分离：资源读取走 `ResourceRouter`，prompt/skill/rule/context 能力视图走 `CapabilitySnapshot`
 - `Edit` 在 runtime 启动时解析为互斥的 Hashline 或 Replace schema、提示词和 executor
 - 上下文预算是硬约束，通过摘要压缩和 immutable prefix 尽量保留 prefix cache 命中
+- Prefab 会话重组：可选 `prefab` feature 在 session 初始化后检查/重组模板会话，并从 `events.jsonl` 的标准 `prefix_snapshot` 事件重建完整 system prompt/tools
 
 ---
 
@@ -53,6 +54,7 @@ crates/mink-cli/src/cli.rs          ← mink / mink-core 共用 CLI adapter
   │
   │  CLI 参数解析 -> 配置合并 -> sandbox re-exec
   │  根据模式启动 one-shot / REPL / TUI / stream-json / Agent JSONL
+  │  可选 --prefab[=TEMPLATE] / with_prefab(true|named|path|spec) → prefab 重组 session
   │  调用 mink::runtime 构造 AgentRuntime
   ▼
 OrchActor (agent/orchestrator.rs)
@@ -137,7 +139,7 @@ TurnExecutor (agent/turn.rs)
   │
   ▼
 OrchActor.handle_user_input()
-  ├── belief.reset()
+  ├── belief.decay(config.signal.decay_per_input)
   ├── ctx.interrupt = false
   ├── resolve_active_model()
   └── TurnExecutor::execute()
@@ -197,8 +199,9 @@ ToolExecution
   -> None / Inject / Abort
 ```
 
-每个用户输入开始时会重置 belief、ToolSignalProcessor、decision cooldown 和 StormBreaker
-窗口。`MINK_SIGNAL_POLICY=off` 时，信号采集、belief 更新、注入和中止逻辑都关闭。
+每个用户输入开始时，belief 按 `Config.signal.decay_per_input`（默认 0.6）衰减；
+ToolSignalProcessor、decision cooldown 和 StormBreaker 窗口重置。`MINK_SIGNAL_POLICY=off`
+时，信号采集、belief 更新、注入和中止逻辑都关闭。
 
 ---
 
@@ -211,7 +214,8 @@ ToolExecution
 | `crates/mink-cli/src/cli.rs` | **Mink / mink-core 共用 CLI adapter**，参数解析、配置合并、sandbox re-exec、模式分发；调用 `mink::runtime`，但 REPL/TUI 实现归属 CLI crate |
 | `crates/mink-cli/src/main.rs` | `mink` binary thin wrapper → `mink_cli::cli::main_entry()` |
 | `crates/mink-cli/src/bin/mink-core.rs` | `mink-core` binary thin wrapper → `mink_cli::cli::main_entry()` |
-| `config.rs` | `Config`、CLI 解析、`.minkrc` 合并、环境变量默认值、sandbox 配置 |
+| `crates/mink-prefab/` | workspace 独立 prefab seeder：模板加载、校验、`session.json`/`conversation.jsonl`/`events.jsonl`/`prefab-*.json` 写入 |
+| `crates/mink-cli/src/config.rs` | CLI `Config`、参数解析、`.minkrc`/`--config` 合并、环境变量默认值、sandbox 配置 |
 | `context.rs` | `AgentSharedContext` 和工具层 `ToolContext` |
 | `assets.rs` | 编译期嵌入的 `tools.json` 和 skill 索引 |
 | `capabilities/` | model-visible 能力 snapshot：skills、instruction files、rules，以及 source/exposure 元数据 |
@@ -245,11 +249,12 @@ Server 生命周期：Ctrl+C → axum serve 停止 → idle reaper abort → `re
 
 | 文件 | 职责 |
 |------|------|
-| `runtime/mod.rs` | `mink::runtime` 公共 API 导出，供 `mink::prelude` facade 复用 |
+| `runtime/mod.rs` | `mink::runtime` 公共 API 导出，供 `mink::prelude` facade 复用；`prefab` feature 下导出 `runtime::prefab` |
 | `runtime/builder.rs` | crate-private `build_runtime()` — 从 `AgentOptions` 的内部 resolved 配置构造 runtime |
 | `runtime/config.rs` | 私有 resolved 配置 / `SessionPolicy` / `SessionInfo` |
 | `runtime/handle.rs` | `AgentRuntime`（唯一 shutdown owner）/ 可克隆 `AgentRuntimeHandle` — `start()`, `handle()`, `run_turn()`, `stream_turn()`, `compact()`, `set_model()`, `interrupt_current_turn()`, `shutdown()` |
-| `runtime/options.rs` | `AgentOptions` ergonomic builder，包括 LLM backend、只读 VFS 和 resource session scope 注入 |
+| `runtime/options.rs` | `AgentOptions` ergonomic builder，包括 LLM backend、只读 VFS、resource session scope 注入和 `with_prefab()` / `with_prefab_named()` / `with_prefab_path()` / `with_prefab_spec()`（`prefab` feature） |
+| `runtime/prefab.rs` | `prefab` feature 适配层：`ensure_session()` / `resolve_template()`，复用 `mink-prefab` |
 | `runtime/events.rs` | turn-scoped `AgentEvent` envelope / `EventSink` / 异步 dispatcher / `EventDisplay` adapter |
 | `runtime/tools.rs` | 稳定异步 `AgentTool` 自定义工具 API：`ToolDefinition` / `ToolExecutionContext` / `ToolOutput` / `ToolError` |
 | `runtime/sdk_adapter.rs` | SDK option 映射、status/exit code 映射、`SdkFinal` 组装 |
@@ -260,7 +265,7 @@ Server 生命周期：Ctrl+C → axum serve 停止 → idle reaper abort → `re
 |------|------|
 | `agent/orchestrator.rs` | 命令循环、模型切换、手动 compact、turn 后处理 |
 | `agent/turn.rs` | 单轮执行主流程和 tool_use 内循环 |
-| `agent/prefix.rs` | `PrefixManager`，构建/复用 immutable prefix |
+| `agent/prefix.rs` | `PrefixManager`，构建/复用 immutable prefix；prefab 模式下从 session `events.jsonl` 的 `prefix_snapshot` 事件重建 |
 | `agent/compactor.rs` | `TurnCompactor`，封装同轮压缩防护 |
 | `agent/tool_signals.rs` | 工具信号采集和 belief 更新 |
 | `agent/plan_actions.rs` | 将已完成的 PlanCommand 转换为 turn effect 和压缩请求 |
@@ -269,7 +274,7 @@ Server 生命周期：Ctrl+C → axum serve 停止 → idle reaper abort → `re
 | `agent/belief.rs` | `BeliefTracker` |
 | `agent/decision.rs` | `DecisionEngine` |
 | `agent/recovery_policy.rs` | 基于已解析语义能力生成恢复提示并校验恢复首个调用；与普通 Bash 执行策略相互独立 |
-| `config.rs` | `SignalPolicy` / 信号响应能力边界 |
+| `crates/mink-core/src/config.rs` | `SignalPolicy` / 信号响应能力边界 |
 
 ### 工具系统
 
@@ -294,7 +299,7 @@ Server 生命周期：Ctrl+C → axum serve 停止 → idle reaper abort → `re
 | `tools/todo.rs` | `TodoReadTool`、`TodoWriteTool`、`TodoAdvanceTool` 与追加式事件格式化 |
 | `assets/tools.json` | 提供给模型的工具 schema |
 
-新增工具时需要同时实现 `ToolExec::metadata()`、注册 `TOOL_REGISTRY`、更新 `assets/tools.json`，并在 metadata 中声明 approval tier、result kind、副作用、`storm_exempt`、`internal` 或 `spawns_sub_agent`。若工具参与跨工具工作流，还必须在 `semantic_capabilities.rs` 显式声明受支持的语义能力和调用 scope；schema 只描述该工具自身合同，不得静态推荐其他工具。
+新增工具时需要同时实现 `ToolExec::metadata()`、注册 `TOOL_REGISTRY`、更新 `assets/tools.json`，并在 metadata 中声明 approval tier、result kind、副作用、`storm_exempt`、`spawns_sub_agent`。若工具参与跨工具工作流，还必须在 `semantic_capabilities.rs` 显式声明受支持的语义能力和调用 scope；schema 只描述该工具自身合同，不得静态推荐其他工具。
 
 模型可见工具只有一条构造链：
 
@@ -454,7 +459,7 @@ REPL/TUI 在 `mink-cli` 内把同一事件流投影为终端输出或 `TuiSignal
 ## Session 结构
 
 Session 目录保存 conversation、events、metadata、summary、stats 和 artifacts，并按实际功能
-生成 compaction、plan、todo 和 usage 状态文件。session 根目录由 `home`、`cwd`、`session_id`
+生成 compaction、plan、todo、usage 和 prefab 状态文件。session 根目录由 `home`、`cwd`、`session_id`
 和以下四种 layout 共同决定：
 
 | Layout | `home` 含义 | session 目录 |
@@ -494,11 +499,21 @@ Session 目录保存 conversation、events、metadata、summary、stats 和 arti
 `isolated` 中 `home` 自身就是 session 目录，`session_id` 仍写入 `session.json` 并用于事件、SDK final 和恢复引用。
 `session.json` 保存用户可读的 alias、title、cwd 和时间戳。`--session NAME` 会按 alias、完整 id、id 前缀和 title解析已有 session，匹配不到时创建新的时间戳 session 并把 NAME 规范化为安全 alias。列表和解析路径对损坏的 `session.json` 采用 legacy fallback，不让单个坏 metadata 阻断恢复。`--continue` 会选择当前 layout 下最近修改的 session。
 
+### Prefab 会话播种
+
+`prefab` feature 在 `AgentRuntime` 完成正常 session 初始化后重组目标 session：检查 `events.jsonl` 是否已有 Prefab 特殊 `prefix_snapshot` 事件，没有则写入模板会话，并通过标准 `prefix_snapshot` 事件记录特殊 system prompt/tools。CLI 通过 `--prefab[=TEMPLATE]` 触发，Rust 通过 `AgentOptions::with_prefab(true)` 或 `with_prefab_named()` / `with_prefab_path()` / `with_prefab_spec()` 指定模板触发；子代理继承父 runtime 的 `prefab_mode`。
+
+- 全新 session：若 conversation 为空，写入模板会话（默认占位符），随后正常启动 agent loop。
+- 已有 prefab session：直接恢复，不重复重组，不覆盖 `conversation.jsonl` 或已有 `prefix_snapshot`。
+- 已有普通 session + prefab：复用该 session，仅当缺少 Prefab `prefix_snapshot` 时补写标准前缀事件；conversation 保持不变。
+- Prefix 重建：启用 prefab 的 runtime 在 `PrefixManager::ensure()` 中优先读取 `events.jsonl` 的 Prefab `prefix_snapshot` 事件（system prompt + tools schema），否则回退到编译期 prompt builder。
+- 普通 runtime 忽略 Prefab `prefix_snapshot`；只有 `prefab` feature 编译进来且通过 CLI/Rust API 启用 Prefab 时该事件才生效。
+
 ---
 
 ## 关键不变式
 
-- 每个用户输入开始时重置 StormBreaker、belief、decision cooldown 和 interrupt。
+- 每个用户输入开始时重置 StormBreaker、decision cooldown 和 interrupt；belief 按 `decay_per_input`（默认 0.6）衰减而非硬重置。
 - 同一用户输入的 tool_use 内循环最多压缩一次，包括 PlanConfirm / PlanClear 请求的强制压缩。
 - `conversation.jsonl` 是完整的 append-only 消息历史；压缩只推进 `context-state.json` 中的投影边界。
 - JSONL 续写先处理未换行尾部：完整 JSON 补换行，半截 JSON 截断后再以单缓冲区追加新记录。
@@ -520,6 +535,8 @@ Session 目录保存 conversation、events、metadata、summary、stats 和 arti
 - Agent JSONL、Python SDK 和 Rust runtime 暴露并映射同一组上下文压缩参数；runtime 在创建 session 前统一校验有限窗口的 reserve、tail、摘要输出和主请求输入预算关系。
 - `max_context_tokens=0` 禁用 auto/preflight 压缩和请求预算上限，但保留手动压缩；真实 context overflow 最多触发一次 LLM 压缩和一次重试。
 - 子代理始终使用父 session 下的 isolated home；fork 在 runtime 初始化前克隆完整 session 状态并重置身份与遥测文件。
+- Prefab 模式使用标准 `prefix_snapshot` 事件记录特殊 system prompt/tools，不创建额外 `prefab-*.json` 文件；普通 runtime 忽略该事件中的 Prefab 前缀。
+- Prefab 重组只写全新 conversation；已有 conversation 的 session 不重新写入模板，缺少 Prefab `prefix_snapshot` 时只补写标准前缀事件，不得修改 conversation。
 - `ImmutablePrefix` 变更必须通过 prefix manager / invalidate 路径。
 - `ConversationStore` append 时保持活跃后缀缓存一致；显式完整历史读取是一次性读盘操作，缓存继续保持为活跃后缀。
 - `ToolRunner::format_tool_result()` 是工具输出进入 LLM/UI 前的最大字节保护。

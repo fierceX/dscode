@@ -411,6 +411,8 @@ async fn test_context(name: &str, api_url: &str) -> anyhow::Result<Arc<AgentShar
         tool_surface,
         tool_capabilities,
         custom_tools: Arc::new(Vec::new()),
+        #[cfg(feature = "prefab")]
+        prefab_mode: false,
         events_path: spaths.events,
         summary_path: spaths.summary,
         plan_path: spaths.plan,

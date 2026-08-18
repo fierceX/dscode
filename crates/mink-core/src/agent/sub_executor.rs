@@ -150,6 +150,8 @@ impl SubAgentExecutor {
             resource_router: Some(parent_ctx.resource_router.clone()),
             capability_snapshot: Some(parent_ctx.capability_snapshot.clone()),
             custom_tools: parent_ctx.custom_tools.as_ref().clone(),
+            #[cfg(feature = "prefab")]
+            prefab_mode: parent_ctx.prefab_mode,
         })
         .await?;
         let child_ctx = built.ctx;
