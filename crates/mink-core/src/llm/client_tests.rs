@@ -412,6 +412,16 @@ async fn test_context(name: &str, api_url: &str) -> anyhow::Result<Arc<AgentShar
         tool_capabilities,
         custom_tools: Arc::new(Vec::new()),
         prefix_source: None,
+        model_capabilities: Arc::new(
+            crate::capabilities::model_capabilities::SessionModelCapabilities::unsupported(
+                "test",
+            ),
+        ),
+        image_cache: Arc::new(crate::session::image_cache::ImageCache::new(
+            &std::env::temp_dir(),
+        )),
+        this_turn_image_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
+        warned_image_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
         events_path: spaths.events,
         summary_path: spaths.summary,
         plan_path: spaths.plan,

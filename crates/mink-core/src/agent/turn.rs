@@ -198,6 +198,11 @@ impl TurnExecutor {
         self.compactor.reset();
         self.signal_processor.reset();
         self.decision_engine.reset();
+        self.ctx
+            .this_turn_image_ids
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
         self.local = TurnLocalState {
             current_user_input: user_input.to_string(),
             ..TurnLocalState::default()
@@ -350,8 +355,13 @@ impl TurnExecutor {
             let plan_compaction_trigger = if calls.is_empty() {
                 None
             } else {
-                self.execute_tools_inner(calls, belief.as_deref_mut(), &mut effects)
-                    .await?
+                self.execute_tools_inner(
+                    calls,
+                    belief.as_deref_mut(),
+                    &mut effects,
+                    &request_messages,
+                )
+                .await?
             };
 
             // 用户中断：跳过决策/证据注入/回滚，也不再发起下一次 LLM 请求。
@@ -427,6 +437,7 @@ fn blocked_by_signal_recovery(
         plan_command: None,
         needs_finalization: false,
         state_metadata: None,
+        image_attachment: None,
     }
 }
 

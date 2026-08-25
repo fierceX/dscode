@@ -868,3 +868,78 @@ fn sdk_context_override_is_validated_after_defaults_merge() {
         "{error}"
     );
 }
+
+#[test]
+fn image_input_toml_on_and_off_parse() {
+    let file: MinkConfigFile = toml::from_str(
+        "[provider]\nimage_input = \"on\"\nvision_models = [\"model-a\", \"model-b\"]",
+    )
+    .unwrap();
+    assert_eq!(file.provider.image_input.as_deref(), Some("on"));
+    assert_eq!(
+        file.provider.vision_models.as_deref(),
+        Some(vec!["model-a".to_string(), "model-b".to_string()].as_slice())
+    );
+
+    let mut cfg = CliConfig::default();
+    let defaults = CliConfig::default();
+    apply_config_sources(&mut cfg, &defaults, None, None, Some(&file));
+    assert!(
+        matches!(
+            cfg.image_input,
+            Some(mink::runtime::ImageInputCapability::OpenAiChatImageUrl(_))
+        ),
+        "image_input=on must override to OpenAiChatImageUrl"
+    );
+    assert_eq!(
+        cfg.vision_models.as_deref(),
+        Some(vec!["model-a".to_string(), "model-b".to_string()].as_slice())
+    );
+
+    let file: MinkConfigFile = toml::from_str("[provider]\nimage_input = \"off\"").unwrap();
+    let mut cfg = CliConfig::default();
+    apply_config_sources(&mut cfg, &defaults, None, None, Some(&file));
+    assert!(
+        matches!(cfg.image_input, Some(mink::runtime::ImageInputCapability::Unsupported)),
+        "image_input=off must force Unsupported"
+    );
+}
+
+#[test]
+fn image_input_env_vars_apply_and_files_outrank() {
+    // env layer: MINK_IMAGE_INPUT / MINK_VISION_MODELS
+    unsafe {
+        std::env::set_var("MINK_IMAGE_INPUT", "off");
+        std::env::set_var("MINK_VISION_MODELS", "m1, m2 ,m3");
+    }
+    let mut cfg = CliConfig::default();
+    apply_env_defaults(&mut cfg, &CliConfig::default()).unwrap();
+    assert!(matches!(cfg.image_input, Some(mink::runtime::ImageInputCapability::Unsupported)));
+    assert_eq!(
+        cfg.vision_models.as_deref(),
+        Some(vec!["m1".to_string(), "m2".to_string(), "m3".to_string()].as_slice())
+    );
+
+    // File layer outranks env for image_input.
+    let file: MinkConfigFile = toml::from_str("[provider]\nimage_input = \"on\"").unwrap();
+    apply_config_sources(&mut cfg, &CliConfig::default(), None, None, Some(&file));
+    assert!(
+        matches!(
+            cfg.image_input,
+            Some(mink::runtime::ImageInputCapability::OpenAiChatImageUrl(_))
+        ),
+        "file layer must outrank env"
+    );
+
+    unsafe {
+        std::env::remove_var("MINK_IMAGE_INPUT");
+        std::env::remove_var("MINK_VISION_MODELS");
+    }
+}
+
+#[test]
+fn invalid_image_input_is_rejected() {
+    assert!(crate::config::parse_image_input("banana").is_err());
+    assert!(crate::config::parse_image_input("on").is_ok());
+    assert!(crate::config::parse_image_input("OFF").is_ok());
+}

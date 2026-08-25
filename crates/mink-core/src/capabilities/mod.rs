@@ -1,5 +1,6 @@
 pub mod context_files;
 pub(crate) mod fingerprint;
+pub mod model_capabilities;
 pub mod rules;
 pub mod skills;
 pub mod source;

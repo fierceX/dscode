@@ -219,19 +219,27 @@ fn format_session_history(ctx: &ToolContext) -> Result<String> {
             }
             ("user", Some(Value::Array(blocks))) => {
                 for block in blocks {
-                    if block.get("type").and_then(Value::as_str) != Some("tool_result") {
-                        continue;
-                    }
-                    let id = block
-                        .get("tool_use_id")
-                        .and_then(Value::as_str)
-                        .unwrap_or("<unknown>");
-                    if !consumed_results.contains(id) {
-                        let content = block.get("content").and_then(Value::as_str).unwrap_or("");
-                        out.push_str(&format!(
-                            "## tool result\n\n{}\n\n",
-                            format_tool_result_status(id, content)
-                        ));
+                    match block.get("type").and_then(Value::as_str) {
+                        Some("tool_result") => {
+                            let id = block
+                                .get("tool_use_id")
+                                .and_then(Value::as_str)
+                                .unwrap_or("<unknown>");
+                            if !consumed_results.contains(id) {
+                                let content =
+                                    block.get("content").and_then(Value::as_str).unwrap_or("");
+                                out.push_str(&format!(
+                                    "## tool result\n\n{}\n\n",
+                                    format_tool_result_status(id, content)
+                                ));
+                            }
+                        }
+                        Some("tool_attachment") => {
+                            let url =
+                                block.get("url").and_then(Value::as_str).unwrap_or("image://?");
+                            out.push_str(&format!("## image\n\n{url}\n\n"));
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -450,6 +458,13 @@ fn summarize_content(content: &Value) -> String {
                                 .map(str::len)
                                 .unwrap_or(0);
                             parts.push(format!("tool_result {id} {len} bytes"));
+                        }
+                        "tool_attachment" => {
+                            let url =
+                                item.get("url").and_then(Value::as_str).unwrap_or("?");
+                            let width = item.get("width").and_then(Value::as_u64).unwrap_or(0);
+                            let height = item.get("height").and_then(Value::as_u64).unwrap_or(0);
+                            parts.push(format!("image {url} ({width}x{height})"));
                         }
                         other => parts.push(other.to_string()),
                     }

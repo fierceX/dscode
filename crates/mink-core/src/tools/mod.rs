@@ -3,6 +3,7 @@ pub mod bash;
 pub mod catalog;
 pub mod file;
 pub mod hashline;
+pub mod image;
 pub mod metadata;
 pub mod plan;
 pub(crate) mod process;

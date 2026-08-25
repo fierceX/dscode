@@ -132,6 +132,17 @@ pub struct ToolContext {
     pub tool_surface: Arc<ModelToolSurface>,
     pub tool_capabilities: Arc<ResolvedToolCapabilities>,
     pub(crate) custom_tools: Arc<Vec<crate::runtime::RegisteredCustomTool>>,
+    pub(crate) model_capabilities:
+        Arc<crate::capabilities::model_capabilities::SessionModelCapabilities>,
+    pub(crate) image_cache: Arc<crate::session::image_cache::ImageCache>,
+    /// Per-turn image quota (used = active projection). The turn executor
+    /// resets this before each tool batch; the runner reserves against it in
+    /// call order (v7 §7.3). Shared so cloned ToolContexts observe the same
+    /// runner-side state.
+    pub(crate) image_quota: Arc<Mutex<crate::tools::image::ImageQuotaState>>,
+    /// Image ids captured during the current user input (v7 §9.5). Reset per
+    /// input; fresh-attachment materialization failures fail the request.
+    pub(crate) this_turn_image_ids: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
 impl From<&AgentSharedContext> for ToolContext {
@@ -160,6 +171,10 @@ impl From<&AgentSharedContext> for ToolContext {
             tool_surface: ctx.tool_surface.clone(),
             tool_capabilities: ctx.tool_capabilities.clone(),
             custom_tools: ctx.custom_tools.clone(),
+            model_capabilities: ctx.model_capabilities.clone(),
+            image_cache: ctx.image_cache.clone(),
+            image_quota: Arc::new(Mutex::new(crate::tools::image::ImageQuotaState::default())),
+            this_turn_image_ids: ctx.this_turn_image_ids.clone(),
         }
     }
 }
@@ -289,6 +304,14 @@ pub struct AgentSharedContext {
     pub tool_capabilities: Arc<ResolvedToolCapabilities>,
     pub(crate) custom_tools: Arc<Vec<crate::runtime::RegisteredCustomTool>>,
     pub(crate) prefix_source: Option<Arc<dyn crate::runtime::PrefixSource>>,
+    pub(crate) model_capabilities:
+        Arc<crate::capabilities::model_capabilities::SessionModelCapabilities>,
+    pub(crate) image_cache: Arc<crate::session::image_cache::ImageCache>,
+    /// Image ids captured during the current user input (v7 §9.5).
+    pub(crate) this_turn_image_ids: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// Image ids whose unavailability warning was already shown in a previous
+    /// request (cross-request dedup, review fix).
+    pub(crate) warned_image_ids: Arc<Mutex<std::collections::HashSet<String>>>,
     pub events_path: PathBuf,
     pub summary_path: PathBuf,
     pub plan_path: PathBuf,

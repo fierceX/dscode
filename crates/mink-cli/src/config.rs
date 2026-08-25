@@ -70,6 +70,12 @@ pub struct ProviderConfigFile {
     pub openai_token_param: Option<String>,
     pub openai_tool_choice: Option<serde_json::Value>,
     pub openai_extra_body: Option<BTreeMap<String, serde_json::Value>>,
+    /// Explicit image-input capability: "on" | "off". Overrides the
+    /// backend declaration (v7 §3.1).
+    pub image_input: Option<String>,
+    /// Model ids declared image-capable. When set, this replaces the built-in
+    /// vision model list (empty list disables image capture entirely).
+    pub vision_models: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
@@ -225,6 +231,12 @@ pub struct CliConfig {
     pub prefab: Option<String>,
     /// Router mode; `Some("flash")` enables the Flash routing backend.
     pub router: Option<String>,
+    /// Explicit image-input capability: `Some(cap)` overrides the backend
+    /// declaration; `None` defers to it (v7 §3.1).
+    pub image_input: Option<mink::runtime::ImageInputCapability>,
+    /// Explicit vision model ids; `Some(list)` replaces the built-in default
+    /// list (empty disables image capture), `None` keeps the built-in list.
+    pub vision_models: Option<Vec<String>>,
     /// 从 --config CLI 参数解析的 TOML 配置（最高优先级，在 apply_config_sources 中应用）
     pub cli_config: Option<MinkConfigFile>,
     /// 工具选择：`None` 使用默认工具集；`Some(vec![])` 不启用任何工具。
@@ -306,6 +318,8 @@ impl Default for CliConfig {
             mission_content: None,
             prefab: None,
             router: None,
+            image_input: None,
+            vision_models: None,
             enabled_tools: None,
             cli_config: None,
             tool_approval_mode: ToolApprovalMode::Yolo,
@@ -539,6 +553,20 @@ fn parse_bool_value(name: &str, value: &str) -> Result<bool> {
     }
 }
 
+/// Parse `image_input = "on" | "off"` from TOML/env into the explicit
+/// capability override (v7 §3.1 priority: explicit > backend > Unsupported).
+pub fn parse_image_input(value: &str) -> Result<mink::runtime::ImageInputCapability> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "on" | "true" | "1" => Ok(mink::runtime::ImageInputCapability::OpenAiChatImageUrl(
+            mink::runtime::OpenAiChatImageUrlLimits::default(),
+        )),
+        "off" | "false" | "0" => Ok(mink::runtime::ImageInputCapability::Unsupported),
+        other => anyhow::bail!(
+            "invalid image_input {other:?}: expected \"on\" or \"off\""
+        ),
+    }
+}
+
 pub(crate) fn default_home() -> std::path::PathBuf {
     std::path::PathBuf::from(
         std::env::var("MINK_HOME")
@@ -586,6 +614,19 @@ pub fn apply_config_file(cfg: &mut CliConfig) -> Result<()> {
 fn apply_env_defaults(cfg: &mut CliConfig, defaults: &CliConfig) -> Result<()> {
     if let Ok(value) = std::env::var("MINK_SIGNAL_POLICY") {
         cfg.signal_policy = SignalPolicy::parse(&value)?;
+    }
+    if let Ok(value) = std::env::var("MINK_IMAGE_INPUT") {
+        cfg.image_input = Some(parse_image_input(&value)?);
+    }
+    if let Ok(value) = std::env::var("MINK_VISION_MODELS") {
+        cfg.vision_models = Some(
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+                .map(str::to_string)
+                .collect(),
+        );
     }
     if cfg.log_events == defaults.log_events
         && let Ok(v) = std::env::var("LOG_EVENTS")
@@ -717,6 +758,17 @@ fn apply_config_sources(
         }
         if let Some(tool_choice) = &toml_cfg.provider.openai_tool_choice {
             cfg.openai_tool_choice = Some(tool_choice.clone());
+        }
+        if let Some(value) = &toml_cfg.provider.image_input {
+            match parse_image_input(value) {
+                Ok(capability) => cfg.image_input = Some(capability),
+                Err(error) => eprintln!(
+                    "[mink] Warning: ignoring image_input={value:?}: {error}"
+                ),
+            }
+        }
+        if let Some(models) = &toml_cfg.provider.vision_models {
+            cfg.vision_models = Some(models.clone());
         }
         if let Some(extra_body) = &toml_cfg.provider.openai_extra_body {
             cfg.openai_extra_body.extend(extra_body.clone());

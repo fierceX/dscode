@@ -85,6 +85,26 @@ pub trait ReadOnlyFileSystem: Send + Sync {
     fn glob(&self, scope: &VfsScope, request: &VfsGlobRequest) -> Result<VfsGlobResult>;
 
     fn grep(&self, scope: &VfsScope, request: &VfsGrepRequest) -> Result<VfsGrepResult>;
+
+    /// Optional image read. The default returns `Ok(None)`: existing
+    /// implementations need no changes (v7 §12). Returned bytes must be
+    /// self-consistent and must not exceed `max_bytes` (enforced by the
+    /// caller).
+    fn read_image(
+        &self,
+        scope: &VfsScope,
+        path: &str,
+        max_bytes: u64,
+    ) -> Result<Option<VfsImage>> {
+        let _ = (scope, path, max_bytes);
+        Ok(None)
+    }
+}
+
+/// Image bytes exposed by a virtual filesystem backend.
+pub struct VfsImage {
+    pub bytes: Vec<u8>,
+    pub mime: String,
 }
 
 pub fn validate_virtual_glob_request(request: &VfsGlobRequest) -> Result<()> {

@@ -120,6 +120,17 @@ impl LlmBackend for RouterLlmBackend {
         "router-llm-backend"
     }
 
+    fn image_input_capability(
+        &self,
+        model: &str,
+    ) -> mink::runtime::ImageInputCapability {
+        // The router is a transparent transport decorator: capability
+        // declarations must pass through to the inner backend so sessions
+        // created through `--router` resolve the same image capability as
+        // plain sessions (v7 §3.1).
+        self.inner.image_input_capability(model)
+    }
+
     async fn stream(&self, mut request: LlmRequest) -> anyhow::Result<LlmResponseStream> {
         // Only main-agent requests are routed. Compaction and sub-agent calls
         // should stay untouched for now.
@@ -261,5 +272,42 @@ mod tests {
         let messages = vec![user("帮我看看"), tool_use()];
         let out = transform_request(&config, "deepseek-v4-flash", "sys", &messages, &tools);
         assert_eq!(out.tools.len(), 3);
+    }
+}
+
+#[cfg(test)]
+mod image_capability_tests {
+    use super::*;
+    use mink::runtime::{
+        ImageInputCapability, LlmBackend, LlmRequest, LlmResponseStream, OpenAiChatImageUrlLimits,
+    };
+
+    struct VisionInner;
+
+    #[async_trait::async_trait]
+    impl LlmBackend for VisionInner {
+        fn name(&self) -> &str {
+            "vision-inner"
+        }
+
+        fn image_input_capability(&self, _model: &str) -> ImageInputCapability {
+            ImageInputCapability::OpenAiChatImageUrl(OpenAiChatImageUrlLimits::default())
+        }
+
+        async fn stream(&self, _request: LlmRequest) -> anyhow::Result<LlmResponseStream> {
+            anyhow::bail!("not called in this test")
+        }
+    }
+
+    #[test]
+    fn router_forwards_image_input_capability_to_inner() {
+        let router = RouterLlmBackend::new(Arc::new(VisionInner), RouterConfig::flash_only());
+        assert!(
+            router
+                .image_input_capability("deepseek-v4-flash-vision-exp")
+                .limits()
+                .is_some(),
+            "router must forward the inner backend's image capability (v7 §3.1)"
+        );
     }
 }

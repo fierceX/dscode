@@ -30,6 +30,12 @@ pub use crate::runtime::extensions::{PostInitContext, PostInitHook, PrefixSource
 /// 同目录临时文件 + rename 的原子替换（session 状态文件共用实现）。
 pub use crate::session::atomic_file::atomic_replace;
 pub use crate::session::paths::SessionLayout;
+pub use crate::capabilities::model_capabilities::{
+    ImageDetail, ImageInputCapability, OpenAiChatImageUrlLimits, TokenEstimator, WireProtocol,
+};
+pub use crate::config::{ResolvedConfig, vision_model_defaults};
+pub use crate::tools::image::ImageFormat;
+pub use crate::tools::vfs::VfsImage;
 pub use crate::tools::metadata::{
     ApprovalTier, ToolBlocker, ToolFailureKind, ToolResultKind, ToolStatus,
 };

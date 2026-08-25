@@ -30,6 +30,7 @@ fn tool_result(content: &str) -> ToolExecution {
         plan_command: None,
         needs_finalization: false,
         state_metadata: None,
+        image_attachment: None,
     }
 }
 

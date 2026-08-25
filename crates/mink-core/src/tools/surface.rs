@@ -319,6 +319,99 @@ impl ModelToolSurface {
     }
 }
 
+/// Statically augment the Read tool description for image-capable sessions
+/// (v7 §3.4). Unsupported sessions return the schemas unchanged, preserving
+/// the byte-for-byte text-only behavior. The advertised format list is
+/// generated from the model's `allowed_mime` set (review fix).
+pub fn augment_read_schema_for_image(
+    tools: Vec<serde_json::Value>,
+    capabilities: &crate::capabilities::model_capabilities::SessionModelCapabilities,
+) -> Vec<serde_json::Value> {
+    let Some(limits) = capabilities.image_input.limits() else {
+        return tools;
+    };
+    let mut tools = tools;
+    for tool in tools.iter_mut() {
+        if tool.get("name").and_then(serde_json::Value::as_str) != Some("Read") {
+            continue;
+        }
+        if let Some(description) = tool
+            .get_mut("description")
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+        {
+            let mut description = description;
+            let formats = limits
+                .allowed_mime
+                .iter()
+                .map(|format| match format {
+                    crate::tools::image::ImageFormat::Png => "PNG",
+                    crate::tools::image::ImageFormat::Jpeg => "JPEG",
+                    crate::tools::image::ImageFormat::Gif => "GIF",
+                    crate::tools::image::ImageFormat::Webp => "WebP",
+                })
+                .collect::<Vec<_>>()
+                .join("/");
+            description.push_str("\n\nRead can capture supported raster images (");
+            description.push_str(&formats);
+            description.push_str(") and attach them to the next model request. ");
+            description.push_str(&format!(
+                "Image capture limits: {} images and {} bytes per request.",
+                limits.max_images_per_request, limits.max_image_bytes_per_request
+            ));
+            tool["description"] = serde_json::Value::String(description);
+        }
+    }
+    tools
+}
+
+#[cfg(test)]
+mod image_augment_tests {
+    use super::*;
+    use crate::capabilities::model_capabilities::{
+        ImageInputCapability, OpenAiChatImageUrlLimits, SessionModelCapabilities,
+    };
+
+    fn capabilities(image: ImageInputCapability) -> SessionModelCapabilities {
+        let mut caps = SessionModelCapabilities {
+            version: 1,
+            initial_model: "m".into(),
+            image_input: image,
+            capability_fingerprint: String::new(),
+        };
+        caps.capability_fingerprint = caps.image_input.fingerprint();
+        caps
+    }
+
+    fn read_schema(description: &str) -> serde_json::Value {
+        serde_json::json!({"name": "Read", "description": description, "input_schema": {}})
+    }
+
+    #[test]
+    fn unsupported_session_leaves_schemas_unchanged() {
+        let tools = vec![read_schema("Read one path.")];
+        let out = augment_read_schema_for_image(tools.clone(), &capabilities(ImageInputCapability::Unsupported));
+        assert_eq!(out, tools);
+    }
+
+    #[test]
+    fn image_capable_session_augments_read_description() {
+        let tools = vec![read_schema("Read one path.")];
+        let out = augment_read_schema_for_image(
+            tools,
+            &capabilities(ImageInputCapability::OpenAiChatImageUrl(
+                OpenAiChatImageUrlLimits::default(),
+            )),
+        );
+        let description = out[0]["description"].as_str().unwrap();
+        assert!(description.contains("capture supported raster images"), "{description}");
+        // Format list is generated from allowed_mime; per-request cap was
+        // raised to 64MB so a single 20MB image is always admissible.
+        assert!(description.contains("(PNG/JPEG/GIF/WebP)"), "{description}");
+        assert!(description.contains("Image capture limits: 4 images and 16777216 bytes"), "{description}");
+    }
+}
+
 /// 将真实配置值注入工具描述中的 caps 占位符。
 /// 占位符白名单见下；tools.json 与运行时描述字符串中的未知 {{...}} 一律
 /// fail-fast（提示词纪律，tests/prompt_discipline.rs 同步执行）。

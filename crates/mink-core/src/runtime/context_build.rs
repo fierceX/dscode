@@ -125,6 +125,17 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
         event_log_writer.clone(),
     )?);
 
+    // Session-scoped model capabilities: resolve once, freeze, persist, and
+    // validate the startup model against the snapshot (v7 §3).
+    let model_capabilities = resolve_session_capabilities(
+        &config,
+        params.llm_backend.as_ref(),
+        &paths,
+    )?;
+    let image_cache = Arc::new(crate::session::image_cache::ImageCache::new(&params.home));
+    let this_turn_image_ids = Arc::new(Mutex::new(std::collections::HashSet::new()));
+    let warned_image_ids = Arc::new(Mutex::new(std::collections::HashSet::new()));
+
     let ctx = Arc::new(AgentSharedContext {
         config: config.clone(),
         cwd: params.cwd,
@@ -155,6 +166,10 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
         tool_capabilities,
         custom_tools: Arc::new(params.custom_tools),
         prefix_source: params.prefix_source,
+        model_capabilities,
+        image_cache,
+        this_turn_image_ids,
+        warned_image_ids,
         events_path: paths.events.clone(),
         summary_path: paths.summary.clone(),
         plan_path: paths.plan.clone(),
@@ -201,5 +216,65 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
         capability_fingerprint: ctx.tool_capabilities.fingerprint().to_string(),
     });
 
+    // One-time UI hint for text-only sessions (v7 §3.4): never part of the
+    // system prompt or conversation. Sub-agents stay silent (the parent
+    // already explained the session).
+    if !ctx.is_sub_agent && ctx.model_capabilities.image_input.limits().is_none() {
+        ctx.display.render_info(
+            "This session's model does not declare image input: Read treats image files as text. Use a vision model (e.g. deepseek-v4-flash-vision-exp) or set [provider] image_input = \"on\" in .minkrc for a new session.",
+        );
+    }
+
     Ok(BuiltAgentContext { ctx, paths, is_new })
+}
+
+/// Resolve the frozen session capability snapshot.
+///
+/// - Existing snapshot: verify the persisted fingerprint, then validate the
+///   current startup model through the compatibility predicate; an
+///   incompatible startup model refuses the turn before any prefix work.
+/// - No snapshot: classify the crash boundary. Interrupted initialization
+///   (empty conversation, no `prefix_snapshot` event) resolves and persists
+///   fresh capabilities; a legacy session freezes to `Unsupported`.
+fn resolve_session_capabilities(
+    config: &Config,
+    backend: &dyn LlmBackend,
+    paths: &crate::session::paths::Paths,
+) -> Result<Arc<crate::capabilities::model_capabilities::SessionModelCapabilities>> {
+    use crate::capabilities::model_capabilities::{
+        SessionModelCapabilities, SnapshotAbsence, capabilities_path, classify_snapshot_absence,
+        load_capabilities, save_capabilities,
+    };
+    let path = capabilities_path(&paths.session_dir);
+    if let Some(snapshot) = load_capabilities(&path)? {
+        // Startup validation: the configured model must be compatible with
+        // the frozen snapshot (v7 §3.3). Unsupported snapshots accept any
+        // model while staying text-only.
+        let candidate = SessionModelCapabilities::resolve(&config.model, config, backend);
+        if !snapshot.is_compatible_with(&candidate) {
+            anyhow::bail!(
+                "model {:?} is incompatible with this session's frozen image capability {}; start a new session to use that model",
+                config.model,
+                snapshot.capability_fingerprint
+            );
+        }
+        return Ok(Arc::new(snapshot));
+    }
+    let absence = classify_snapshot_absence(&paths.conversation, &paths.events)?;
+    match absence {
+        SnapshotAbsence::Uninitialized => {
+            let snapshot = SessionModelCapabilities::resolve(&config.model, config, backend);
+            save_capabilities(&path, &snapshot)?;
+            Ok(Arc::new(snapshot))
+        }
+        SnapshotAbsence::Legacy => {
+            // Legacy session: freeze Unsupported persistently (review fix —
+            // the design states the freeze is persisted; an on-disk snapshot
+            // also lets recovery re-verify the fingerprint). The session
+            // keeps behaving exactly as before.
+            let snapshot = SessionModelCapabilities::unsupported(&config.model);
+            save_capabilities(&path, &snapshot)?;
+            Ok(Arc::new(snapshot))
+        }
+    }
 }

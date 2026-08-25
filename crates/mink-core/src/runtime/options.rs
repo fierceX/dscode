@@ -324,6 +324,34 @@ impl AgentOptions {
         self
     }
 
+    /// Declare the image-input capability explicitly (v7 §3.1).
+    ///
+    /// Priority is explicit config > backend declaration > Unsupported.
+    /// Without this, image reading stays disabled even for vision-capable
+    /// endpoints unless the backend declares it.
+    pub fn with_image_input(
+        mut self,
+        capability: crate::capabilities::model_capabilities::ImageInputCapability,
+    ) -> Self {
+        self.config.image_input = Some(capability);
+        self
+    }
+
+    /// Replace the backend-declared vision model list (v7 §3.1). An empty
+    /// list disables image capture for every model; the default built-in list
+    /// is `deepseek-v4-flash-vision-exp`.
+    pub fn with_vision_models(mut self, models: Vec<String>) -> Self {
+        self.config.vision_models = models;
+        self
+    }
+
+    /// The currently configured vision model list (built-in defaults unless
+    /// replaced via `with_vision_models`). Used by CLI layers that construct
+    /// their own backend (e.g. `--router`) so user configuration is honored.
+    pub fn vision_models(&self) -> &[String] {
+        &self.config.vision_models
+    }
+
     pub fn with_openai_reasoning_effort(mut self, effort: impl Into<String>) -> Self {
         let effort = effort.into();
         self.config.openai_reasoning_effort = Some(effort);

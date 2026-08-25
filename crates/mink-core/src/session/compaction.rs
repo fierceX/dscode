@@ -336,7 +336,13 @@ impl CompactionEngine {
                 "content": compaction_input::reduce_for_summary(dropped),
             })]
         } else {
-            dropped.to_vec()
+            // Summary requests never carry pixels, even with input reduction
+            // disabled: the compaction path bypasses stream_backend, so any
+            // tool_attachment reference would be sent verbatim to the
+            // provider (v7 §10.3). Degrade attachments to text markers.
+            let mut messages = dropped.to_vec();
+            degrade_images_for_summary(&mut messages);
+            messages
         };
         messages.push(json!({"role":"user","content":instruction}));
 
@@ -584,11 +590,36 @@ fn is_real_user_message(message: &Value) -> bool {
         return false;
     }
     let Some(content) = message.get("content").and_then(Value::as_str) else {
+        // Array content (tool results / attachments) is never a real user
+        // message and never a safe compaction start (v7 §10.1).
         return false;
     };
     !RUNTIME_INJECTED_MARKERS
         .iter()
         .any(|marker| content.starts_with(marker))
+}
+
+/// Replace every `tool_attachment` block with a text marker so a summary
+/// request never carries image references or pixels (v7 §10.3).
+fn degrade_images_for_summary(messages: &mut [Value]) {
+    for message in messages.iter_mut() {
+        let Some(blocks) = message.get_mut("content").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for block in blocks.iter_mut() {
+            if block.get("type").and_then(Value::as_str) != Some("tool_attachment") {
+                continue;
+            }
+            let url = block.get("url").and_then(Value::as_str).unwrap_or("?");
+            let format = block.get("format").and_then(Value::as_str).unwrap_or("?");
+            let width = block.get("width").and_then(Value::as_u64).unwrap_or(0);
+            let height = block.get("height").and_then(Value::as_u64).unwrap_or(0);
+            *block = serde_json::json!({
+                "type": "text",
+                "text": format!("[image {format} {width}x{height}: {url}]")
+            });
+        }
+    }
 }
 
 fn is_safe_context_start(message: &Value) -> bool {

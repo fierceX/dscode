@@ -139,6 +139,7 @@ pub struct ToolExecution {
     pub(crate) plan_command: Option<PlanCommand>,
     pub(crate) needs_finalization: bool,
     pub(crate) state_metadata: Option<serde_json::Value>,
+    pub image_attachment: Option<crate::tools::image::ImageAttachment>,
 }
 
 pub struct SubAgentRequest {
@@ -186,6 +187,7 @@ impl ToolExecution {
             plan_command: None,
             needs_finalization: false,
             state_metadata: None,
+            image_attachment: None,
         }
     }
 }
@@ -305,23 +307,96 @@ impl ToolRunner {
         if calls.is_empty() {
             return Ok(Vec::new());
         }
-        let mut handles = Vec::new();
+        // Every call passes the policy gate (surface membership, StormBreaker,
+        // approval/blocking) BEFORE any classification or file/VFS access:
+        // a crafted image call must never execute when Read is not on the
+        // model surface (v7 §7.3 / review fix #1). Slots preserve the original
+        // call order so mixed batches return results in dispatch order.
+        #[allow(clippy::large_enum_variant)]
+        enum PreparedSlot {
+            Immediate(ToolExecution),
+            Text(ToolCallEvent),
+            Image {
+                call: ToolCallEvent,
+                kind: super::file::ImageReadKind,
+            },
+            ClassifyError {
+                call: ToolCallEvent,
+                error: String,
+            },
+        }
+        let mut slots = Vec::with_capacity(calls.len());
         for call in calls {
             match self.prepare_call(call) {
-                PreparedCall::Immediate(result) => {
-                    handles.push(tokio::spawn(async move { Ok(result) }));
-                }
+                PreparedCall::Immediate(result) => slots.push(PreparedSlot::Immediate(result)),
                 PreparedCall::Execute(call) => {
-                    if let Some(tool) = self.find_custom_tool(&call.name).cloned() {
+                    let slot = if call.name == "Read" {
+                        let path = call
+                            .input_json
+                            .get("path")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
+                        // Classification may touch the VFS (slow) — run it on
+                        // the blocking pool so async workers are not stalled.
                         let ctx = self.ctx.clone();
-                        handles.push(tokio::spawn(async move {
-                            execute_custom(&ctx, &call, tool).await
-                        }));
-                        continue;
-                    }
+                        let path_for_task = path.clone();
+                        let classified = tokio::task::spawn_blocking(move || {
+                            // Invalid path selection keeps the text-path error
+                            // surface (e.g. serde unknown-field diagnostics).
+                            let selection =
+                                match crate::resources::selector::split_read_path_selection(
+                                    &path_for_task,
+                                ) {
+                                    Ok(selection) => selection,
+                                    Err(_) => {
+                                        return Ok(super::file::ImageReadKind::NotImage)
+                                    }
+                                };
+                            super::file::classify_image_read(&ctx, &path_for_task, &selection)
+                        })
+                        .await;
+                        match classified {
+                            Ok(Ok(kind))
+                                if !matches!(kind, super::file::ImageReadKind::NotImage) =>
+                            {
+                                PreparedSlot::Image { call, kind }
+                            }
+                            Ok(Ok(_)) => PreparedSlot::Text(call),
+                            // Classification failures must surface as failed
+                            // ToolExecutions, never a silent fallback to the
+                            // text path.
+                            Ok(Err(error)) => PreparedSlot::ClassifyError {
+                                call,
+                                error: format!("{error:#}"),
+                            },
+                            Err(error) => PreparedSlot::ClassifyError {
+                                call,
+                                error: format!("{error:#}"),
+                            },
+                        }
+                    } else {
+                        PreparedSlot::Text(call)
+                    };
+                    slots.push(slot);
+                }
+            }
+        }
+
+        // Phase one, text family: concurrent dispatch (policy gate already
+        // passed above, so no second prepare_call).
+        let mut text_handles = Vec::new();
+        for slot in &slots {
+            if let PreparedSlot::Text(call) = slot {
+                if let Some(tool) = self.find_custom_tool(&call.name).cloned() {
+                    let ctx = self.ctx.clone();
+                    let call = call.clone();
+                    text_handles.push(tokio::spawn(async move { execute_custom(&ctx, &call, tool).await }));
+                } else {
                     let ctx = self.ctx.clone();
                     let tool_name = call.name.clone();
-                    handles.push(tokio::spawn(async move {
+                    let call = call.clone();
+                    text_handles.push(tokio::spawn(async move {
                         tokio::task::spawn_blocking(move || {
                             let tool = tool_registry()
                                 .iter()
@@ -333,12 +408,176 @@ impl ToolRunner {
                 }
             }
         }
+        let mut text_results = Vec::with_capacity(text_handles.len());
+        for handle in text_handles {
+            text_results.push(handle.await??);
+        }
 
-        let mut results = Vec::new();
-        for handle in handles {
-            results.push(handle.await??);
+        // Phase one, image family: concurrent compute-only prepare.
+        let mut image_handles = Vec::new();
+        for slot in &slots {
+            if let PreparedSlot::Image { kind, .. } = slot {
+                let ctx = self.ctx.clone();
+                let kind = kind.clone();
+                image_handles.push(tokio::spawn(async move {
+                    tokio::task::spawn_blocking(move || {
+                        super::file::prepare_image_read(&ctx, kind)
+                    })
+                    .await
+                }));
+            }
+        }
+        let mut image_results = Vec::with_capacity(image_handles.len());
+        for handle in image_handles {
+            image_results.push(handle.await??);
+        }
+
+        // Phase two: assemble by original slot order; image commits (quota
+        // reserve + publish) run in the original image call order.
+        let mut text_iter = text_results.into_iter();
+        let mut image_iter = image_results.into_iter();
+        let mut results = Vec::with_capacity(slots.len());
+        for slot in slots {
+            match slot {
+                PreparedSlot::Immediate(result) => results.push(result),
+                PreparedSlot::Text(_) => results.push(text_iter.next().expect("text slot")),
+                PreparedSlot::Image { call, .. } => {
+                    results.push(
+                        self.commit_image_result(call, image_iter.next().expect("image slot"))
+                            .await,
+                    );
+                }
+                PreparedSlot::ClassifyError { call, error } => results.push(failed_tool_result(
+                    call.id,
+                    call.name,
+                    call.fields,
+                    error,
+                )),
+            }
         }
         Ok(results)
+    }
+
+    /// Reserve quota in call order and publish the prepared image object.
+    /// Quota failures and commit failures are ordinary failed
+    /// ToolExecutions; a failed commit never consumes the reservation. The
+    /// fsync-heavy cache commit runs on the blocking pool.
+    async fn commit_image_result(
+        &self,
+        call: ToolCallEvent,
+        prepared: anyhow::Result<super::file::PreparedImage>,
+    ) -> ToolExecution {
+        let prepare_error = |error: anyhow::Error| {
+            failed_tool_result(
+                call.id.clone(),
+                call.name.clone(),
+                call.fields.clone(),
+                format!("{error:#}"),
+            )
+        };
+        let prepared = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => return prepare_error(error),
+        };
+        let Some(limits) = super::file::image_limits(&self.ctx) else {
+            return prepare_error(anyhow::anyhow!(
+                "image reading is not enabled in this session"
+            ));
+        };
+        let bytes = prepared.bytes.len() as u64;
+        // Phase A: reserve check (guard is dropped before any await).
+        {
+            let quota = self
+                .ctx
+                .image_quota
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let (remaining_images, remaining_bytes) = quota.remaining(&limits);
+            if remaining_images < 1 || remaining_bytes < bytes {
+                return prepare_error(anyhow::anyhow!(
+                    "Error: image attachment quota exceeded: usage {}/{} images and {}/{} bytes; remove images or use fewer Read calls",
+                    quota.used_images,
+                    limits.max_images_per_request,
+                    quota.used_bytes,
+                    limits.max_image_bytes_per_request
+                ));
+            }
+        }
+        // Phase B: commit on the blocking pool (no guard held across await).
+        let image_id = match &prepared.existing_id {
+            Some(id) => id.clone(),
+            None => {
+                let cache = self.ctx.image_cache.clone();
+                let bytes = prepared.bytes.clone();
+                match tokio::task::spawn_blocking(move || cache.commit(&bytes)).await {
+                    Ok(Ok(id)) => id,
+                    Ok(Err(error)) => return prepare_error(anyhow::anyhow!(
+                        "Error: failed to persist image: {error:#}"
+                    )),
+                    Err(error) => return prepare_error(anyhow::anyhow!(
+                        "Error: failed to persist image: {error:#}"
+                    )),
+                }
+            }
+        };
+        // Phase C: commit succeeded — consume the reservation.
+        {
+            let mut quota = self
+                .ctx
+                .image_quota
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            quota.used_images = quota.used_images.saturating_add(1);
+            quota.used_bytes = quota.used_bytes.saturating_add(bytes);
+        }
+        // Register as a this-turn capture so a materialization failure of a
+        // freshly produced attachment fails the request instead of silently
+        // degrading (v7 §9.5).
+        self.ctx
+            .this_turn_image_ids
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(image_id.clone());
+
+        let attachment = crate::tools::image::ImageAttachment {
+            image_id,
+            format: prepared.info.format,
+            width: prepared.info.width,
+            height: prepared.info.height,
+            bytes,
+            name: prepared.name,
+        };
+        let content = attachment.summary(&prepared.display_path);
+        ToolExecution {
+            tool_use_id: call.id,
+            tool_name: call.name,
+            tool_args: call.fields,
+            content: content.clone(),
+            conv_content: content,
+            spawns_sub_agent: false,
+            sub_agent_prompt: None,
+            sub_agent_fork: false,
+            exit_code: None,
+            status: super::metadata::ToolStatus::Succeeded,
+            result_kind: super::metadata::ToolResultKind::FileRead,
+            presentation: None,
+            artifacts: Vec::new(),
+            signals: Vec::new(),
+            plan_command: None,
+            needs_finalization: false,
+            state_metadata: None,
+            image_attachment: Some(attachment),
+        }
+    }
+
+    /// Replace the per-turn image quota baseline (used = active projection
+    /// sent to the model). Called by the turn executor before each batch.
+    pub fn set_image_quota(&self, state: crate::tools::image::ImageQuotaState) {
+        *self
+            .ctx
+            .image_quota
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = state;
     }
 
     async fn execute_prepared_call(&self, call: ToolCallEvent) -> Result<ToolExecution> {
@@ -758,6 +997,7 @@ fn format_dispatched_result(
         plan_command,
         needs_finalization,
         state_metadata,
+        image_attachment: None,
     }
 }
 fn hashline_target_paths(input: &str) -> Vec<String> {
@@ -898,6 +1138,7 @@ pub(crate) fn blocked_tool_result(
         plan_command: None,
         needs_finalization: false,
         state_metadata: None,
+        image_attachment: None,
     }
 }
 

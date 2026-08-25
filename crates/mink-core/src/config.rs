@@ -2,7 +2,6 @@ use crate::llm::client::TokenParamKind;
 use anyhow::{Result, bail};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputFormat {
     Human,
@@ -312,7 +311,23 @@ pub struct ResolvedConfig {
     pub tool_approval: BTreeMap<String, ToolApprovalPolicy>,
     pub signal_policy: SignalPolicy,
     pub(crate) signal: SignalConfig,
+    /// Explicit image-input capability override. Priority: explicit config
+    /// over backend declaration, then Unsupported (v7 §3.1). `None` defers
+    /// to the backend. MVP: not configurable via CLI/.minkrc; SDK embedding
+    /// may set it programmatically.
+    pub image_input: Option<crate::capabilities::model_capabilities::ImageInputCapability>,
+    /// Model ids that the default OpenAI-compatible backend declares as
+    /// image-capable. The built-in vision catalog entry is included by
+    /// default so the stock CLI works against vision models without extra
+    /// configuration; unknown models stay text-only (fail closed).
+    pub vision_models: Vec<String>,
 }
+/// Built-in model ids that declare image input (v7 §3.1). Single source for
+/// `ResolvedConfig::default` and CLI router wiring.
+pub fn vision_model_defaults() -> Vec<String> {
+    vec!["deepseek-v4-flash-vision-exp".to_string()]
+}
+
 impl Default for ResolvedConfig {
     fn default() -> Self {
         Self {
@@ -365,6 +380,8 @@ impl Default for ResolvedConfig {
             tool_approval: BTreeMap::new(),
             signal_policy: SignalPolicy::Full,
             signal: SignalConfig::default(),
+            image_input: None,
+            vision_models: vision_model_defaults(),
         }
     }
 }

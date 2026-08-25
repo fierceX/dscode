@@ -373,6 +373,16 @@ async fn harness_with_config(
         tool_capabilities,
         custom_tools: Arc::new(Vec::new()),
         prefix_source: None,
+        model_capabilities: Arc::new(
+            crate::capabilities::model_capabilities::SessionModelCapabilities::unsupported(
+                "test",
+            ),
+        ),
+        image_cache: Arc::new(crate::session::image_cache::ImageCache::new(
+            &std::env::temp_dir(),
+        )),
+        this_turn_image_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
+        warned_image_ids: Arc::new(Mutex::new(std::collections::HashSet::new())),
         events_path: spaths.events,
         summary_path: spaths.summary,
         plan_path: spaths.plan,
@@ -471,6 +481,10 @@ fn test_context_with_llm_backend(
         tool_capabilities: ctx.tool_capabilities.clone(),
         custom_tools: ctx.custom_tools.clone(),
         prefix_source: ctx.prefix_source.clone(),
+        model_capabilities: ctx.model_capabilities.clone(),
+        image_cache: ctx.image_cache.clone(),
+        this_turn_image_ids: ctx.this_turn_image_ids.clone(),
+        warned_image_ids: ctx.warned_image_ids.clone(),
         events_path: ctx.events_path.clone(),
         summary_path: ctx.summary_path.clone(),
         plan_path: ctx.plan_path.clone(),
@@ -507,6 +521,7 @@ fn internal_result(name: &str) -> ToolExecution {
         plan_command: None,
         needs_finalization: false,
         state_metadata: None,
+        image_attachment: None,
     }
 }
 

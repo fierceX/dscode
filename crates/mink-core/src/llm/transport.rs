@@ -109,9 +109,36 @@ pub(crate) fn estimate_openai_context_tokens(
         request_messages.push(json!({"role":"system","content":system_prompt}));
     }
     request_messages.extend(converted);
+    // The JSON byte estimate covers text and already-materialized data URLs;
+    // a pre-materialization `tool_attachment` block is only metadata, so its
+    // eventual pixel payload is added with the tile estimator (review fix #3).
+    let mut image_tokens = 0usize;
+    for message in &request_messages {
+        let Some(blocks) = message.get("content").and_then(Value::as_array) else {
+            continue;
+        };
+        for block in blocks {
+            if block.get("type").and_then(Value::as_str) != Some("tool_attachment") {
+                continue;
+            }
+            let width = block.get("width").and_then(Value::as_u64).unwrap_or(0) as u32;
+            let height = block.get("height").and_then(Value::as_u64).unwrap_or(0) as u32;
+            // Conservative: preflight assumes the configured high detail.
+            image_tokens = image_tokens.saturating_add(
+                crate::capabilities::model_capabilities::estimate_image_tokens(
+                    width,
+                    height,
+                    crate::capabilities::model_capabilities::ImageDetail::High,
+                ) as usize,
+            );
+        }
+    }
     let message_bytes = serde_json::to_vec(&request_messages)?.len();
     let tool_bytes = serde_json::to_vec(&convert_tools_to_openai(tools))?.len();
-    Ok(message_bytes.saturating_add(tool_bytes).div_ceil(3))
+    Ok(message_bytes
+        .saturating_add(tool_bytes)
+        .div_ceil(3)
+        .saturating_add(image_tokens))
 }
 
 fn is_reserved_body_key(key: &str) -> bool {
@@ -237,15 +264,23 @@ fn convert_assistant_message(content: &Value) -> Result<Value> {
 fn convert_tool_result_messages(content: &Value) -> Result<Vec<Value>> {
     let blocks = content.as_array().cloned().unwrap_or_default();
     let mut out = Vec::new();
+    // tool_result blocks become tool-role messages (existing protocol); the
+    // remaining blocks (text labels / tool_attachment) become one residual
+    // user message preserving their interleaved order (v7 §9.1).
+    let mut residual = Vec::new();
     for b in blocks {
-        if b.get("type").and_then(Value::as_str) != Some("tool_result") {
-            continue;
+        if b.get("type").and_then(Value::as_str) == Some("tool_result") {
+            out.push(json!({
+                "role":"tool",
+                "tool_call_id": b.get("tool_use_id").and_then(Value::as_str).unwrap_or(""),
+                "content": b.get("content").and_then(Value::as_str).unwrap_or(""),
+            }));
+        } else {
+            residual.push(b);
         }
-        out.push(json!({
-            "role":"tool",
-            "tool_call_id": b.get("tool_use_id").and_then(Value::as_str).unwrap_or(""),
-            "content": b.get("content").and_then(Value::as_str).unwrap_or(""),
-        }));
+    }
+    if !residual.is_empty() {
+        out.push(json!({"role":"user","content":residual}));
     }
     Ok(out)
 }

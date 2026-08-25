@@ -44,6 +44,8 @@ time.workspace = true
 tokio.workspace = true
 unicode-normalization.workspace = true
 xxhash-rust.workspace = true
+image.workspace = true
+base64.workspace = true
 wasmtime = { workspace = true, optional = true }
 wasmtime-wasi = { workspace = true, optional = true }
 axum = { workspace = true, optional = true }
@@ -53,6 +55,8 @@ windows-sys.workspace = true
 
 [dev-dependencies]
 redb = "4"
+image.workspace = true
+base64.workspace = true
 
 [[example]]
 name = "web_api"

@@ -396,6 +396,27 @@ impl OrchActor {
                 .render_error("Model name must not be empty.");
             anyhow::bail!("Model name must not be empty.");
         }
+        // Model switch is gated by the frozen session capability snapshot
+        // (v7 §3.3): an Unsupported session accepts any model but stays
+        // text-only; an image-capable session requires an exact capability
+        // fingerprint match.
+        let candidate =
+            crate::capabilities::model_capabilities::SessionModelCapabilities::resolve(
+                model,
+                &self.ctx.config,
+                self.ctx.llm_backend.as_ref(),
+            );
+        if !self.ctx.model_capabilities.is_compatible_with(&candidate) {
+            self.ctx.display.render_error(&format!(
+                "Model switch rejected: this session was initialized with image capability {}. The selected model has incompatible capabilities. Start a new session to use that model.",
+                self.ctx.model_capabilities.capability_fingerprint
+            ));
+            anyhow::bail!(
+                "model switch rejected: capability fingerprint {} does not match the session's frozen {}",
+                candidate.capability_fingerprint,
+                self.ctx.model_capabilities.capability_fingerprint
+            );
+        }
         if model == self.ctx.config.model {
             self.forced_model = None;
         } else {

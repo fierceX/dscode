@@ -77,18 +77,38 @@ impl ConversationStore {
     ) -> Result<()> {
         let content: Vec<Value> = results
             .iter()
-            .map(|r| {
+            .flat_map(|r| {
                 let conv = if r.conv_content.is_empty() {
                     &r.content
                 } else {
                     &r.conv_content
                 };
-                let mut block =
-                    json!({"type":"tool_result","tool_use_id":r.tool_use_id,"content":conv});
+                let mut blocks = vec![json!({"type":"tool_result","tool_use_id":r.tool_use_id,"content":conv})];
                 if let Some(metadata) = &r.state_metadata {
-                    block["_mink"] = metadata.clone();
+                    blocks[0]["_mink"] = metadata.clone();
                 }
-                block
+                // Image capture: append an interleaved label + attachment
+                // block so the model can associate each image with its call
+                // (v7 §8.1). The block carries budget metadata but never a
+                // path.
+                if let Some(image) = &r.image_attachment {
+                    if !image.name.is_empty() {
+                        blocks.push(json!({
+                            "type": "text",
+                            "text": format!("Image for {}: {}", r.tool_use_id, image.name),
+                        }));
+                    }
+                    blocks.push(json!({
+                        "type": "tool_attachment",
+                        "tool_use_id": r.tool_use_id,
+                        "url": format!("image://{}", image.image_id),
+                        "format": image.format,
+                        "width": image.width,
+                        "height": image.height,
+                        "bytes": image.bytes,
+                    }));
+                }
+                blocks
             })
             .collect();
         self.append_line(&json!({"role":"user","content":content}))

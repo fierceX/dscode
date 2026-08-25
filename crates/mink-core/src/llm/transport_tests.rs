@@ -227,3 +227,21 @@ fn openai_body_omits_tool_choice_when_no_tools_are_sent() {
     assert!(value.get("tools").is_none());
     assert!(value.get("tool_choice").is_none());
 }
+
+#[test]
+fn estimate_counts_tool_attachment_pixel_payload() {
+    use serde_json::json;
+    // A 1024x768 attachment: 85 + 170*4 = 765 tokens on top of JSON bytes.
+    let messages = vec![json!({"role": "user", "content": [
+        json!({"type": "tool_attachment", "tool_use_id": "c", "url": "image://sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "format": "png", "width": 1024, "height": 768, "bytes": 1024}),
+    ]})];
+    let plain = estimate_openai_context_tokens(&messages, &[], "").unwrap();
+    let without_attachment = estimate_openai_context_tokens(
+        &[json!({"role": "user", "content": [json!({"type": "text", "text": "x"})]})],
+        &[],
+        "",
+    )
+    .unwrap();
+    // Attachment must add the tile estimate (>= 765 tokens).
+    assert!(plain >= without_attachment + 765, "{plain} vs {without_attachment}");
+}

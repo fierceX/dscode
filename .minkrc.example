@@ -39,6 +39,15 @@ openai_token_param = "max_tokens"           # max_tokens / max_completion_tokens
 #[provider.openai_extra_body.custom_options]
 #enabled = true
 
+# 多模态（图像输入）能力（v7 §3.1）
+# 默认：内置视觉模型列表自动开启（deepseek-v4-flash-vision-exp）
+# image_input = "on"   # 显式开启（对任何模型生效，覆盖 backend 声明）
+# image_input = "off"  # 显式关闭（覆盖 backend 声明，强制文本模式）
+# vision_models = ["deepseek-v4-flash-vision-exp"]  # 自定义视觉模型 id 列表
+#                                                  # （替换内置默认；空列表 = 全部关闭）
+# 环境变量：MINK_IMAGE_INPUT=on|off，MINK_VISION_MODELS="model-a,model-b"
+# 优先级：CLI --config > project .minkrc > user ~/.minkrc > env > 默认
+
 # ── Generation ─────────────────────────────────────────────────
 [generation]
 max_tokens = 81920                          # 最大输出 token

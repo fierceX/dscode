@@ -318,9 +318,12 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
     }
     #[cfg(feature = "router")]
     if cfg.router.is_some() {
-        let inner = Arc::new(mink::runtime::OpenAiCompatibleBackend::new(
-            mink::runtime::OpenAiCompatibleOptions::default(),
-        ));
+        // Build the inner backend through `from_config` so the vision-model
+        // declaration list is populated; honor the user-configured list from
+        // the assembled options instead of hard-coding defaults (review fix).
+        let mut resolved = mink::runtime::ResolvedConfig::default();
+        resolved.vision_models = runtime_options.vision_models().to_vec();
+        let inner = Arc::new(mink::runtime::OpenAiCompatibleBackend::from_config(&resolved));
         let router = RouterLlmBackend::new(
             inner,
             RouterConfig::flash_only()
@@ -507,6 +510,15 @@ fn assemble_runtime_options(
     }
     if let Some(content) = &cfg.mission_content {
         options = options.with_mission_content(content.clone());
+    }
+    // Image capability wiring (v7 §3.1): an explicit override beats the
+    // backend declaration; an explicit vision-model list replaces the
+    // built-in default list (empty disables image capture).
+    if let Some(capability) = cfg.image_input.clone() {
+        options = options.with_image_input(capability);
+    }
+    if let Some(models) = &cfg.vision_models {
+        options = options.with_vision_models(models.clone());
     }
     options
 }
@@ -940,6 +952,8 @@ fn print_usage() {
         "                          Example: --config \"[generation]\\nmax_tokens=4096\\n[tools]\\ntool_timeout=300\""
     );
     println!("                          Sections: [provider] [generation] [context] [tools]");
+    println!("                          [provider] image_input: \"on\" | \"off\" (explicit");
+    println!("                          multi-modal override; vision_models: model id list)");
     println!("                          [tools.edit] [signal] [sandbox] [sandbox_python]");
     println!("  -h, --help              Show this help");
     println!();
@@ -965,6 +979,8 @@ fn print_usage() {
     println!("  MINK_EDIT_FUZZY_MATCH   Replace fuzzy matching: true | false");
     println!("  MINK_EDIT_FUZZY_THRESHOLD Replace fuzzy threshold, 0.0..=1.0");
     println!("  MINK_EDIT_ENFORCE_SEEN_LINES Hashline seen-line guard: true | false");
+    println!("  MINK_IMAGE_INPUT        Image capability override: on | off");
+    println!("  MINK_VISION_MODELS      Comma-separated vision model ids (replaces default)");
 }
 fn version_line() -> String {
     let git_hash = env!("MINK_GIT_HASH");

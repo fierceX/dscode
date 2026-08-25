@@ -21,6 +21,18 @@ pub fn reduce_for_summary(messages: &[Value]) -> String {
                         }
                         Some("tool_use") => push_tool_use(&mut out, block),
                         Some("tool_result") => push_tool_result(&mut out, block),
+                        // Summary requests never carry pixels: an attachment
+                        // degrades to a text marker using its persisted
+                        // metadata (v7 §10).
+                        Some("tool_attachment") => {
+                            let url = block.get("url").and_then(Value::as_str).unwrap_or("?");
+                            let format = block.get("format").and_then(Value::as_str).unwrap_or("?");
+                            let width = block.get("width").and_then(Value::as_u64).unwrap_or(0);
+                            let height = block.get("height").and_then(Value::as_u64).unwrap_or(0);
+                            out.push_str(&format!(
+                                "[image {format} {width}x{height}: {url}]\n"
+                            ));
+                        }
                         _ => {}
                     }
                 }

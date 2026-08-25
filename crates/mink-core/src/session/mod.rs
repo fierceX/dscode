@@ -3,6 +3,7 @@ pub(crate) mod atomic_file;
 pub mod compaction;
 pub mod compaction_input;
 pub(crate) mod event_log;
+pub mod image_cache;
 pub mod init;
 pub(crate) mod jsonl;
 pub mod metadata;

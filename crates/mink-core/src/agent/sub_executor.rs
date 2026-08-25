@@ -346,6 +346,11 @@ fn copy_session_entries(source: &Path, destination: &Path, root: bool) -> Result
         if root && entry.file_name().to_string_lossy() == "subagents" {
             continue;
         }
+        // Exclude the image cache tree: child agents own an isolated cache
+        // and must never inherit parent objects (v7 §5.1).
+        if entry.file_name().to_string_lossy() == "cache" {
+            continue;
+        }
         let file_type = entry.file_type()?;
         let target = destination.join(entry.file_name());
         if file_type.is_dir() {

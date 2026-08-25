@@ -39,7 +39,15 @@ impl PrefixManager {
             }
 
             let system_prompt = self.ctx.build_system_prompt()?;
-            let tools_json = self.ctx.tool_surface.schemas();
+            // Static image-capability enhancement: when the frozen session
+            // capability supports images, the Read description is augmented
+            // here and cached inside ImmutablePrefix (v7 §3.4). Unsupported
+            // sessions leave the schema byte-for-byte unchanged.
+            let tools_json =
+                crate::tools::surface::augment_read_schema_for_image(
+                    self.ctx.tool_surface.schemas(),
+                    &self.ctx.model_capabilities,
+                );
             let workflows = crate::prompt::workflows::PromptWorkflowResolver::builtin()
                 .resolve(&self.ctx.tool_capabilities)?;
             self.ctx
@@ -51,12 +59,15 @@ impl PrefixManager {
                         .collect(),
                     workflow_fingerprint: workflows.fingerprint().to_string(),
                 });
+            // The capability fingerprint joins the dependency fingerprint so
+            // any capability change forces a prefix rebuild (v7 §3.4).
             let dependency_fingerprint = format!(
-                "mink-prefix-dependencies-v2\0{}\0{}\0{}\0{}",
+                "mink-prefix-dependencies-v2\0{}\0{}\0{}\0{}\0{}",
                 self.ctx.capability_snapshot.dependency_fingerprint,
                 self.ctx.tool_surface.fingerprint(),
                 self.ctx.tool_capabilities.fingerprint(),
                 workflows.fingerprint(),
+                self.ctx.model_capabilities.capability_fingerprint,
             );
             let prefix = ImmutablePrefix::new(
                 system_prompt.clone(),

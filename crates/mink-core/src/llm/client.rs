@@ -87,6 +87,19 @@ pub struct LlmRequest {
 pub trait LlmBackend: Send + Sync {
     fn name(&self) -> &str;
     async fn stream(&self, request: LlmRequest) -> Result<LlmResponseStream>;
+
+    /// Declared image-input capability for one resolved model.
+    ///
+    /// The default is `Unsupported` (fail closed): custom backends that do
+    /// not override this method keep their existing source compatibility and
+    /// never receive image parts (v7 §3.1).
+    fn image_input_capability(
+        &self,
+        model: &str,
+    ) -> crate::capabilities::model_capabilities::ImageInputCapability {
+        let _ = model;
+        crate::capabilities::model_capabilities::ImageInputCapability::Unsupported
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,6 +144,10 @@ pub struct OpenAiCompatibleBackend {
     tool_choice: Option<serde_json::Value>,
     extra_body: std::collections::BTreeMap<String, serde_json::Value>,
     client: Mutex<Option<reqwest::Client>>,
+    /// Resolved model ids that declare image input. Defaults to the built-in
+    /// vision catalog entry; an explicit `ResolvedConfig::image_input` still
+    /// wins over this declaration (v7 §3.1 priority).
+    vision_models: Vec<String>,
 }
 
 impl OpenAiCompatibleBackend {
@@ -140,7 +157,14 @@ impl OpenAiCompatibleBackend {
             tool_choice: None,
             extra_body: std::collections::BTreeMap::new(),
             client: Mutex::new(None),
+            vision_models: Vec::new(),
         }
+    }
+
+    /// Restrict the backend-declared image capability to these model ids.
+    pub fn with_vision_models(mut self, models: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.vision_models = models.into_iter().map(Into::into).collect();
+        self
     }
 
     pub fn with_tool_choice(mut self, tool_choice: impl Into<serde_json::Value>) -> Self {
@@ -191,6 +215,7 @@ impl OpenAiCompatibleBackend {
         })
         .with_extra_body(config.openai_extra_body.clone())
         .with_optional_tool_choice(config.openai_tool_choice.clone())
+        .with_vision_models(config.vision_models.iter().cloned())
     }
 
     #[cfg(test)]
@@ -210,6 +235,18 @@ impl LlmBackend for OpenAiCompatibleBackend {
         "openai-compatible"
     }
 
+    fn image_input_capability(
+        &self,
+        model: &str,
+    ) -> crate::capabilities::model_capabilities::ImageInputCapability {
+        if self.vision_models.iter().any(|vision| vision == model) {
+            return crate::capabilities::model_capabilities::ImageInputCapability::OpenAiChatImageUrl(
+                crate::capabilities::model_capabilities::OpenAiChatImageUrlLimits::default(),
+            );
+        }
+        crate::capabilities::model_capabilities::ImageInputCapability::Unsupported
+    }
+
     async fn stream(&self, request: LlmRequest) -> Result<LlmResponseStream> {
         let client = AsyncLlClient::from_client(
             self.http_client()?.clone(),
@@ -226,6 +263,28 @@ impl LlmBackend for OpenAiCompatibleBackend {
             self.tool_choice.as_ref(),
             &self.extra_body,
         )?;
+        // Final body cap (v7 §9.4): fail before any bytes hit the wire. The
+        // cap applies only to multimodal requests — plain text requests keep
+        // their pre-existing behavior (review fix).
+        let has_materialized_images = request.messages.iter().any(|message| {
+            message
+                .get("content")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|blocks| {
+                    blocks
+                        .iter()
+                        .any(|block| block.get("type").and_then(serde_json::Value::as_str) == Some("image_url"))
+                })
+        });
+        if has_materialized_images
+            && body.len() as u64 > crate::capabilities::model_capabilities::MAX_REQUEST_BODY_BYTES
+        {
+            anyhow::bail!(
+                "request body exceeds the {} byte limit ({} bytes); reduce image count or size and retry",
+                crate::capabilities::model_capabilities::MAX_REQUEST_BODY_BYTES,
+                body.len()
+            );
+        }
 
         if request.verbose {
             let preview = String::from_utf8_lossy(&body);
@@ -513,6 +572,36 @@ pub(crate) async fn stream_backend(
     } else {
         LlmPurpose::Agent
     };
+    // Core request projection (v7 §9.2): resolve `tool_attachment` blocks
+    // into data-URL image parts against the home image cache. The compaction
+    // summary path bypasses stream_backend and is text-only by construction.
+    // Runs on the blocking pool: reads + base64 of multi-MB images must not
+    // stall async workers.
+    let mut messages = messages_json.to_vec();
+    let this_turn_ids = ctx
+        .this_turn_image_ids
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    let cache = ctx.image_cache.clone();
+    let display = ctx.display.clone();
+    let limits = ctx.model_capabilities.image_input.limits().cloned();
+    let warned = ctx.warned_image_ids.clone();
+    let messages = tokio::task::spawn_blocking(move || {
+        let mut warned = warned
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        crate::llm::image_projection::materialize_images_with(
+            &mut messages,
+            &cache,
+            display.as_ref(),
+            limits.as_ref(),
+            &this_turn_ids,
+            &mut warned,
+        )?;
+        Ok::<_, anyhow::Error>(messages)
+    })
+    .await??;
     let capture = ctx.usage.capture(
         ctx.usage_scope(if ctx.is_sub_agent {
             UsageKind::SubAgent
@@ -529,7 +618,7 @@ pub(crate) async fn stream_backend(
             api_url: ctx.api_url.clone(),
             api_key: ctx.api_key().to_string(),
             system_prompt: system_prompt.to_string(),
-            messages: messages_json.to_vec(),
+            messages,
             tools: tools_json.to_vec(),
             max_tokens: crate::session::compaction::effective_max_tokens(&ctx.config),
             cancel: ctx.cancel.clone(),
