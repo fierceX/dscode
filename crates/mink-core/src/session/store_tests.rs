@@ -67,7 +67,43 @@ fn tool_call_event(id: &str) -> ToolCallEvent {
         id: id.into(),
         input_json: json!({"command": "false"}),
         fields: Default::default(),
+        parse_error: None,
     }
+}
+
+#[tokio::test]
+async fn image_results_enter_history_like_text_results() {
+    // Image read results are persisted exactly like text tool results: the
+    // model-visible description text (tool_result) plus a plain-text
+    // reference block. No pixel bytes are stored; the reference is a plain
+    // text citation and is only removed by compaction.
+    let store = temp_store();
+    store.ensure().await.unwrap();
+    let mut result =
+        crate::tools::runner::ToolExecution::test_result("id_img", "Read", "img result");
+    result.image_attachment = Some(crate::tools::image::ImageAttachment {
+        image_id: "sha256:".to_string() + &"aa".repeat(32),
+        format: crate::tools::image::ImageFormat::Png,
+        width: 1024,
+        height: 768,
+        bytes: 118782,
+        name: "page.png".to_string(),
+    });
+    store.add_tool_results(&[result]).await.unwrap();
+    let lines = store.lines().await.unwrap();
+    let content = lines[0]["content"].as_array().unwrap();
+    // Text-equivalent: the tool_result carries the model-visible description.
+    assert_eq!(content[0]["type"], "tool_result");
+    assert_eq!(content[0]["content"], "img result");
+    // Followed by the plain-text label and reference (metadata only).
+    assert_eq!(content[1]["type"], "text");
+    assert!(content[1]["text"].as_str().unwrap().contains("page.png"));
+    assert_eq!(content[2]["type"], "tool_attachment");
+    assert_eq!(content[2]["url"], "image://sha256:".to_string() + &"aa".repeat(32));
+    assert_eq!(content[2]["bytes"], 118782);
+    // No pixel data anywhere in the persisted message.
+    let serialized = serde_json::to_string(&lines[0]).unwrap();
+    assert!(!serialized.contains("base64"), "{serialized}");
 }
 
 #[tokio::test]

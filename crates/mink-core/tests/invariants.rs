@@ -87,6 +87,7 @@ fn read_tool_call(id: &str, path: &str) -> LlmEvent {
         id: id.to_string(),
         input_json: input,
         fields,
+        parse_error: None,
     })
 }
 

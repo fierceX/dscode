@@ -55,6 +55,20 @@ pub fn project_current_plan(
     Ok(projected)
 }
 
+/// Full request projection, shared by the turn executor and the compactor:
+/// single-consumption image lifecycle (§7.3) first, then the current plan
+/// projection. Any token estimate fed to compaction must use this exactly
+/// like the real request, or history pictures would be counted as visual
+/// tokens after they were already consumed.
+pub fn project_full_request(
+    plan_path: &Path,
+    tail: bool,
+    messages: &[serde_json::Value],
+) -> Result<Vec<serde_json::Value>> {
+    let projected = crate::llm::image_projection::project_consumed_attachments(messages);
+    project_current_plan(plan_path, &projected, tail)
+}
+
 pub struct PlanStore {
     plan_path: PathBuf,
     draft_path: PathBuf,

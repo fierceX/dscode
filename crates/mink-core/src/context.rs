@@ -135,11 +135,6 @@ pub struct ToolContext {
     pub(crate) model_capabilities:
         Arc<crate::capabilities::model_capabilities::SessionModelCapabilities>,
     pub(crate) image_cache: Arc<crate::session::image_cache::ImageCache>,
-    /// Per-turn image quota (used = active projection). The turn executor
-    /// resets this before each tool batch; the runner reserves against it in
-    /// call order (v7 §7.3). Shared so cloned ToolContexts observe the same
-    /// runner-side state.
-    pub(crate) image_quota: Arc<Mutex<crate::tools::image::ImageQuotaState>>,
     /// Image ids captured during the current user input (v7 §9.5). Reset per
     /// input; fresh-attachment materialization failures fail the request.
     pub(crate) this_turn_image_ids: Arc<Mutex<std::collections::HashSet<String>>>,
@@ -173,7 +168,6 @@ impl From<&AgentSharedContext> for ToolContext {
             custom_tools: ctx.custom_tools.clone(),
             model_capabilities: ctx.model_capabilities.clone(),
             image_cache: ctx.image_cache.clone(),
-            image_quota: Arc::new(Mutex::new(crate::tools::image::ImageQuotaState::default())),
             this_turn_image_ids: ctx.this_turn_image_ids.clone(),
         }
     }

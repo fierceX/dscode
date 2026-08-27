@@ -943,3 +943,54 @@ fn invalid_image_input_is_rejected() {
     assert!(crate::config::parse_image_input("on").is_ok());
     assert!(crate::config::parse_image_input("OFF").is_ok());
 }
+
+#[test]
+fn image_limits_toml_parse_and_apply() {
+    let file: MinkConfigFile = toml::from_str(
+        "[provider.image]\n\
+detail = \"low\"\n\
+max_images_per_request = 8\n\
+max_image_bytes_per_request = \"32M\"\n\
+max_image_bytes = \"1048576\"\n\
+max_dimension = 8192\n\
+max_pixels = \"8M\""
+    )
+    .unwrap();
+    let mut cfg = CliConfig::default();
+    let defaults = CliConfig::default();
+    apply_config_sources(&mut cfg, &defaults, None, None, Some(&file));
+    let over = cfg.image_limits.expect("image limits parsed");
+    assert_eq!(over.detail, Some(mink::runtime::ImageDetail::Low));
+    assert_eq!(over.max_images_per_request, Some(8));
+    assert_eq!(over.max_image_bytes_per_request, Some(32_000_000));
+    assert_eq!(over.max_image_bytes, Some(1_048_576));
+    assert_eq!(over.max_dimension, Some(8192));
+    assert_eq!(over.max_pixels, Some(8_000_000));
+}
+
+#[test]
+fn image_limits_empty_or_invalid_section_is_ignored() {
+    let empty: MinkConfigFile = toml::from_str("[provider.image]\n").unwrap();
+    let mut cfg = CliConfig::default();
+    apply_config_sources(&mut cfg, &CliConfig::default(), None, None, Some(&empty));
+    assert!(cfg.image_limits.is_none(), "defaults must not produce overrides");
+
+    let invalid: MinkConfigFile = toml::from_str("[provider.image]\ndetail = \"ultra\"").unwrap();
+    let mut cfg = CliConfig::default();
+    apply_config_sources(&mut cfg, &CliConfig::default(), None, None, Some(&invalid));
+    assert!(cfg.image_limits.is_none(), "invalid section must be ignored");
+}
+
+#[test]
+fn image_limits_merge_across_layers_field_wise() {
+    let defaults = CliConfig::default();
+    let user: MinkConfigFile =
+        toml::from_str("[provider.image]\nmax_images_per_request = 8").unwrap();
+    let project: MinkConfigFile =
+        toml::from_str("[provider.image]\ndetail = \"low\"").unwrap();
+    let mut cfg = CliConfig::default();
+    apply_config_sources(&mut cfg, &defaults, Some(&user), Some(&project), None);
+    let over = cfg.image_limits.expect("merged overrides");
+    assert_eq!(over.max_images_per_request, Some(8));
+    assert_eq!(over.detail, Some(mink::runtime::ImageDetail::Low));
+}

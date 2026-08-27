@@ -43,6 +43,7 @@ impl CapturingVisionBackend {
                             .collect()
                     })
                     .unwrap_or_default(),
+                parse_error: None,
             }))
         }
         fn text(content: &str) -> Result<LlmEvent> {

@@ -1,10 +1,16 @@
 //! Request-time image projection: resolve `tool_attachment` blocks into
-//! OpenAI `image_url` data-URL parts (v7 §9.2/§9.5).
+//! OpenAI `image_url` data-URL parts (v7 §9.2/§9.5), plus single-consumption
+//! lifecycle projection (§7.3).
 //!
-//! Phase one sends the captured raw bytes verbatim (no normalization, no
-//! re-encoding). Failures follow the v7 contract: a fresh attachment fails
-//! the current request; a historical attachment degrades to a model-visible
-//! `[image unavailable]` text block with per-id deduplicated warnings.
+//! History references are plain text. Each reference is expanded into a data
+//! URL exactly ONCE — on the first request after its capture (it sits after
+//! the last assistant message). Once the model has seen it (a later
+//! assistant message exists), the reference projects as a deterministic
+//! text citation instead of being re-base64'd on every request; the model
+//! can re-attach it with `Read image://...`. Failures follow the v7
+//! contract: a fresh (unconsumed) attachment fails the current request; a
+//! historical attachment degrades to a model-visible `[image unavailable]`
+//! text block with per-id deduplicated warnings.
 
 use anyhow::Result;
 use base64::Engine as _;
@@ -12,6 +18,65 @@ use serde_json::Value;
 use std::collections::HashSet;
 
 pub(crate) const UNAVAILABLE_PREFIX: &str = "[image unavailable: ";
+
+/// Deterministic text citation for an already-consumed attachment (the
+/// model saw the image once; the pixel payload is not re-sent).
+pub(crate) fn previous_image_text(block: &Value) -> String {
+    let url = block
+        .get("url")
+        .and_then(Value::as_str)
+        .unwrap_or("image://?");
+    let width = block.get("width").and_then(Value::as_u64).unwrap_or(0);
+    let height = block.get("height").and_then(Value::as_u64).unwrap_or(0);
+    let format = block.get("format").and_then(Value::as_str).unwrap_or("image");
+    format!(
+        "[Previously attached image: {url} ({width}x{height} {format}). Use Read with this image reference if visual inspection is needed again.]"
+    )
+}
+
+/// Single-consumption request projection (v7 §7.3): attachments after the
+/// LAST assistant message have not been seen by the model yet — they stay as
+/// `tool_attachment` and materialize on this request. Attachments before it
+/// were already consumed (their pixel payload reached the model once) and
+/// become a deterministic text citation; they are never re-expanded, never
+/// budgeted as images, and never removed from history.
+///
+/// Order-based, so a crash between tool-result persistence and the next LLM
+/// request still re-sends the capture (it remains after the last assistant
+/// message). A compaction cut that drops the assistant message also counts
+/// the surviving reference as unconsumed (safe direction: at most re-sent
+/// once).
+pub(crate) fn project_consumed_attachments(messages: &[Value]) -> Vec<Value> {
+    if !messages.iter().any(|message| {
+        message.get("role").and_then(Value::as_str) == Some("assistant")
+    }) {
+        // No assistant message yet: every capture is unconsumed.
+        return messages.to_vec();
+    }
+    let last_assistant = messages
+        .iter()
+        .rposition(|message| {
+            message.get("role").and_then(Value::as_str) == Some("assistant")
+        })
+        .expect("checked above");
+    let mut projected = messages.to_vec();
+    for message_index in 0..last_assistant {
+        let Some(blocks) = projected[message_index]
+            .get_mut("content")
+            .and_then(Value::as_array_mut)
+        else {
+            continue;
+        };
+        for block in blocks.iter_mut() {
+            if block.get("type").and_then(Value::as_str) != Some("tool_attachment") {
+                continue;
+            }
+            let text = previous_image_text(block);
+            *block = serde_json::json!({"type": "text", "text": text});
+        }
+    }
+    projected
+}
 
 /// Materialize every `tool_attachment` block in the request messages.
 ///
@@ -41,6 +106,12 @@ pub(crate) fn materialize_images_with(
         }
         return Ok(());
     };
+    // Single-consumption: `project_request_messages` already turned every
+    // CONSUMED reference into a text citation, so the remaining
+    // `tool_attachment` blocks here are exactly the unconsumed batch for
+    // this request. The defensive counters below enforce the per-request
+    // budget on that batch; crossing it degrades historical attachments (or
+    // fails the request for this-turn ones) instead of rewriting history.
     // Defensive re-check of the tool-layer quota on hand-imported or corrupt
     // conversations (review): count/byte limits are enforced before any
     // base64 allocation, and dimension/pixel limits inside materialize_one.
@@ -224,7 +295,7 @@ fn materialize_one(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::capabilities::model_capabilities::{ImageInputCapability, OpenAiChatImageUrlLimits};
+    use crate::capabilities::model_capabilities::OpenAiChatImageUrlLimits;
     use crate::session::image_cache::ImageCache;
     use serde_json::json;
 
@@ -444,21 +515,6 @@ mod tests {
     }
 
     #[test]
-    fn quota_from_messages_counts_blocks_and_bytes() {
-        use crate::tools::image::ImageQuotaState;
-        let id = "sha256:".to_string() + &"ef".repeat(32);
-        let messages = vec![json!({"role": "user", "content": [
-            json!({"type": "tool_attachment", "tool_use_id": "a", "url": format!("image://{id}"), "format": "png", "width": 1, "height": 1, "bytes": 100}),
-            json!({"type": "tool_attachment", "tool_use_id": "b", "url": format!("image://{id}"), "format": "png", "width": 1, "height": 1, "bytes": 50}),
-            json!({"type": "text", "text": "label"}),
-        ]})];
-        let quota = ImageQuotaState::from_messages(&messages);
-        // Same id repeated counts per block.
-        assert_eq!(quota.used_images, 2);
-        assert_eq!(quota.used_bytes, 150);
-    }
-
-    #[test]
     fn wire_body_contains_materialized_image_part() {
         use crate::llm::transport::build_openai_body;
         let home = std::env::temp_dir().join(format!(
@@ -492,6 +548,80 @@ mod tests {
         let tool_pos = text.find("\"role\":\"tool\"").unwrap();
         let image_pos = text.find("image_url").unwrap();
         assert!(tool_pos < image_pos, "tool message must precede the image part");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn consumed_attachments_become_text_references() {
+        let messages = vec![
+            json!({"role": "user", "content": [
+                json!({"type": "tool_attachment", "tool_use_id": "a", "url": "image://sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "format": "png", "width": 1024, "height": 768, "bytes": 100}),
+            ]}),
+            json!({"role": "assistant", "content": [json!({"type": "text", "text": "I see a chart."})]}),
+            json!({"role": "user", "content": [
+                json!({"type": "tool_attachment", "tool_use_id": "b", "url": "image://sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "format": "png", "width": 64, "height": 32, "bytes": 200}),
+            ]}),
+        ];
+        let projected = crate::llm::image_projection::project_consumed_attachments(&messages);
+        // Oldest reference (before the last assistant message) is consumed.
+        let first = &projected[0]["content"][0];
+        assert_eq!(first["type"], "text");
+        let text = first["text"].as_str().unwrap();
+        assert!(text.contains("[Previously attached image: image://sha256:aaaaaaaa"), "{text}");
+        assert!(text.contains("1024x768 png"), "{text}");
+        assert!(text.contains("Read with this image reference"), "{text}");
+        // The reference after the last assistant message is unconsumed.
+        assert_eq!(projected[2]["content"][0]["type"], "tool_attachment");
+    }
+
+    #[test]
+    fn no_assistant_message_keeps_all_attachments() {
+        let messages = vec![json!({"role": "user", "content": [
+            json!({"type": "tool_attachment", "tool_use_id": "a", "url": "image://sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "format": "png", "width": 1, "height": 1, "bytes": 1}),
+        ]})];
+        let projected = crate::llm::image_projection::project_consumed_attachments(&messages);
+        assert_eq!(projected[0]["content"][0]["type"], "tool_attachment");
+    }
+
+    #[test]
+    fn consumed_attachments_are_never_materialized() {
+        // A consumed reference uses an id that does NOT exist in the cache:
+        // projection turns it into a text citation, so materialization never
+        // touches it (no unavailable degrade, no error). The unconsumed
+        // reference still materializes.
+        let home = std::env::temp_dir().join(format!(
+            "mink-proj-consume-{}",
+            std::thread::current().name().unwrap_or("t")
+        ));
+        let cache = ImageCache::new(&home);
+        let (fresh_id, fresh_bytes) = { let b = png_fixture(16, 16); (cache.commit(&b).unwrap(), b) };
+        let missing = "sha256:".to_string() + &"aa".repeat(32);
+        let messages = vec![
+            json!({"role": "user", "content": [
+                json!({"type": "tool_attachment", "tool_use_id": "c", "url": format!("image://{missing}"), "format": "png", "width": 1, "height": 1, "bytes": 1}),
+            ]}),
+            json!({"role": "assistant", "content": [json!({"type": "text", "text": "seen"})]}),
+            json!({"role": "user", "content": [attachment_block(&fresh_id, &fresh_bytes)]}),
+        ];
+        let mut projected = crate::llm::image_projection::project_consumed_attachments(&messages);
+        let display = RecordingDisplay {
+            infos: std::sync::Mutex::new(Vec::new()),
+        };
+        materialize_images_with(
+            &mut projected,
+            &cache,
+            &display,
+            Some(&limits()),
+            &HashSet::new(),
+            &mut HashSet::new(),
+        )
+        .unwrap();
+        assert_eq!(projected[0]["content"][0]["type"], "text");
+        assert!(projected[0]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("[Previously attached image"), "{}", projected[0]);
+        assert_eq!(projected[2]["content"][0]["type"], "image_url");
         let _ = std::fs::remove_dir_all(&home);
     }
 }
@@ -665,7 +795,7 @@ mod defensive_quota_tests {
             blocks
                 .iter()
                 .any(|b| b["type"] == "text" && b["text"].as_str().unwrap().contains("max_images_per_request")),
-            "third block must carry the limit reason"
+            "third block must carry the defensive limit reason"
         );
         let _ = std::fs::remove_dir_all(&home);
     }

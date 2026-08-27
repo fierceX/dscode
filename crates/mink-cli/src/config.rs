@@ -76,6 +76,22 @@ pub struct ProviderConfigFile {
     /// Model ids declared image-capable. When set, this replaces the built-in
     /// vision model list (empty list disables image capture entirely).
     pub vision_models: Option<Vec<String>>,
+    /// `[provider.image]` — per-field image limit overrides applied on top
+    /// of the resolved capability (never enables an Unsupported session).
+    pub image: ImageConfigFile,
+}
+
+/// `[provider.image]` TOML section (all fields optional). Byte/pixel values
+/// accept plain integers or K/M/G suffixes (e.g. "32M").
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ImageConfigFile {
+    pub detail: Option<String>,
+    pub max_images_per_request: Option<usize>,
+    pub max_image_bytes_per_request: Option<String>,
+    pub max_image_bytes: Option<String>,
+    pub max_dimension: Option<u32>,
+    pub max_pixels: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
@@ -237,6 +253,9 @@ pub struct CliConfig {
     /// Explicit vision model ids; `Some(list)` replaces the built-in default
     /// list (empty disables image capture), `None` keeps the built-in list.
     pub vision_models: Option<Vec<String>>,
+    /// `[provider.image]` overrides, merged across config-file layers
+    /// (higher layer wins per field).
+    pub image_limits: Option<mink::runtime::ImageLimitsOverrides>,
     /// 从 --config CLI 参数解析的 TOML 配置（最高优先级，在 apply_config_sources 中应用）
     pub cli_config: Option<MinkConfigFile>,
     /// 工具选择：`None` 使用默认工具集；`Some(vec![])` 不启用任何工具。
@@ -320,6 +339,7 @@ impl Default for CliConfig {
             router: None,
             image_input: None,
             vision_models: None,
+            image_limits: None,
             enabled_tools: None,
             cli_config: None,
             tool_approval_mode: ToolApprovalMode::Yolo,
@@ -567,6 +587,50 @@ pub fn parse_image_input(value: &str) -> Result<mink::runtime::ImageInputCapabil
     }
 }
 
+/// Parse the `[provider.image]` TOML section into per-field overrides.
+/// `Ok(None)` for an all-empty section; any invalid field fails the whole
+/// section (callers warn and ignore).
+pub fn parse_image_limits(
+    file: &ImageConfigFile,
+) -> Result<Option<mink::runtime::ImageLimitsOverrides>> {
+    let detail = match file.detail.as_deref() {
+        None => None,
+        Some(value) => Some(match value.trim().to_ascii_lowercase().as_str() {
+            "high" => mink::runtime::ImageDetail::High,
+            "low" => mink::runtime::ImageDetail::Low,
+            other => anyhow::bail!(
+                "invalid image.detail {other:?}: expected \"high\" or \"low\""
+            ),
+        }),
+    };
+    let parse_u64 = |name: &str, value: &str| -> Result<u64> {
+        parse_size_bytes(value)
+            .map(|n| n as u64)
+            .map_err(|_| anyhow!("invalid image.{name} {value:?}: expected a byte count"))
+    };
+    let max_image_bytes_per_request = match file.max_image_bytes_per_request.as_deref() {
+        None => None,
+        Some(value) => Some(parse_u64("max_image_bytes_per_request", value)?),
+    };
+    let max_image_bytes = match file.max_image_bytes.as_deref() {
+        None => None,
+        Some(value) => Some(parse_u64("max_image_bytes", value)?),
+    };
+    let max_pixels = match file.max_pixels.as_deref() {
+        None => None,
+        Some(value) => Some(parse_u64("max_pixels", value)?),
+    };
+    let overrides = mink::runtime::ImageLimitsOverrides {
+        detail,
+        max_images_per_request: file.max_images_per_request,
+        max_image_bytes_per_request,
+        max_image_bytes,
+        max_dimension: file.max_dimension,
+        max_pixels,
+    };
+    Ok((!overrides.is_empty()).then_some(overrides))
+}
+
 pub(crate) fn default_home() -> std::path::PathBuf {
     std::path::PathBuf::from(
         std::env::var("MINK_HOME")
@@ -769,6 +833,17 @@ fn apply_config_sources(
         }
         if let Some(models) = &toml_cfg.provider.vision_models {
             cfg.vision_models = Some(models.clone());
+        }
+        // `[provider.image]` overrides: higher layers win per field; an
+        // invalid section is warned and ignored entirely (same stance as
+        // invalid image_input).
+        match parse_image_limits(&toml_cfg.provider.image) {
+            Ok(Some(overrides)) => match &mut cfg.image_limits {
+                Some(existing) => existing.merge(overrides),
+                None => cfg.image_limits = Some(overrides),
+            },
+            Ok(None) => {}
+            Err(error) => eprintln!("[mink] Warning: ignoring [provider.image]: {error}"),
         }
         if let Some(extra_body) = &toml_cfg.provider.openai_extra_body {
             cfg.openai_extra_body.extend(extra_body.clone());

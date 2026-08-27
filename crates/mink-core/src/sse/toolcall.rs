@@ -15,6 +15,7 @@ pub fn build_tool_call_event(name: &str, id: &str, input: &str) -> Result<ToolCa
         id: id.to_string(),
         input_json: obj.clone(),
         fields: BTreeMap::new(),
+        parse_error: None,
     };
     let map = obj
         .as_object()

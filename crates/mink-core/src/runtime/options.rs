@@ -345,6 +345,18 @@ impl AgentOptions {
         self
     }
 
+    /// Override a subset of the resolved image limits (`.minkrc
+    /// [provider.image]` equivalent). Only fields that are `Some` are
+    /// applied; an `Unsupported` capability is never enabled by overrides
+    /// (use `with_image_input` for that).
+    pub fn with_image_limits(
+        mut self,
+        overrides: crate::capabilities::model_capabilities::ImageLimitsOverrides,
+    ) -> Self {
+        self.config.image_limits = Some(overrides);
+        self
+    }
+
     /// The currently configured vision model list (built-in defaults unless
     /// replaced via `with_vision_models`). Used by CLI layers that construct
     /// their own backend (e.g. `--router`) so user configuration is honored.

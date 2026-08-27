@@ -206,6 +206,17 @@ struct ToolPolicyGate<'a> {
     storm: &'a Mutex<StormBreaker>,
 }
 
+/// Per-`execute_all` image budget counters (v7 §7.3). Created once per
+/// `execute_all` and shared across every sequential-tool flushes of the read
+/// batch — the budget resets only at the next `execute_all`, so history
+/// never locks out new reads while one tool-call group stays bounded
+/// (memory and keepable promises).
+#[derive(Debug, Default)]
+struct ImageBatchBudget {
+    used_images: usize,
+    used_bytes: u64,
+}
+
 struct ToolExecOutput {
     content: String,
     is_bash: bool,
@@ -265,6 +276,10 @@ impl ToolRunner {
     pub async fn execute_all(&self, calls: Vec<ToolCallEvent>) -> Result<Vec<ToolExecution>> {
         let mut results = Vec::new();
         let mut read_batch = Vec::new();
+        // One budget per execute_all: sequential tools flush the read batch
+        // mid-way, but the counters must NOT reset there or a Read→Bash→Read
+        // group would slip two 10MiB images into the same request.
+        let mut image_budget = ImageBatchBudget::default();
 
         for call in calls {
             let metadata = self.metadata_for(&call.name);
@@ -273,7 +288,7 @@ impl ToolRunner {
             });
             if custom_sequential || requires_sequential_execution(metadata) {
                 results.extend(
-                    self.execute_read_batch(std::mem::take(&mut read_batch))
+                    self.execute_read_batch(std::mem::take(&mut read_batch), &mut image_budget)
                         .await?,
                 );
                 results.push(self.execute_prepared_call(call).await?);
@@ -282,7 +297,7 @@ impl ToolRunner {
             }
         }
 
-        results.extend(self.execute_read_batch(read_batch).await?);
+        results.extend(self.execute_read_batch(read_batch, &mut image_budget).await?);
         Ok(results)
     }
 
@@ -303,7 +318,11 @@ impl ToolRunner {
         }
     }
 
-    async fn execute_read_batch(&self, calls: Vec<ToolCallEvent>) -> Result<Vec<ToolExecution>> {
+    async fn execute_read_batch(
+        &self,
+        calls: Vec<ToolCallEvent>,
+        budget: &mut ImageBatchBudget,
+    ) -> Result<Vec<ToolExecution>> {
         if calls.is_empty() {
             return Ok(Vec::new());
         }
@@ -413,39 +432,75 @@ impl ToolRunner {
             text_results.push(handle.await??);
         }
 
-        // Phase one, image family: concurrent compute-only prepare.
-        let mut image_handles = Vec::new();
-        for slot in &slots {
-            if let PreparedSlot::Image { kind, .. } = slot {
-                let ctx = self.ctx.clone();
-                let kind = kind.clone();
-                image_handles.push(tokio::spawn(async move {
-                    tokio::task::spawn_blocking(move || {
-                        super::file::prepare_image_read(&ctx, kind)
-                    })
-                    .await
-                }));
-            }
-        }
-        let mut image_results = Vec::with_capacity(image_handles.len());
-        for handle in image_handles {
-            image_results.push(handle.await??);
-        }
-
-        // Phase two: assemble by original slot order; image commits (quota
-        // reserve + publish) run in the original image call order.
+        // Image family runs strictly in call order: prepare one image at a
+        // time (bounded memory — never hold every image's bytes at once),
+        // then admit it against the per-`execute_all` image budget shared
+        // across flushes (sequential tools do not reset it).
         let mut text_iter = text_results.into_iter();
-        let mut image_iter = image_results.into_iter();
         let mut results = Vec::with_capacity(slots.len());
         for slot in slots {
             match slot {
                 PreparedSlot::Immediate(result) => results.push(result),
                 PreparedSlot::Text(_) => results.push(text_iter.next().expect("text slot")),
-                PreparedSlot::Image { call, .. } => {
-                    results.push(
-                        self.commit_image_result(call, image_iter.next().expect("image slot"))
-                            .await,
-                    );
+                PreparedSlot::Image { call, kind } => {
+                    let ctx = self.ctx.clone();
+                    match kind {
+                        super::file::ImageReadKind::VfsCandidate {
+                            display_path,
+                            has_selector,
+                        } => {
+                            // Read the VFS image on demand (one at a time,
+                            // bounded memory). NotImage falls back to the
+                            // ordinary text read for this call (selector
+                            // honored).
+                            let ctx_for_prepare = ctx.clone();
+                            let outcome = match tokio::task::spawn_blocking(move || {
+                                super::file::prepare_vfs_candidate(
+                                    &ctx_for_prepare,
+                                    display_path,
+                                    has_selector,
+                                )
+                            })
+                            .await
+                            {
+                                Ok(result) => result,
+                                Err(error) => Err(anyhow::anyhow!(
+                                    "image prepare task failed: {error}"
+                                )),
+                            };
+                            match outcome {
+                                Ok(super::file::VfsImageOutcome::Image(prepared)) => {
+                                    results.push(
+                                        self.commit_image_result(call, Ok(prepared), budget).await,
+                                    );
+                                }
+                                Ok(super::file::VfsImageOutcome::NotImage) => {
+                                    results.push(self.execute_text_fallback(call).await);
+                                }
+                                Err(error) => results.push(failed_tool_result(
+                                    call.id,
+                                    call.name,
+                                    call.fields,
+                                    format!("{error:#}"),
+                                )),
+                            }
+                        }
+                        _ => {
+                            let prepared = match tokio::task::spawn_blocking(move || {
+                                super::file::prepare_image_read(&ctx, kind)
+                            })
+                            .await
+                            {
+                                Ok(result) => result,
+                                Err(error) => Err(anyhow::anyhow!(
+                                    "image prepare task failed: {error}"
+                                )),
+                            };
+                            results.push(
+                                self.commit_image_result(call, prepared, budget).await,
+                            );
+                        }
+                    }
                 }
                 PreparedSlot::ClassifyError { call, error } => results.push(failed_tool_result(
                     call.id,
@@ -466,6 +521,7 @@ impl ToolRunner {
         &self,
         call: ToolCallEvent,
         prepared: anyhow::Result<super::file::PreparedImage>,
+        batch: &mut ImageBatchBudget,
     ) -> ToolExecution {
         let prepare_error = |error: anyhow::Error| {
             failed_tool_result(
@@ -479,26 +535,21 @@ impl ToolRunner {
             Ok(prepared) => prepared,
             Err(error) => return prepare_error(error),
         };
-        let Some(limits) = super::file::image_limits(&self.ctx) else {
-            return prepare_error(anyhow::anyhow!(
-                "image reading is not enabled in this session"
-            ));
-        };
         let bytes = prepared.bytes.len() as u64;
-        // Phase A: reserve check (guard is dropped before any await).
-        {
-            let quota = self
-                .ctx
-                .image_quota
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            let (remaining_images, remaining_bytes) = quota.remaining(&limits);
-            if remaining_images < 1 || remaining_bytes < bytes {
+        // Per-`execute_all` admission (v7 §7.3): the budget starts at zero
+        // for every `execute_all` call (shared across sequential-tool
+        // flushes), so history never locks out new reads. A rejected read
+        // returns an ordinary failed ToolExecution and is never published —
+        // no promise of a later attach that materialization could not keep.
+        if let Some(limits) = super::file::image_limits(&self.ctx) {
+            if batch.used_images >= limits.max_images_per_request
+                || batch.used_bytes.saturating_add(bytes) > limits.max_image_bytes_per_request
+            {
                 return prepare_error(anyhow::anyhow!(
-                    "Error: image attachment quota exceeded: usage {}/{} images and {}/{} bytes; remove images or use fewer Read calls",
-                    quota.used_images,
+                    "Error: image attachment batch limit exceeded: usage {}/{} images and {}/{} bytes; use fewer Read calls in this batch",
+                    batch.used_images,
                     limits.max_images_per_request,
-                    quota.used_bytes,
+                    batch.used_bytes,
                     limits.max_image_bytes_per_request
                 ));
             }
@@ -520,16 +571,9 @@ impl ToolRunner {
                 }
             }
         };
-        // Phase C: commit succeeded — consume the reservation.
-        {
-            let mut quota = self
-                .ctx
-                .image_quota
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            quota.used_images = quota.used_images.saturating_add(1);
-            quota.used_bytes = quota.used_bytes.saturating_add(bytes);
-        }
+        // Commit succeeded — consume the batch budget.
+        batch.used_images = batch.used_images.saturating_add(1);
+        batch.used_bytes = batch.used_bytes.saturating_add(bytes);
         // Register as a this-turn capture so a materialization failure of a
         // freshly produced attachment fails the request instead of silently
         // degrading (v7 §9.5).
@@ -570,16 +614,6 @@ impl ToolRunner {
         }
     }
 
-    /// Replace the per-turn image quota baseline (used = active projection
-    /// sent to the model). Called by the turn executor before each batch.
-    pub fn set_image_quota(&self, state: crate::tools::image::ImageQuotaState) {
-        *self
-            .ctx
-            .image_quota
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = state;
-    }
-
     async fn execute_prepared_call(&self, call: ToolCallEvent) -> Result<ToolExecution> {
         match self.prepare_call(call) {
             PreparedCall::Immediate(result) => Ok(result),
@@ -601,6 +635,17 @@ impl ToolRunner {
     }
 
     fn prepare_call(&self, call: ToolCallEvent) -> PreparedCall {
+        // Model-generated tool arguments that could not be parsed become an
+        // ordinary failed tool result instead of failing the turn: the model
+        // sees the error and can retry (dsh-style degradation).
+        if let Some(error) = call.parse_error.clone() {
+            return PreparedCall::Immediate(failed_tool_result(
+                call.id,
+                call.name,
+                call.fields,
+                format!("Error: tool input JSON invalid: {error}"),
+            ));
+        }
         let tool_metadata = self.metadata_for(&call.name);
         let policy = ToolPolicyGate {
             surface: &self.ctx.tool_surface,
@@ -620,6 +665,38 @@ impl ToolRunner {
     ) -> Result<ToolExecution> {
         let raw = dispatch_tool(ctx, call, tool_fn);
         Ok(format_dispatched_result(ctx, call, raw))
+    }
+
+    /// VFS `NotImage` fallback: run the ordinary text Read for this call
+    /// (classification deferred the decision; the backend reported no
+    /// image).
+    async fn execute_text_fallback(&self, call: ToolCallEvent) -> ToolExecution {
+        let ctx = self.ctx.clone();
+        // Static registry reference: safe to move into the blocking task.
+        let tool_fn = tool_registry()
+            .iter()
+            .find(|t| t.metadata().name == call.name)
+            .map(|t| t.as_ref());
+        let call_for_task = call.clone();
+        match tokio::task::spawn_blocking(move || {
+            Self::execute_one_sync(&ctx, &call_for_task, tool_fn)
+        })
+        .await
+        {
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) => failed_tool_result(
+                call.id,
+                call.name,
+                call.fields,
+                format!("{error:#}"),
+            ),
+            Err(error) => failed_tool_result(
+                call.id.clone(),
+                call.name.clone(),
+                call.fields.clone(),
+                format!("text fallback task failed: {error}"),
+            ),
+        }
     }
 }
 

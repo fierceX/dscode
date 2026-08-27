@@ -109,9 +109,12 @@ pub(crate) fn estimate_openai_context_tokens(
         request_messages.push(json!({"role":"system","content":system_prompt}));
     }
     request_messages.extend(converted);
-    // The JSON byte estimate covers text and already-materialized data URLs;
-    // a pre-materialization `tool_attachment` block is only metadata, so its
-    // eventual pixel payload is added with the tile estimator (review fix #3).
+    // Single-consumption: `project_request_messages` already turned consumed
+    // references into text citations, so only the unconsumed batch counts
+    // image tokens. The JSON byte estimate covers text and already-
+    // materialized data URLs; a pre-materialization `tool_attachment` block
+    // is only metadata, so its eventual pixel payload is added with the
+    // tile estimator (review fix #3).
     let mut image_tokens = 0usize;
     for message in &request_messages {
         let Some(blocks) = message.get("content").and_then(Value::as_array) else {

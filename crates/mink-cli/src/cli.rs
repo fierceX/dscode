@@ -517,6 +517,9 @@ fn assemble_runtime_options(
     if let Some(capability) = cfg.image_input.clone() {
         options = options.with_image_input(capability);
     }
+    if let Some(overrides) = &cfg.image_limits {
+        options = options.with_image_limits(overrides.clone());
+    }
     if let Some(models) = &cfg.vision_models {
         options = options.with_vision_models(models.clone());
     }
@@ -953,7 +956,8 @@ fn print_usage() {
     );
     println!("                          Sections: [provider] [generation] [context] [tools]");
     println!("                          [provider] image_input: \"on\" | \"off\" (explicit");
-    println!("                          multi-modal override; vision_models: model id list)");
+    println!("                          multi-modal override; vision_models: model id list;");
+    println!("                          [provider.image]: max_images_per_request etc.)");
     println!("                          [tools.edit] [signal] [sandbox] [sandbox_python]");
     println!("  -h, --help              Show this help");
     println!();

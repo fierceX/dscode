@@ -257,11 +257,25 @@ impl OpenAIParser {
             let evt = match build_tool_call_event(&call.name, &call.id, &call.arguments) {
                 Ok(evt) => evt,
                 Err(original) => {
+                    // Repair covers truncation; anything else (e.g. a missing
+                    // comma) degrades instead of failing the whole turn: the
+                    // call is marked with the parse error and the runner
+                    // turns it into a failed tool result the model can see
+                    // and retry.
                     let repaired = crate::repair::repair_truncated_json(&call.arguments);
-                    if repaired.changed && !repaired.fallback {
-                        build_tool_call_event(&call.name, &call.id, &repaired.repaired)?
+                    let repaired_evt = if repaired.changed && !repaired.fallback {
+                        build_tool_call_event(&call.name, &call.id, &repaired.repaired).ok()
                     } else {
-                        anyhow::bail!("parse tool call {} input: {}", call.name, original);
+                        None
+                    };
+                    match repaired_evt {
+                        Some(evt) => evt,
+                        None => {
+                            let mut degraded =
+                                build_tool_call_event(&call.name, &call.id, "{}")?;
+                            degraded.parse_error = Some(format!("{original:#}"));
+                            degraded
+                        }
                     }
                 }
             };

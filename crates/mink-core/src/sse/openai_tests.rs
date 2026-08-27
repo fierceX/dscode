@@ -283,6 +283,27 @@ fn truncated_tool_call_arguments_are_repaired_before_emit() {
 }
 
 #[test]
+fn unparseable_tool_call_arguments_emit_parse_error_call() {
+    // Arguments with a missing comma are not a truncation shape: the parser
+    // must NOT fail the turn — it emits a ToolCall marked with the parse
+    // error so the runner can turn it into a failed tool result.
+    let mut p = OpenAIParser::new();
+    let lines = [
+        "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_bad\",\"type\":\"function\",\"function\":{\"name\":\"Edit\",\"arguments\":\"{\\\"path\\\": \\\"/tmp/f.txt\\\" \\\"edits\\\": []}\"}}]},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}",
+        "data: [DONE]",
+    ];
+    let events = collect_lines(&mut p, &lines);
+    let bad = events.iter().find_map(|e| match e {
+        Event::ToolCall(c) if c.name == "Edit" => Some(c),
+        _ => None,
+    });
+    let bad = bad.expect("degraded call must be emitted");
+    assert_eq!(bad.input_json, serde_json::json!({}));
+    let err = bad.parse_error.as_deref().expect("parse error present");
+    assert!(err.contains("parse tool input"), "{err}");
+}
+
+#[test]
 fn cached_tokens_from_prompt_tokens_details() {
     let mut p = OpenAIParser::new();
     let lines = [

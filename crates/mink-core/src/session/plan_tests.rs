@@ -1,5 +1,41 @@
 use super::*;
 
+#[test]
+fn project_full_request_applies_consumed_images_then_plan() {
+    // The compactor and the turn executor share this projection: consumed
+    // image references must become text citations BEFORE the plan projection
+    // and any token estimate (or history pictures would be counted as
+    // visual tokens forever).
+    let (root, store) = store("full-request-projection");
+    store.set_draft("# Plan\n", 1024).unwrap();
+    store.confirm().unwrap();
+    let plan_path = root.join("plan.md");
+    let messages = vec![
+        serde_json::json!({"role": "user", "content": [
+            serde_json::json!({"type": "tool_attachment", "tool_use_id": "a", "url": "image://sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "format": "png", "width": 1024, "height": 768, "bytes": 100}),
+        ]}),
+        serde_json::json!({"role": "assistant", "content": [serde_json::json!({"type": "text", "text": "seen"})]}),
+        serde_json::json!({"role": "user", "content": [
+            serde_json::json!({"type": "tool_attachment", "tool_use_id": "b", "url": "image://sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "format": "png", "width": 64, "height": 32, "bytes": 200}),
+        ]}),
+    ];
+    let projected = project_full_request(&plan_path, true, &messages).unwrap();
+    // Consumed reference (before last assistant) -> text citation.
+    assert_eq!(projected[0]["content"][0]["type"], "text");
+    assert!(projected[0]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("[Previously attached image"), "{}", projected[0]);
+    // Unconsumed (after last assistant) stays a tool_attachment.
+    assert_eq!(projected[2]["content"][0]["type"], "tool_attachment");
+    // Plan is the last projected message (tail mode).
+    assert!(projected.last().unwrap()["content"]
+        .as_str()
+        .unwrap()
+        .contains("<current-plan>"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
 fn store(name: &str) -> (PathBuf, PlanStore) {
     let root = std::env::temp_dir().join(format!(
         "mink-{name}-{}-{}",

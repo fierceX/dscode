@@ -38,10 +38,15 @@ impl TurnCompactor {
         if self.compacted_this_turn {
             return Ok(false);
         }
-        let request_messages = crate::session::plan::project_current_plan(
+        // Same projection as the real request: consumed image references
+        // become text citations FIRST, so the compaction estimate counts
+        // visual tokens only for the unconsumed batch — otherwise history
+        // pictures would trigger premature compaction (they are never
+        // re-expanded after consumption).
+        let request_messages = crate::session::plan::project_full_request(
             &self.ctx.plan_path,
-            messages,
             self.ctx.config.plan_projection_tail,
+            messages,
         )?;
         let local_tokens = crate::llm::transport::estimate_openai_context_tokens(
             &request_messages,

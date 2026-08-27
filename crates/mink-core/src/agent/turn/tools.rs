@@ -74,20 +74,9 @@ impl super::TurnExecutor {
         calls: Vec<ToolCallEvent>,
         mut belief: Option<&mut crate::agent::belief::BeliefTracker>,
         effects: &mut Vec<TurnEffect>,
-        request_messages: &[serde_json::Value],
+        _request_messages: &[serde_json::Value],
     ) -> Result<Option<&'static str>> {
         self.local.tool_call_count += calls.len() as u32;
-        // Per-batch image quota baseline: the active projection actually sent
-        // to the model (v7 §7.3). Re-computed after any compaction because the
-        // turn loop reloads messages before each tool batch. Attachments that
-        // would degrade at materialization (missing/damaged/unsupported
-        // objects) are excluded from the baseline (review fix #4).
-        let image_limits = self.ctx.model_capabilities.image_input.limits();
-        self.tools.set_image_quota(crate::tools::image::ImageQuotaState::from_messages_with_cache(
-            request_messages,
-            Some(&self.ctx.image_cache),
-            image_limits,
-        ));
         let (calls_to_execute, mut guarded_results) = self.apply_signal_recovery_guard(calls);
         let executed = if calls_to_execute.is_empty() {
             Ok(Vec::new())

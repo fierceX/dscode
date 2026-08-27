@@ -50,6 +50,10 @@ pub struct ToolCallEvent {
     pub id: String,
     pub input_json: Value,
     pub fields: BTreeMap<String, String>,
+    /// Model-generated tool arguments that could not be parsed. The SSE layer
+    /// fills this instead of failing the turn; the runner converts the call
+    /// into a failed tool result so the model can retry.
+    pub parse_error: Option<String>,
 }
 
 #[cfg(test)]

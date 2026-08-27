@@ -48,6 +48,20 @@ openai_token_param = "max_tokens"           # max_tokens / max_completion_tokens
 # 环境变量：MINK_IMAGE_INPUT=on|off，MINK_VISION_MODELS="model-a,model-b"
 # 优先级：CLI --config > project .minkrc > user ~/.minkrc > env > 默认
 
+# 图片限额覆盖（可选子表）：只覆盖已支持图片能力的会话；
+# 不会把文本会话变成视觉会话（那需要 image_input = "on"）。
+# 字节/像素值支持 K/M/G 后缀（如 "32M"）。默认见下方注释。
+#[provider.image]
+#detail = "high"                   # high | low（图片 token 估算档位，默认 high）
+#max_images_per_request = 600       # 单工具批（未消费批）图片数量预算防线（每批从0计数，
+#                                  # 超限 Read 返回普通失败；批次间重置，历史不锁死读图）
+#                                  # 历史引用=纯文本：只在下一次请求物化一次，
+#                                  # 此后投影为文字引用（Read image://可重新注入）
+#max_image_bytes_per_request = "16M"  # 默认 16MiB：单工具批（未消费批）图片字节预算防线
+#max_image_bytes = "16M"              # 默认 16MiB：单张图片原始字节上限
+#max_dimension = 16384                # 默认 16384：图片单边像素上限
+#max_pixels = "16M"                  # 默认 16M：解码像素总数上限
+
 # ── Generation ─────────────────────────────────────────────────
 [generation]
 max_tokens = 81920                          # 最大输出 token

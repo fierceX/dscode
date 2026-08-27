@@ -1685,11 +1685,15 @@ pub(crate) enum ImageReadKind {
     },
     /// `image://<sha256>` reference read: re-inject a cached object.
     ImageRef { id: String },
-    /// Virtual filesystem image bytes (already bounded by the backend).
-    ImageVfs {
-        bytes: Vec<u8>,
-        declared_mime: String,
+    /// Virtual filesystem candidate: the bytes are NOT read during
+    /// classification — `prepare_vfs_candidate` reads one image at a time in
+    /// call order, so many VFS images never share memory at once. A `None`
+    /// image result falls back to the ordinary text path (with its selector
+    /// still honored). `has_selector` is only rejected when the path IS an
+    /// image.
+    VfsCandidate {
         display_path: String,
+        has_selector: bool,
     },
 }
 
@@ -1727,33 +1731,27 @@ pub(crate) fn classify_image_read(
     }
     let has_selector =
         selection.offset.is_some() || selection.limit.is_some() || selection.raw;
-    if let Some(vfs) = &ctx.read_only_fs {
-        let max_bytes = image_limits(ctx)
-            .map(|limits| limits.max_image_bytes)
-            .unwrap_or(crate::capabilities::model_capabilities::DEFAULT_MAX_IMAGE_BYTES);
-        match vfs.read_image(&ctx.vfs_scope, &selection.path, max_bytes) {
-            Ok(Some(image)) => {
-                // A selector on a confirmed image is an explicit error, not a
-                // fallback to the text path (review fix).
-                if has_selector {
-                    anyhow::bail!(
-                        "Error: image files do not support line selectors or raw mode: {}",
-                        selection.path
-                    );
-                }
-                return Ok(ImageReadKind::ImageVfs {
-                    bytes: image.bytes,
-                    declared_mime: image.mime,
-                    display_path: selection.path.clone(),
-                });
-            }
-            Ok(None) => return Ok(ImageReadKind::NotImage),
-            // Backend errors must surface, never silently fall back to the
-            // text path (review fix #6).
-            Err(error) => {
-                anyhow::bail!("image read failed for {}: {error:#}", selection.path);
-            }
-        }
+    // Registered resources (artifact://, skill://, rule://, session://) and
+    // unknown URL-like schemes never become image reads: they keep the
+    // resource-router semantics (resolve with selector support, or fail
+    // closed on the text path). Checks only what this classifier can see —
+    // the async Read path already routed resources before VFS text.
+    if ctx.resource_router.can_handle(raw_path) {
+        return Ok(ImageReadKind::NotImage);
+    }
+    if ctx.resource_router.is_url_like(raw_path) {
+        return Ok(ImageReadKind::NotImage);
+    }
+    if let Some(_vfs) = &ctx.read_only_fs {
+        // The candidate keeps only its display path: the actual
+        // `read_image` call is deferred to `prepare_vfs_candidate`, which
+        // runs per image in call order — VFS bytes never accumulate across
+        // a batch (bounded memory). A selector is honored by the text path
+        // and rejected ONLY when the path turns out to be an image.
+        return Ok(ImageReadKind::VfsCandidate {
+            display_path: selection.path.clone(),
+            has_selector,
+        });
     }
     let path = match resolve_tool_path(&ctx.cwd, &selection.path) {
         Ok(path) => path,
@@ -1805,29 +1803,8 @@ pub(crate) fn prepare_image_read(
             })?;
             (bytes, String::new(), Some(id))
         }
-        ImageReadKind::ImageVfs {
-            bytes,
-            declared_mime,
-            display_path,
-        } => {
-            // The backend may exceed its declared cap: re-check before any
-            // further processing (review fix #6).
-            if bytes.len() as u64 > limits.max_image_bytes {
-                anyhow::bail!(
-                    "Error: image file exceeds the {} byte limit; downscale the image and retry",
-                    limits.max_image_bytes
-                );
-            }
-            // The VFS-declared mime must match the decoded bytes (v7 §12).
-            if let Some(info) = crate::tools::image::probe(&bytes)
-                && info.mime() != declared_mime
-            {
-                anyhow::bail!(
-                    "Error: virtual filesystem declared {declared_mime} but the bytes are {}",
-                    info.mime()
-                );
-            }
-            (bytes, display_path, None)
+        ImageReadKind::VfsCandidate { .. } => {
+            anyhow::bail!("vfs candidate must go through prepare_vfs_candidate")
         }
     };
     let info = crate::tools::image::probe(&bytes)
@@ -1867,6 +1844,99 @@ pub(crate) fn prepare_image_read(
         display_path,
         existing_id,
     })
+}
+
+/// Prepared image for the VFS candidate path. `NotImage` when the backend
+/// reported no image (falls back to the ordinary text read).
+#[derive(Debug)]
+pub(crate) enum VfsImageOutcome {
+    Image(PreparedImage),
+    NotImage,
+}
+
+/// Phase one compute for a `VfsCandidate`: read one image on demand (call
+/// order, one at a time — VFS bytes never accumulate across a batch), then
+/// run the same validation chain as local files.
+pub(crate) fn prepare_vfs_candidate(
+    ctx: &crate::context::ToolContext,
+    display_path: String,
+    has_selector: bool,
+) -> anyhow::Result<VfsImageOutcome> {
+    let limits = image_limits(ctx)
+        .ok_or_else(|| anyhow::anyhow!("image reading is not enabled in this session"))?;
+    let Some(vfs) = &ctx.read_only_fs else {
+        anyhow::bail!("vfs candidate without a virtual filesystem");
+    };
+    let image = vfs
+        .read_image(&ctx.vfs_scope, &display_path, limits.max_image_bytes)
+        .map_err(|error| anyhow::anyhow!("image read failed for {display_path}: {error:#}"))?
+        .map(|image| {
+            Ok::<_, anyhow::Error>(image)
+        })
+        .transpose()?;
+    let Some(image) = image else {
+        return Ok(VfsImageOutcome::NotImage);
+    };
+    // Only reject a selector once the path is CONFIRMED to be an image; a
+    // text path with a selector keeps working (the ordinary text read honors
+    // offset/limit/raw).
+    if has_selector {
+        anyhow::bail!(
+            "Error: image files do not support line selectors or raw mode: {display_path}"
+        );
+    }
+    // The backend may exceed its declared cap: re-check before any further
+    // processing (review fix #6).
+    if image.bytes.len() as u64 > limits.max_image_bytes {
+        anyhow::bail!(
+            "Error: image file exceeds the {} byte limit; downscale the image and retry",
+            limits.max_image_bytes
+        );
+    }
+    let info = crate::tools::image::probe(&image.bytes)
+        .ok_or_else(|| anyhow::anyhow!("Error: invalid image: header or dimensions could not be parsed"))?;
+    // The VFS-declared mime must match the decoded bytes (v7 §12).
+    if info.mime() != image.mime {
+        anyhow::bail!(
+            "Error: virtual filesystem declared {} but the bytes are {}",
+            image.mime,
+            info.mime()
+        );
+    }
+    if !limits.allowed_mime.contains(&info.format) {
+        anyhow::bail!(
+            "Error: unsupported image mime {} for the current model",
+            info.mime()
+        );
+    }
+    if info.width > limits.max_dimension || info.height > limits.max_dimension {
+        anyhow::bail!(
+            "Error: image side {}x{} exceeds the {}px per-side limit; downscale the image and retry",
+            info.width,
+            info.height,
+            limits.max_dimension
+        );
+    }
+    let pixels = crate::tools::image::checked_pixel_count(info.width, info.height)
+        .ok_or_else(|| anyhow::anyhow!("Error: image dimensions overflow"))?;
+    if pixels > limits.max_pixels {
+        anyhow::bail!(
+            "Error: image exceeds the {}px decoded-size limit; downscale the image and retry",
+            limits.max_pixels
+        );
+    }
+    let name = display_path
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("")
+        .to_string();
+    Ok(VfsImageOutcome::Image(PreparedImage {
+        bytes: image.bytes,
+        info,
+        name,
+        display_path,
+        existing_id: None,
+    }))
 }
 
 pub(crate) fn image_limits(

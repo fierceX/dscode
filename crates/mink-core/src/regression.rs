@@ -417,6 +417,7 @@ fn tool_call(name: &str, id: &str, input: serde_json::Value) -> ToolCallEvent {
         id: id.into(),
         input_json: input,
         fields,
+        parse_error: None,
     }
 }
 

@@ -9,10 +9,12 @@ impl super::TurnExecutor {
         &self,
         messages: &[serde_json::Value],
     ) -> Result<Vec<serde_json::Value>> {
-        crate::session::plan::project_current_plan(
+        // Full request projection: single-consumption image lifecycle (§7.3)
+        // then the plan — identical to what the compactor estimates with.
+        crate::session::plan::project_full_request(
             &self.ctx.plan_path,
-            messages,
             self.ctx.config.plan_projection_tail,
+            messages,
         )
     }
 

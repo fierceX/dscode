@@ -58,6 +58,7 @@ fn tool_call_event_roundtrip_fields() {
         id: "call_1".into(),
         input_json: input.clone(),
         fields: [("path".to_string(), "/tmp/file.txt".to_string())].into(),
+        parse_error: None,
     };
     assert_eq!(e.name, "Read");
     assert_eq!(e.id, "call_1");

@@ -316,6 +316,10 @@ pub struct ResolvedConfig {
     /// to the backend. MVP: not configurable via CLI/.minkrc; SDK embedding
     /// may set it programmatically.
     pub image_input: Option<crate::capabilities::model_capabilities::ImageInputCapability>,
+    /// User-facing image limit overrides (`[provider.image]` in .minkrc /
+    /// `AgentOptions::with_image_limits`). Applied on top of the resolved
+    /// capability; never enables an `Unsupported` session.
+    pub image_limits: Option<crate::capabilities::model_capabilities::ImageLimitsOverrides>,
     /// Model ids that the default OpenAI-compatible backend declares as
     /// image-capable. The built-in vision catalog entry is included by
     /// default so the stock CLI works against vision models without extra
@@ -381,6 +385,7 @@ impl Default for ResolvedConfig {
             signal_policy: SignalPolicy::Full,
             signal: SignalConfig::default(),
             image_input: None,
+            image_limits: None,
             vision_models: vision_model_defaults(),
         }
     }

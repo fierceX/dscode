@@ -15,7 +15,7 @@ pub const MODEL_CAPABILITIES_VERSION: u32 = 1;
 pub const MODEL_CAPABILITIES_FILE: &str = "model-capabilities.json";
 
 // v7 §3.1 defaults (internal constants, not config-exposed).
-pub const DEFAULT_MAX_IMAGES_PER_REQUEST: usize = 4;
+pub const DEFAULT_MAX_IMAGES_PER_REQUEST: usize = 600;
 pub const DEFAULT_MAX_IMAGE_BYTES_PER_REQUEST: u64 = 16 * 1024 * 1024;
 pub const DEFAULT_MAX_IMAGE_BYTES: u64 = 16 * 1024 * 1024;
 pub const DEFAULT_MAX_DIMENSION: u32 = 16_384;
@@ -127,6 +127,77 @@ impl Default for OpenAiChatImageUrlLimits {
     }
 }
 
+/// User-facing overrides for a subset of `OpenAiChatImageUrlLimits`
+/// (`[provider.image]` in .minkrc / `AgentOptions::with_image_limits`).
+///
+/// Overrides only apply when the resolved capability is already
+/// `OpenAiChatImageUrl`; they never enable an `Unsupported` session.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageLimitsOverrides {
+    pub detail: Option<ImageDetail>,
+    pub max_images_per_request: Option<usize>,
+    pub max_image_bytes_per_request: Option<u64>,
+    pub max_image_bytes: Option<u64>,
+    pub max_dimension: Option<u32>,
+    pub max_pixels: Option<u64>,
+}
+
+impl ImageLimitsOverrides {
+    pub fn is_empty(&self) -> bool {
+        self.detail.is_none()
+            && self.max_images_per_request.is_none()
+            && self.max_image_bytes_per_request.is_none()
+            && self.max_image_bytes.is_none()
+            && self.max_dimension.is_none()
+            && self.max_pixels.is_none()
+    }
+
+    /// Apply the present fields onto `limits`; absent fields keep their
+    /// current value.
+    pub fn apply_to(&self, limits: &mut OpenAiChatImageUrlLimits) {
+        if let Some(detail) = self.detail {
+            limits.detail = detail;
+        }
+        if let Some(max) = self.max_images_per_request {
+            limits.max_images_per_request = max;
+        }
+        if let Some(max) = self.max_image_bytes_per_request {
+            limits.max_image_bytes_per_request = max;
+        }
+        if let Some(max) = self.max_image_bytes {
+            limits.max_image_bytes = max;
+        }
+        if let Some(max) = self.max_dimension {
+            limits.max_dimension = max;
+        }
+        if let Some(max) = self.max_pixels {
+            limits.max_pixels = max;
+        }
+    }
+
+    /// Merge `other` on top of `self`: present fields of `other` win.
+    pub fn merge(&mut self, other: Self) {
+        if other.detail.is_some() {
+            self.detail = other.detail;
+        }
+        if other.max_images_per_request.is_some() {
+            self.max_images_per_request = other.max_images_per_request;
+        }
+        if other.max_image_bytes_per_request.is_some() {
+            self.max_image_bytes_per_request = other.max_image_bytes_per_request;
+        }
+        if other.max_image_bytes.is_some() {
+            self.max_image_bytes = other.max_image_bytes;
+        }
+        if other.max_dimension.is_some() {
+            self.max_dimension = other.max_dimension;
+        }
+        if other.max_pixels.is_some() {
+            self.max_pixels = other.max_pixels;
+        }
+    }
+}
+
 /// Image input capability of one model route.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -191,6 +262,13 @@ impl SessionModelCapabilities {
             .image_input
             .clone()
             .unwrap_or_else(|| backend.image_input_capability(&resolved.actual));
+        // User-facing limit overrides only adjust an already-supported image
+        // capability; they never turn a text-only session into a vision one.
+        if let ImageInputCapability::OpenAiChatImageUrl(limits) = &mut image_input
+            && let Some(overrides) = &config.image_limits
+        {
+            overrides.apply_to(limits);
+        }
         // Canonicalize the MIME set before fingerprinting so order/duplicates
         // never change the session fingerprint; an empty set is a
         // configuration error that fails closed to text-only (review fix).
@@ -389,6 +467,46 @@ mod tests {
             &TextBackend,
         );
         assert!(legacy.is_compatible_with(&vision));
+    }
+
+    #[test]
+    fn image_limits_overrides_apply_and_change_fingerprint() {
+        let mut config = base_config();
+        config.image_input = Some(ImageInputCapability::OpenAiChatImageUrl(
+            OpenAiChatImageUrlLimits::default(),
+        ));
+        config.image_limits = Some(ImageLimitsOverrides {
+            max_images_per_request: Some(1),
+            ..Default::default()
+        });
+        let caps = SessionModelCapabilities::resolve("m", &config, &TextBackend);
+        let limits = caps.image_input.limits().expect("image capability");
+        assert_eq!(limits.max_images_per_request, 1);
+        // Overrides change the fingerprint: the session capability differs
+        // from the default-limit session.
+        let default_caps = SessionModelCapabilities::resolve(
+            "m",
+            &{
+                let mut c = base_config();
+                c.image_input = Some(ImageInputCapability::OpenAiChatImageUrl(
+                    OpenAiChatImageUrlLimits::default(),
+                ));
+                c
+            },
+            &TextBackend,
+        );
+        assert_ne!(caps.capability_fingerprint, default_caps.capability_fingerprint);
+    }
+
+    #[test]
+    fn image_limits_never_enable_unsupported() {
+        let mut config = base_config();
+        config.image_limits = Some(ImageLimitsOverrides {
+            max_images_per_request: Some(64),
+            ..Default::default()
+        });
+        let caps = SessionModelCapabilities::resolve("any-model", &config, &TextBackend);
+        assert_eq!(caps.image_input, ImageInputCapability::Unsupported);
     }
 
     #[test]

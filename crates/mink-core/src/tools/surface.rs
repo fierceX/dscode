@@ -408,7 +408,7 @@ mod image_augment_tests {
         // Format list is generated from allowed_mime; per-request cap was
         // raised to 64MB so a single 20MB image is always admissible.
         assert!(description.contains("(PNG/JPEG/GIF/WebP)"), "{description}");
-        assert!(description.contains("Image capture limits: 4 images and 16777216 bytes"), "{description}");
+        assert!(description.contains("Image capture limits: 600 images and 16777216 bytes"), "{description}");
     }
 }
 

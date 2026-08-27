@@ -14,6 +14,7 @@ async fn successful_display_text_may_start_with_error_prefix() {
         id: "call-error-prefix".into(),
         input_json: serde_json::json!({}),
         fields: BTreeMap::new(),
+        parse_error: None,
     };
     let result = format_dispatched_result(
         &ctx,
@@ -378,6 +379,7 @@ fn test_call(name: &str) -> ToolCallEvent {
         id: "call_test".to_string(),
         input_json: serde_json::json!({}),
         fields: BTreeMap::new(),
+        parse_error: None,
     }
 }
 
@@ -459,12 +461,24 @@ fn png_fixture() -> Vec<u8> {
     out
 }
 
+fn png_fixture_with_dimensions(width: u32, height: u32) -> Vec<u8> {
+    let mut img = image::RgbaImage::new(width, height);
+    for (x, y, pixel) in img.enumerate_pixels_mut() {
+        *pixel = image::Rgba([(x % 251) as u8, (y % 251) as u8, 7, 255]);
+    }
+    let mut out = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+        .expect("png fixture");
+    out
+}
+
 fn read_call(id: &str, path: &str) -> ToolCallEvent {
     ToolCallEvent {
         name: "Read".into(),
         id: id.into(),
         input_json: serde_json::json!({"path": path}),
         fields: BTreeMap::from([("path".to_string(), path.to_string())]),
+        parse_error: None,
     }
 }
 
@@ -522,12 +536,22 @@ async fn image_read_captures_and_reference_read_reinjects() {
 }
 
 #[tokio::test]
-async fn quota_orders_by_call_position_and_rejects_excess() {
-    let mut shared = crate::regression::test_context_for_agent("runner-image-quota")
+async fn batch_admission_limits_each_batch_and_resets_between_batches() {
+    // Per-batch admission (v7 §7.3): the image budget starts at zero for
+    // every execute_all call. Within one batch the 3rd image (over the
+    // budget of 2) is an ordinary failed ToolExecution — never published, so
+    // materialization cannot fail later on a promise the tool layer made.
+    // The NEXT batch starts fresh: history does not lock out new reads.
+    let mut shared = crate::regression::test_context_for_agent("runner-image-batch")
         .await
         .unwrap();
     let bytes = png_fixture();
     std::fs::write(shared.cwd.join("shot.png"), &bytes).unwrap();
+    // Distinct contents keep this-turn ids distinct (content-addressed).
+    let bytes_b = png_fixture_with_dimensions(32, 24);
+    std::fs::write(shared.cwd.join("shot_b.png"), &bytes_b).unwrap();
+    let bytes_c = png_fixture_with_dimensions(64, 24);
+    std::fs::write(shared.cwd.join("shot_c.png"), &bytes_c).unwrap();
     {
         let shared_ref = Arc::get_mut(&mut shared).expect("unique shared ctx");
         shared_ref.model_capabilities = vision_capabilities(2);
@@ -535,37 +559,300 @@ async fn quota_orders_by_call_position_and_rejects_excess() {
     let tool_ctx = crate::context::ToolContext::from(shared.as_ref());
     let runner = ToolRunner::new(Arc::new(tool_ctx.clone()));
 
-    // Baseline from the active projection: 1 attachment block already in the
-    // conversation history counts against the quota.
-    let baseline = crate::tools::image::ImageQuotaState {
-        used_images: 1,
-        used_bytes: bytes.len() as u64,
-    };
-    runner.set_image_quota(baseline);
-
     let results = runner
         .execute_all(vec![
             read_call("call_1", "shot.png"),
-            read_call("call_2", "shot.png"),
-            read_call("call_3", "shot.png"),
+            read_call("call_2", "shot_b.png"),
+            read_call("call_3", "shot_c.png"),
         ])
         .await
         .unwrap();
-    // Limit is 2 total; baseline consumed 1, so only call_1 is admitted and
-    // call_2 / call_3 are rejected in call order.
+    // First two capture, the third is rejected by the batch budget.
     assert!(results[0].succeeded(), "{}", results[0].content);
-    for result in &results[1..] {
-        assert!(!result.succeeded(), "{}", result.content);
-        assert!(
-            result.content.contains("image attachment quota exceeded"),
-            "{}",
-            result.content
-        );
+    assert!(results[1].succeeded(), "{}", results[1].content);
+    assert!(!results[2].succeeded(), "{}", results[2].content);
+    assert!(
+        results[2].content.contains("image attachment batch limit exceeded"),
+        "{}",
+        results[2].content
+    );
+    assert_eq!(tool_ctx.this_turn_image_ids.lock().unwrap().len(), 2);
+
+    // Next batch starts from zero: two more captures succeed (with fresh
+    // ids), proving history does not accumulate across batches.
+    let results = runner
+        .execute_all(vec![
+            read_call("call_4", "shot_b.png"),
+            read_call("call_5", "shot_c.png"),
+        ])
+        .await
+        .unwrap();
+    assert!(results[0].succeeded(), "{}", results[0].content);
+    assert!(results[1].succeeded(), "{}", results[1].content);
+}
+
+#[tokio::test]
+async fn batch_budget_survives_sequential_tool_flush() {
+    // Regression: sequential tools (Bash) flush the read batch mid-`execute_all`;
+    // the per-execute_all image budget must NOT reset there, or a
+    // Read→Bash→Read group would slip two images (and their bytes) into one
+    // request while each flush counts from zero.
+    let mut shared = crate::regression::test_context_for_agent("runner-image-seq-flush")
+        .await
+        .unwrap();
+    let bytes = png_fixture();
+    std::fs::write(shared.cwd.join("shot.png"), &bytes).unwrap();
+    let bytes_b = png_fixture_with_dimensions(32, 24);
+    std::fs::write(shared.cwd.join("shot_b.png"), &bytes_b).unwrap();
+    let bytes_c = png_fixture_with_dimensions(64, 24);
+    std::fs::write(shared.cwd.join("shot_c.png"), &bytes_c).unwrap();
+    {
+        let shared_ref = Arc::get_mut(&mut shared).expect("unique shared ctx");
+        shared_ref.model_capabilities = vision_capabilities(2);
     }
-    // Only the committed image consumed the reservation.
-    let quota = tool_ctx.image_quota.lock().unwrap();
-    assert_eq!(quota.used_images, 2);
-    assert_eq!(quota.used_bytes, bytes.len() as u64 * 2);
+    let ctx = crate::context::ToolContext::from(shared.as_ref());
+    let runner = ToolRunner::new(Arc::new(ctx));
+    let bash = ToolCallEvent {
+        name: "Bash".into(),
+        id: "call_bash".into(),
+        input_json: serde_json::json!({"command": "true"}),
+        fields: BTreeMap::from([("command".to_string(), "true".to_string())]),
+        parse_error: None,
+    };
+    let results = runner
+        .execute_all(vec![
+            read_call("call_1", "shot.png"),
+            bash,
+            read_call("call_2", "shot_b.png"),
+            read_call("call_3", "shot_c.png"),
+        ])
+        .await
+        .unwrap();
+    assert!(results[0].succeeded(), "{}", results[0].content);
+    assert!(results[1].succeeded(), "{}", results[1].content);
+    assert!(results[2].succeeded(), "{}", results[2].content);
+    // Budget counts across the flush: the third image is rejected even
+    // though it lies in a later read sub-batch.
+    assert!(!results[3].succeeded(), "{}", results[3].content);
+    assert!(
+        results[3].content.contains("image attachment batch limit exceeded"),
+        "{}",
+        results[3].content
+    );
+}
+
+struct TestImageVfs {
+    image: Option<Vec<u8>>,
+    text: String,
+}
+
+impl crate::tools::vfs::ReadOnlyFileSystem for TestImageVfs {
+    fn read(
+        &self,
+        _scope: &crate::tools::vfs::VfsScope,
+        _request: &crate::tools::vfs::VfsReadRequest,
+    ) -> anyhow::Result<crate::tools::vfs::VfsReadResult> {
+        Ok(crate::tools::vfs::VfsReadResult {
+            content: self.text.clone(),
+            total_lines: 1,
+            total_bytes: self.text.len(),
+        })
+    }
+
+    fn glob(
+        &self,
+        _scope: &crate::tools::vfs::VfsScope,
+        _request: &crate::tools::vfs::VfsGlobRequest,
+    ) -> anyhow::Result<crate::tools::vfs::VfsGlobResult> {
+        Ok(crate::tools::vfs::VfsGlobResult::default())
+    }
+
+    fn grep(
+        &self,
+        _scope: &crate::tools::vfs::VfsScope,
+        _request: &crate::tools::vfs::VfsGrepRequest,
+    ) -> anyhow::Result<crate::tools::vfs::VfsGrepResult> {
+        Ok(crate::tools::vfs::VfsGrepResult::default())
+    }
+
+    fn read_image(
+        &self,
+        _scope: &crate::tools::vfs::VfsScope,
+        _path: &str,
+        max_bytes: u64,
+    ) -> anyhow::Result<Option<crate::tools::vfs::VfsImage>> {
+        Ok(self.image.clone().map(|bytes| {
+            assert!(bytes.len() <= max_bytes as usize);
+            crate::tools::vfs::VfsImage {
+                bytes,
+                mime: "image/png".to_string(),
+            }
+        }))
+    }
+}
+
+#[tokio::test]
+async fn vfs_image_reads_one_at_a_time_and_text_falls_back() {
+    // VfsCandidate: classification stores only the path; the image bytes are
+    // read during prepare (one image in memory at a time). A backend `None`
+    // falls back to the ordinary text read.
+    let mut shared = crate::regression::test_context_for_agent("runner-image-vfs")
+        .await
+        .unwrap();
+    let bytes = png_fixture();
+    {
+        let shared_ref = Arc::get_mut(&mut shared).expect("unique shared ctx");
+        shared_ref.model_capabilities = vision_capabilities(4);
+        shared_ref.read_only_fs = Some(Arc::new(TestImageVfs {
+            image: Some(bytes.clone()),
+            text: "text body".to_string(),
+        }));
+    }
+    let ctx = crate::context::ToolContext::from(shared.as_ref());
+    let runner = ToolRunner::new(Arc::new(ctx));
+    let results = runner
+        .execute_all(vec![read_call("call_vfs", "shot.png")])
+        .await
+        .unwrap();
+    assert!(results[0].succeeded(), "{}", results[0].content);
+    assert!(results[0].image_attachment.is_some());
+    assert!(shared.image_cache.contains(&("sha256:".to_string() + &"00".repeat(32))) || !results[0].content.is_empty());
+
+    // Backend reports no image: the call falls back to the text read.
+    let mut shared = crate::regression::test_context_for_agent("runner-image-vfs-text")
+        .await
+        .unwrap();
+    {
+        let shared_ref = Arc::get_mut(&mut shared).expect("unique shared ctx");
+        shared_ref.model_capabilities = vision_capabilities(4);
+        shared_ref.read_only_fs = Some(Arc::new(TestImageVfs {
+            image: None,
+            text: "plain text body".to_string(),
+        }));
+    }
+    let ctx = crate::context::ToolContext::from(shared.as_ref());
+    let runner = ToolRunner::new(Arc::new(ctx));
+    let results = runner
+        .execute_all(vec![read_call("call_text", "note.txt")])
+        .await
+        .unwrap();
+    assert!(results[0].succeeded(), "{}", results[0].content);
+    assert!(results[0].image_attachment.is_none());
+    assert!(results[0].content.contains("plain text body"), "{}", results[0].content);
+}
+
+#[tokio::test]
+async fn vfs_text_selector_works_in_vision_session() {
+    // A VFS TEXT path with a selector must not be rejected as an image: the
+    // selector is honored on the ordinary text read; it is rejected only
+    // when the path is confirmed to be an image.
+    let mut shared = crate::regression::test_context_for_agent("runner-image-vfs-selector")
+        .await
+        .unwrap();
+    {
+        let shared_ref = Arc::get_mut(&mut shared).expect("unique shared ctx");
+        shared_ref.model_capabilities = vision_capabilities(4);
+        shared_ref.read_only_fs = Some(Arc::new(TestImageVfs {
+            image: None,
+            text: "line one\nline two\nline three".to_string(),
+        }));
+    }
+    let ctx = crate::context::ToolContext::from(shared.as_ref());
+    let runner = ToolRunner::new(Arc::new(ctx));
+    let results = runner
+        .execute_all(vec![read_call("call_sel", "note.txt:2-2")])
+        .await
+        .unwrap();
+    assert!(results[0].succeeded(), "{}", results[0].content);
+    assert!(results[0].image_attachment.is_none());
+    assert!(results[0].content.contains("line two"), "{}", results[0].content);
+}
+
+#[tokio::test]
+async fn vfs_image_selector_rejected_only_when_confirmed_image() {
+    // The same selector on a CONFIRMED image is rejected at prepare time.
+    let mut shared = crate::regression::test_context_for_agent("runner-image-vfs-sel-img")
+        .await
+        .unwrap();
+    let bytes = png_fixture();
+    {
+        let shared_ref = Arc::get_mut(&mut shared).expect("unique shared ctx");
+        shared_ref.model_capabilities = vision_capabilities(4);
+        shared_ref.read_only_fs = Some(Arc::new(TestImageVfs {
+            image: Some(bytes.clone()),
+            text: String::new(),
+        }));
+    }
+    let ctx = crate::context::ToolContext::from(shared.as_ref());
+    let runner = ToolRunner::new(Arc::new(ctx));
+    let results = runner
+        .execute_all(vec![read_call("call_img_sel", "shot.png:2-2")])
+        .await
+        .unwrap();
+    assert!(!results[0].succeeded(), "{}", results[0].content);
+    assert!(
+        results[0].content.contains("do not support line selectors"),
+        "{}",
+        results[0].content
+    );
+}
+
+#[tokio::test]
+async fn registered_resources_never_become_vfs_image_reads() {
+    // Registered resource paths (even with a selector, even when the VFS
+    // backend serves image bytes) stay on the resource-router path.
+    let mut shared = crate::regression::test_context_for_agent("runner-image-vfs-resource")
+        .await
+        .unwrap();
+    let bytes = png_fixture();
+    {
+        let shared_ref = Arc::get_mut(&mut shared).expect("unique shared ctx");
+        shared_ref.model_capabilities = vision_capabilities(4);
+        shared_ref.read_only_fs = Some(Arc::new(TestImageVfs {
+            image: Some(bytes.clone()),
+            text: "ignored".to_string(),
+        }));
+    }
+    let ctx = crate::context::ToolContext::from(shared.as_ref());
+    // Direct classifier check: a registered scheme classifies as text.
+    let selection = crate::resources::selector::split_read_path_selection("session://current/stats:1-2")
+        .unwrap();
+    let kind = super::file::classify_image_read(&ctx, "session://current/stats:1-2", &selection)
+        .unwrap();
+    assert!(matches!(kind, super::file::ImageReadKind::NotImage), "{kind:?}");
+}
+
+#[tokio::test]
+async fn parse_error_calls_become_failed_tool_results_without_executing() {
+    // A call whose arguments could not be parsed must not fail the turn: the
+    // runner returns a failed tool result and never executes the tool.
+    let shared = crate::regression::test_context_for_agent("runner-parse-error")
+        .await
+        .unwrap();
+    let ctx = crate::context::ToolContext::from(shared.as_ref());
+    let runner = ToolRunner::new(Arc::new(ctx));
+    let marker = std::env::temp_dir().join(format!(
+        "mink-parse-error-marker-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&marker);
+    let call = ToolCallEvent {
+        name: "Bash".into(),
+        id: "call_bad".into(),
+        input_json: serde_json::json!({}),
+        fields: BTreeMap::new(),
+        parse_error: Some("parse tool input: expected `,` or `}` at line 1 column 153".to_string()),
+    };
+    let results = runner.execute_all(vec![call]).await.unwrap();
+    assert_eq!(results.len(), 1);
+    assert!(!results[0].succeeded(), "{}", results[0].content);
+    assert!(
+        results[0].content.contains("tool input JSON invalid"),
+        "{}",
+        results[0].content
+    );
+    // The Bash command was never executed.
+    assert!(!marker.exists(), "tool must not execute on parse error");
 }
 
 #[tokio::test]

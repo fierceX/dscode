@@ -31,7 +31,8 @@ pub use crate::runtime::extensions::{PostInitContext, PostInitHook, PrefixSource
 pub use crate::session::atomic_file::atomic_replace;
 pub use crate::session::paths::SessionLayout;
 pub use crate::capabilities::model_capabilities::{
-    ImageDetail, ImageInputCapability, OpenAiChatImageUrlLimits, TokenEstimator, WireProtocol,
+    ImageDetail, ImageInputCapability, ImageLimitsOverrides, OpenAiChatImageUrlLimits,
+    TokenEstimator, WireProtocol,
 };
 pub use crate::config::{ResolvedConfig, vision_model_defaults};
 pub use crate::tools::image::ImageFormat;

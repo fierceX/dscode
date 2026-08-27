@@ -784,6 +784,7 @@ fn tool_call_event(
         id: id.into(),
         input_json: input,
         fields,
+        parse_error: None,
     }
 }
 
@@ -1782,6 +1783,7 @@ fn mock_llm_tool_use() -> crate::llm::mock::MockLlmBackend {
                     id: "call_bash_1".into(),
                     input_json: json!({"command": "echo hello"}),
                     fields,
+                    parse_error: None,
                 })),
                 Ok(Event::Stop(StopEvent {
                     reason: "tool_use".into(),
@@ -1959,6 +1961,7 @@ fn mock_llm_single_tool(name: &str) -> crate::llm::mock::MockLlmBackend {
                     id: format!("call_{}", name.to_ascii_lowercase()),
                     input_json: serde_json::json!({}),
                     fields: Default::default(),
+                    parse_error: None,
                 })),
                 Ok(Event::Stop(StopEvent {
                     reason: "tool_use".into(),
@@ -1989,6 +1992,7 @@ fn mock_llm_custom_tool_use() -> crate::llm::mock::MockLlmBackend {
                     id: "call_echo_1".into(),
                     input_json: serde_json::json!({"text": "hello"}),
                     fields,
+                    parse_error: None,
                 })),
                 Ok(Event::Stop(StopEvent {
                     reason: "tool_use".into(),
@@ -2171,6 +2175,7 @@ async fn custom_tool_timeout_is_local_and_next_turn_still_runs() {
                             id: "call-timeout".into(),
                             input_json: serde_json::json!({}),
                             fields: Default::default(),
+                            parse_error: None,
                         },
                     )),
                     Ok(crate::protocol::Event::Stop(crate::protocol::StopEvent {

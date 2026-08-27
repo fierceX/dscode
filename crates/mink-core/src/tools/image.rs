@@ -6,8 +6,6 @@
 
 use std::io::Cursor;
 
-use crate::capabilities::model_capabilities::OpenAiChatImageUrlLimits;
-
 /// Raster image formats accepted by the version-one image path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -138,88 +136,6 @@ impl ImageAttachment {
     }
 }
 
-/// Per-turn image quota derived from the active projection actually sent to
-/// the model (v7 §7.3). Same image id repeated in multiple attachment blocks
-/// counts per block.
-#[derive(Debug, Clone, Default)]
-pub struct ImageQuotaState {
-    pub used_images: usize,
-    pub used_bytes: u64,
-}
-
-impl ImageQuotaState {
-    #[allow(dead_code)] // Convenience entry without cache awareness; tests use it.
-    pub fn from_messages(messages: &[serde_json::Value]) -> Self {
-        Self::from_messages_with_cache(messages, None, None)
-    }
-
-    /// Count only attachments that will actually be sent (review fix): each
-    /// block is verified against the cache — object must exist, pass digest
-    /// verification, probe as a supported format, and be in the model's
-    /// allowed MIME set — and the counted bytes are the real object size,
-    /// not the declared (possibly forged) value. A block that would degrade
-    /// at materialization never consumes quota.
-    pub fn from_messages_with_cache(
-        messages: &[serde_json::Value],
-        cache: Option<&crate::session::image_cache::ImageCache>,
-        limits: Option<&crate::capabilities::model_capabilities::OpenAiChatImageUrlLimits>,
-    ) -> Self {
-        let mut used_images = 0usize;
-        let mut used_bytes = 0u64;
-        for message in messages {
-            let Some(blocks) = message.get("content").and_then(serde_json::Value::as_array)
-            else {
-                continue;
-            };
-            for block in blocks {
-                if block.get("type").and_then(serde_json::Value::as_str)
-                    != Some("tool_attachment")
-                {
-                    continue;
-                }
-                let url = block.get("url").and_then(serde_json::Value::as_str).unwrap_or("");
-                let Some(id) = url.strip_prefix("image://") else {
-                    continue;
-                };
-                let (Some(cache), Some(limits)) = (cache, limits) else {
-                    // No cache: fall back to the declared facts (legacy path).
-                    used_images = used_images.saturating_add(1);
-                    used_bytes = used_bytes.saturating_add(
-                        block.get("bytes").and_then(serde_json::Value::as_u64).unwrap_or(0),
-                    );
-                    continue;
-                };
-                // Full sendability check mirrors materialization: digest,
-                // probe, MIME. Object bytes are authoritative for the count.
-                let Ok(Some(bytes)) = cache.read_bounded(id, limits.max_image_bytes) else {
-                    continue;
-                };
-                let Some(info) = crate::tools::image::probe(&bytes) else {
-                    continue;
-                };
-                if !limits.allowed_mime.contains(&info.format) {
-                    continue;
-                }
-                used_images = used_images.saturating_add(1);
-                used_bytes = used_bytes.saturating_add(bytes.len() as u64);
-            }
-        }
-        Self {
-            used_images,
-            used_bytes,
-        }
-    }
-
-    pub fn remaining(&self, limits: &OpenAiChatImageUrlLimits) -> (usize, u64) {
-        (
-            limits.max_images_per_request.saturating_sub(self.used_images),
-            limits
-                .max_image_bytes_per_request
-                .saturating_sub(self.used_bytes),
-        )
-    }
-}
-
 fn format_bytes(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = 1024 * 1024;
@@ -332,36 +248,6 @@ mod tests {
     }
 }
 
-#[cfg(test)]
-mod quota_precision_tests {
-    use super::*;
-    use crate::capabilities::model_capabilities::OpenAiChatImageUrlLimits;
-    use crate::session::image_cache::ImageCache;
-    use serde_json::json;
-
-    fn block(id: &str, bytes: u64) -> serde_json::Value {
-        json!({"type": "tool_attachment", "tool_use_id": "c", "url": format!("image://{id}"), "format": "png", "width": 1, "height": 1, "bytes": bytes})
-    }
-
-    #[test]
-    fn damaged_objects_do_not_consume_quota() {
-        let home = std::env::temp_dir().join(format!(
-            "mink-quota-prec-{}",
-            std::thread::current().name().unwrap_or("t")
-        ));
-        let cache = ImageCache::new(&home);
-        let id = cache.commit(b"payload-bytes").unwrap();
-        // Corrupt the object: it would degrade at materialization.
-        let path = home.join(".mink/cache/images/v1/objects").join(&id["sha256:".len()..][..2]).join(&id["sha256:".len()..]);
-        std::fs::write(path, b"tampered").unwrap();
-        let messages = vec![json!({"role": "user", "content": [block(&id, 100)]})];
-        let state = ImageQuotaState::from_messages_with_cache(
-            &messages,
-            Some(&cache),
-            Some(&OpenAiChatImageUrlLimits::default()),
-        );
-        assert_eq!(state.used_images, 0, "damaged object must not count");
-        assert_eq!(state.used_bytes, 0);
-        let _ = std::fs::remove_dir_all(&home);
-    }
-}
+// Request budget planning now lives in `llm::image_projection` (dsh-style
+// oldest-first omission); the tool layer performs no cumulative admission
+// check — a turn may read any number of images.

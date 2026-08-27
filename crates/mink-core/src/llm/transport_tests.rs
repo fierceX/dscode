@@ -245,3 +245,31 @@ fn estimate_counts_tool_attachment_pixel_payload() {
     // Attachment must add the tile estimate (>= 765 tokens).
     assert!(plain >= without_attachment + 765, "{plain} vs {without_attachment}");
 }
+
+#[test]
+fn estimate_counts_only_unconsumed_after_projection() {
+    use serde_json::json;
+    // Single-consumption: project consumed references into text citations
+    // first, then only the unconsumed batch contributes image tokens.
+    let messages = vec![
+        json!({"role": "user", "content": [
+            json!({"type": "tool_attachment", "tool_use_id": "a", "url": "image://sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "format": "png", "width": 1024, "height": 768, "bytes": 1000}),
+        ]}),
+        json!({"role": "assistant", "content": [json!({"type": "text", "text": "seen"})]}),
+        json!({"role": "user", "content": [
+            json!({"type": "tool_attachment", "tool_use_id": "b", "url": "image://sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "format": "png", "width": 1024, "height": 768, "bytes": 1000}),
+        ]}),
+    ];
+    let projected =
+        crate::llm::image_projection::project_consumed_attachments(&messages);
+    let counted = estimate_openai_context_tokens(&projected, &[], "").unwrap();
+    let fresh_only = estimate_openai_context_tokens(
+        &[json!({"role": "user", "content": [
+            json!({"type": "tool_attachment", "tool_use_id": "b", "url": "image://sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "format": "png", "width": 1024, "height": 768, "bytes": 1000}),
+        ]})],
+        &[],
+        "",
+    )
+    .unwrap();
+    assert!(counted >= fresh_only, "{counted} vs {fresh_only}");
+}
