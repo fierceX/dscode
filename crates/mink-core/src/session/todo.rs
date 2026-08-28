@@ -46,7 +46,7 @@ impl Default for TodoSnapshot {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TodoAdd {
     pub content: String,

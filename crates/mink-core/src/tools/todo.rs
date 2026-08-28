@@ -29,11 +29,37 @@ struct TodoReadArgs {
 struct TodoWriteArgs {
     base_revision: u64,
     #[serde(default)]
-    add: Vec<TodoAdd>,
+    add: Vec<TodoAddArgs>,
     #[serde(default)]
     update: Vec<TodoUpdate>,
     #[serde(default)]
     remove: Vec<String>,
+}
+
+/// Tool-boundary argument shape for one new item.
+///
+/// Models routinely echo the snapshot `id` (`T0001`) into `add` entries,
+/// which previously failed every first-attempt `TodoWrite` with "unknown
+/// field `id`". Parsed here so the write succeeds; the echoed id is
+/// deliberately dropped — `TodoStore` keeps its strong "no caller ids"
+/// contract and assigns `T####` from `next_id`. Other fields (`status`
+/// etc.) still fail closed.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TodoAddArgs {
+    content: String,
+    #[serde(default)]
+    id: Option<String>,
+}
+
+impl TodoAddArgs {
+    /// Convert into the domain add shape, ignoring any echoed id.
+    fn into_domain(self) -> TodoAdd {
+        let _ = self.id;
+        TodoAdd {
+            content: self.content,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -78,10 +104,15 @@ impl ToolExec for TodoWriteTool {
 
     fn execute(&self, input: &serde_json::Value, ctx: &ToolContext) -> Result<ToolOutcome> {
         let args: TodoWriteArgs = serde_json::from_value(input.clone())?;
+        let add = args
+            .add
+            .into_iter()
+            .map(TodoAddArgs::into_domain)
+            .collect::<Vec<_>>();
         let result = ctx.todo_store.apply_structure(
             args.base_revision,
             TodoChanges {
-                add: args.add,
+                add,
                 update: args.update,
                 remove: args.remove,
             },

@@ -179,6 +179,10 @@
           "items": {
             "type": "object",
             "properties": {
+              "id": {
+                "type": "string",
+                "description": "Ignored: stable IDs are system-assigned (T####) and must not be included."
+              },
               "content": {
                 "type": "string",
                 "description": "A short, concrete, actionable task description."
