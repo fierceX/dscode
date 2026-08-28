@@ -125,6 +125,11 @@ async fn main() -> anyhow::Result<()> {
 ### 🛠️ 工具系统
 
 - **内置工具** — Read / Write / Edit / Bash / Python / Glob / Grep / PlanDraft / PlanConfirm / PlanClear / TodoRead / TodoWrite / TodoAdvance / SubAgent
+- **多模态读图** — 视觉会话中 `Read` 捕获图片（本地文件 / `image://sha256:<id>` 引用）、
+  内容寻址缓存、请求时以 OpenAI `image_url` data-URL 注入一次（单次消费）；MIME 双层
+  校验与数量/字节/尺寸/像素配额 fail closed。CLI 经 `[provider] image_input` /
+  `vision_models` 配置，Rust 经 `with_image_input()` / `with_vision_models()` /
+  `with_image_limits()`
 - **统一工具选择** — `enabled_tools` 是唯一启用入口，同时决定模型可见 schema、能力工作流和真实执行边界；`PythonSandbox` 仅在显式列出时启用
 - **语义能力模型** — 工具按语义能力分类，自动组合工作流提示；不可用工具不会出现在 schema、提示词或组合链路中
 - **注册式轻量资源** — `Read` 通过 `ResourceRouter` 统一分发 `artifact://`、`skill://`、`rule://`、`session://` 等 scheme

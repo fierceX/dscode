@@ -127,11 +127,8 @@ pub(crate) async fn build_agent_context(params: AgentContextBuild) -> Result<Bui
 
     // Session-scoped model capabilities: resolve once, freeze, persist, and
     // validate the startup model against the snapshot (v7 §3).
-    let model_capabilities = resolve_session_capabilities(
-        &config,
-        params.llm_backend.as_ref(),
-        &paths,
-    )?;
+    let model_capabilities =
+        resolve_session_capabilities(&config, params.llm_backend.as_ref(), &paths)?;
     let image_cache = Arc::new(crate::session::image_cache::ImageCache::new(&params.home));
     let this_turn_image_ids = Arc::new(Mutex::new(std::collections::HashSet::new()));
     let warned_image_ids = Arc::new(Mutex::new(std::collections::HashSet::new()));

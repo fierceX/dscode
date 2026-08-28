@@ -28,7 +28,10 @@ pub(crate) fn previous_image_text(block: &Value) -> String {
         .unwrap_or("image://?");
     let width = block.get("width").and_then(Value::as_u64).unwrap_or(0);
     let height = block.get("height").and_then(Value::as_u64).unwrap_or(0);
-    let format = block.get("format").and_then(Value::as_str).unwrap_or("image");
+    let format = block
+        .get("format")
+        .and_then(Value::as_str)
+        .unwrap_or("image");
     format!(
         "[Previously attached image: {url} ({width}x{height} {format}). Use Read with this image reference if visual inspection is needed again.]"
     )
@@ -47,24 +50,20 @@ pub(crate) fn previous_image_text(block: &Value) -> String {
 /// the surviving reference as unconsumed (safe direction: at most re-sent
 /// once).
 pub(crate) fn project_consumed_attachments(messages: &[Value]) -> Vec<Value> {
-    if !messages.iter().any(|message| {
-        message.get("role").and_then(Value::as_str) == Some("assistant")
-    }) {
+    if !messages
+        .iter()
+        .any(|message| message.get("role").and_then(Value::as_str) == Some("assistant"))
+    {
         // No assistant message yet: every capture is unconsumed.
         return messages.to_vec();
     }
     let last_assistant = messages
         .iter()
-        .rposition(|message| {
-            message.get("role").and_then(Value::as_str) == Some("assistant")
-        })
+        .rposition(|message| message.get("role").and_then(Value::as_str) == Some("assistant"))
         .expect("checked above");
     let mut projected = messages.to_vec();
-    for message_index in 0..last_assistant {
-        let Some(blocks) = projected[message_index]
-            .get_mut("content")
-            .and_then(Value::as_array_mut)
-        else {
+    for message in projected.iter_mut().take(last_assistant) {
+        let Some(blocks) = message.get_mut("content").and_then(Value::as_array_mut) else {
             continue;
         };
         for block in blocks.iter_mut() {
@@ -102,7 +101,9 @@ pub(crate) fn materialize_images_with(
         // tool_attachment blocks, but an imported conversation could carry
         // them (v7 §8.4).
         for message in messages.iter_mut() {
-            degrade_attachments(message, &mut |_| Ok(Some("capability disabled".to_string())))?;
+            degrade_attachments(message, &mut |_| {
+                Ok(Some("capability disabled".to_string()))
+            })?;
         }
         return Ok(());
     };
@@ -232,13 +233,22 @@ fn materialize_one(
         );
     }
     if declared_width != u64::from(info.width) {
-        anyhow::bail!("width mismatch: declared {declared_width}, stored {}", info.width);
+        anyhow::bail!(
+            "width mismatch: declared {declared_width}, stored {}",
+            info.width
+        );
     }
     if declared_height != u64::from(info.height) {
-        anyhow::bail!("height mismatch: declared {declared_height}, stored {}", info.height);
+        anyhow::bail!(
+            "height mismatch: declared {declared_height}, stored {}",
+            info.height
+        );
     }
     if declared_bytes != bytes.len() as u64 {
-        anyhow::bail!("byte mismatch: declared {declared_bytes}, stored {}", bytes.len());
+        anyhow::bail!(
+            "byte mismatch: declared {declared_bytes}, stored {}",
+            bytes.len()
+        );
     }
     if !limits.allowed_mime.contains(&info.format) {
         anyhow::bail!("mime {} not allowed by the current model", info.mime());
@@ -273,7 +283,10 @@ fn materialize_one(
     let pixels = crate::tools::image::checked_pixel_count(info.width, info.height)
         .ok_or_else(|| anyhow::anyhow!("image dimensions overflow"))?;
     if pixels > limits.max_pixels {
-        anyhow::bail!("image exceeds the {}px decoded-size limit", limits.max_pixels);
+        anyhow::bail!(
+            "image exceeds the {}px decoded-size limit",
+            limits.max_pixels
+        );
     }
     counters.images = counters.images.saturating_add(1);
     counters.bytes = counters.bytes.saturating_add(bytes.len() as u64);
@@ -339,7 +352,7 @@ mod tests {
     }
 
     fn png_fixture(width: u32, height: u32) -> Vec<u8> {
-        let mut img = image::RgbaImage::new(width, height);
+        let img = image::RgbaImage::new(width, height);
         let mut out = Vec::new();
         img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
             .expect("png fixture");
@@ -395,7 +408,9 @@ mod tests {
         // The raw bytes are sent verbatim (phase one, no transform).
         let encoded = &url["data:image/png;base64,".len()..];
         assert_eq!(
-            base64::engine::general_purpose::STANDARD.decode(encoded).unwrap(),
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .unwrap(),
             bytes
         );
         let _ = std::fs::remove_dir_all(&home);
@@ -427,7 +442,12 @@ mod tests {
         .unwrap();
         for block in messages[0]["content"].as_array().unwrap() {
             assert_eq!(block["type"], "text");
-            assert!(block["text"].as_str().unwrap().contains("[image unavailable: image://"));
+            assert!(
+                block["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("[image unavailable: image://")
+            );
         }
         // Deduplicated: one warning per id, not per block.
         assert_eq!(display.infos.lock().unwrap().len(), 1);
@@ -486,10 +506,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(messages[0]["content"][0]["type"], "text");
-        assert!(messages[0]["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("width mismatch"));
+        assert!(
+            messages[0]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("width mismatch")
+        );
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -506,11 +528,21 @@ mod tests {
         let mut messages = vec![json!({"role": "user", "content": [
             json!({"type": "tool_attachment", "tool_use_id": "c", "url": "image://sha256:aaaa", "format": "png", "width": 1, "height": 1, "bytes": 1}),
         ]})];
-        materialize_images_with(&mut messages, &cache, &display, None, &HashSet::new(), &mut HashSet::new()).unwrap();
-        assert!(messages[0]["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("capability disabled"));
+        materialize_images_with(
+            &mut messages,
+            &cache,
+            &display,
+            None,
+            &HashSet::new(),
+            &mut HashSet::new(),
+        )
+        .unwrap();
+        assert!(
+            messages[0]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("capability disabled")
+        );
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -547,7 +579,10 @@ mod tests {
         // Tool message precedes the residual user message carrying the image.
         let tool_pos = text.find("\"role\":\"tool\"").unwrap();
         let image_pos = text.find("image_url").unwrap();
-        assert!(tool_pos < image_pos, "tool message must precede the image part");
+        assert!(
+            tool_pos < image_pos,
+            "tool message must precede the image part"
+        );
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -567,7 +602,10 @@ mod tests {
         let first = &projected[0]["content"][0];
         assert_eq!(first["type"], "text");
         let text = first["text"].as_str().unwrap();
-        assert!(text.contains("[Previously attached image: image://sha256:aaaaaaaa"), "{text}");
+        assert!(
+            text.contains("[Previously attached image: image://sha256:aaaaaaaa"),
+            "{text}"
+        );
         assert!(text.contains("1024x768 png"), "{text}");
         assert!(text.contains("Read with this image reference"), "{text}");
         // The reference after the last assistant message is unconsumed.
@@ -594,7 +632,10 @@ mod tests {
             std::thread::current().name().unwrap_or("t")
         ));
         let cache = ImageCache::new(&home);
-        let (fresh_id, fresh_bytes) = { let b = png_fixture(16, 16); (cache.commit(&b).unwrap(), b) };
+        let (fresh_id, fresh_bytes) = {
+            let b = png_fixture(16, 16);
+            (cache.commit(&b).unwrap(), b)
+        };
         let missing = "sha256:".to_string() + &"aa".repeat(32);
         let messages = vec![
             json!({"role": "user", "content": [
@@ -617,10 +658,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(projected[0]["content"][0]["type"], "text");
-        assert!(projected[0]["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("[Previously attached image"), "{}", projected[0]);
+        assert!(
+            projected[0]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("[Previously attached image"),
+            "{}",
+            projected[0]
+        );
         assert_eq!(projected[2]["content"][0]["type"], "image_url");
         let _ = std::fs::remove_dir_all(&home);
     }
@@ -646,13 +691,22 @@ mod strict_metadata_tests {
         fn render_info(&self, _m: &str) {}
         fn render_title_update(&self, _m: &str, _s: &crate::ui::StatsSnapshot) {}
         fn render_sub_agent_status(&self, _s: &str, _st: &str, _i: u64, _o: u64) {}
-        fn render_sub_agent_output(&self, _s: &str, _st: &str, _t: &str, _x: &str, _i: u64, _o: u64) {}
+        fn render_sub_agent_output(
+            &self,
+            _s: &str,
+            _st: &str,
+            _t: &str,
+            _x: &str,
+            _i: u64,
+            _o: u64,
+        ) {
+        }
         fn render_prompt(&self) {}
         fn render_clear_line(&self) {}
     }
 
     fn png_fixture() -> Vec<u8> {
-        let mut img = image::RgbaImage::new(16, 16);
+        let img = image::RgbaImage::new(16, 16);
         let mut out = Vec::new();
         img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
             .expect("png");
@@ -718,7 +772,10 @@ mod strict_metadata_tests {
         .unwrap();
         let block = &messages[0]["content"][0];
         assert_eq!(block["type"], "image_url");
-        assert!(block.get("sneaky").is_none(), "unknown fields must be dropped");
+        assert!(
+            block.get("sneaky").is_none(),
+            "unknown fields must be dropped"
+        );
         assert!(block.get("tool_use_id").is_none());
         assert!(block["image_url"].get("detail").is_some());
         let _ = std::fs::remove_dir_all(&home);
@@ -745,7 +802,16 @@ mod defensive_quota_tests {
         fn render_info(&self, _m: &str) {}
         fn render_title_update(&self, _m: &str, _s: &crate::ui::StatsSnapshot) {}
         fn render_sub_agent_status(&self, _s: &str, _st: &str, _i: u64, _o: u64) {}
-        fn render_sub_agent_output(&self, _s: &str, _st: &str, _t: &str, _x: &str, _i: u64, _o: u64) {}
+        fn render_sub_agent_output(
+            &self,
+            _s: &str,
+            _st: &str,
+            _t: &str,
+            _x: &str,
+            _i: u64,
+            _o: u64,
+        ) {
+        }
         fn render_prompt(&self) {}
         fn render_clear_line(&self) {}
     }
@@ -763,13 +829,16 @@ mod defensive_quota_tests {
         ));
         let cache = ImageCache::new(&home);
         let bytes = {
-            let mut img = image::RgbaImage::new(8, 8);
+            let img = image::RgbaImage::new(8, 8);
             let mut out = Vec::new();
-            img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png).unwrap();
+            img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+                .unwrap();
             out
         };
-        let mut limits = OpenAiChatImageUrlLimits::default();
-        limits.max_images_per_request = 2;
+        let limits = OpenAiChatImageUrlLimits {
+            max_images_per_request: 2,
+            ..Default::default()
+        };
         let ids: Vec<String> = (0..3).map(|_| cache.commit(&bytes).unwrap()).collect();
         let mut messages = vec![json!({"role": "user", "content": [
             block(&ids[0], &bytes),
@@ -786,15 +855,14 @@ mod defensive_quota_tests {
         )
         .unwrap();
         let blocks = messages[0]["content"].as_array().unwrap();
-        let image_blocks = blocks
-            .iter()
-            .filter(|b| b["type"] == "image_url")
-            .count();
+        let image_blocks = blocks.iter().filter(|b| b["type"] == "image_url").count();
         assert_eq!(image_blocks, 2, "third attachment must degrade, not send");
         assert!(
-            blocks
-                .iter()
-                .any(|b| b["type"] == "text" && b["text"].as_str().unwrap().contains("max_images_per_request")),
+            blocks.iter().any(|b| b["type"] == "text"
+                && b["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("max_images_per_request")),
             "third block must carry the defensive limit reason"
         );
         let _ = std::fs::remove_dir_all(&home);

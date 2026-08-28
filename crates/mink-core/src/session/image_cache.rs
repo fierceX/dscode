@@ -32,7 +32,10 @@ pub fn validate_image_id(id: &str) -> bool {
 fn digest(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    format!("sha256:{}", crate::capabilities::fingerprint::hex_lower(hasher.finalize()))
+    format!(
+        "sha256:{}",
+        crate::capabilities::fingerprint::hex_lower(hasher.finalize())
+    )
 }
 
 fn object_path(objects: &Path, id: &str) -> PathBuf {
@@ -95,7 +98,9 @@ impl ImageCache {
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let temporary = self.tmp.join(format!("{}-{}", std::process::id(), uuid_tail()));
+        let temporary = self
+            .tmp
+            .join(format!("{}-{}", std::process::id(), uuid_tail()));
         let result = (|| -> Result<()> {
             let mut file = std::fs::OpenOptions::new()
                 .write(true)

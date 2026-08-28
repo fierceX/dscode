@@ -900,7 +900,10 @@ fn image_input_toml_on_and_off_parse() {
     let mut cfg = CliConfig::default();
     apply_config_sources(&mut cfg, &defaults, None, None, Some(&file));
     assert!(
-        matches!(cfg.image_input, Some(mink::runtime::ImageInputCapability::Unsupported)),
+        matches!(
+            cfg.image_input,
+            Some(mink::runtime::ImageInputCapability::Unsupported)
+        ),
         "image_input=off must force Unsupported"
     );
 }
@@ -914,7 +917,10 @@ fn image_input_env_vars_apply_and_files_outrank() {
     }
     let mut cfg = CliConfig::default();
     apply_env_defaults(&mut cfg, &CliConfig::default()).unwrap();
-    assert!(matches!(cfg.image_input, Some(mink::runtime::ImageInputCapability::Unsupported)));
+    assert!(matches!(
+        cfg.image_input,
+        Some(mink::runtime::ImageInputCapability::Unsupported)
+    ));
     assert_eq!(
         cfg.vision_models.as_deref(),
         Some(vec!["m1".to_string(), "m2".to_string(), "m3".to_string()].as_slice())
@@ -953,7 +959,7 @@ max_images_per_request = 8\n\
 max_image_bytes_per_request = \"32M\"\n\
 max_image_bytes = \"1048576\"\n\
 max_dimension = 8192\n\
-max_pixels = \"8M\""
+max_pixels = \"8M\"",
     )
     .unwrap();
     let mut cfg = CliConfig::default();
@@ -973,12 +979,18 @@ fn image_limits_empty_or_invalid_section_is_ignored() {
     let empty: MinkConfigFile = toml::from_str("[provider.image]\n").unwrap();
     let mut cfg = CliConfig::default();
     apply_config_sources(&mut cfg, &CliConfig::default(), None, None, Some(&empty));
-    assert!(cfg.image_limits.is_none(), "defaults must not produce overrides");
+    assert!(
+        cfg.image_limits.is_none(),
+        "defaults must not produce overrides"
+    );
 
     let invalid: MinkConfigFile = toml::from_str("[provider.image]\ndetail = \"ultra\"").unwrap();
     let mut cfg = CliConfig::default();
     apply_config_sources(&mut cfg, &CliConfig::default(), None, None, Some(&invalid));
-    assert!(cfg.image_limits.is_none(), "invalid section must be ignored");
+    assert!(
+        cfg.image_limits.is_none(),
+        "invalid section must be ignored"
+    );
 }
 
 #[test]
@@ -986,8 +998,7 @@ fn image_limits_merge_across_layers_field_wise() {
     let defaults = CliConfig::default();
     let user: MinkConfigFile =
         toml::from_str("[provider.image]\nmax_images_per_request = 8").unwrap();
-    let project: MinkConfigFile =
-        toml::from_str("[provider.image]\ndetail = \"low\"").unwrap();
+    let project: MinkConfigFile = toml::from_str("[provider.image]\ndetail = \"low\"").unwrap();
     let mut cfg = CliConfig::default();
     apply_config_sources(&mut cfg, &defaults, Some(&user), Some(&project), None);
     let over = cfg.image_limits.expect("merged overrides");

@@ -22,17 +22,23 @@ fn project_full_request_applies_consumed_images_then_plan() {
     let projected = project_full_request(&plan_path, true, &messages).unwrap();
     // Consumed reference (before last assistant) -> text citation.
     assert_eq!(projected[0]["content"][0]["type"], "text");
-    assert!(projected[0]["content"][0]["text"]
-        .as_str()
-        .unwrap()
-        .contains("[Previously attached image"), "{}", projected[0]);
+    assert!(
+        projected[0]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("[Previously attached image"),
+        "{}",
+        projected[0]
+    );
     // Unconsumed (after last assistant) stays a tool_attachment.
     assert_eq!(projected[2]["content"][0]["type"], "tool_attachment");
     // Plan is the last projected message (tail mode).
-    assert!(projected.last().unwrap()["content"]
-        .as_str()
-        .unwrap()
-        .contains("<current-plan>"));
+    assert!(
+        projected.last().unwrap()["content"]
+            .as_str()
+            .unwrap()
+            .contains("<current-plan>")
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 

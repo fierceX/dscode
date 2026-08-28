@@ -29,9 +29,7 @@ pub fn reduce_for_summary(messages: &[Value]) -> String {
                             let format = block.get("format").and_then(Value::as_str).unwrap_or("?");
                             let width = block.get("width").and_then(Value::as_u64).unwrap_or(0);
                             let height = block.get("height").and_then(Value::as_u64).unwrap_or(0);
-                            out.push_str(&format!(
-                                "[image {format} {width}x{height}: {url}]\n"
-                            ));
+                            out.push_str(&format!("[image {format} {width}x{height}: {url}]\n"));
                         }
                         _ => {}
                     }

@@ -1725,12 +1725,9 @@ pub(crate) fn classify_image_read(
         if !crate::session::image_cache::validate_image_id(id) {
             anyhow::bail!("Error: invalid image reference: {raw_path}");
         }
-        return Ok(ImageReadKind::ImageRef {
-            id: id.to_string(),
-        });
+        return Ok(ImageReadKind::ImageRef { id: id.to_string() });
     }
-    let has_selector =
-        selection.offset.is_some() || selection.limit.is_some() || selection.raw;
+    let has_selector = selection.offset.is_some() || selection.limit.is_some() || selection.raw;
     // Registered resources (artifact://, skill://, rule://, session://) and
     // unknown URL-like schemes never become image reads: they keep the
     // resource-router semantics (resolve with selector support, or fail
@@ -1795,20 +1792,26 @@ pub(crate) fn prepare_image_read(
                     "Error: image files do not support line selectors or raw mode: {display_path}"
                 );
             }
-            (read_bounded_image(&path, limits.max_image_bytes)?, display_path, None)
+            (
+                read_bounded_image(&path, limits.max_image_bytes)?,
+                display_path,
+                None,
+            )
         }
         ImageReadKind::ImageRef { id } => {
-            let bytes = ctx.image_cache.read_bounded(&id, limits.max_image_bytes)?.ok_or_else(|| {
-                anyhow::anyhow!("Error: image://{id} not found in image cache")
-            })?;
+            let bytes = ctx
+                .image_cache
+                .read_bounded(&id, limits.max_image_bytes)?
+                .ok_or_else(|| anyhow::anyhow!("Error: image://{id} not found in image cache"))?;
             (bytes, String::new(), Some(id))
         }
         ImageReadKind::VfsCandidate { .. } => {
             anyhow::bail!("vfs candidate must go through prepare_vfs_candidate")
         }
     };
-    let info = crate::tools::image::probe(&bytes)
-        .ok_or_else(|| anyhow::anyhow!("Error: invalid image: header or dimensions could not be parsed"))?;
+    let info = crate::tools::image::probe(&bytes).ok_or_else(|| {
+        anyhow::anyhow!("Error: invalid image: header or dimensions could not be parsed")
+    })?;
     // Double-layer MIME check: Mink support set (probe) ∩ model allowed_mime.
     if !limits.allowed_mime.contains(&info.format) {
         anyhow::bail!(
@@ -1870,9 +1873,7 @@ pub(crate) fn prepare_vfs_candidate(
     let image = vfs
         .read_image(&ctx.vfs_scope, &display_path, limits.max_image_bytes)
         .map_err(|error| anyhow::anyhow!("image read failed for {display_path}: {error:#}"))?
-        .map(|image| {
-            Ok::<_, anyhow::Error>(image)
-        })
+        .map(Ok::<_, anyhow::Error>)
         .transpose()?;
     let Some(image) = image else {
         return Ok(VfsImageOutcome::NotImage);
@@ -1893,8 +1894,9 @@ pub(crate) fn prepare_vfs_candidate(
             limits.max_image_bytes
         );
     }
-    let info = crate::tools::image::probe(&image.bytes)
-        .ok_or_else(|| anyhow::anyhow!("Error: invalid image: header or dimensions could not be parsed"))?;
+    let info = crate::tools::image::probe(&image.bytes).ok_or_else(|| {
+        anyhow::anyhow!("Error: invalid image: header or dimensions could not be parsed")
+    })?;
     // The VFS-declared mime must match the decoded bytes (v7 §12).
     if info.mime() != image.mime {
         anyhow::bail!(
@@ -1950,7 +1952,8 @@ fn read_bounded_image(path: &Path, max_bytes: u64) -> Result<Vec<u8>> {
     let mut file = std::fs::File::open(path)?;
     file.seek(SeekFrom::Start(0))?;
     let mut bytes = Vec::with_capacity((max_bytes as usize).min(64 * 1024));
-    file.take(max_bytes.saturating_add(1)).read_to_end(&mut bytes)?;
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
     if bytes.len() as u64 > max_bytes {
         anyhow::bail!(
             "Error: image file exceeds the {} byte limit; downscale the image and retry",

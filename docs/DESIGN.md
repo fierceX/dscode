@@ -860,6 +860,10 @@ pub enum Event {
 | artifact 序号恢复且正文独占创建 | `artifacts.rs` | fork/恢复后覆盖历史 artifact |
 | Prefab prefix 只在 prefab runtime 生效 | `agent/prefix.rs` | 普通 runtime 误读 Prefab `prefix_snapshot` 会破坏默认提示词 |
 | Prefab 重组不覆盖已有 session | `crates/mink-prefab/src/seed.rs` | 覆盖已有历史会丢失对话 |
+| 图片能力在 session 初始化冻结；恢复/切换按能力指纹兼容门控 | `capabilities/model_capabilities.rs`、`runtime/context_build.rs`、`agent/orchestrator.rs` | 升级或改配置后旧视觉会话被拒绝启动 |
+| conversation 只存 `image://` 引用，请求时才物化；每个引用只完整发送一次 | `llm/image_projection.rs`、`session/store.rs` | 重复 base64 放大请求体或缓存缺失时谎报"已附加" |
+| 图片对象内容寻址、独占创建、读回 digest 校验；子代理不继承父缓存 | `session/image_cache.rs`、`agent/sub_executor.rs` | 覆盖/篡改对象或 fork 后引用损坏 |
+| 图片批次配额从 0 计数且在物化层重复校验；超限本轮失败、历史降级 | `tools/runner.rs`、`llm/image_projection.rs` | 导入或损坏会话绕过图片预算 |
 
 ## 主题十五：Rust 库 API 设计
 
@@ -924,3 +928,18 @@ Rust crate mink ───┘
 ### 隐藏 worker 模式
 
 私有化业务服务可以通过自身隐藏 worker 分支 + `sandbox::reexec_in_sandbox()` 实现进程级沙箱。沙箱配置走 argv，任务数据走 stdin（re-exec 后读），和 Mink CLI 流程完全一致。该隐藏分支属于业务服务实现细节，不要求 `mink` / `mink-core` 暴露新的公开 CLI。
+
+## 主题十六：多模态读图（v7 协议）
+
+实现为"Read 捕获 → 内容寻址缓存 → 请求时物化注入"三段式，完整协议见
+[`docs/设计哲学-多模态读图.md`](设计哲学-多模态读图.md)。关键不变式：
+
+- 能力在 session 初始化时解析并冻结（`model-capabilities.json`），恢复与 `/model`
+  切换经能力指纹兼容门控——Unsupported 会话接受任意模型但永远 text-only，图片会话
+  要求精确指纹匹配（fail closed）；
+- conversation 只存 `image://` opaque 引用（无字节、无路径、无文件名），原始字节以
+  内容寻址对象存 `<home>/.mink/cache/images/v1/`；
+- 每个引用只完整物化一次（单次消费：最后一条 assistant 消息之后为未消费批），之后
+  降级为确定性文本引用，`Read image://` 可重新注入；
+- 图片准入配额（数量/字节/维度/像素）在工具层与物化层双重校验，批次从 0 计数且
+  批次间重置；`[provider.image]` 限额只作用于已支持会话。

@@ -43,11 +43,10 @@ impl PrefixManager {
             // capability supports images, the Read description is augmented
             // here and cached inside ImmutablePrefix (v7 §3.4). Unsupported
             // sessions leave the schema byte-for-byte unchanged.
-            let tools_json =
-                crate::tools::surface::augment_read_schema_for_image(
-                    self.ctx.tool_surface.schemas(),
-                    &self.ctx.model_capabilities,
-                );
+            let tools_json = crate::tools::surface::augment_read_schema_for_image(
+                self.ctx.tool_surface.schemas(),
+                &self.ctx.model_capabilities,
+            );
             let workflows = crate::prompt::workflows::PromptWorkflowResolver::builtin()
                 .resolve(&self.ctx.tool_capabilities)?;
             self.ctx

@@ -7,13 +7,13 @@
 //! materialization → wire body; plus `image://` reference re-injection and
 //! the text-only regression (unknown scheme fail-closed).
 
+use anyhow::Result;
+use base64::Engine as _;
 use mink::runtime::{
     AgentOptions, AgentRuntime, ImageInputCapability, LlmBackend, LlmRequest, LlmResponseStream,
     OpenAiChatImageUrlLimits, TurnStatus,
 };
 use mink::runtime::{LlmEvent, LlmStopEvent, LlmTextEvent, LlmToolCallEvent};
-use anyhow::Result;
-use base64::Engine as _;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -27,6 +27,17 @@ struct CapturingVisionBackend {
 
 impl CapturingVisionBackend {
     fn new(requests: Arc<Mutex<Vec<serde_json::Value>>>) -> Self {
+        Self::build(requests, None)
+    }
+
+    /// Backend for a turn whose model must re-read a cached image through
+    /// the `image://` reference (the reference is only known after the
+    /// capture turn persisted it).
+    fn new_with_reference(requests: Arc<Mutex<Vec<serde_json::Value>>>, reference: String) -> Self {
+        Self::build(requests, Some(reference))
+    }
+
+    fn build(requests: Arc<Mutex<Vec<serde_json::Value>>>, reference: Option<String>) -> Self {
         fn tool_call(name: &str, id: &str, input: serde_json::Value) -> Result<LlmEvent> {
             Ok(LlmEvent::ToolCall(LlmToolCallEvent {
                 name: name.to_string(),
@@ -57,18 +68,29 @@ impl CapturingVisionBackend {
             }))
         }
         let mut responses = VecDeque::new();
-        // Request 1: the model asks to Read the image.
-        responses.push_back(vec![
-            tool_call("Read", "call_read", serde_json::json!({"path": "shot.png"})),
-            stop("tool_use"),
-        ]);
-        // Request 2 (after capture): the model describes the image.
-        responses.push_back(vec![
-            text("The image shows a red square on a black background."),
-            stop("stop"),
-        ]);
-        // Request 3 (`image://` reference read): acknowledge.
-        responses.push_back(vec![text("Re-injected the cached image."), stop("stop")]);
+        match reference {
+            // Capture turn: Request 1 — the model asks to Read the image;
+            // Request 2 (after capture) — the model describes the image.
+            None => {
+                responses.push_back(vec![
+                    tool_call("Read", "call_read", serde_json::json!({"path": "shot.png"})),
+                    stop("tool_use"),
+                ]);
+                responses.push_back(vec![
+                    text("The image shows a red square on a black background."),
+                    stop("stop"),
+                ]);
+            }
+            // Reference turn: Request 1 — the model re-reads via the cached
+            // reference; Request 2 — acknowledges the re-injection.
+            Some(reference) => {
+                responses.push_back(vec![
+                    tool_call("Read", "call_re", serde_json::json!({"path": reference})),
+                    stop("tool_use"),
+                ]);
+                responses.push_back(vec![text("Re-injected the cached image."), stop("stop")]);
+            }
+        }
         Self {
             requests,
             responses: Mutex::new(responses),
@@ -82,10 +104,7 @@ impl LlmBackend for CapturingVisionBackend {
         "capturing-vision"
     }
 
-    fn image_input_capability(
-        &self,
-        _model: &str,
-    ) -> mink::runtime::ImageInputCapability {
+    fn image_input_capability(&self, _model: &str) -> mink::runtime::ImageInputCapability {
         ImageInputCapability::OpenAiChatImageUrl(OpenAiChatImageUrlLimits::default())
     }
 
@@ -177,7 +196,10 @@ async fn read_image_captures_and_materializes_in_wire_body() {
     .await
     .unwrap();
 
-    let outcome = runtime.run_turn("Read shot.png and describe it").await.unwrap();
+    let outcome = runtime
+        .run_turn("Read shot.png and describe it")
+        .await
+        .unwrap();
     assert_eq!(outcome.status, TurnStatus::Ok, "{:?}", outcome.error);
 
     let requests = requests.lock().unwrap().clone();
@@ -203,7 +225,9 @@ async fn read_image_captures_and_materializes_in_wire_body() {
     assert!(url.starts_with("data:image/png;base64,"), "{url}");
     let encoded = &url["data:image/png;base64,".len()..];
     assert_eq!(
-        base64::engine::general_purpose::STANDARD.decode(encoded).unwrap(),
+        base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap(),
         bytes,
         "wire body must carry the raw captured bytes (phase one, no transform)"
     );
@@ -220,7 +244,9 @@ async fn read_image_captures_and_materializes_in_wire_body() {
         })
         .expect("image user message");
     assert!(
-        tool_positions.iter().all(|position| position < &image_message),
+        tool_positions
+            .iter()
+            .all(|position| position < &image_message),
         "tool messages must precede the image user message: {tool_positions:?} vs {image_message}"
     );
 
@@ -251,7 +277,10 @@ async fn read_image_captures_and_materializes_in_wire_body() {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let runtime = AgentRuntime::start(
         AgentOptions::new(home.clone(), cwd.clone())
-            .with_llm_backend(Arc::new(CapturingVisionBackend::new(requests.clone())))
+            .with_llm_backend(Arc::new(CapturingVisionBackend::new_with_reference(
+                requests.clone(),
+                format!("image://{image_id}"),
+            )))
             .with_api_key("test-key")
             .with_base_url("https://example.invalid/v1"),
     )
@@ -264,12 +293,20 @@ async fn read_image_captures_and_materializes_in_wire_body() {
     assert_eq!(outcome.status, TurnStatus::Ok, "{:?}", outcome.error);
 
     let requests = requests.lock().unwrap().clone();
-    let messages = requests[0]["messages"].as_array().unwrap().clone();
+    assert_eq!(
+        requests.len(),
+        2,
+        "reference turn must produce two requests"
+    );
+    // The reference read materializes on the request AFTER the tool ran.
+    let messages = requests[1]["messages"].as_array().unwrap().clone();
     let url = find_image_url(&messages).expect("re-injected image part");
     assert!(url.starts_with("data:image/png;base64,"), "{url}");
     let encoded = &url["data:image/png;base64,".len()..];
     assert_eq!(
-        base64::engine::general_purpose::STANDARD.decode(encoded).unwrap(),
+        base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap(),
         bytes,
         "reference read must re-inject the same raw bytes"
     );
@@ -323,7 +360,11 @@ async fn text_only_session_keeps_legacy_behavior() {
     // A png path in a text-only session is read as text and fails like
     // before (binary is not UTF-8), never producing an attachment.
     let outcome = runtime.run_turn("Read shot.png").await.unwrap();
-    assert_eq!(outcome.status, TurnStatus::Ok, "turn itself still completes");
+    assert_eq!(
+        outcome.status,
+        TurnStatus::Ok,
+        "turn itself still completes"
+    );
 
     let _ = std::fs::remove_dir_all(&home);
     let _ = std::fs::remove_dir_all(&cwd);
@@ -352,7 +393,8 @@ fn find_object(objects: &std::path::Path) -> Option<PathBuf> {
 
 fn read_capability_snapshot(home: &std::path::Path) -> Option<String> {
     let path = home.join("model-capabilities.json");
-    path.exists().then(|| std::fs::read_to_string(path).unwrap())
+    path.exists()
+        .then(|| std::fs::read_to_string(path).unwrap())
 }
 
 fn extract_image_id(conversation: &str) -> String {

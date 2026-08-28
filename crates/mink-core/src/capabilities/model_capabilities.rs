@@ -38,20 +38,14 @@ pub fn estimate_image_tokens(width: u32, height: u32, detail: ImageDetail) -> u6
     // Stage 1: long edge <= 2000.
     let (long, short) = if long > 2000 {
         let ratio = 2000.0 / f64::from(long);
-        (
-            2000,
-            (f64::from(short) * ratio).max(1.0) as u32,
-        )
+        (2000, (f64::from(short) * ratio).max(1.0) as u32)
     } else {
         (long, short)
     };
     // Stage 2: short edge <= 768 (after stage 1 re-proportioning).
     let (long, short) = if short > 768 {
         let ratio = 768.0 / f64::from(short);
-        (
-            (f64::from(long) * ratio) as u32,
-            768,
-        )
+        ((f64::from(long) * ratio) as u32, 768)
     } else {
         (long, short)
     };
@@ -315,12 +309,8 @@ pub fn load_capabilities(path: &Path) -> Result<Option<SessionModelCapabilities>
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
     };
-    let caps: SessionModelCapabilities = serde_json::from_str(&raw).with_context(|| {
-        format!(
-            "invalid model capabilities snapshot at {}",
-            path.display()
-        )
-    })?;
+    let caps: SessionModelCapabilities = serde_json::from_str(&raw)
+        .with_context(|| format!("invalid model capabilities snapshot at {}", path.display()))?;
     if !caps.verify_fingerprint() {
         bail!(
             "model capabilities snapshot fingerprint mismatch at {}",
@@ -369,9 +359,7 @@ pub fn classify_snapshot_absence(
 
 fn has_nonempty_jsonl(path: &Path) -> Result<bool> {
     match std::fs::read_to_string(path) {
-        Ok(raw) => Ok(raw
-            .lines()
-            .any(|line| !line.trim().is_empty())),
+        Ok(raw) => Ok(raw.lines().any(|line| !line.trim().is_empty())),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error.into()),
     }
@@ -382,9 +370,10 @@ mod tests {
     use super::*;
 
     fn base_config() -> ResolvedConfig {
-        let mut config = ResolvedConfig::default();
-        config.model = "vision-model".to_string();
-        config
+        ResolvedConfig {
+            model: "vision-model".to_string(),
+            ..ResolvedConfig::default()
+        }
     }
 
     struct TextBackend;
@@ -443,8 +432,10 @@ mod tests {
             OpenAiChatImageUrlLimits::default(),
         ));
         let mut config_b = base_config();
-        let mut limits = OpenAiChatImageUrlLimits::default();
-        limits.max_images_per_request = 1;
+        let limits = OpenAiChatImageUrlLimits {
+            max_images_per_request: 1,
+            ..Default::default()
+        };
         config_b.image_input = Some(ImageInputCapability::OpenAiChatImageUrl(limits));
         let a = SessionModelCapabilities::resolve("m", &config_a, &TextBackend);
         let b = SessionModelCapabilities::resolve("m", &config_b, &TextBackend);
@@ -495,7 +486,10 @@ mod tests {
             },
             &TextBackend,
         );
-        assert_ne!(caps.capability_fingerprint, default_caps.capability_fingerprint);
+        assert_ne!(
+            caps.capability_fingerprint,
+            default_caps.capability_fingerprint
+        );
     }
 
     #[test]
@@ -559,7 +553,11 @@ mod tests {
 
         // Empty conversation but a prefix_snapshot event: legacy.
         std::fs::write(&conversation, "").unwrap();
-        std::fs::write(&events, "{\"type\":\"prefix_snapshot\",\"fingerprint\":\"x\"}\n").unwrap();
+        std::fs::write(
+            &events,
+            "{\"type\":\"prefix_snapshot\",\"fingerprint\":\"x\"}\n",
+        )
+        .unwrap();
         assert!(matches!(
             classify_snapshot_absence(&conversation, &events).unwrap(),
             SnapshotAbsence::Legacy
@@ -586,7 +584,10 @@ mod backend_declaration_tests {
             "built-in vision model must resolve image capability by default"
         );
         assert!(
-            backend.image_input_capability("deepseek-v4-pro").limits().is_none(),
+            backend
+                .image_input_capability("deepseek-v4-pro")
+                .limits()
+                .is_none(),
             "non-vision models stay text-only"
         );
     }
@@ -599,19 +600,13 @@ mod token_estimation_tests {
     #[test]
     fn tile_estimation_matches_openai_semantics() {
         // 1024x768 high: 2x2 tiles -> 85 + 170*4 = 765.
-        assert_eq!(
-            estimate_image_tokens(1024, 768, ImageDetail::High),
-            765
-        );
+        assert_eq!(estimate_image_tokens(1024, 768, ImageDetail::High), 765);
         // low detail is a flat 85 regardless of size.
         assert_eq!(estimate_image_tokens(4000, 3000, ImageDetail::Low), 85);
         // Sequential two-stage scaling (review fix): 4000x3000 -> stage 1
         // long edge 2000 -> 2000x1500 -> stage 2 short edge 768 -> 1024x768
         // -> 2x2 tiles = 765.
-        assert_eq!(
-            estimate_image_tokens(4000, 3000, ImageDetail::High),
-            765
-        );
+        assert_eq!(estimate_image_tokens(4000, 3000, ImageDetail::High), 765);
         // Wide image without the 4-tile cap (review fix): 2000x1000 -> stage 2
         // short edge 768 -> 1536x768 -> 3x2 tiles = 6 -> 85 + 170*6 = 1105.
         assert_eq!(estimate_image_tokens(2000, 1000, ImageDetail::High), 1105);

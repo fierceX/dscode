@@ -90,12 +90,7 @@ pub trait ReadOnlyFileSystem: Send + Sync {
     /// implementations need no changes (v7 §12). Returned bytes must be
     /// self-consistent and must not exceed `max_bytes` (enforced by the
     /// caller).
-    fn read_image(
-        &self,
-        scope: &VfsScope,
-        path: &str,
-        max_bytes: u64,
-    ) -> Result<Option<VfsImage>> {
+    fn read_image(&self, scope: &VfsScope, path: &str, max_bytes: u64) -> Result<Option<VfsImage>> {
         let _ = (scope, path, max_bytes);
         Ok(None)
     }

@@ -99,7 +99,10 @@ async fn image_results_enter_history_like_text_results() {
     assert_eq!(content[1]["type"], "text");
     assert!(content[1]["text"].as_str().unwrap().contains("page.png"));
     assert_eq!(content[2]["type"], "tool_attachment");
-    assert_eq!(content[2]["url"], "image://sha256:".to_string() + &"aa".repeat(32));
+    assert_eq!(
+        content[2]["url"],
+        "image://sha256:".to_string() + &"aa".repeat(32)
+    );
     assert_eq!(content[2]["bytes"], 118782);
     // No pixel data anywhere in the persisted message.
     let serialized = serde_json::to_string(&lines[0]).unwrap();

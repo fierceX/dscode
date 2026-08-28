@@ -243,7 +243,10 @@ fn estimate_counts_tool_attachment_pixel_payload() {
     )
     .unwrap();
     // Attachment must add the tile estimate (>= 765 tokens).
-    assert!(plain >= without_attachment + 765, "{plain} vs {without_attachment}");
+    assert!(
+        plain >= without_attachment + 765,
+        "{plain} vs {without_attachment}"
+    );
 }
 
 #[test]
@@ -260,8 +263,7 @@ fn estimate_counts_only_unconsumed_after_projection() {
             json!({"type": "tool_attachment", "tool_use_id": "b", "url": "image://sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "format": "png", "width": 1024, "height": 768, "bytes": 1000}),
         ]}),
     ];
-    let projected =
-        crate::llm::image_projection::project_consumed_attachments(&messages);
+    let projected = crate::llm::image_projection::project_consumed_attachments(&messages);
     let counted = estimate_openai_context_tokens(&projected, &[], "").unwrap();
     let fresh_only = estimate_openai_context_tokens(
         &[json!({"role": "user", "content": [

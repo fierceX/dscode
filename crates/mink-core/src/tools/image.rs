@@ -7,7 +7,9 @@
 use std::io::Cursor;
 
 /// Raster image formats accepted by the version-one image path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum ImageFormat {
     Png,
@@ -17,7 +19,12 @@ pub enum ImageFormat {
 }
 
 impl ImageFormat {
-    pub const ALL: [ImageFormat; 4] = [ImageFormat::Png, ImageFormat::Jpeg, ImageFormat::Gif, ImageFormat::Webp];
+    pub const ALL: [ImageFormat; 4] = [
+        ImageFormat::Png,
+        ImageFormat::Jpeg,
+        ImageFormat::Gif,
+        ImageFormat::Webp,
+    ];
 
     pub fn mime(self) -> &'static str {
         match self {
@@ -96,7 +103,11 @@ pub fn probe(bytes: &[u8]) -> Option<ImageInfo> {
     if width == 0 || height == 0 {
         return None;
     }
-    Some(ImageInfo { format, width, height })
+    Some(ImageInfo {
+        format,
+        width,
+        height,
+    })
 }
 
 /// `width as u64 * height as u64` with overflow rejection.
@@ -169,8 +180,11 @@ mod tests {
             *pixel = image::Rgb([(x * 16) as u8, (y * 32) as u8, 64]);
         }
         let mut out = Vec::new();
-        img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Jpeg)
-            .expect("encode jpeg fixture");
+        img.write_to(
+            &mut std::io::Cursor::new(&mut out),
+            image::ImageFormat::Jpeg,
+        )
+        .expect("encode jpeg fixture");
         out
     }
 
@@ -193,7 +207,7 @@ mod tests {
     fn gif_and_webp_magic_dispatch() {
         // Real GIF via the image crate encoder: dimensions parse from the
         // logical screen descriptor.
-        let mut gif_img = image::RgbaImage::new(32, 16);
+        let gif_img = image::RgbaImage::new(32, 16);
         let mut gif = Vec::new();
         gif_img
             .write_to(&mut std::io::Cursor::new(&mut gif), image::ImageFormat::Gif)
@@ -224,7 +238,7 @@ mod tests {
         // header probe; truncating the tail does not, because phase one only
         // reads the header.
         let full = png_bytes(64, 64);
-        let mut bytes = full[..20].to_vec(); // signature + partial IHDR
+        let bytes = full[..20].to_vec(); // signature + partial IHDR
         assert!(probe(&bytes).is_none());
         let tail = full[..full.len() - 5].to_vec();
         assert!(probe(&tail).is_some());
@@ -236,7 +250,10 @@ mod tests {
         // guard exists for the pixel-limit comparison itself.
         assert_eq!(checked_pixel_count(u32::MAX, 2), Some(8_589_934_590));
         assert_eq!(checked_pixel_count(1024, 768), Some(786_432));
-        assert_eq!(checked_pixel_count(u32::MAX, u32::MAX), Some(18_446_744_065_119_617_025));
+        assert_eq!(
+            checked_pixel_count(u32::MAX, u32::MAX),
+            Some(18_446_744_065_119_617_025)
+        );
     }
 
     #[test]

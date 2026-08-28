@@ -219,6 +219,7 @@ ToolSignalProcessor、decision cooldown 和 StormBreaker 窗口重置。`MINK_SI
 | `context.rs` | `AgentSharedContext` 和工具层 `ToolContext` |
 | `assets.rs` | 编译期嵌入的 `tools.json` 和 skill 索引 |
 | `capabilities/` | model-visible 能力 snapshot：skills、instruction files、rules，以及 source/exposure 元数据 |
+| `capabilities/model_capabilities.rs` | session 级模型能力：图片输入能力/限额、能力指纹、`model-capabilities.json` 快照与兼容门控 |
 | `resources/` | 轻量资源 URL 的注册式 router 和内置 handler；`Read` 是当前内置 provider，不拥有具体 resource scheme |
 | `cancel.rs` | 父子 cancellation token |
 | `safety.rs` | Bash 危险命令拦截 |
@@ -274,6 +275,7 @@ Server 生命周期：Ctrl+C → axum serve 停止 → idle reaper abort → `re
 | `agent/belief.rs` | `BeliefTracker` |
 | `agent/decision.rs` | `DecisionEngine` |
 | `agent/recovery_policy.rs` | 基于已解析语义能力生成恢复提示并校验恢复首个调用；与普通 Bash 执行策略相互独立 |
+| `llm/image_projection.rs` | 请求时 `tool_attachment` → `image_url` data-URL 物化、单次消费投影、配额防线与降级 |
 | `crates/mink-core/src/config.rs` | `SignalPolicy` / 信号响应能力边界 |
 
 ### 工具系统
@@ -287,7 +289,8 @@ Server 生命周期：Ctrl+C → axum serve 停止 → idle reaper abort → `re
 | `tools/semantic_capabilities.rs` | 工具语义能力 offer、provider binding、scope classifier 和 fingerprint |
 | `tools/runtime_guidance.rs` | 带结构化工具引用的运行时引导消息 |
 | `tools/runner.rs` | `ToolExec` trait、`TOOL_REGISTRY`、resolved surface gate、并发调度、结果截断、artifact spill 和内置控制工具 |
-| `tools/file.rs` | `ReadTool`、`WriteTool`、双模式 `EditTool`、selector、resource URL、prepare/commit |
+| `tools/file.rs` | `ReadTool`、`WriteTool`、双模式 `EditTool`、selector、resource URL、图片读分类/准备、prepare/commit |
+| `tools/image.rs` | 图片识别与头部探测：magic 预检（PNG/JPEG/GIF/WebP）、`ImageInfo`、`ImageAttachment` 与配额元数据 |
 | `tools/hashline.rs` | 非 Block tokenizer/parser、行号/文本锚点坐标 apply、剪贴板操作 |
 | `tools/replace.rs` | exact 与归一化行窗口 fuzzy 匹配、歧义诊断、缩进转换 |
 | `tools/snapshot.rs` | Hashline 完整文本版本、seen-lines、xxHash tag、淘汰和路径恢复 |
@@ -327,6 +330,7 @@ bindings。发给 provider 的 schemas 直接来自 surface；prefix 直接消�
 | `session/prefix.rs` | ImmutablePrefix |
 | `session/plan.rs` | PlanStore、原子计划状态转换和当前计划动态投影 |
 | `session/todo.rs` | TodoStore、revision、稳定 ID、原子批量提交和 revision 对账 |
+| `session/image_cache.rs` | 内容寻址图片缓存（`<home>/.mink/cache/images/v1/`）：SHA-256 对象、两阶段提交、digest 校验、有界读取 |
 | `session/atomic_file.rs` | Plan/Todo 状态文件共用的同目录临时文件和原子替换 |
 | `session/paths.rs` | 四种 session layout 的路径推导 |
 | `session/init.rs` | session 目录、conversation、stats 和 artifact 基础设施初始化 |

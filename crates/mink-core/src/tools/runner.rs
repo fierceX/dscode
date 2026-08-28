@@ -297,7 +297,10 @@ impl ToolRunner {
             }
         }
 
-        results.extend(self.execute_read_batch(read_batch, &mut image_budget).await?);
+        results.extend(
+            self.execute_read_batch(read_batch, &mut image_budget)
+                .await?,
+        );
         Ok(results)
     }
 
@@ -368,9 +371,7 @@ impl ToolRunner {
                                     &path_for_task,
                                 ) {
                                     Ok(selection) => selection,
-                                    Err(_) => {
-                                        return Ok(super::file::ImageReadKind::NotImage)
-                                    }
+                                    Err(_) => return Ok(super::file::ImageReadKind::NotImage),
                                 };
                             super::file::classify_image_read(&ctx, &path_for_task, &selection)
                         })
@@ -410,7 +411,9 @@ impl ToolRunner {
                 if let Some(tool) = self.find_custom_tool(&call.name).cloned() {
                     let ctx = self.ctx.clone();
                     let call = call.clone();
-                    text_handles.push(tokio::spawn(async move { execute_custom(&ctx, &call, tool).await }));
+                    text_handles.push(tokio::spawn(async move {
+                        execute_custom(&ctx, &call, tool).await
+                    }));
                 } else {
                     let ctx = self.ctx.clone();
                     let tool_name = call.name.clone();
@@ -464,9 +467,9 @@ impl ToolRunner {
                             .await
                             {
                                 Ok(result) => result,
-                                Err(error) => Err(anyhow::anyhow!(
-                                    "image prepare task failed: {error}"
-                                )),
+                                Err(error) => {
+                                    Err(anyhow::anyhow!("image prepare task failed: {error}"))
+                                }
                             };
                             match outcome {
                                 Ok(super::file::VfsImageOutcome::Image(prepared)) => {
@@ -492,22 +495,17 @@ impl ToolRunner {
                             .await
                             {
                                 Ok(result) => result,
-                                Err(error) => Err(anyhow::anyhow!(
-                                    "image prepare task failed: {error}"
-                                )),
+                                Err(error) => {
+                                    Err(anyhow::anyhow!("image prepare task failed: {error}"))
+                                }
                             };
-                            results.push(
-                                self.commit_image_result(call, prepared, budget).await,
-                            );
+                            results.push(self.commit_image_result(call, prepared, budget).await);
                         }
                     }
                 }
-                PreparedSlot::ClassifyError { call, error } => results.push(failed_tool_result(
-                    call.id,
-                    call.name,
-                    call.fields,
-                    error,
-                )),
+                PreparedSlot::ClassifyError { call, error } => {
+                    results.push(failed_tool_result(call.id, call.name, call.fields, error))
+                }
             }
         }
         Ok(results)
@@ -541,18 +539,17 @@ impl ToolRunner {
         // flushes), so history never locks out new reads. A rejected read
         // returns an ordinary failed ToolExecution and is never published —
         // no promise of a later attach that materialization could not keep.
-        if let Some(limits) = super::file::image_limits(&self.ctx) {
-            if batch.used_images >= limits.max_images_per_request
-                || batch.used_bytes.saturating_add(bytes) > limits.max_image_bytes_per_request
-            {
-                return prepare_error(anyhow::anyhow!(
-                    "Error: image attachment batch limit exceeded: usage {}/{} images and {}/{} bytes; use fewer Read calls in this batch",
-                    batch.used_images,
-                    limits.max_images_per_request,
-                    batch.used_bytes,
-                    limits.max_image_bytes_per_request
-                ));
-            }
+        if let Some(limits) = super::file::image_limits(&self.ctx)
+            && (batch.used_images >= limits.max_images_per_request
+                || batch.used_bytes.saturating_add(bytes) > limits.max_image_bytes_per_request)
+        {
+            return prepare_error(anyhow::anyhow!(
+                "Error: image attachment batch limit exceeded: usage {}/{} images and {}/{} bytes; use fewer Read calls in this batch",
+                batch.used_images,
+                limits.max_images_per_request,
+                batch.used_bytes,
+                limits.max_image_bytes_per_request
+            ));
         }
         // Phase B: commit on the blocking pool (no guard held across await).
         let image_id = match &prepared.existing_id {
@@ -562,12 +559,16 @@ impl ToolRunner {
                 let bytes = prepared.bytes.clone();
                 match tokio::task::spawn_blocking(move || cache.commit(&bytes)).await {
                     Ok(Ok(id)) => id,
-                    Ok(Err(error)) => return prepare_error(anyhow::anyhow!(
-                        "Error: failed to persist image: {error:#}"
-                    )),
-                    Err(error) => return prepare_error(anyhow::anyhow!(
-                        "Error: failed to persist image: {error:#}"
-                    )),
+                    Ok(Err(error)) => {
+                        return prepare_error(anyhow::anyhow!(
+                            "Error: failed to persist image: {error:#}"
+                        ));
+                    }
+                    Err(error) => {
+                        return prepare_error(anyhow::anyhow!(
+                            "Error: failed to persist image: {error:#}"
+                        ));
+                    }
                 }
             }
         };
@@ -684,12 +685,9 @@ impl ToolRunner {
         .await
         {
             Ok(Ok(result)) => result,
-            Ok(Err(error)) => failed_tool_result(
-                call.id,
-                call.name,
-                call.fields,
-                format!("{error:#}"),
-            ),
+            Ok(Err(error)) => {
+                failed_tool_result(call.id, call.name, call.fields, format!("{error:#}"))
+            }
             Err(error) => failed_tool_result(
                 call.id.clone(),
                 call.name.clone(),

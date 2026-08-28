@@ -235,8 +235,10 @@ fn format_session_history(ctx: &ToolContext) -> Result<String> {
                             }
                         }
                         Some("tool_attachment") => {
-                            let url =
-                                block.get("url").and_then(Value::as_str).unwrap_or("image://?");
+                            let url = block
+                                .get("url")
+                                .and_then(Value::as_str)
+                                .unwrap_or("image://?");
                             out.push_str(&format!("## image\n\n{url}\n\n"));
                         }
                         _ => {}
@@ -460,8 +462,7 @@ fn summarize_content(content: &Value) -> String {
                             parts.push(format!("tool_result {id} {len} bytes"));
                         }
                         "tool_attachment" => {
-                            let url =
-                                item.get("url").and_then(Value::as_str).unwrap_or("?");
+                            let url = item.get("url").and_then(Value::as_str).unwrap_or("?");
                             let width = item.get("width").and_then(Value::as_u64).unwrap_or(0);
                             let height = item.get("height").and_then(Value::as_u64).unwrap_or(0);
                             parts.push(format!("image {url} ({width}x{height})"));

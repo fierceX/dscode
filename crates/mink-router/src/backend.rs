@@ -120,10 +120,7 @@ impl LlmBackend for RouterLlmBackend {
         "router-llm-backend"
     }
 
-    fn image_input_capability(
-        &self,
-        model: &str,
-    ) -> mink::runtime::ImageInputCapability {
+    fn image_input_capability(&self, model: &str) -> mink::runtime::ImageInputCapability {
         // The router is a transparent transport decorator: capability
         // declarations must pass through to the inner backend so sessions
         // created through `--router` resolve the same image capability as

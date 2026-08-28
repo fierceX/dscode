@@ -103,6 +103,7 @@ observer 通过固定容量队列与核心 turn 隔离；溢出或 observer 失�
 | Session | `with_session()` / `with_session_layout()`（或布局快捷方法） |
 | Signal | `with_signal_policy(SignalPolicy)` |
 | OpenAI | `with_openai_reasoning_effort()` / `with_openai_tool_choice()` / `with_openai_extra_body()` / `with_openai_token_param()` / `with_openai_include_usage()` |
+| 多模态 | `with_image_input(ImageInputCapability)` / `with_vision_models(Vec<String>)` / `with_image_limits(ImageLimitsOverrides)` |
 | 能力 | `with_mission_content()` / `with_selected_skills()` / `with_runtime_skill_content()` / `with_skill_discovery_policy()` / `with_resource_handler()` / `with_read_only_file_system()` / `with_resource_session_id()` |
 | 后端 | `with_llm_backend()` / `with_sandbox()` / `with_sandbox_python()` |
 | Prefab | `with_prefab(true)` / `with_prefab_named("flash")` / `with_prefab_path(path)` / `with_prefab_spec("name-or-path")`；需要启用 `prefab` feature |
@@ -145,6 +146,10 @@ let runtime = AgentRuntime::start(
 - 从 `LlmRequest` 读取 system prompt、messages、tools、取消 token 和模型名
 - `LlmRequest.model` 是解析后的真实模型名；`LlmRequest.model_alias` 保留用户请求的别名
 - 失败时返回 `LlmRequestFailure { attempt_count, error }`，usage 日志可记录重试次数
+- 图片能力：实现 `image_input_capability(model)`（trait 默认 `Unsupported`，fail
+  closed）。OpenAI-compatible 后端按 `with_vision_models` 列表声明；自定义后端不开此
+  方法则会话保持 text-only，也可用 `AgentOptions::with_image_input(...)` 显式声明
+  （优先级高于 backend 声明）
 
 完整示例：
 

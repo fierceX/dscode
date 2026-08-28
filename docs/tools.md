@@ -167,6 +167,15 @@ cargo build --release
 - 参数只接受 `path`（行范围用路径选择器）；未知字段被拒绝。
 - 搜索具体内容时优先用 `Grep`，定位后再用 `Read` path selector 读取目标范围。
 - UI 展示会额外加 `Read(path) [lines, bytes]` 摘要。
+- **多模态读图**（会话开启图片能力时）：`Read` 本地图片（PNG/JPEG/GIF/WebP，magic
+  嗅探）或 `image://sha256:<hex64>` 引用会捕获图片并附加到下一次 LLM 请求；结果展示
+  文本摘要 `Image: WxH MIME (bytes) — path` 与 `[The image will be attached to the
+  next model request.]`。图片路径不支持行 selector / `:raw`；默认限额 600 张/批、
+  16MB 单批原始字节、16MB 单图、16384px 边长、1600 万像素（`[provider.image]` 可
+  覆盖）。
+- 已消费引用在下一次请求后投影为文本提示（`[Previously attached image: ...]`）；
+  需要重新看图用 `Read image://sha256:<hex64>`（幂等）。能力关闭时图片走普通文本路径，
+  `image://` 保持未知 scheme fail-closed。图片不写入 `artifacts/`。
 
 ## `Write`
 

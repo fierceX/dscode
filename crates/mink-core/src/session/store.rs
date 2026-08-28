@@ -83,7 +83,8 @@ impl ConversationStore {
                 } else {
                     &r.conv_content
                 };
-                let mut blocks = vec![json!({"type":"tool_result","tool_use_id":r.tool_use_id,"content":conv})];
+                let mut blocks =
+                    vec![json!({"type":"tool_result","tool_use_id":r.tool_use_id,"content":conv})];
                 if let Some(metadata) = &r.state_metadata {
                     blocks[0]["_mink"] = metadata.clone();
                 }

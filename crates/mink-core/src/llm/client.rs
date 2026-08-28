@@ -162,7 +162,10 @@ impl OpenAiCompatibleBackend {
     }
 
     /// Restrict the backend-declared image capability to these model ids.
-    pub fn with_vision_models(mut self, models: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn with_vision_models(
+        mut self,
+        models: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
         self.vision_models = models.into_iter().map(Into::into).collect();
         self
     }
@@ -271,9 +274,9 @@ impl LlmBackend for OpenAiCompatibleBackend {
                 .get("content")
                 .and_then(serde_json::Value::as_array)
                 .is_some_and(|blocks| {
-                    blocks
-                        .iter()
-                        .any(|block| block.get("type").and_then(serde_json::Value::as_str) == Some("image_url"))
+                    blocks.iter().any(|block| {
+                        block.get("type").and_then(serde_json::Value::as_str) == Some("image_url")
+                    })
                 })
         });
         if has_materialized_images
@@ -588,9 +591,7 @@ pub(crate) async fn stream_backend(
     let limits = ctx.model_capabilities.image_input.limits().cloned();
     let warned = ctx.warned_image_ids.clone();
     let messages = tokio::task::spawn_blocking(move || {
-        let mut warned = warned
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let mut warned = warned.lock().unwrap_or_else(|error| error.into_inner());
         crate::llm::image_projection::materialize_images_with(
             &mut messages,
             &cache,

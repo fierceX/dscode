@@ -210,6 +210,8 @@ openai_reasoning_effort = "max"
 openai_include_usage = true
 openai_token_param = "max_tokens"
 openai_tool_choice = "auto"
+image_input = "on"                     # 可选：显式开启/关闭图片能力（覆盖 backend 声明）
+vision_models = ["deepseek-v4-flash-vision-exp"]  # 可选：视觉模型列表（空列表=全部关闭）
 
 [provider.model_aliases]
 flash = "deepseek-v4-flash"
@@ -218,6 +220,13 @@ pro = "deepseek-v4-pro"
 [provider.openai_extra_body]
 custom_boolean = true
 custom_budget = 8192
+
+# 多模态图片限额（可选子表）：只覆盖已支持图片能力的会话，见下文
+[provider.image]
+detail = "high"                        # high | low（token 估算档位）
+max_images_per_request = 600          # 单工具批图片数量预算防线（每批从 0 计数）
+max_image_bytes_per_request = "16M"   # 单工具批原始字节预算防线
+max_image_bytes = "16M"               # 单张图片原始字节上限
 
 [generation]
 max_tokens = 4096
@@ -277,6 +286,25 @@ read_dirs = ["./data"]
   （证据/编辑路径/选项）并返回失败，等待用户重锚定。
 
 `MINK_SIGNAL_POLICY=off` 关闭全部信号采集、证据注入、回滚、接管与守卫。
+
+#### 多模态（图片输入）
+
+视觉能力在 session 初始化时解析并**冻结**（持久化到 `model-capabilities.json`），
+分辨率优先级：显式 `image_input` > backend 声明（`vision_models` 列表）> 关闭。
+内置默认视觉模型为 `deepseek-v4-flash-vision-exp`；其余模型保持 text-only
+（fail closed）。`[provider.image]` 只覆盖已支持会话的限额，不会把文本会话变成
+视觉会话。设计协议见 `docs/设计哲学-多模态读图.md`。
+
+- 开启后：`Read` 图片文件或 `image://sha256:<hex64>` 会把图片附加到**下一次** LLM
+  请求（OpenAI `image_url` data-URL，原字节 base64 无转换）；图片路径拒绝行
+  selector / `:raw`。默认限额：600 张/批、16MB/批、16MB/单图、16384px 边长、
+  1600 万像素。
+- 单次消费：图片完整发送一次后，历史中的引用降级为文本提示
+  （`[Previously attached image: ...]`）；需要重新看图用
+  `Read image://sha256:<hex64>` 重新注入（幂等）。
+- 升级/换模型注意：会话冻结的能力指纹与新配置不一致时（库升级改变默认限额、
+  修改 `[provider.image]`、切换到不同能力模型），启动或 `/model` 切换会失败
+  （fail closed），需要新建会话；未启用图片的文本会话不受影响。
 
 ### 配置文件
 
@@ -363,6 +391,8 @@ policy = "full"                      # off | evidence | state_ops | restart | fu
 | `MAX_SEARCH_RESULTS` | `1000` | Grep 最大匹配结果行数 |
 | `LOG_EVENTS` | `true` | 设为 `0`/`false` 关闭 events.jsonl |
 | `MINK_SIGNAL_POLICY` | `full` | `off` / `evidence` / `state_ops` / `restart` / `full` |
+| `MINK_IMAGE_INPUT` | — | 显式图片能力开关：`on` / `off`（覆盖 backend 声明） |
+| `MINK_VISION_MODELS` | — | 视觉模型 id 逗号分隔列表（替换内置默认；空值关闭） |
 | `MINK_EDIT_MODE` | `hashline` | Edit 协议：`hashline` / `replace` |
 | `MINK_EDIT_FUZZY_MATCH` | `true` | Replace 模糊匹配开关 |
 | `MINK_EDIT_FUZZY_THRESHOLD` | `0.95` | Replace 模糊阈值，`0.0..=1.0` |
@@ -652,8 +682,9 @@ Python SDK 共用的唯一工具选择入口。未设置时使用 catalog 默认
 ### Read selector 与资源 URL
 
 `Read.path` 支持行 selector（`src/main.rs:40-80`、`:40+20`、`:raw` 等），并可读取轻量
-资源 URL（`artifact://`、`skill://`、`rule://`、`session://`）。完整协议见
-[工具参考](tools.md)。
+资源 URL（`artifact://`、`skill://`、`rule://`、`session://`）。多模态会话中 `Read`
+图片路径或 `image://sha256:<hex64>` 引用会捕获图片并附到下一次模型请求（图片不接受
+selector / `:raw`）。完整协议见[工具参考](tools.md)。
 
 ### Edit 双模式
 

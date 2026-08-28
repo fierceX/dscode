@@ -390,7 +390,10 @@ mod image_augment_tests {
     #[test]
     fn unsupported_session_leaves_schemas_unchanged() {
         let tools = vec![read_schema("Read one path.")];
-        let out = augment_read_schema_for_image(tools.clone(), &capabilities(ImageInputCapability::Unsupported));
+        let out = augment_read_schema_for_image(
+            tools.clone(),
+            &capabilities(ImageInputCapability::Unsupported),
+        );
         assert_eq!(out, tools);
     }
 
@@ -404,11 +407,17 @@ mod image_augment_tests {
             )),
         );
         let description = out[0]["description"].as_str().unwrap();
-        assert!(description.contains("capture supported raster images"), "{description}");
+        assert!(
+            description.contains("capture supported raster images"),
+            "{description}"
+        );
         // Format list is generated from allowed_mime; per-request cap was
         // raised to 64MB so a single 20MB image is always admissible.
         assert!(description.contains("(PNG/JPEG/GIF/WebP)"), "{description}");
-        assert!(description.contains("Image capture limits: 600 images and 16777216 bytes"), "{description}");
+        assert!(
+            description.contains("Image capture limits: 600 images and 16777216 bytes"),
+            "{description}"
+        );
     }
 }
 

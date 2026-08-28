@@ -1,6 +1,6 @@
 # Agents Guide
 
-> 更新日期：2026-08-18
+> 更新日期：2026-08-27
 
 [TOC]
 
@@ -599,6 +599,8 @@ grep '"prefix_snapshot"' events.jsonl | jq '{version, fingerprint, dependency_fi
 | `docs/设计哲学-工具能力与提示词解耦.md` | 工具 surface、语义能力、自由组合、前向求值和 prompt 所有权 |
 | `docs/设计哲学-信号系统.md` | 信号系统完整设计 |
 | `docs/TUI_OPTIMIZATION_ROADMAP.md` | TUI 当前实现和维护建议 |
+| `docs/设计哲学-多模态读图.md` | 多模态读图协议设计（能力冻结、缓存布局、`image://` 协议、单次消费、配额与降级矩阵） |
+| `docs/设计哲学-远程图片URL.md` | 后续远程图片 URL 直通设计（尚未实现） |
 
 ---
 

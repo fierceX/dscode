@@ -271,8 +271,7 @@ impl OpenAIParser {
                     match repaired_evt {
                         Some(evt) => evt,
                         None => {
-                            let mut degraded =
-                                build_tool_call_event(&call.name, &call.id, "{}")?;
+                            let mut degraded = build_tool_call_event(&call.name, &call.id, "{}")?;
                             degraded.parse_error = Some(format!("{original:#}"));
                             degraded
                         }

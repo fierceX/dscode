@@ -11,6 +11,10 @@ mod tools;
 pub(crate) use tools::RegisteredCustomTool;
 
 pub use crate::capabilities::CapabilitySnapshot;
+pub use crate::capabilities::model_capabilities::{
+    ImageDetail, ImageInputCapability, ImageLimitsOverrides, OpenAiChatImageUrlLimits,
+    TokenEstimator, WireProtocol,
+};
 pub use crate::capabilities::{
     CapabilityExposure, LoadedSkill, RuntimeSkill, SkillCapability, SkillDiscoveryPolicy,
     SkillLoadContext, SkillProvider, SourceLevel, SourceMeta,
@@ -19,6 +23,7 @@ pub use crate::config::{
     EditMode, ModelResolver, OutputFormat, ResolvedModel, SandboxConfig, SandboxPythonConfig,
     SignalPolicy, ToolApprovalMode, ToolApprovalPolicy,
 };
+pub use crate::config::{ResolvedConfig, vision_model_defaults};
 pub use crate::llm::client::{
     LlmBackend, LlmCancelToken, LlmErrorEvent, LlmEvent, LlmEventStream, LlmPurpose, LlmRequest,
     LlmRequestFailure, LlmResponseStream, LlmRetryEvent, LlmStopEvent, LlmTextEvent,
@@ -30,19 +35,14 @@ pub use crate::runtime::extensions::{PostInitContext, PostInitHook, PrefixSource
 /// 同目录临时文件 + rename 的原子替换（session 状态文件共用实现）。
 pub use crate::session::atomic_file::atomic_replace;
 pub use crate::session::paths::SessionLayout;
-pub use crate::capabilities::model_capabilities::{
-    ImageDetail, ImageInputCapability, ImageLimitsOverrides, OpenAiChatImageUrlLimits,
-    TokenEstimator, WireProtocol,
-};
-pub use crate::config::{ResolvedConfig, vision_model_defaults};
 pub use crate::tools::image::ImageFormat;
-pub use crate::tools::vfs::VfsImage;
 pub use crate::tools::metadata::{
     ApprovalTier, ToolBlocker, ToolFailureKind, ToolResultKind, ToolStatus,
 };
 pub use crate::tools::semantic_capabilities::{
     CapabilityAvailability, CapabilityUseScope, ProviderTier, ToolSemanticCapability,
 };
+pub use crate::tools::vfs::VfsImage;
 pub use crate::tools::vfs::{
     ReadOnlyFileSystem, VfsGlobRequest, VfsGlobResult, VfsGrepEntry, VfsGrepRequest, VfsGrepResult,
     VfsReadRequest, VfsReadResult, VfsScope, format_virtual_glob, format_virtual_grep,

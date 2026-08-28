@@ -581,9 +581,7 @@ pub fn parse_image_input(value: &str) -> Result<mink::runtime::ImageInputCapabil
             mink::runtime::OpenAiChatImageUrlLimits::default(),
         )),
         "off" | "false" | "0" => Ok(mink::runtime::ImageInputCapability::Unsupported),
-        other => anyhow::bail!(
-            "invalid image_input {other:?}: expected \"on\" or \"off\""
-        ),
+        other => anyhow::bail!("invalid image_input {other:?}: expected \"on\" or \"off\""),
     }
 }
 
@@ -598,9 +596,7 @@ pub fn parse_image_limits(
         Some(value) => Some(match value.trim().to_ascii_lowercase().as_str() {
             "high" => mink::runtime::ImageDetail::High,
             "low" => mink::runtime::ImageDetail::Low,
-            other => anyhow::bail!(
-                "invalid image.detail {other:?}: expected \"high\" or \"low\""
-            ),
+            other => anyhow::bail!("invalid image.detail {other:?}: expected \"high\" or \"low\""),
         }),
     };
     let parse_u64 = |name: &str, value: &str| -> Result<u64> {
@@ -826,9 +822,7 @@ fn apply_config_sources(
         if let Some(value) = &toml_cfg.provider.image_input {
             match parse_image_input(value) {
                 Ok(capability) => cfg.image_input = Some(capability),
-                Err(error) => eprintln!(
-                    "[mink] Warning: ignoring image_input={value:?}: {error}"
-                ),
+                Err(error) => eprintln!("[mink] Warning: ignoring image_input={value:?}: {error}"),
             }
         }
         if let Some(models) = &toml_cfg.provider.vision_models {

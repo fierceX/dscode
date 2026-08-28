@@ -323,7 +323,9 @@ pub async fn main_entry(args: Vec<String>) -> Result<CliExit> {
         // the assembled options instead of hard-coding defaults (review fix).
         let mut resolved = mink::runtime::ResolvedConfig::default();
         resolved.vision_models = runtime_options.vision_models().to_vec();
-        let inner = Arc::new(mink::runtime::OpenAiCompatibleBackend::from_config(&resolved));
+        let inner = Arc::new(mink::runtime::OpenAiCompatibleBackend::from_config(
+            &resolved,
+        ));
         let router = RouterLlmBackend::new(
             inner,
             RouterConfig::flash_only()
