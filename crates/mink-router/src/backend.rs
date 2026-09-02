@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use mink::runtime::{LlmBackend, LlmPurpose, LlmRequest, LlmResponseStream};
+use mink::runtime::{LlmBackend, LlmCacheProjection, LlmPurpose, LlmRequest, LlmResponseStream};
 
 use crate::config::RouterConfig;
 use crate::core::{
@@ -120,12 +120,68 @@ impl LlmBackend for RouterLlmBackend {
         "router-llm-backend"
     }
 
+    fn prompt_usage_calibration_safe(&self) -> bool {
+        // Routing can append guidance or change the visible tool surface based
+        // on message history. Source-local token deltas therefore do not prove
+        // provider-visible token deltas; retain conservative local pressure.
+        false
+    }
+
     fn image_input_capability(&self, model: &str) -> mink::runtime::ImageInputCapability {
         // The router is a transparent transport decorator: capability
         // declarations must pass through to the inner backend so sessions
         // created through `--router` resolve the same image capability as
         // plain sessions (v7 §3.1).
         self.inner.image_input_capability(model)
+    }
+
+    fn cache_projection(
+        &self,
+        request: &LlmRequest,
+        source_prefix_len: usize,
+    ) -> Option<LlmCacheProjection> {
+        if source_prefix_len > request.messages.len() {
+            return None;
+        }
+        if !matches!(request.purpose, LlmPurpose::Agent) {
+            return self.inner.cache_projection(request, source_prefix_len);
+        }
+        let transformed = transform_request(
+            &self.config,
+            &request.model,
+            &request.system_prompt,
+            &request.messages,
+            &request.tools,
+        );
+        // Router only appends near-field guidance. A partial projection must
+        // omit that backend-generated tail and preserve the one-to-one source
+        // boundary promised by the public seam; a complete projection includes
+        // the full provider-visible request.
+        let complete = source_prefix_len == request.messages.len();
+        let projected_messages = if complete {
+            transformed.messages
+        } else {
+            transformed.messages[..source_prefix_len].to_vec()
+        };
+        let projected_len = projected_messages.len();
+        let projected = LlmRequest {
+            // This projection describes the already-routed Agent request.
+            // Preserve its purpose for purpose-sensitive inner backends; the
+            // outer Router is not re-entered by this direct inner call.
+            purpose: request.purpose.clone(),
+            model: request.model.clone(),
+            model_alias: request.model_alias.clone(),
+            api_url: request.api_url.clone(),
+            api_key: request.api_key.clone(),
+            system_prompt: transformed.system_prompt,
+            messages: projected_messages,
+            tools: transformed.tools,
+            max_tokens: request.max_tokens,
+            cancel: request.cancel.clone(),
+            verbose: request.verbose,
+            display: request.display.clone(),
+        };
+        self.inner.cache_projection(&projected, projected_len)
     }
 
     async fn stream(&self, mut request: LlmRequest) -> anyhow::Result<LlmResponseStream> {
@@ -306,5 +362,112 @@ mod image_capability_tests {
                 .is_some(),
             "router must forward the inner backend's image capability (v7 §3.1)"
         );
+    }
+
+    #[test]
+    fn router_disables_source_delta_prompt_calibration() {
+        let router = RouterLlmBackend::new(Arc::new(VisionInner), RouterConfig::flash_only());
+        assert!(!router.prompt_usage_calibration_safe());
+    }
+}
+
+#[cfg(test)]
+mod cache_projection_tests {
+    use super::*;
+    use mink::runtime::{
+        Display, LlmCancelToken, PresentedToolResultDisplay, StatsSnapshot, ToolCallDisplay,
+    };
+    use std::sync::Mutex;
+
+    struct PurposeRecordingInner {
+        purpose: Mutex<Option<LlmPurpose>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmBackend for PurposeRecordingInner {
+        fn name(&self) -> &str {
+            "purpose-recording-inner"
+        }
+
+        fn cache_projection(
+            &self,
+            request: &LlmRequest,
+            source_prefix_len: usize,
+        ) -> Option<LlmCacheProjection> {
+            *self.purpose.lock().unwrap() = Some(request.purpose.clone());
+            Some(LlmCacheProjection {
+                model: request.model.clone(),
+                system_prompt: request.system_prompt.clone(),
+                tools: request.tools.clone(),
+                messages: request.messages[..source_prefix_len].to_vec(),
+            })
+        }
+
+        async fn stream(&self, _request: LlmRequest) -> anyhow::Result<LlmResponseStream> {
+            anyhow::bail!("not called in this test")
+        }
+    }
+
+    struct SilentDisplay;
+
+    impl Display for SilentDisplay {
+        fn render_thinking(&self, _content: &str) {}
+        fn render_text(&self, _content: &str) {}
+        fn render_tool_call(&self, _call: &ToolCallDisplay<'_>) {}
+        fn render_tool_result(&self, _result: &PresentedToolResultDisplay<'_>) {}
+        fn render_stop(&self, _reason: &str) {}
+        fn render_signal(&self, _kind: &str, _severity: f64, _message: &str) {}
+        fn render_error(&self, _message: &str) {}
+        fn render_retry(&self) {}
+        fn render_info(&self, _msg: &str) {}
+        fn render_title_update(&self, _model: &str, _stats: &StatsSnapshot) {}
+        fn render_sub_agent_status(
+            &self,
+            _session_id: &str,
+            _status: &str,
+            _in_tokens: u64,
+            _out_tokens: u64,
+        ) {
+        }
+        fn render_sub_agent_output(
+            &self,
+            _session_id: &str,
+            _status: &str,
+            _thinking: &str,
+            _text: &str,
+            _in_tokens: u64,
+            _out_tokens: u64,
+        ) {
+        }
+        fn render_prompt(&self) {}
+        fn render_clear_line(&self) {}
+    }
+
+    #[test]
+    fn agent_cache_projection_preserves_purpose_for_inner_backend() {
+        let inner = Arc::new(PurposeRecordingInner {
+            purpose: Mutex::new(None),
+        });
+        let router = RouterLlmBackend::new(inner.clone(), RouterConfig::flash_only());
+        let request = LlmRequest {
+            purpose: LlmPurpose::Agent,
+            model: "deepseek-v4-flash".into(),
+            model_alias: Some("flash".into()),
+            api_url: "https://example.invalid".into(),
+            api_key: "test".into(),
+            system_prompt: "system".into(),
+            messages: vec![serde_json::json!({"role":"user","content":"修复 bug"})],
+            tools: Vec::new(),
+            max_tokens: 128,
+            cancel: LlmCancelToken::new(),
+            verbose: false,
+            display: Arc::new(SilentDisplay),
+        };
+
+        assert!(router.cache_projection(&request, 1).is_some());
+        assert!(matches!(
+            inner.purpose.lock().unwrap().as_ref(),
+            Some(LlmPurpose::Agent)
+        ));
     }
 }

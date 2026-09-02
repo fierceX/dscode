@@ -75,7 +75,7 @@ impl super::TurnExecutor {
         mut belief: Option<&mut crate::agent::belief::BeliefTracker>,
         effects: &mut Vec<TurnEffect>,
         _request_messages: &[serde_json::Value],
-    ) -> Result<Option<&'static str>> {
+    ) -> Result<()> {
         self.local.tool_call_count += calls.len() as u32;
         let (calls_to_execute, mut guarded_results) = self.apply_signal_recovery_guard(calls);
         let executed = if calls_to_execute.is_empty() {
@@ -105,10 +105,10 @@ impl super::TurnExecutor {
         let results = guarded_results;
 
         let mut prepared_results = Vec::new();
-        let mut plan_compaction_trigger = None;
+        let mut plan_transitions = Vec::new();
         for mut result in results {
-            if let Some(trigger) = self.plan_actions.handle(&mut result, effects) {
-                plan_compaction_trigger = Some(trigger);
+            if let Some(command) = self.plan_actions.handle(&mut result, effects) {
+                plan_transitions.push((result.tool_use_id.clone(), command));
             }
             prepared_results.push(result);
         }
@@ -123,6 +123,11 @@ impl super::TurnExecutor {
         }
 
         self.ctx.store.add_tool_results(&processed_results).await?;
+        for (tool_use_id, command) in plan_transitions {
+            self.tools
+                .finish_plan_transition(&tool_use_id, command)
+                .await?;
+        }
         self.observe_todo_progress(&processed_results);
         self.maybe_append_todo_progress_reminder().await?;
 
@@ -161,7 +166,7 @@ impl super::TurnExecutor {
                     artifacts: &r.artifacts,
                 });
         }
-        Ok(plan_compaction_trigger)
+        Ok(())
     }
 
     fn observe_todo_progress(&mut self, results: &[crate::tools::runner::ToolExecution]) {

@@ -286,10 +286,6 @@ pub struct ResolvedConfig {
     pub context_compact_tail_tokens: usize,
     pub context_compact_max_output_tokens: i32,
     pub context_compact_input_reduction: bool,
-    /// Project the confirmed plan as the **last** message (default true) so
-    /// plan edits stay outside the cacheable prefix; false restores the legacy
-    /// head projection (after leading system messages) for A/B fallback.
-    pub plan_projection_tail: bool,
     pub skills: Vec<String>,
     pub interactive: bool,
     pub session_id: String,
@@ -369,7 +365,6 @@ impl Default for ResolvedConfig {
             context_compact_tail_tokens: 256_000,
             context_compact_max_output_tokens: 8_192,
             context_compact_input_reduction: false,
-            plan_projection_tail: true,
             skills: Vec::new(),
             interactive: false,
             session_id: String::new(),

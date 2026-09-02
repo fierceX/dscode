@@ -220,6 +220,11 @@ impl TurnExecutor {
         // New user intent: compiler-enforced full local-state reset.
         self.reset_local_state(user_input);
 
+        // A previous turn may have failed after changing plan.md but before
+        // durably appending its tool result/transition. Replay or roll back
+        // that journal before constructing any new model-visible history.
+        self.tools.recover_plan_transactions().await?;
+
         let mut messages = self.ctx.compaction.active_messages().await?;
         self.reconcile_todo_state(&mut messages).await?;
         self.ctx.store.add_user(user_input).await?;
@@ -352,28 +357,20 @@ impl TurnExecutor {
                 .await?;
 
             // Phase 3: 工具执行
-            let plan_compaction_trigger = if calls.is_empty() {
-                None
-            } else {
+            if !calls.is_empty() {
                 self.execute_tools_inner(
                     calls,
                     belief.as_deref_mut(),
                     &mut effects,
                     &request_messages,
                 )
-                .await?
-            };
+                .await?;
+            }
 
             // 用户中断：跳过决策/证据注入/回滚，也不再发起下一次 LLM 请求。
             if self.ctx.cancel.is_cancelled() || self.ctx.interrupt.load(Ordering::SeqCst) {
                 self.ctx.display.render_stop("interrupted");
                 return Ok((TurnDecision::Interrupted, effects));
-            }
-
-            if let Some(trigger) = plan_compaction_trigger {
-                messages = self.ctx.compaction.active_messages().await?;
-                self.try_compact(trigger, &mut messages, &mut system_prompt, &mut tools_json)
-                    .await?;
             }
 
             // Phase 4: 决策 — 继续或结束

@@ -21,7 +21,7 @@ impl ImmutablePrefix {
         dependency_fingerprint: String,
     ) -> Self {
         let fingerprint =
-            Self::compute_fingerprint(&system_prompt, &tools_json, &dependency_fingerprint);
+            Self::compute_fingerprint(&system_prompt, &tools_json, Some(&dependency_fingerprint));
 
         Self {
             system_prompt,
@@ -66,23 +66,25 @@ impl ImmutablePrefix {
         let recomputed = Self::compute_fingerprint(
             &self.system_prompt,
             &self.tools_json,
-            &self.dependency_fingerprint,
+            Some(&self.dependency_fingerprint),
         );
         recomputed == self.fingerprint
     }
 
-    fn compute_fingerprint(
+    pub(crate) fn compute_fingerprint(
         system_prompt: &str,
         tools_json: &[Value],
-        dependency_fingerprint: &str,
+        dependency_fingerprint: Option<&str>,
     ) -> String {
         let mut hasher = Sha256::new();
         hasher.update(system_prompt.as_bytes());
         hasher.update(b"\0");
         let tools_str = serde_json::to_string(tools_json).unwrap_or_default();
         hasher.update(tools_str.as_bytes());
-        hasher.update(b"\0");
-        hasher.update(dependency_fingerprint.as_bytes());
+        if let Some(dependency) = dependency_fingerprint {
+            hasher.update(b"\0");
+            hasher.update(dependency.as_bytes());
+        }
         hex_lower(hasher.finalize())
     }
 }

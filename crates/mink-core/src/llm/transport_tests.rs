@@ -107,6 +107,7 @@ fn internal_todo_metadata_is_not_sent_to_the_provider() {
         json!({
             "role": "user",
             "content": "<todo-sync revision=\"2\">state</todo-sync>",
+            "internal": true,
             "_mink": {"todo_revision": 2, "todo_state_kind": "sync"},
         }),
     ];
@@ -115,6 +116,7 @@ fn internal_todo_metadata_is_not_sent_to_the_provider() {
     assert_eq!(converted[0], messages[0]);
     assert_eq!(converted[1]["content"], messages[1]["content"]);
     assert!(converted[1].get("_mink").is_none());
+    assert!(converted[1].get("internal").is_none());
 }
 
 #[test]

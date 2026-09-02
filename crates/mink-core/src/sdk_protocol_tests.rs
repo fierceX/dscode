@@ -197,6 +197,15 @@ fn sdk_request_accepts_explicit_compaction_policy() {
 }
 
 #[test]
+fn sdk_request_rejects_removed_plan_projection_tail() {
+    let error = parse_agent_jsonl_request(
+        r#"{"prompt":"hi","options":{"context":{"plan_projection_tail":false}}}"#,
+    )
+    .unwrap_err();
+    assert!(error.contains("plan_projection_tail"), "{error}");
+}
+
+#[test]
 fn validate_sdk_request_rejects_bad_tool_timeout_options() {
     let req =
         parse_agent_jsonl_request(r#"{"prompt":"hi","options":{"tools":{"tool_timeout":0}}}"#)

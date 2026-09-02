@@ -115,7 +115,6 @@ pub struct ContextConfigFile {
     pub context_compact_tail_tokens: Option<usize>,
     pub context_compact_max_output_tokens: Option<i32>,
     pub context_compact_input_reduction: Option<bool>,
-    pub plan_projection_tail: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
@@ -220,10 +219,6 @@ pub struct CliConfig {
     pub context_compact_tail_tokens: usize,
     pub context_compact_max_output_tokens: i32,
     pub context_compact_input_reduction: bool,
-    /// Project the confirmed plan as the **last** message (default true) so
-    /// plan edits stay outside the cacheable prefix; false restores the legacy
-    /// head projection (after leading system messages) for A/B fallback.
-    pub plan_projection_tail: bool,
     pub skills: Vec<String>,
     pub interactive: bool,
     pub session_id: String,
@@ -321,7 +316,6 @@ impl Default for CliConfig {
             context_compact_tail_tokens: 256_000,
             context_compact_max_output_tokens: 8_192,
             context_compact_input_reduction: false,
-            plan_projection_tail: true,
             skills: Vec::new(),
             interactive: false,
             session_id: String::new(),
@@ -935,9 +929,6 @@ fn apply_config_sources(
         }
         if let Some(enabled) = toml_cfg.context.context_compact_input_reduction {
             cfg.context_compact_input_reduction = enabled;
-        }
-        if let Some(tail) = toml_cfg.context.plan_projection_tail {
-            cfg.plan_projection_tail = tail;
         }
         if let Some(log_events) = toml_cfg.generation.log_events {
             cfg.log_events = log_events;

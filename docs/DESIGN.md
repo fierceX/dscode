@@ -191,8 +191,8 @@ assistant 消息使用 content 数组承载多种内容类型（thinking/text/to
 压缩投影、计划和 Todo 使用独立的 session 状态文件：
 
 - `context-state.json` 保存 `active_start` 和滚动摘要，决定 conversation 的当前活跃投影；
-- `plan.draft` 和 `plan.md` 由 `PlanStore` 管理，确认后的计划在每次请求时投影为唯一的动态
-  `<current-plan>` system message；
+- `plan.draft` 和 `plan.md` 由 `PlanStore` 管理，确认/清除通过 append-only 内部 user
+  transition 表达；历史压缩后活动计划投影为 `<active-plan-checkpoint>`；
 - `todos.json` 保存 Todo 的权威完整快照，conversation 只追加成功变更事件、紧凑 active
   投影和必要的 TodoSync。
 
@@ -290,7 +290,7 @@ transcript：用户和 assistant text 保留，thinking 删除，工具参数限
 ### 防护措施
 
 **同轮防护**（`TurnCompactor::compacted_this_turn`）：同一用户输入中的自动、Preflight、
-overflow 和 PlanConfirm / PlanClear 强制压缩共用一个守卫，整个 tool_use 循环只压缩一次。
+auto、preflight 和 overflow 压缩共用一个守卫，整个 tool_use 循环只压缩一次；Plan transition 不强制压缩。
 
 **最小收益检查**（`CompactionEngine::evaluate_and_compact`）：如果压缩节省的 token 不足当前总量的 10%，跳过压缩。防止小上下文场景下的无意义压缩。
 
@@ -767,8 +767,8 @@ Rules/instruction/skills      ← 外部内容，不纳入生成内容工具引�
 Output language               ← core
 ```
 
-`Current plan` 不参与上述 immutable prompt 装配。每次 agent 请求都从 `plan.md` 生成唯一的
-`<current-plan>` 动态 system message，并插入压缩摘要之后、conversation 之前。
+Plan 不参与上述 immutable prompt 装配。PlanConfirm/PlanClear 追加 transition；仅在历史
+已压缩且 `plan.md` 存在时生成唯一的 `<active-plan-checkpoint>`，插入摘要之后、热尾部之前。
 
 Todo 采用追加式事件而不是逐请求前置投影。TodoWrite / TodoAdvance 成功时，tool result
 追加本次增量事件和 `<current-todos>` 物化投影；投影只包含 revision、状态计数与当前

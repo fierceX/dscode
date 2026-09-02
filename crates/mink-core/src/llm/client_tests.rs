@@ -58,6 +58,20 @@ impl Display for TestDisplay {
     fn render_clear_line(&self) {}
 }
 
+#[test]
+fn compaction_overrides_forced_tool_choice_to_none() {
+    let backend = OpenAiCompatibleBackend::deepseek_defaults().with_tool_choice("required");
+
+    assert_eq!(
+        backend.tool_choice_for_purpose(&LlmPurpose::Agent),
+        Some(json!("required"))
+    );
+    assert_eq!(
+        backend.tool_choice_for_purpose(&LlmPurpose::Compaction),
+        Some(json!("none"))
+    );
+}
+
 #[tokio::test]
 #[ignore = "requires local loopback sockets"]
 async fn send_with_retry_retries_429_and_preserves_authorization() -> anyhow::Result<()> {

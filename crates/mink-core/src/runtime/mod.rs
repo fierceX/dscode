@@ -25,9 +25,9 @@ pub use crate::config::{
 };
 pub use crate::config::{ResolvedConfig, vision_model_defaults};
 pub use crate::llm::client::{
-    LlmBackend, LlmCancelToken, LlmErrorEvent, LlmEvent, LlmEventStream, LlmPurpose, LlmRequest,
-    LlmRequestFailure, LlmResponseStream, LlmRetryEvent, LlmStopEvent, LlmTextEvent,
-    LlmThinkingEvent, LlmToolCallEvent, LlmUsageEvent, OpenAiCompatibleBackend,
+    LlmBackend, LlmCacheProjection, LlmCancelToken, LlmErrorEvent, LlmEvent, LlmEventStream,
+    LlmPurpose, LlmRequest, LlmRequestFailure, LlmResponseStream, LlmRetryEvent, LlmStopEvent,
+    LlmTextEvent, LlmThinkingEvent, LlmToolCallEvent, LlmUsageEvent, OpenAiCompatibleBackend,
     OpenAiCompatibleOptions, TokenParamKind,
 };
 pub use crate::resources::ResourceHandler;

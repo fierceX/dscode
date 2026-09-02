@@ -176,6 +176,7 @@ pub(crate) fn convert_messages_to_openai(messages: &[Value]) -> Result<Vec<Value
         let mut message = msg.clone();
         if let Some(object) = message.as_object_mut() {
             object.remove("_mink");
+            object.remove("internal");
         }
         result.push(message);
     }

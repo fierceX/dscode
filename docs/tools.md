@@ -461,8 +461,10 @@ runtime 启动时 fail closed。
 
 - 仅在用户明确确认计划后调用。
 - 通过原子 rename 触发 `plan.draft -> plan.md`，草稿文件随之消失。
-- 请求上下文压缩；请求统一经过 `TurnCompactor` 的同轮一次守卫，失败会返回当前 turn。
-- 下一次 LLM 请求将计划作为动态 `<current-plan>` system message 注入，不改变 immutable prefix。
+- 成功工具结果写入后追加 confirmed 内部 user transition，不强制上下文压缩。
+- 文件变更通过 session 内的 Plan transaction journal 与 conversation 追加协调；崩溃恢复会
+  回滚尚未绑定成功结果的操作，或幂等补齐已经绑定的结果和 transition。
+- 历史已压缩时，从 `plan.md` 投影 `<active-plan-checkpoint>`，不改变 immutable prefix。
 - 状态转换由类型化 `PlanCommand` 和 `PlanStore` 处理，失败会原样进入工具结果。
 
 ## `PlanClear`
@@ -473,7 +475,8 @@ runtime 启动时 fail closed。
 
 - 在计划完成后调用。
 - 删除 `plan.md` 并清理可能遗留的 `plan.draft`；确认计划不存在或为空时 fail closed。
-- 请求上下文压缩；请求统一经过 `TurnCompactor` 的同轮一次守卫，失败会返回当前 turn。
+- 成功工具结果写入后追加 cleared 内部 user transition，不强制上下文压缩。
+- 文件变更与 conversation 追加使用同一可恢复 Plan transaction journal。
 - 下一次 LLM 请求不再注入动态计划，immutable prefix 保持不变。
 - 状态转换由类型化 `PlanCommand` 和 `PlanStore` 处理，失败会原样进入工具结果。
 

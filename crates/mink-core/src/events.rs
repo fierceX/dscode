@@ -94,6 +94,17 @@ pub enum EventLog {
         trigger: String,
         result: String,
     },
+    CompactionCheck {
+        trigger: String,
+        pressure_source: String,
+        local_tokens: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_baseline_tokens: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        calibrated_tokens: Option<usize>,
+        threshold_tokens: usize,
+        projection_generation: u64,
+    },
     TurnTracking {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         version: Option<u8>,

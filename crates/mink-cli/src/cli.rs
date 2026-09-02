@@ -477,7 +477,6 @@ fn assemble_runtime_options(
             compact_tail_tokens: cfg.context_compact_tail_tokens,
             compact_max_output_tokens: cfg.context_compact_max_output_tokens,
             compact_input_reduction: cfg.context_compact_input_reduction,
-            plan_projection_tail: cfg.plan_projection_tail,
         })
         .with_tool_options(ToolOptions {
             timeout_secs: cfg.tool_timeout_secs,

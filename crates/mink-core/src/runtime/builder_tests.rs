@@ -1092,7 +1092,7 @@ async fn injected_backend_receives_resolved_model_alias() {
 }
 
 #[tokio::test]
-async fn confirmed_plan_projects_as_last_message_by_default() {
+async fn uncompressed_confirmed_plan_is_not_dynamically_projected() {
     let home = unique_temp_dir("plan-tail-home");
     let cwd = unique_temp_dir("plan-tail-cwd");
     tokio::fs::create_dir_all(&cwd).await.unwrap();
@@ -1105,7 +1105,6 @@ async fn confirmed_plan_projects_as_last_message_by_default() {
         max_context_tokens: 1_000_000,
         ..Config::default()
     };
-    assert!(cfg.plan_projection_tail);
     let runtime_config = AgentRuntimeConfig::from_config(cfg, home.clone(), cwd.clone())
         .with_llm_backend(Arc::new(MessageCaptureBackend { seen: seen.clone() }));
     let runtime = build_runtime(runtime_config).await.unwrap();
@@ -1125,20 +1124,11 @@ async fn confirmed_plan_projects_as_last_message_by_default() {
         let captured = seen.lock().unwrap();
         assert_eq!(captured.len(), 1);
         let messages = &captured[0];
-        let last = messages.last().expect("request has at least one message");
-        assert_eq!(last["role"], "system");
-        let plan_text = last["content"]
-            .as_str()
-            .expect("plan message content is a string");
-        assert!(plan_text.contains("<current-plan>\n# Verified plan"));
-        // Tail projection: the plan must not sit before the conversation.
-        let first = &messages[0];
-        assert!(
-            !first["content"]
+        assert!(messages.iter().all(|message| {
+            !message["content"]
                 .as_str()
-                .unwrap()
-                .contains("<current-plan>")
-        );
+                .is_some_and(|content| content.contains("<current-plan>"))
+        }));
     }
 
     runtime.shutdown().await.unwrap();

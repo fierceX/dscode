@@ -1,5 +1,7 @@
 use crate::config::ResolvedConfig as Config;
-use crate::llm::client::{LlmBackend, LlmModelTarget, LlmPurpose, LlmRequest, MeteredStream};
+use crate::llm::client::{
+    LlmBackend, LlmCacheProjection, LlmModelTarget, LlmPurpose, LlmRequest, MeteredStream,
+};
 use crate::protocol::{ErrorEvent, Event, StopEvent, TextEvent, UsageEvent};
 use crate::session::compaction_input;
 use crate::session::event_log::EventLogWriter;
@@ -13,7 +15,68 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
+
+const COMPACTION_INSTRUCTION: &str = "Merge the conversation history above into one checkpoint. Preserve current user goals, constraints, decisions, progress, blockers, file changes, commands, errors, pending work, and exact identifiers. An earlier <compacted-summary>, if present, is established background and must be merged with the newer history. Output these seven non-empty fields: Task focus:, Latest request:, Progress:, Errors:, Decisions:, Tool evidence:, Reflections:. Write (none) for any field without content. Start directly with Task focus:, do not use code fences, do not continue the task, and do not call tools.";
+
+const FALLBACK_SYSTEM_PROMPT: &str = "Summarize coding-agent history for a later model. Preserve user goals, constraints, decisions, progress, blockers, file changes, commands, errors, pending work, and exact identifiers. Do not continue the task.";
+
+#[derive(Debug, Clone)]
+struct LatestAgentRequest {
+    model: String,
+    source_fingerprint: String,
+    local_tokens: usize,
+    projection_generation: u64,
+    backend_name: String,
+    source_system_prompt: String,
+    source_tools: Vec<Value>,
+    projection: Option<CacheProjectionSnapshot>,
+}
+
+#[derive(Debug, Clone)]
+struct PromptUsageBaseline {
+    request: Arc<LatestAgentRequest>,
+    provider_prompt_tokens: usize,
+}
+
+#[derive(Debug, Default)]
+struct PromptUsageState {
+    latest_request: Option<Arc<LatestAgentRequest>>,
+    baseline: Option<PromptUsageBaseline>,
+}
+
+/// Long-lived provider projection metadata. Message bodies are represented by
+/// hashes so request-time image data URLs can never survive across requests.
+#[derive(Debug, Clone)]
+struct CacheProjectionSnapshot {
+    model: String,
+    system_prompt: String,
+    tools: Vec<Value>,
+    message_hashes: Vec<[u8; 32]>,
+}
+
+#[derive(Debug)]
+struct PressureDecision {
+    source: &'static str,
+    effective_tokens: usize,
+    provider_baseline_tokens: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct SummaryInputMeta {
+    input_mode: &'static str,
+    aligned_messages: usize,
+    aligned_estimated_tokens: usize,
+    reduced_suffix_messages: usize,
+    fallback_reason: Option<String>,
+}
+
+struct SummaryRequestInput {
+    system_prompt: String,
+    tools: Vec<Value>,
+    messages: Vec<Value>,
+    meta: SummaryInputMeta,
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct CompactionState {
@@ -38,6 +101,8 @@ pub struct CompactionEngine {
     state: RwLock<std::result::Result<CompactionState, String>>,
     compact_lock: tokio::sync::Mutex<()>,
     memo_epoch: Arc<AtomicU64>,
+    projection_generation: AtomicU64,
+    prompt_usage: Mutex<PromptUsageState>,
     projection_dirty: AtomicBool,
     event_log_writer: Option<EventLogWriter>,
 }
@@ -86,6 +151,8 @@ impl CompactionEngine {
             state: RwLock::new(Ok(state)),
             compact_lock: tokio::sync::Mutex::new(()),
             memo_epoch: Arc::new(AtomicU64::new(0)),
+            projection_generation: AtomicU64::new(0),
+            prompt_usage: Mutex::new(PromptUsageState::default()),
             projection_dirty: AtomicBool::new(false),
             event_log_writer,
         })
@@ -101,6 +168,71 @@ impl CompactionEngine {
     pub fn current_summary(&self) -> Result<Option<String>> {
         let state = self.current_state()?;
         Ok((!state.summary.trim().is_empty()).then_some(state.summary))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_agent_request(
+        &self,
+        model: &str,
+        source_fingerprint: &str,
+        local_tokens: usize,
+        backend_name: String,
+        source_system_prompt: String,
+        source_tools: Vec<Value>,
+        projection: Option<LlmCacheProjection>,
+    ) {
+        let request = Arc::new(LatestAgentRequest {
+            model: model.to_string(),
+            source_fingerprint: source_fingerprint.to_string(),
+            local_tokens,
+            projection_generation: self.projection_generation.load(Ordering::SeqCst),
+            backend_name,
+            source_system_prompt,
+            source_tools,
+            projection: projection.map(CacheProjectionSnapshot::from_projection),
+        });
+        self.prompt_usage
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .latest_request = Some(request);
+    }
+
+    pub(crate) fn record_agent_usage(&self, usage: &UsageEvent) {
+        if usage.input_tokens < 0
+            || usage.cache_read_input_tokens < 0
+            || usage.cache_creation_input_tokens < 0
+        {
+            return;
+        }
+        let Some(provider_prompt_tokens) = usage
+            .input_tokens
+            .checked_add(usage.cache_read_input_tokens)
+            .and_then(|value| value.checked_add(usage.cache_creation_input_tokens))
+            .and_then(|value| usize::try_from(value).ok())
+        else {
+            return;
+        };
+        let mut state = self
+            .prompt_usage
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(request) = state.latest_request.clone() else {
+            return;
+        };
+        if request.projection_generation != self.projection_generation.load(Ordering::SeqCst) {
+            return;
+        }
+        state.baseline = Some(PromptUsageBaseline {
+            request,
+            provider_prompt_tokens,
+        });
+    }
+
+    pub(crate) fn clear_prompt_usage(&self) {
+        *self
+            .prompt_usage
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = PromptUsageState::default();
     }
 
     pub async fn validate_startup(&self) -> Result<()> {
@@ -140,8 +272,28 @@ impl CompactionEngine {
     pub async fn active_messages(&self) -> Result<Vec<Value>> {
         let state = self.current_state()?;
         let mut messages = self.store.lines_from(state.active_start).await?;
-        self.prepend_dynamic_summary(&mut messages, &state.summary);
+        self.prepend_dynamic_checkpoints(&mut messages, &state)?;
         Ok(messages)
+    }
+
+    fn prepend_dynamic_checkpoints(
+        &self,
+        messages: &mut Vec<Value>,
+        state: &CompactionState,
+    ) -> Result<()> {
+        if state.active_start == 0 {
+            return Ok(());
+        }
+        let mut checkpoints = Vec::new();
+        if !state.summary.trim().is_empty() {
+            checkpoints.push(compacted_summary_message(&state.summary));
+        }
+        if let Some(plan) = read_active_plan_checkpoint(&self.summary_path)? {
+            checkpoints.push(plan);
+        }
+        checkpoints.append(messages);
+        *messages = checkpoints;
+        Ok(())
     }
 
     pub async fn evaluate_and_compact(
@@ -150,11 +302,32 @@ impl CompactionEngine {
         context_tokens: usize,
         target: LlmModelTarget<'_>,
     ) -> Result<(bool, String)> {
+        self.evaluate_and_compact_with_prefix(trigger, context_tokens, target, None, None)
+            .await
+    }
+
+    pub(crate) async fn evaluate_and_compact_with_prefix(
+        &self,
+        trigger: &str,
+        context_tokens: usize,
+        target: LlmModelTarget<'_>,
+        source_fingerprint: Option<&str>,
+        current_projection: Option<&LlmCacheProjection>,
+    ) -> Result<(bool, String)> {
         let _guard = self.compact_lock.lock().await;
         if self.config.max_context_tokens == 0 && matches!(trigger, "auto" | "preflight") {
             return Ok((false, "automatic compaction disabled".into()));
         }
-        if !is_forced_trigger(trigger) && context_tokens < compaction_trigger_tokens(&self.config) {
+        let pressure = self.pressure_decision(
+            trigger,
+            context_tokens,
+            target.model,
+            source_fingerprint,
+            current_projection,
+        );
+        let threshold_tokens = compaction_trigger_tokens(&self.config);
+        self.log_compaction_check(trigger, &pressure, context_tokens, threshold_tokens);
+        if !is_forced_trigger(trigger) && pressure.effective_tokens < threshold_tokens {
             return Ok((false, "below threshold".into()));
         }
 
@@ -170,7 +343,6 @@ impl CompactionEngine {
             return Ok((false, "no safe boundary".into()));
         }
 
-        let dropped = &active[..cut];
         let kept = &active[cut..];
         let total_tokens = estimate_messages_tokens(&active);
         let kept_tokens = estimate_messages_tokens(kept);
@@ -179,10 +351,12 @@ impl CompactionEngine {
             return Ok((false, "savings too small".into()));
         }
 
-        let summary = self
+        let (summary, summary_meta) = self
             .run_summary_call(
-                dropped,
+                &active,
+                cut,
                 (!state.summary.is_empty()).then_some(state.summary.as_str()),
+                state.active_start > 0,
                 target,
             )
             .await?;
@@ -196,29 +370,76 @@ impl CompactionEngine {
             summary: summary.clone(),
         };
         self.commit_state(next).await?;
-
-        Ok((
-            true,
-            format!(
-                "compacted_at_trigger={trigger}_kept={}_input_reduction={}",
-                kept.len(),
-                self.config.context_compact_input_reduction
-            ),
-        ))
+        let result = format!(
+            "compacted_at_trigger={trigger}_kept={}_input_reduction={}_input_mode={}_aligned_messages={}_aligned_estimated_tokens={}_reduced_suffix_messages={}_fallback_reason={}",
+            kept.len(),
+            self.config.context_compact_input_reduction,
+            summary_meta.input_mode,
+            summary_meta.aligned_messages,
+            summary_meta.aligned_estimated_tokens,
+            summary_meta.reduced_suffix_messages,
+            summary_meta.fallback_reason.as_deref().unwrap_or("none"),
+        );
+        if self.config.log_events {
+            self.write_event(crate::events::EventLog::Compact {
+                version: Some(2),
+                trigger: trigger.to_string(),
+                result: result.clone(),
+            });
+        }
+        Ok((true, result))
     }
 
-    fn prepend_dynamic_summary(&self, messages: &mut Vec<Value>, summary: &str) {
-        if !summary.trim().is_empty() {
-            messages.insert(
-                0,
-                json!({
-                    "role": "system",
-                    "content": format!(
-                        "<context-snapshot>\n{}\n</context-snapshot>",
-                        summary.trim()
-                    )
-                }),
-            );
+    fn pressure_decision(
+        &self,
+        trigger: &str,
+        local_tokens: usize,
+        model: &str,
+        source_fingerprint: Option<&str>,
+        current_projection: Option<&LlmCacheProjection>,
+    ) -> PressureDecision {
+        if trigger == "preflight" {
+            return PressureDecision {
+                source: "local_preflight",
+                effective_tokens: local_tokens,
+                provider_baseline_tokens: None,
+            };
+        }
+        if trigger != "auto" {
+            return PressureDecision {
+                source: "local_fallback",
+                effective_tokens: local_tokens,
+                provider_baseline_tokens: None,
+            };
+        }
+        let state = self
+            .prompt_usage
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let generation = self.projection_generation.load(Ordering::SeqCst);
+        let Some(baseline) = state.baseline.as_ref().filter(|baseline| {
+            baseline.request.model == model
+                && source_fingerprint
+                    .is_some_and(|fingerprint| fingerprint == baseline.request.source_fingerprint)
+                && baseline.request.projection_generation == generation
+                && self.llm_backend.prompt_usage_calibration_safe()
+                && baseline.request.projection.as_ref().is_none_or(|previous| {
+                    current_projection
+                        .is_some_and(|current| provider_projection_extends(previous, current))
+                })
+        }) else {
+            return PressureDecision {
+                source: "local_fallback",
+                effective_tokens: local_tokens,
+                provider_baseline_tokens: None,
+            };
+        };
+        let calibrated = (baseline.provider_prompt_tokens as i128) + (local_tokens as i128)
+            - (baseline.request.local_tokens as i128);
+        PressureDecision {
+            source: "provider_calibrated",
+            effective_tokens: usize::try_from(calibrated.max(0)).unwrap_or(usize::MAX),
+            provider_baseline_tokens: Some(baseline.provider_prompt_tokens),
         }
     }
 
@@ -243,6 +464,7 @@ impl CompactionEngine {
         self.projection_dirty
             .store(!matches!(projection, Ok(Ok(()))), Ordering::SeqCst);
         self.memo_epoch.fetch_add(1, Ordering::SeqCst);
+        self.projection_generation.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
@@ -282,10 +504,12 @@ impl CompactionEngine {
 
     async fn run_summary_call(
         &self,
-        dropped: &[Value],
+        active: &[Value],
+        cut: usize,
         previous_summary: Option<&str>,
+        history_already_compacted: bool,
         target: LlmModelTarget<'_>,
-    ) -> Result<String> {
+    ) -> Result<(String, SummaryInputMeta)> {
         let request_cancel = self.cancel.linked_child_token();
         let watcher_cancel = request_cancel.clone();
         let cleanup_cancel = request_cancel.clone();
@@ -303,7 +527,14 @@ impl CompactionEngine {
             }
         });
         let result = self
-            .run_summary_call_with_cancel(dropped, previous_summary, target, request_cancel)
+            .run_summary_call_with_cancel(
+                active,
+                cut,
+                previous_summary,
+                history_already_compacted,
+                target,
+                request_cancel,
+            )
             .await;
         watcher.abort();
         cleanup_cancel.cancel();
@@ -315,43 +546,31 @@ impl CompactionEngine {
 
     async fn run_summary_call_with_cancel(
         &self,
-        dropped: &[Value],
+        active: &[Value],
+        cut: usize,
         previous_summary: Option<&str>,
+        history_already_compacted: bool,
         target: LlmModelTarget<'_>,
         request_cancel: crate::cancel::CancellationToken,
-    ) -> Result<String> {
-        let previous = serde_json::to_string(&previous_summary)?;
-        let instruction = format!(
-            "Merge the conversation turns above with the previous context snapshot below.\n\
-             Preserve current facts, decisions, constraints, progress, and blockers.\n\
-             Previous context snapshot: {previous}\n\n\
-             Output these seven non-empty fields:\n\
-             Task focus:\nLatest request:\nProgress:\nErrors:\nDecisions:\nTool evidence:\nReflections:\n\
-             Write (none) for any field without content.\n\
-             Start directly with Task focus: and do not use code fences."
-        );
-        let mut messages = if self.config.context_compact_input_reduction {
-            vec![json!({
-                "role": "user",
-                "content": compaction_input::reduce_for_summary(dropped),
-            })]
-        } else {
-            // Summary requests never carry pixels, even with input reduction
-            // disabled: the compaction path bypasses stream_backend, so any
-            // tool_attachment reference would be sent verbatim to the
-            // provider (v7 §10.3). Degrade attachments to text markers.
-            let mut messages = dropped.to_vec();
-            degrade_images_for_summary(&mut messages);
-            messages
-        };
-        messages.push(json!({"role":"user","content":instruction}));
-
-        let system_prompt = "Summarize coding-agent history for a later model. Preserve user goals, constraints, decisions, progress, blockers, file changes, commands, errors, pending work, and exact identifiers. Do not continue the task.".to_string();
+    ) -> Result<(String, SummaryInputMeta)> {
+        let input = self.build_summary_input(
+            active,
+            cut,
+            previous_summary,
+            history_already_compacted,
+            target,
+        )?;
+        let SummaryRequestInput {
+            system_prompt,
+            tools,
+            messages,
+            meta,
+        } = input;
 
         if self.config.max_context_tokens > 0 {
             let input_tokens = crate::llm::transport::estimate_openai_context_tokens(
                 &messages,
-                &[],
+                &tools,
                 &system_prompt,
             )?;
             let input_limit = self.config.max_context_tokens.saturating_sub(
@@ -369,6 +588,10 @@ impl CompactionEngine {
                 .scope(UsageKind::Compaction, self.session_id.clone()),
             target.model.to_string(),
         );
+        // Cache-aligned summaries deliberately retain the Agent tool schemas so
+        // the provider can reuse the immutable request prefix. Those tools are
+        // alignment-only: compaction never executes them, and any emitted tool
+        // call is rejected explicitly while consuming the response below.
         let request = self.llm_backend.stream(LlmRequest {
             purpose: LlmPurpose::Compaction,
             model: target.model.to_string(),
@@ -377,7 +600,7 @@ impl CompactionEngine {
             api_key: self.api_key.clone(),
             system_prompt,
             messages,
-            tools: Vec::new(),
+            tools,
             max_tokens: compaction_max_output_tokens(&self.config),
             cancel: request_cancel.clone(),
             verbose: self.config.verbose,
@@ -406,6 +629,7 @@ impl CompactionEngine {
         let mut output = String::new();
         let mut stop_reason = String::new();
         let mut last_error = String::new();
+        let mut invalid_tool_call = None;
         loop {
             let event = tokio::select! {
                 event = stream.next() => event,
@@ -421,11 +645,19 @@ impl CompactionEngine {
                 Event::UsageUnavailable => {}
                 Event::Error(ErrorEvent { message }) => last_error = message,
                 Event::Stop(StopEvent { reason }) => stop_reason = reason,
+                Event::ToolCall(call) if invalid_tool_call.is_none() => {
+                    invalid_tool_call = Some((call.name, call.id));
+                }
                 _ => {}
             }
         }
         if !last_error.is_empty() {
             bail!("failed to generate context summary: {last_error}");
+        }
+        if let Some((name, id)) = invalid_tool_call {
+            bail!(
+                "failed to generate context summary: compaction attempted invalid tool call {name} ({id})"
+            );
         }
         if !matches!(stop_reason.as_str(), "stop" | "end_turn") {
             bail!("failed to generate context summary: invalid stop reason {stop_reason:?}");
@@ -434,14 +666,224 @@ impl CompactionEngine {
         if summary.trim().is_empty() {
             bail!("failed to generate context summary: empty response");
         }
-        Ok(summary.trim().to_string())
+        Ok((summary.trim().to_string(), meta))
     }
 
-    fn log_compact_event(&self, usage: &UsageEvent) {
+    fn build_summary_input(
+        &self,
+        active: &[Value],
+        cut: usize,
+        previous_summary: Option<&str>,
+        history_already_compacted: bool,
+        target: LlmModelTarget<'_>,
+    ) -> Result<SummaryRequestInput> {
+        let dropped = &active[..cut];
+        let mut source_messages = Vec::new();
+        if let Some(summary) = previous_summary.filter(|summary| !summary.trim().is_empty()) {
+            source_messages.push(compacted_summary_message(summary));
+        }
+        if history_already_compacted
+            && let Some(plan) = read_active_plan_checkpoint(&self.summary_path)?
+        {
+            source_messages.push(plan);
+        }
+        let dynamic_prefix_len = source_messages.len();
+        source_messages.extend(crate::llm::image_projection::project_consumed_attachments(
+            active,
+        ));
+        let source_prefix_len = dynamic_prefix_len.saturating_add(cut);
+
+        let latest = self
+            .prompt_usage
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .latest_request
+            .clone();
+        let fallback_reason;
+        if let Some(latest) = latest {
+            let aligned = (|| -> Result<SummaryRequestInput, String> {
+                if latest.model != target.model {
+                    return Err("model_changed".into());
+                }
+                if latest.backend_name != self.llm_backend.name() {
+                    return Err("cache_domain_changed".into());
+                }
+                if latest.projection_generation != self.projection_generation.load(Ordering::SeqCst)
+                {
+                    return Err("projection_generation_changed".into());
+                }
+                let Some(recent_projection) = latest.projection.as_ref() else {
+                    return Err("backend_projection_unavailable".into());
+                };
+                let source_request = LlmRequest {
+                    purpose: LlmPurpose::Agent,
+                    model: target.model.to_string(),
+                    model_alias: target.alias.map(str::to_string),
+                    api_url: self.api_url.clone(),
+                    api_key: self.api_key.clone(),
+                    system_prompt: latest.source_system_prompt.clone(),
+                    messages: source_messages.clone(),
+                    tools: latest.source_tools.clone(),
+                    max_tokens: effective_max_tokens(&self.config),
+                    cancel: self.cancel.clone(),
+                    verbose: self.config.verbose,
+                    display: self.display.clone(),
+                };
+                let Some(candidate) = self
+                    .llm_backend
+                    .cache_projection(&source_request, source_prefix_len)
+                else {
+                    return Err("backend_projection_unavailable".into());
+                };
+                if candidate.model != recent_projection.model {
+                    return Err("model_changed".into());
+                }
+                if candidate.system_prompt != recent_projection.system_prompt
+                    || candidate.tools != recent_projection.tools
+                {
+                    return Err("system_tools_changed".into());
+                }
+                if candidate.messages.len() != source_prefix_len {
+                    return Err("source_boundary_unproven".into());
+                }
+                let candidate_hashes = message_hashes(&candidate.messages);
+                let aligned_messages = candidate_hashes
+                    .iter()
+                    .zip(&recent_projection.message_hashes)
+                    .take_while(|(left, right)| left == right)
+                    .count();
+                let aligned_messages = rollback_incomplete_tool_exchange_boundary(
+                    &candidate.messages,
+                    aligned_messages,
+                );
+                if aligned_messages == 0 {
+                    return Err("no_safe_message_prefix".into());
+                }
+                let mut messages = candidate.messages[..aligned_messages].to_vec();
+                let suffix = &candidate.messages[aligned_messages..];
+                let reduced_suffix_messages = suffix.len();
+                if !suffix.is_empty() {
+                    if self.config.context_compact_input_reduction {
+                        messages.push(json!({
+                            "role": "user",
+                            "internal": true,
+                            "content": format!(
+                                "<compaction-uncached-suffix>\n{}\n</compaction-uncached-suffix>",
+                                compaction_input::reduce_for_summary(suffix)
+                            ),
+                        }));
+                    } else {
+                        let mut raw_suffix = suffix.to_vec();
+                        crate::llm::image_projection::degrade_images_for_summary(&mut raw_suffix);
+                        messages.extend(raw_suffix);
+                    }
+                }
+                let aligned_estimated_tokens =
+                    crate::llm::transport::estimate_openai_context_tokens(
+                        &candidate.messages[..aligned_messages],
+                        &candidate.tools,
+                        &candidate.system_prompt,
+                    )
+                    .map_err(|error| format!("aligned_estimate_failed:{error}"))?;
+                messages.push(compaction_instruction_message());
+                if summary_input_over_budget(
+                    &self.config,
+                    &messages,
+                    &candidate.tools,
+                    &candidate.system_prompt,
+                )
+                .map_err(|error| format!("aligned_estimate_failed:{error}"))?
+                {
+                    return Err("aligned_input_over_budget".into());
+                }
+                Ok(SummaryRequestInput {
+                    system_prompt: candidate.system_prompt,
+                    tools: candidate.tools,
+                    messages,
+                    meta: SummaryInputMeta {
+                        input_mode: if aligned_messages == candidate.messages.len() {
+                            "cache_aligned"
+                        } else {
+                            "partial_aligned"
+                        },
+                        aligned_messages,
+                        aligned_estimated_tokens,
+                        reduced_suffix_messages,
+                        fallback_reason: None,
+                    },
+                })
+            })();
+            match aligned {
+                Ok(input) => return Ok(input),
+                Err(reason) => fallback_reason = Some(reason),
+            }
+        } else {
+            fallback_reason = Some("no_recent_agent_request".into());
+        }
+
+        let mut history = Vec::new();
+        if let Some(summary) = previous_summary.filter(|summary| !summary.trim().is_empty()) {
+            history.push(compacted_summary_message(summary));
+        }
+        history.extend(crate::llm::image_projection::project_consumed_attachments(
+            dropped,
+        ));
+        crate::llm::image_projection::degrade_images_for_summary(&mut history);
+        let input_mode = if self.config.context_compact_input_reduction {
+            "reduced"
+        } else {
+            "raw"
+        };
+        let mut messages = if self.config.context_compact_input_reduction {
+            vec![json!({
+                "role": "user",
+                "internal": true,
+                "content": compaction_input::reduce_for_summary(&history),
+            })]
+        } else {
+            history
+        };
+        messages.push(compaction_instruction_message());
+        if summary_input_over_budget(&self.config, &messages, &[], FALLBACK_SYSTEM_PROMPT)? {
+            bail!("compaction summary input exceeds configured budget");
+        }
+        Ok(SummaryRequestInput {
+            system_prompt: FALLBACK_SYSTEM_PROMPT.to_string(),
+            tools: Vec::new(),
+            messages,
+            meta: SummaryInputMeta {
+                input_mode,
+                aligned_messages: 0,
+                aligned_estimated_tokens: 0,
+                reduced_suffix_messages: dropped.len(),
+                fallback_reason,
+            },
+        })
+    }
+
+    fn log_compaction_check(
+        &self,
+        trigger: &str,
+        pressure: &PressureDecision,
+        local_tokens: usize,
+        threshold_tokens: usize,
+    ) {
         if !self.config.log_events {
             return;
         }
-        let event = crate::events::EventLog::usage(usage, "compact");
+        self.write_event(crate::events::EventLog::CompactionCheck {
+            trigger: trigger.to_string(),
+            pressure_source: pressure.source.to_string(),
+            local_tokens,
+            provider_baseline_tokens: pressure.provider_baseline_tokens,
+            calibrated_tokens: (pressure.source == "provider_calibrated")
+                .then_some(pressure.effective_tokens),
+            threshold_tokens,
+            projection_generation: self.projection_generation.load(Ordering::SeqCst),
+        });
+    }
+
+    fn write_event(&self, event: crate::events::EventLog) {
         let Ok(line) = serde_json::to_string(&event) else {
             return;
         };
@@ -449,6 +891,150 @@ impl CompactionEngine {
             writer.send(line);
         }
     }
+
+    fn log_compact_event(&self, usage: &UsageEvent) {
+        if !self.config.log_events {
+            return;
+        }
+        self.write_event(crate::events::EventLog::usage(usage, "compact"));
+    }
+}
+
+fn compacted_summary_message(summary: &str) -> Value {
+    json!({
+        "role": "user",
+        "internal": true,
+        "content": format!(
+            "This is an automatically generated checkpoint condensing an earlier span of the conversation. Treat it as established background and continue from the messages that follow without acknowledging the checkpoint.\n\n<compacted-summary>\n{}\n</compacted-summary>",
+            summary.trim()
+        ),
+    })
+}
+
+fn compaction_instruction_message() -> Value {
+    json!({
+        "role": "user",
+        "internal": true,
+        "content": COMPACTION_INSTRUCTION,
+    })
+}
+
+fn read_active_plan_checkpoint(summary_path: &Path) -> Result<Option<Value>> {
+    let plan_path = summary_path.with_file_name("plan.md");
+    let content = match std::fs::read_to_string(&plan_path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(anyhow::anyhow!(
+                "cannot read active plan checkpoint {}: {error}",
+                plan_path.display()
+            ));
+        }
+    };
+    let content = content.trim();
+    Ok((!content.is_empty()).then(|| {
+        json!({
+            "role": "user",
+            "internal": true,
+            "content": format!("<active-plan-checkpoint>\n{content}\n</active-plan-checkpoint>"),
+        })
+    }))
+}
+
+fn summary_input_over_budget(
+    config: &Config,
+    messages: &[Value],
+    tools: &[Value],
+    system_prompt: &str,
+) -> Result<bool> {
+    if config.max_context_tokens == 0 {
+        return Ok(false);
+    }
+    let input_tokens =
+        crate::llm::transport::estimate_openai_context_tokens(messages, tools, system_prompt)?;
+    let input_limit = config
+        .max_context_tokens
+        .saturating_sub(usize::try_from(compaction_max_output_tokens(config)).unwrap_or(0));
+    Ok(input_tokens > input_limit)
+}
+
+pub(crate) fn prefix_fingerprint(system_prompt: &str, tools: &[Value]) -> String {
+    crate::session::prefix::ImmutablePrefix::compute_fingerprint(system_prompt, tools, None)
+}
+
+fn provider_projection_extends(
+    previous: &CacheProjectionSnapshot,
+    current: &LlmCacheProjection,
+) -> bool {
+    previous.model == current.model
+        && previous.system_prompt == current.system_prompt
+        && previous.tools == current.tools
+        && previous.message_hashes.len() <= current.messages.len()
+        && previous
+            .message_hashes
+            .iter()
+            .zip(message_hashes(&current.messages))
+            .all(|(left, right)| left == &right)
+}
+
+impl CacheProjectionSnapshot {
+    fn from_projection(projection: LlmCacheProjection) -> Self {
+        Self {
+            model: projection.model,
+            system_prompt: projection.system_prompt,
+            tools: projection.tools,
+            message_hashes: message_hashes(&projection.messages),
+        }
+    }
+}
+
+fn message_hashes(messages: &[Value]) -> Vec<[u8; 32]> {
+    use sha2::{Digest, Sha256};
+
+    messages
+        .iter()
+        .map(|message| {
+            let mut hasher = Sha256::new();
+            hasher.update(serde_json::to_vec(message).unwrap_or_default());
+            hasher.finalize().into()
+        })
+        .collect()
+}
+
+/// A cache LCP may end between an assistant tool call and its user-side tool
+/// result (for example when an attachment in that result changed projection).
+/// Keep the aligned prefix protocol-complete: otherwise OpenAI conversion
+/// strips the orphan call before the reduced suffix can describe the exchange.
+fn rollback_incomplete_tool_exchange_boundary(messages: &[Value], boundary: usize) -> usize {
+    let prefix = &messages[..boundary.min(messages.len())];
+    let result_ids = prefix
+        .iter()
+        .filter_map(|message| message.get("content").and_then(Value::as_array))
+        .flatten()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
+        .filter_map(|block| block.get("tool_use_id").and_then(Value::as_str))
+        .collect::<std::collections::HashSet<_>>();
+
+    prefix
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| message.get("role").and_then(Value::as_str) == Some("assistant"))
+        .find_map(|(index, message)| {
+            message
+                .get("content")
+                .and_then(Value::as_array)
+                .is_some_and(|blocks| {
+                    blocks.iter().any(|block| {
+                        block.get("type").and_then(Value::as_str) == Some("tool_use")
+                            && block
+                                .get("id")
+                                .and_then(Value::as_str)
+                                .is_none_or(|id| id.is_empty() || !result_ids.contains(id))
+                    })
+                })
+                .then_some(index)
+        })
+        .unwrap_or(boundary)
 }
 
 pub fn effective_max_tokens(config: &Config) -> i32 {
@@ -485,10 +1071,7 @@ fn load_state(path: &Path) -> Result<CompactionState> {
 }
 
 fn is_forced_trigger(trigger: &str) -> bool {
-    matches!(
-        trigger,
-        "manual" | "preflight" | "overflow" | "plan_clear" | "plan_confirm"
-    )
+    matches!(trigger, "manual" | "preflight" | "overflow")
 }
 
 fn compaction_trigger_tokens(config: &Config) -> usize {
@@ -597,29 +1180,6 @@ fn is_real_user_message(message: &Value) -> bool {
     !RUNTIME_INJECTED_MARKERS
         .iter()
         .any(|marker| content.starts_with(marker))
-}
-
-/// Replace every `tool_attachment` block with a text marker so a summary
-/// request never carries image references or pixels (v7 §10.3).
-fn degrade_images_for_summary(messages: &mut [Value]) {
-    for message in messages.iter_mut() {
-        let Some(blocks) = message.get_mut("content").and_then(Value::as_array_mut) else {
-            continue;
-        };
-        for block in blocks.iter_mut() {
-            if block.get("type").and_then(Value::as_str) != Some("tool_attachment") {
-                continue;
-            }
-            let url = block.get("url").and_then(Value::as_str).unwrap_or("?");
-            let format = block.get("format").and_then(Value::as_str).unwrap_or("?");
-            let width = block.get("width").and_then(Value::as_u64).unwrap_or(0);
-            let height = block.get("height").and_then(Value::as_u64).unwrap_or(0);
-            *block = serde_json::json!({
-                "type": "text",
-                "text": format!("[image {format} {width}x{height}: {url}]")
-            });
-        }
-    }
 }
 
 fn is_safe_context_start(message: &Value) -> bool {

@@ -38,7 +38,6 @@ fn cli_defaults_track_runtime_option_defaults() {
         cli.context_compact_input_reduction,
         context.compact_input_reduction
     );
-    assert_eq!(cli.plan_projection_tail, context.plan_projection_tail);
 
     let tools = crate::runtime::ToolOptions::default();
     assert_eq!(cli.tool_timeout_secs, tools.timeout_secs);
@@ -741,19 +740,14 @@ fn edit_configuration_defaults_and_cli_overrides_are_typed() {
 }
 
 #[test]
-fn plan_projection_tail_config_defaults_true_and_toml_overrides() {
-    assert!(CliConfig::default().plan_projection_tail);
+fn removed_plan_projection_tail_is_rejected() {
+    assert!(toml::from_str::<MinkConfigFile>("[context]\nplan_projection_tail = false").is_err());
+}
 
-    let defaults = CliConfig::default();
-    let mut cfg = CliConfig::default();
-    apply_config_sources(&mut cfg, &defaults, None, None, None);
-    assert!(cfg.plan_projection_tail);
-
-    let file: MinkConfigFile = toml::from_str("[context]\nplan_projection_tail = false").unwrap();
-    assert_eq!(file.context.plan_projection_tail, Some(false));
-
-    apply_config_sources(&mut cfg, &defaults, None, None, Some(&file));
-    assert!(!cfg.plan_projection_tail);
+#[test]
+fn checked_in_example_config_remains_parseable() {
+    let example = include_str!("../../../.minkrc.example");
+    toml::from_str::<MinkConfigFile>(example).expect(".minkrc.example must remain valid");
 }
 
 #[test]

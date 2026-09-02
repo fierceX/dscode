@@ -19,6 +19,7 @@ pub fn extract_real_user_messages(messages: &[Value], prefab_aware: bool) -> Vec
     messages
         .iter()
         .filter(|msg| msg.get("role").and_then(Value::as_str) == Some("user"))
+        .filter(|msg| !is_internal_message(msg))
         .filter_map(|msg| {
             let text = message_text(msg.get("content")?).trim().to_string();
             if text.is_empty() {
@@ -74,6 +75,9 @@ pub fn first_real_user_index(messages: &[Value], prefab_aware: bool) -> Option<u
         if msg.get("role").and_then(Value::as_str) != Some("user") {
             return false;
         }
+        if is_internal_message(msg) {
+            return false;
+        }
         if is_tool_result_message(msg) {
             return false;
         }
@@ -107,6 +111,9 @@ pub fn last_is_real_user(messages: &[Value], prefab_aware: bool) -> bool {
         return false;
     };
     if last.get("role").and_then(Value::as_str) != Some("user") {
+        return false;
+    }
+    if is_internal_message(last) {
         return false;
     }
     if is_tool_result_message(last) {
@@ -152,6 +159,10 @@ fn is_tool_result_message(msg: &Value) -> bool {
         })
 }
 
+fn is_internal_message(msg: &Value) -> bool {
+    msg.get("internal").and_then(Value::as_bool) == Some(true) || msg.get("_mink").is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,6 +193,20 @@ mod tests {
         let real = extract_real_user_messages(&messages, true);
         assert_eq!(real, vec!["修复这个 bug"]);
         assert_eq!(count_real_user_rounds(&messages, true), 1);
+    }
+
+    #[test]
+    fn runtime_checkpoints_are_not_real_user_rounds() {
+        let messages = vec![
+            json!({"role":"user","internal":true,"content":"<compacted-summary>old</compacted-summary>"}),
+            user("修复这个 bug"),
+        ];
+        assert_eq!(
+            extract_real_user_messages(&messages, false),
+            vec!["修复这个 bug"]
+        );
+        assert_eq!(first_real_user_index(&messages, false), Some(1));
+        assert!(!last_is_real_user(&messages[..1], false));
     }
 
     #[test]

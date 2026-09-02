@@ -665,7 +665,24 @@ impl ToolRunner {
         tool_fn: Option<&dyn ToolExec>,
     ) -> Result<ToolExecution> {
         let raw = dispatch_tool(ctx, call, tool_fn);
-        Ok(format_dispatched_result(ctx, call, raw))
+        let mut result = format_dispatched_result(ctx, call, raw);
+        ctx.plan_store.bind_transition(&mut result)?;
+        Ok(result)
+    }
+
+    pub(crate) async fn recover_plan_transactions(&self) -> Result<()> {
+        self.ctx.plan_store.recover_pending(&self.ctx.store).await
+    }
+
+    pub(crate) async fn finish_plan_transition(
+        &self,
+        tool_use_id: &str,
+        command: PlanCommand,
+    ) -> Result<()> {
+        self.ctx
+            .plan_store
+            .finish_transition(&self.ctx.store, tool_use_id, command)
+            .await
     }
 
     /// VFS `NotImage` fallback: run the ordinary text Read for this call

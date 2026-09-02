@@ -114,7 +114,7 @@ TurnExecutor (agent/turn.rs)
 │ session/compaction.rs │ 显式策略、非破坏式投影、LLM 摘要和压缩状态
 │ session/compaction_input.rs │ 可选摘要输入降噪
 │ session/prefix.rs     │ ImmutablePrefix
-│ session/plan.rs       │ PlanStore 与当前计划动态投影
+│ session/plan.rs       │ PlanStore 与 append-only 计划状态转换
 │ session/todo.rs       │ TodoStore、原子持久化与追加式物化投影
 │ session/atomic_file.rs│ Plan/Todo 共用的同目录原子替换
 │ session/init.rs       │ session 目录和共享状态初始化
@@ -328,7 +328,7 @@ bindings。发给 provider 的 schemas 直接来自 surface；prefix 直接消�
 | `session/compaction.rs` | 显式压缩策略、非破坏式投影、LLM 摘要和压缩状态 |
 | `session/compaction_input.rs` | 摘要请求输入降噪 |
 | `session/prefix.rs` | ImmutablePrefix |
-| `session/plan.rs` | PlanStore、原子计划状态转换和当前计划动态投影 |
+| `session/plan.rs` | PlanStore、原子计划状态转换和 append-only transition |
 | `session/todo.rs` | TodoStore、revision、稳定 ID、原子批量提交和 revision 对账 |
 | `session/image_cache.rs` | 内容寻址图片缓存（`<home>/.mink/cache/images/v1/`）：SHA-256 对象、两阶段提交、digest 校验、有界读取 |
 | `session/atomic_file.rs` | Plan/Todo 状态文件共用的同目录临时文件和原子替换 |
@@ -356,11 +356,10 @@ workflow、`runtime-capabilities`、`tool-inventory`（非空 surface 时自动�
 `current-plan` 属于 runtime-reserved section；普通自定义一级标题作为外部 section 追加。
 runtime-reserved section 冲突会在启动时 fail fast，不保留旧 alias。
 
-`<current-plan>` 不属于 `PromptDocument` 或 `ImmutablePrefix`。`TurnExecutor` 在每次 LLM
-请求前读取当前 `plan.md`，将其作为唯一的动态 system message 插入活跃消息投影；该消息不写入
-conversation，也不进入压缩摘要。PlanConfirm / PlanClear 因此能在同一 turn 的下一次请求生效，
-同时保持稳定 system/tools prefix 不变。两者产生的压缩请求统一交给 `TurnCompactor`，服从同轮
-一次防护，并将压缩失败返回当前 turn。
+Plan 不属于 `PromptDocument` 或 `ImmutablePrefix`。PlanConfirm / PlanClear 在成功工具结果后
+追加内部 user transition，因此能在同一 turn 的下一次请求生效并保持 system/tools 稳定。
+历史已压缩且 `plan.md` 存在时，runtime 在摘要之后插入唯一的
+`<active-plan-checkpoint>`；两种 Plan transition 都不强制压缩。
 
 Todo 不使用逐请求前置动态状态。`TodoRead` 按需返回完整基线；TodoWrite / TodoAdvance
 成功后把增量事件和 `<current-todos>` 紧凑物化投影作为 tool result 追加到 conversation
@@ -518,7 +517,7 @@ Session 目录保存 conversation、events、metadata、summary、stats 和 arti
 ## 关键不变式
 
 - 每个用户输入开始时重置 StormBreaker、decision cooldown 和 interrupt；belief 按 `decay_per_input`（默认 0.6）衰减而非硬重置。
-- 同一用户输入的 tool_use 内循环最多压缩一次，包括 PlanConfirm / PlanClear 请求的强制压缩。
+- 同一用户输入的 tool_use 内循环最多压缩一次；PlanConfirm / PlanClear 不强制压缩。
 - `conversation.jsonl` 是完整的 append-only 消息历史；压缩只推进 `context-state.json` 中的投影边界。
 - JSONL 续写先处理未换行尾部：完整 JSON 补换行，半截 JSON 截断后再以单缓冲区追加新记录。
 - `context-state.json` 通过同目录临时文件和 rename 原子替换，内存状态只在替换成功后更新。

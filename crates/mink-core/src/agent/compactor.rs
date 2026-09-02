@@ -1,6 +1,6 @@
 use crate::agent::prefix::PrefixManager;
 use crate::context::AgentSharedContext;
-use crate::llm::client::LlmModelTarget;
+use crate::llm::client::{LlmModelTarget, LlmPurpose, LlmRequest};
 use anyhow::Result;
 use std::sync::Arc;
 
@@ -43,20 +43,42 @@ impl TurnCompactor {
         // visual tokens only for the unconsumed batch — otherwise history
         // pictures would trigger premature compaction (they are never
         // re-expanded after consumption).
-        let request_messages = crate::session::plan::project_full_request(
-            &self.ctx.plan_path,
-            self.ctx.config.plan_projection_tail,
-            messages,
-        )?;
+        let request_messages = crate::session::plan::project_full_request(messages)?;
         let local_tokens = crate::llm::transport::estimate_openai_context_tokens(
             &request_messages,
             tools_json,
             system_prompt,
         )?;
+        let source_fingerprint =
+            crate::session::compaction::prefix_fingerprint(system_prompt, tools_json);
+        let projection_request = LlmRequest {
+            purpose: LlmPurpose::Agent,
+            model: target.model.to_string(),
+            model_alias: target.alias.map(str::to_string),
+            api_url: self.ctx.api_url.clone(),
+            api_key: self.ctx.api_key().to_string(),
+            system_prompt: system_prompt.clone(),
+            messages: request_messages,
+            tools: tools_json.clone(),
+            max_tokens: crate::session::compaction::effective_max_tokens(&self.ctx.config),
+            cancel: self.ctx.cancel.clone(),
+            verbose: self.ctx.verbose(),
+            display: self.ctx.display.clone(),
+        };
+        let current_projection = self
+            .ctx
+            .llm_backend
+            .cache_projection(&projection_request, projection_request.messages.len());
         let (did_compact, _) = self
             .ctx
             .compaction
-            .evaluate_and_compact(trigger, local_tokens, target)
+            .evaluate_and_compact_with_prefix(
+                trigger,
+                local_tokens,
+                target,
+                Some(&source_fingerprint),
+                current_projection.as_ref(),
+            )
             .await?;
         if did_compact {
             self.compacted_this_turn = true;

@@ -80,7 +80,6 @@ context_reserve_tokens = 64000              # 主请求响应预留及 max_token
 context_compact_tail_tokens = 256000        # 压缩后原样保留的热尾部目标
 context_compact_max_output_tokens = 8192    # 摘要请求输出上限
 context_compact_input_reduction = false     # 摘要前是否过滤 thinking 和工具噪声
-plan_projection_tail = true                 # 已确认计划尾置投影（最后一条消息），false 回退前置投影
 
 # ── Tools ──────────────────────────────────────────────────────
 [tools]

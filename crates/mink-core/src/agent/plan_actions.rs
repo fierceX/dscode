@@ -9,11 +9,11 @@ impl PlanActionHandler {
         &self,
         result: &mut ToolExecution,
         effects: &mut Vec<TurnEffect>,
-    ) -> Option<&'static str> {
+    ) -> Option<PlanCommand> {
         let command = result.plan_command.take()?;
 
         match command {
-            PlanCommand::SetDraft => {}
+            PlanCommand::SetDraft => return None,
             PlanCommand::Confirm => {
                 effects.push("Plan confirmed.");
             }
@@ -21,6 +21,6 @@ impl PlanActionHandler {
                 effects.push("Plan cleared.");
             }
         }
-        command.compaction_trigger()
+        Some(command)
     }
 }

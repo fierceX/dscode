@@ -11,11 +11,7 @@ impl super::TurnExecutor {
     ) -> Result<Vec<serde_json::Value>> {
         // Full request projection: single-consumption image lifecycle (§7.3)
         // then the plan — identical to what the compactor estimates with.
-        crate::session::plan::project_full_request(
-            &self.ctx.plan_path,
-            self.ctx.config.plan_projection_tail,
-            messages,
-        )
+        crate::session::plan::project_full_request(messages)
     }
 
     pub(super) async fn reconcile_todo_state(
@@ -249,6 +245,9 @@ impl super::TurnExecutor {
         drop(stream);
         if !saw_stop {
             anyhow::bail!("stream ended without stop event");
+        }
+        if let Some(usage) = usage.as_ref() {
+            self.ctx.compaction.record_agent_usage(usage);
         }
         Ok(StreamOutput {
             text,

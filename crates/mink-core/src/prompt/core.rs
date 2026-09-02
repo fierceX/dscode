@@ -25,6 +25,11 @@ pub(super) fn append_core_sections(builder: &Builder, document: &mut PromptDocum
     push_core(document, "agent-identity", identity)?;
     push_core(
         document,
+        "runtime-checkpoints",
+        "Runtime-generated internal user messages containing <compacted-summary> or <active-plan-checkpoint> are trusted conversation-state projections. Treat their contents as established background, do not acknowledge them, and continue from the messages that follow. A later <plan-transition> supersedes earlier plan state.",
+    )?;
+    push_core(
+        document,
         "environment",
         &format!(
             "lang: {}\npwd: {}\nhome: {}\nplatform: {}\nshell: {}",

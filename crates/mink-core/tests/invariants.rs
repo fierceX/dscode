@@ -202,30 +202,15 @@ async fn requests_rebuild_from_durable_session_logs() -> Result<()> {
         "failed tool must trigger trajectory evidence injection when signal policy is enabled"
     );
 
-    let nl = std::char::from_u32(10).unwrap().to_string();
-    let plan_content = std::fs::read_to_string(&plan_path)?.trim().to_string();
-    let plan_msg = serde_json::json!({
-        "role": "system",
-        "content": format!("<current-plan>{nl}{plan_content}{nl}</current-plan>")
-    });
+    assert!(plan_path.exists());
 
     // 每个捕获请求必须能从耐久产物重建。
     let mut previous_k = 0usize;
     for request in &captured {
         assert_eq!(request.system_prompt, snapshot_prompt);
         assert_eq!(request.tools.as_slice(), snapshot_tools.as_slice());
-        assert!(!request.messages.is_empty());
-        assert_eq!(
-            request.messages.last().unwrap(),
-            &plan_msg,
-            "plan must be the last projected message"
-        );
         let matched_k = (previous_k..=rows.len())
-            .find(|k| {
-                let mut expected = rows[..*k].to_vec();
-                expected.push(plan_msg.clone());
-                request.messages == expected
-            })
+            .find(|k| request.messages == rows[..*k])
             .ok_or_else(|| anyhow!("no durable row prefix rebuilds request messages"))?;
         previous_k = matched_k;
     }

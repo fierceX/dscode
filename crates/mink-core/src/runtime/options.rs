@@ -47,7 +47,6 @@ pub struct ContextPolicy {
     pub compact_tail_tokens: usize,
     pub compact_max_output_tokens: i32,
     pub compact_input_reduction: bool,
-    pub plan_projection_tail: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -109,7 +108,6 @@ impl Default for ContextPolicy {
             compact_tail_tokens: config.context_compact_tail_tokens,
             compact_max_output_tokens: config.context_compact_max_output_tokens,
             compact_input_reduction: config.context_compact_input_reduction,
-            plan_projection_tail: config.plan_projection_tail,
         }
     }
 }
@@ -232,7 +230,6 @@ impl AgentOptions {
         self.config.context_compact_tail_tokens = policy.compact_tail_tokens;
         self.config.context_compact_max_output_tokens = policy.compact_max_output_tokens;
         self.config.context_compact_input_reduction = policy.compact_input_reduction;
-        self.config.plan_projection_tail = policy.plan_projection_tail;
         self
     }
 

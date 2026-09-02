@@ -350,6 +350,53 @@ async fn orchestrator_manual_compact_uses_active_model_and_shared_backend() -> a
 }
 
 #[tokio::test]
+async fn orchestrator_manual_compact_failure_is_logged() -> anyhow::Result<()> {
+    let h = harness_with_config(
+        "orch-compact-failure-event",
+        false,
+        300,
+        |config| config.context_compact_tail_tokens = 1,
+        Some(Arc::new(FailingCompactionBackend)),
+    )
+    .await?;
+    for index in 0..3 {
+        h.ctx
+            .store
+            .add_user(&format!("user history {index}: {}", "x".repeat(256)))
+            .await?;
+        h.ctx
+            .store
+            .add_assistant(&format!("assistant history {index}"), "", &[])
+            .await?;
+    }
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let actor = OrchActor::new(h.ctx.clone(), rx);
+    let handle = tokio::spawn(actor.run());
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    tx.send(OrchCmd::Compact { done: done_tx })?;
+    let outcome = done_rx.await?;
+    assert!(
+        outcome
+            .unwrap_err()
+            .to_string()
+            .contains("planned compaction failure")
+    );
+    drop(tx);
+    handle.await??;
+
+    let events = tokio::fs::read_to_string(&h.ctx.events_path).await?;
+    assert!(events.contains(r#""type":"compact""#), "{events}");
+    assert!(events.contains(r#""version":2"#), "{events}");
+    assert!(events.contains(r#""trigger":"manual""#), "{events}");
+    assert!(
+        events.contains("failed: planned compaction failure"),
+        "{events}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn plan_confirm_and_clear_preserve_immutable_prefix() -> anyhow::Result<()> {
     let h = harness("plan-actions").await?;
     let prefix = PrefixManager::new(h.ctx.clone());
@@ -389,9 +436,12 @@ async fn plan_confirm_and_clear_preserve_immutable_prefix() -> anyhow::Result<()
         &tool_ctx,
     )?;
     let mut confirm = plan_result("PlanConfirm", confirm_outcome);
+    // Mirrors ToolRunner::execute_one: the filesystem mutation is journaled and
+    // bound to this tool result before the transition handler consumes it.
+    tool_ctx.plan_store.bind_transition(&mut confirm)?;
     assert_eq!(
         handler.handle(&mut confirm, &mut effects),
-        Some("plan_confirm")
+        Some(crate::tools::plan::PlanCommand::Confirm)
     );
     assert_eq!(confirm.content, "Plan confirmed and locked in.");
     assert_eq!(
@@ -413,6 +463,16 @@ async fn plan_confirm_and_clear_preserve_immutable_prefix() -> anyhow::Result<()
             .fingerprint(),
         stable_fingerprint
     );
+    // Mirrors TurnExecutor: the bound journal is completed after the tool
+    // result is appended, so the next plan mutation may proceed.
+    tool_ctx
+        .plan_store
+        .finish_transition(
+            &tool_ctx.store,
+            &confirm.tool_use_id,
+            crate::tools::plan::PlanCommand::Confirm,
+        )
+        .await?;
 
     let clear_outcome = crate::tools::runner::ToolExec::execute(
         &crate::tools::plan::PlanClearTool,
@@ -420,13 +480,25 @@ async fn plan_confirm_and_clear_preserve_immutable_prefix() -> anyhow::Result<()
         &tool_ctx,
     )?;
     let mut clear = plan_result("PlanClear", clear_outcome);
-    assert_eq!(handler.handle(&mut clear, &mut effects), Some("plan_clear"));
+    tool_ctx.plan_store.bind_transition(&mut clear)?;
+    assert_eq!(
+        handler.handle(&mut clear, &mut effects),
+        Some(crate::tools::plan::PlanCommand::Clear)
+    );
     assert_eq!(clear.content, "Plan cleared.");
     assert!(!h.ctx.plan_path.exists());
     assert!(matches!(
         effects.as_slice(),
         ["Plan confirmed.", "Plan cleared."]
     ));
+    tool_ctx
+        .plan_store
+        .finish_transition(
+            &tool_ctx.store,
+            &clear.tool_use_id,
+            crate::tools::plan::PlanCommand::Clear,
+        )
+        .await?;
     let (after_clear_prompt, after_clear_tools) = prefix.ensure()?;
     assert_eq!(after_clear_prompt, stable_prompt);
     assert_eq!(after_clear_tools, stable_tools);
@@ -492,7 +564,7 @@ async fn plan_compaction_obeys_the_existing_single_turn_guard() -> anyhow::Resul
 }
 
 #[tokio::test]
-async fn plan_compaction_failure_is_propagated_from_the_turn() -> anyhow::Result<()> {
+async fn plan_confirm_does_not_force_compaction() -> anyhow::Result<()> {
     let h = harness_with_config(
         "plan-compaction-error",
         false,
@@ -515,27 +587,52 @@ async fn plan_compaction_failure_is_propagated_from_the_turn() -> anyhow::Result
 
     let llm = Arc::new(MockLlmBackend::new(
         "flash",
-        vec![vec![
-            Ok(Event::ToolCall(tool_call(
-                "PlanConfirm",
-                "call_plan_confirm",
-                json!({}),
-            ))),
-            Ok(Event::Stop(StopEvent {
-                reason: "tool_use".into(),
-            })),
-        ]],
+        vec![
+            vec![
+                Ok(Event::ToolCall(tool_call(
+                    "PlanConfirm",
+                    "call_plan_confirm",
+                    json!({}),
+                ))),
+                Ok(Event::Stop(StopEvent {
+                    reason: "tool_use".into(),
+                })),
+            ],
+            vec![Ok(Event::Stop(StopEvent {
+                reason: "end_turn".into(),
+            }))],
+        ],
     ));
     let mut executor = TurnExecutor::new(h.ctx.clone(), llm_backend_from_mock(llm));
-    let error = executor
-        .execute("confirm the plan", None)
-        .await
-        .unwrap_err()
-        .to_string();
+    let (decision, _) = executor.execute("confirm the plan", None).await?;
 
-    assert!(error.contains("planned compaction failure"), "{error}");
+    assert_eq!(decision, TurnDecision::Stop);
     assert!(h.ctx.plan_path.exists());
     assert!(!h.ctx.plan_draft_path.exists());
+    let rows = h.ctx.store.lines().await?;
+    let transition_index = rows
+        .iter()
+        .position(|message| {
+            message
+                .get("content")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|content| content.contains("<plan-transition state=\"confirmed\">"))
+        })
+        .expect("confirmed transition persisted");
+    assert!(
+        rows[..transition_index].iter().any(|message| {
+            message
+                .get("content")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|blocks| {
+                    blocks.iter().any(|block| {
+                        block.get("tool_use_id").and_then(serde_json::Value::as_str)
+                            == Some("call_plan_confirm")
+                    })
+                })
+        }),
+        "tool result must precede confirmed transition"
+    );
     Ok(())
 }
 

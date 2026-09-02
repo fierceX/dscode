@@ -75,6 +75,10 @@ impl ConversationStore {
         &self,
         results: &[crate::tools::runner::ToolExecution],
     ) -> Result<()> {
+        self.append_line(&Self::tool_results_message(results)).await
+    }
+
+    pub(crate) fn tool_results_message(results: &[crate::tools::runner::ToolExecution]) -> Value {
         let content: Vec<Value> = results
             .iter()
             .flat_map(|r| {
@@ -112,12 +116,19 @@ impl ConversationStore {
                 blocks
             })
             .collect();
-        self.append_line(&json!({"role":"user","content":content}))
-            .await
+        json!({"role":"user","content":content})
     }
 
     pub(crate) async fn append_runtime_message(&self, message: Value) -> Result<()> {
         self.append_line(&message).await
+    }
+
+    /// Append and fsync an engine-owned state transition before its external
+    /// transaction journal is cleared. This is intentionally reserved for
+    /// cross-file commits; ordinary high-frequency conversation appends keep
+    /// the existing flush-only behavior.
+    pub(crate) async fn append_runtime_message_durable(&self, message: Value) -> Result<()> {
+        self.append_line_with_sync(&message, true).await
     }
 
     pub async fn lines(&self) -> Result<Vec<Value>> {
@@ -281,14 +292,16 @@ impl ConversationStore {
     }
 
     async fn append_line(&self, value: &Value) -> Result<()> {
+        self.append_line_with_sync(value, false).await
+    }
+
+    async fn append_line_with_sync(&self, value: &Value, sync: bool) -> Result<()> {
         let _guard = self.write_lock.lock().await;
         let mut line = serde_json::to_vec(value)?;
         line.push(b'\n');
         let path = self.path.clone();
-        tokio::task::spawn_blocking(move || {
-            crate::session::jsonl::append_line(&path, &line, false)
-        })
-        .await??;
+        tokio::task::spawn_blocking(move || crate::session::jsonl::append_line(&path, &line, sync))
+            .await??;
         // Append to cache instead of invalidating
         let mut cache = self.cache.write().await;
         if let Some(cache) = cache.as_mut() {

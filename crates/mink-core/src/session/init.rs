@@ -25,6 +25,12 @@ pub async fn init_session_base_at(
 
     let store = Arc::new(ConversationStore::new(paths.conversation.clone()));
     store.ensure().await?;
+    // Recover Plan's cross-file journal before generic dangling-tool repair:
+    // a bound transaction owns the real successful Plan tool result, while an
+    // unbound transaction must first roll its filesystem mutation back.
+    crate::session::plan::PlanStore::new(paths.plan.clone(), paths.plan_draft.clone())
+        .recover_pending(&store)
+        .await?;
     store.repair_dangling_tool_uses().await?;
 
     let stats = StatsTracker::load(&paths.stats).await?;

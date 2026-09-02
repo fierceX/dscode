@@ -10,6 +10,7 @@ struct CapturedSummaryRequest {
     model_alias: Option<String>,
     system_prompt: String,
     messages: Vec<Value>,
+    tools: Vec<Value>,
     max_tokens: i32,
 }
 
@@ -40,12 +41,26 @@ impl LlmBackend for CapturingSummaryBackend {
         "capturing-summary"
     }
 
+    fn cache_projection(
+        &self,
+        request: &LlmRequest,
+        source_prefix_len: usize,
+    ) -> Option<LlmCacheProjection> {
+        (source_prefix_len <= request.messages.len()).then(|| LlmCacheProjection {
+            model: request.model.clone(),
+            system_prompt: request.system_prompt.clone(),
+            tools: request.tools.clone(),
+            messages: request.messages[..source_prefix_len].to_vec(),
+        })
+    }
+
     async fn stream(&self, request: LlmRequest) -> Result<crate::llm::client::LlmResponseStream> {
         self.requests.lock().unwrap().push(CapturedSummaryRequest {
             model: request.model,
             model_alias: request.model_alias,
             system_prompt: request.system_prompt,
             messages: request.messages,
+            tools: request.tools,
             max_tokens: request.max_tokens,
         });
         Ok(crate::llm::client::LlmResponseStream {
@@ -140,6 +155,475 @@ fn trigger_uses_explicit_percentage_and_reserve() {
         ..Config::default()
     };
     assert_eq!(compaction_trigger_tokens(&config), 52_000);
+}
+
+#[tokio::test]
+async fn provider_usage_calibrates_auto_but_not_preflight() -> anyhow::Result<()> {
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "provider-pressure-calibration",
+        |config| {
+            config.max_context_tokens = 1_000_000;
+            config.context_compact_pct = 80;
+            config.context_reserve_tokens = 100_000;
+        },
+        summary_backend(),
+    )
+    .await?;
+    ctx.compaction.record_agent_request(
+        "flash",
+        "prefix-a",
+        798_000,
+        "mock".into(),
+        "system".into(),
+        vec![],
+        None,
+    );
+    ctx.compaction.record_agent_usage(&UsageEvent {
+        input_tokens: 400_000,
+        output_tokens: 999_999,
+        cache_read_input_tokens: 200_000,
+        cache_creation_input_tokens: 80_000,
+    });
+
+    let auto = ctx
+        .compaction
+        .pressure_decision("auto", 800_000, "flash", Some("prefix-a"), None);
+    assert_eq!(auto.source, "provider_calibrated");
+    assert_eq!(auto.provider_baseline_tokens, Some(680_000));
+    assert_eq!(auto.effective_tokens, 682_000);
+
+    let preflight =
+        ctx.compaction
+            .pressure_decision("preflight", 800_000, "flash", Some("prefix-a"), None);
+    assert_eq!(preflight.source, "local_preflight");
+    assert_eq!(preflight.effective_tokens, 800_000);
+
+    let smaller =
+        ctx.compaction
+            .pressure_decision("auto", 700_000, "flash", Some("prefix-a"), None);
+    assert_eq!(smaller.effective_tokens, 582_000);
+    let clamped = ctx
+        .compaction
+        .pressure_decision("auto", 0, "flash", Some("prefix-a"), None);
+    assert_eq!(clamped.effective_tokens, 0);
+    ctx.compaction.record_agent_usage(&UsageEvent {
+        input_tokens: -1,
+        output_tokens: 0,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+    });
+    let after_invalid_usage =
+        ctx.compaction
+            .pressure_decision("auto", 800_000, "flash", Some("prefix-a"), None);
+    assert_eq!(after_invalid_usage.effective_tokens, 682_000);
+    let changed =
+        ctx.compaction
+            .pressure_decision("auto", 800_000, "other", Some("prefix-a"), None);
+    assert_eq!(changed.source, "local_fallback");
+    ctx.compaction
+        .projection_generation
+        .fetch_add(1, Ordering::SeqCst);
+    let after_compaction =
+        ctx.compaction
+            .pressure_decision("auto", 800_000, "flash", Some("prefix-a"), None);
+    assert_eq!(after_compaction.source, "local_fallback");
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_calibration_requires_actual_projection_compatibility() -> anyhow::Result<()> {
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "provider-projection-calibration",
+        |config| config.max_context_tokens = 1_000_000,
+        summary_backend(),
+    )
+    .await?;
+    let narrowed = vec![json!({"name":"Read"})];
+    let full = vec![json!({"name":"Read"}), json!({"name":"Edit"})];
+    let previous = LlmCacheProjection {
+        model: "flash".into(),
+        system_prompt: "routed system".into(),
+        tools: narrowed.clone(),
+        messages: vec![
+            json!({"role":"user","content":"inspect"}),
+            json!({"role":"user","content":"original router guidance"}),
+        ],
+    };
+    ctx.compaction.record_agent_request(
+        "flash",
+        "source-prefix",
+        700_000,
+        "router-llm-backend".into(),
+        "source system".into(),
+        full.clone(),
+        Some(previous.clone()),
+    );
+    ctx.compaction.record_agent_usage(&UsageEvent {
+        input_tokens: 500_000,
+        output_tokens: 1,
+        cache_read_input_tokens: 100_000,
+        cache_creation_input_tokens: 0,
+    });
+
+    let compatible = LlmCacheProjection {
+        messages: vec![
+            json!({"role":"user","content":"inspect"}),
+            json!({"role":"user","content":"original router guidance"}),
+            json!({"role":"assistant","content":"done"}),
+        ],
+        ..previous.clone()
+    };
+    let calibrated = ctx.compaction.pressure_decision(
+        "auto",
+        710_000,
+        "flash",
+        Some("source-prefix"),
+        Some(&compatible),
+    );
+    assert_eq!(calibrated.source, "provider_calibrated");
+    assert_eq!(calibrated.effective_tokens, 610_000);
+
+    let restored_tools = LlmCacheProjection {
+        tools: full,
+        ..compatible.clone()
+    };
+    let changed_tools = ctx.compaction.pressure_decision(
+        "auto",
+        710_000,
+        "flash",
+        Some("source-prefix"),
+        Some(&restored_tools),
+    );
+    assert_eq!(changed_tools.source, "local_fallback");
+
+    let changed_guidance = LlmCacheProjection {
+        messages: vec![
+            json!({"role":"user","content":"inspect"}),
+            json!({"role":"user","content":"different router guidance"}),
+        ],
+        ..previous
+    };
+    let changed_messages = ctx.compaction.pressure_decision(
+        "auto",
+        710_000,
+        "flash",
+        Some("source-prefix"),
+        Some(&changed_guidance),
+    );
+    assert_eq!(changed_messages.source, "local_fallback");
+    Ok(())
+}
+
+#[tokio::test]
+async fn stored_projection_hashes_messages_and_shares_usage_baseline() -> anyhow::Result<()> {
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "hashed-provider-projection",
+        |_| {},
+        summary_backend(),
+    )
+    .await?;
+    let unique_pixels = "data:image/png;base64,UNIQUE_REQUEST_ONLY_PIXEL_PAYLOAD";
+    ctx.compaction.record_agent_request(
+        "flash",
+        "prefix",
+        100,
+        "openai-compatible".into(),
+        "system".into(),
+        vec![],
+        Some(LlmCacheProjection {
+            model: "flash".into(),
+            system_prompt: "system".into(),
+            tools: vec![],
+            messages: vec![json!({
+                "role":"user",
+                "content":[{"type":"image_url","image_url":{"url":unique_pixels}}]
+            })],
+        }),
+    );
+    ctx.compaction.record_agent_usage(&UsageEvent {
+        input_tokens: 100,
+        output_tokens: 1,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+    });
+
+    let state = ctx
+        .compaction
+        .prompt_usage
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let latest = state.latest_request.as_ref().expect("latest request");
+    let baseline = state.baseline.as_ref().expect("usage baseline");
+    assert!(Arc::ptr_eq(latest, &baseline.request));
+    assert_eq!(
+        latest
+            .projection
+            .as_ref()
+            .expect("projection snapshot")
+            .message_hashes
+            .len(),
+        1
+    );
+    let retained = format!("{state:?}");
+    assert!(!retained.contains(unique_pixels), "{retained}");
+    assert!(!retained.contains("data:image"), "{retained}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn cache_aligned_summary_reuses_agent_system_tools_and_prefix() -> anyhow::Result<()> {
+    let backend = Arc::new(CapturingSummaryBackend::default());
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "cache-aligned-summary",
+        |config| {
+            config.max_context_tokens = 64_000;
+            config.context_reserve_tokens = 8_000;
+            config.context_compact_tail_tokens = 1;
+            config.context_compact_input_reduction = true;
+        },
+        backend.clone(),
+    )
+    .await?;
+    for index in 0..4 {
+        ctx.store
+            .add_user(&format!("request {index}: {}", "x".repeat(2_000)))
+            .await?;
+        ctx.store
+            .add_assistant(&format!("progress {index}"), "", &[])
+            .await?;
+    }
+    let messages =
+        crate::llm::image_projection::project_consumed_attachments(&ctx.store.lines().await?);
+    let system = "stable agent system".to_string();
+    let tools = vec![json!({"name":"Read","description":"read"})];
+    let resolved = crate::config::model_resolver(&ctx.config).resolve(&ctx.config.model);
+    let projection = LlmCacheProjection {
+        model: resolved.actual.clone(),
+        system_prompt: system.clone(),
+        tools: tools.clone(),
+        messages: messages.clone(),
+    };
+    ctx.compaction.record_agent_request(
+        &resolved.actual,
+        &prefix_fingerprint(&system, &tools),
+        10_000,
+        backend.name().into(),
+        system.clone(),
+        tools.clone(),
+        Some(projection),
+    );
+
+    let (did_compact, reason) = compact(&ctx, "manual", 0).await?;
+    assert!(did_compact);
+    assert!(reason.contains("input_mode=cache_aligned"), "{reason}");
+    let requests = backend.requests.lock().unwrap();
+    let request = requests.last().expect("summary request captured");
+    assert_eq!(request.system_prompt, system);
+    assert_eq!(request.tools, tools);
+    assert_eq!(request.messages.last().unwrap()["role"], "user");
+    assert_eq!(
+        request.messages.last().unwrap()["content"],
+        COMPACTION_INSTRUCTION
+    );
+    assert_eq!(
+        request.messages[..request.messages.len() - 1],
+        messages[..request.messages.len() - 1]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn raw_partial_aligned_summary_degrades_unconsumed_attachment() -> anyhow::Result<()> {
+    let backend = Arc::new(CapturingSummaryBackend::default());
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "raw-aligned-unconsumed-image",
+        |config| {
+            config.max_context_tokens = 64_000;
+            config.context_reserve_tokens = 8_000;
+            config.context_compact_input_reduction = false;
+        },
+        backend.clone(),
+    )
+    .await?;
+    let image_url = format!("image://{}", "a".repeat(64));
+    let active = vec![
+        json!({"role":"user","content":"initial request"}),
+        json!({"role":"assistant","content":"interrupted before inspecting the next image"}),
+        json!({
+            "role":"user",
+            "content":[{
+                "type":"tool_attachment",
+                "tool_use_id":"image-1",
+                "url":image_url,
+                "format":"png",
+                "width":64,
+                "height":32,
+                "bytes":128
+            }]
+        }),
+        json!({"role":"user","content":"latest request after another interruption"}),
+    ];
+    let system = "stable agent system".to_string();
+    let tools = vec![json!({"name":"Read","description":"read"})];
+    let resolved = crate::config::model_resolver(&ctx.config).resolve(&ctx.config.model);
+    let mut recent_messages = active.clone();
+    recent_messages[2]["content"][0] = json!({
+        "type":"image_url",
+        "image_url":{"url":"data:image/png;base64,AA=="}
+    });
+    ctx.compaction.record_agent_request(
+        &resolved.actual,
+        &prefix_fingerprint(&system, &tools),
+        1_000,
+        backend.name().into(),
+        system,
+        tools,
+        Some(LlmCacheProjection {
+            model: resolved.actual.clone(),
+            system_prompt: "stable agent system".into(),
+            tools: vec![json!({"name":"Read","description":"read"})],
+            messages: recent_messages,
+        }),
+    );
+
+    let input = ctx.compaction.build_summary_input(
+        &active,
+        active.len(),
+        None,
+        false,
+        LlmModelTarget::new(&resolved.actual, resolved.alias.as_deref()),
+    )?;
+
+    assert_eq!(input.meta.input_mode, "partial_aligned");
+    assert_eq!(input.meta.aligned_messages, 2);
+    let serialized = serde_json::to_string(&input.messages)?;
+    assert!(!serialized.contains("\"type\":\"tool_attachment\""));
+    assert!(!serialized.contains("\"type\":\"image_url\""));
+    assert!(serialized.contains("[image png 64x32: image://"));
+    assert_eq!(
+        input.messages.last().unwrap()["content"],
+        COMPACTION_INSTRUCTION
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn partial_alignment_rolls_back_before_incomplete_tool_exchange() -> anyhow::Result<()> {
+    let backend = Arc::new(CapturingSummaryBackend::default());
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "aligned-tool-exchange-boundary",
+        |config| {
+            config.max_context_tokens = 64_000;
+            config.context_reserve_tokens = 8_000;
+            config.context_compact_input_reduction = true;
+        },
+        backend.clone(),
+    )
+    .await?;
+    let active = vec![
+        json!({"role":"user","content":"inspect the image"}),
+        json!({"role":"assistant","content":[{
+            "type":"tool_use",
+            "id":"image-read-1",
+            "name":"Read",
+            "input":{"path":"diagram.png"}
+        }]}),
+        json!({"role":"user","content":[
+            {"type":"tool_result","tool_use_id":"image-read-1","content":"Image captured."},
+            {
+                "type":"tool_attachment",
+                "tool_use_id":"image-read-1",
+                "url":format!("image://{}", "b".repeat(64)),
+                "format":"png",
+                "width":80,
+                "height":40,
+                "bytes":128
+            }
+        ]}),
+        json!({"role":"user","content":"continue after interruption"}),
+    ];
+    let system = "stable agent system".to_string();
+    let tools = vec![json!({"name":"Read","description":"read"})];
+    let resolved = crate::config::model_resolver(&ctx.config).resolve(&ctx.config.model);
+    let mut recent_messages = active.clone();
+    recent_messages[2]["content"][1] = json!({
+        "type":"image_url",
+        "image_url":{"url":"data:image/png;base64,AA=="}
+    });
+    ctx.compaction.record_agent_request(
+        &resolved.actual,
+        &prefix_fingerprint(&system, &tools),
+        1_000,
+        backend.name().into(),
+        system.clone(),
+        tools.clone(),
+        Some(LlmCacheProjection {
+            model: resolved.actual.clone(),
+            system_prompt: system,
+            tools,
+            messages: recent_messages,
+        }),
+    );
+
+    let input = ctx.compaction.build_summary_input(
+        &active,
+        active.len(),
+        None,
+        false,
+        LlmModelTarget::new(&resolved.actual, resolved.alias.as_deref()),
+    )?;
+
+    assert_eq!(input.meta.input_mode, "partial_aligned");
+    assert_eq!(input.meta.aligned_messages, 1);
+    let wire = crate::llm::transport::convert_messages_to_openai(&input.messages)?;
+    let serialized = serde_json::to_string(&wire)?;
+    assert!(serialized.contains("[tool Read id=image-read-1] path=diagram.png"));
+    assert!(serialized.contains("[tool_result id=image-read-1] Image captured."));
+    assert!(!serialized.contains("\"tool_calls\""));
+    Ok(())
+}
+
+#[tokio::test]
+async fn summary_tool_call_fails_explicitly_without_advancing_context() -> anyhow::Result<()> {
+    let backend = Arc::new(MockLlmBackend::new(
+        "summary-tool-call",
+        vec![vec![
+            Ok(Event::ToolCall(crate::protocol::ToolCallEvent {
+                name: "Read".into(),
+                id: "summary-read-1".into(),
+                input_json: json!({"path":"src/lib.rs"}),
+                fields: Default::default(),
+                parse_error: None,
+            })),
+            Ok(Event::Stop(StopEvent {
+                reason: "tool_use".into(),
+            })),
+        ]],
+    ));
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "summary-tool-call-invalid",
+        |config| {
+            config.max_context_tokens = 64_000;
+            config.context_reserve_tokens = 8_000;
+            config.context_compact_tail_tokens = 1;
+        },
+        backend,
+    )
+    .await?;
+    add_tool_history(&ctx).await?;
+    let before = ctx.compaction.active_messages().await?;
+
+    let error = compact(&ctx, "manual", 0).await.unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("compaction attempted invalid tool call Read (summary-read-1)"),
+        "{error:#}"
+    );
+    assert_eq!(ctx.compaction.active_messages().await?, before);
+    assert!(ctx.compaction.read_summary().await.is_none());
+    Ok(())
 }
 
 #[test]
@@ -548,11 +1032,12 @@ async fn repeated_compaction_advances_boundary_and_merges_previous_summary() -> 
     assert_eq!(ctx.store.lines().await?, full_history);
     let projected = ctx.compaction.active_messages().await?;
     assert!(projected.len() < full_history.len());
-    assert_eq!(projected[0]["role"], "system");
+    assert_eq!(projected[0]["role"], "user");
+    assert_eq!(projected[0]["internal"], true);
     assert!(
         projected[0]["content"]
             .as_str()
-            .is_some_and(|c| c.contains("<context-snapshot>"))
+            .is_some_and(|c| c.contains("<compacted-summary>"))
     );
     let last_user = projected
         .iter()
@@ -573,26 +1058,72 @@ async fn repeated_compaction_advances_boundary_and_merges_previous_summary() -> 
     let snapshots = projected
         .iter()
         .filter(|m| {
-            m.get("role").and_then(Value::as_str) == Some("system")
-                && m.get("content")
-                    .and_then(Value::as_str)
-                    .is_some_and(|c| c.contains("<context-snapshot>"))
+            m.get("content")
+                .and_then(Value::as_str)
+                .is_some_and(|c| c.contains("<compacted-summary>"))
         })
         .count();
     assert_eq!(snapshots, 1, "context snapshot must appear exactly once");
 
     let guard = backend.requests.lock().unwrap();
     assert_eq!(guard.len(), 2);
-    let second_instruction = guard[1]
-        .messages
-        .last()
-        .and_then(|message| message.get("content"))
-        .and_then(Value::as_str)
-        .expect("second summary instruction");
-    let encoded_previous = serde_json::to_string(&Some(first_state.summary.as_str()))?;
-    assert!(second_instruction.contains(&format!("Previous context snapshot: {encoded_previous}")));
     let second_request = serde_json::to_string(&guard[1].messages)?;
+    assert!(second_request.contains("<compacted-summary>"));
+    assert!(guard[1].messages.iter().any(|message| {
+        message
+            .get("content")
+            .and_then(Value::as_str)
+            .is_some_and(|content| content.contains(&first_state.summary))
+    }));
     assert!(second_request.contains("second batch request"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn compacted_history_projects_active_plan_after_summary_and_removes_it_on_clear()
+-> anyhow::Result<()> {
+    let ctx = crate::regression::test_context_for_agent_with_config_and_backend(
+        "active-plan-checkpoint",
+        |config| {
+            config.max_context_tokens = 64_000;
+            config.context_reserve_tokens = 8_000;
+            config.context_compact_tail_tokens = 1;
+        },
+        summary_backend(),
+    )
+    .await?;
+    for index in 0..3 {
+        ctx.store
+            .add_user(&format!("request {index}: {}", "x".repeat(2_000)))
+            .await?;
+        ctx.store.add_assistant("progress", "", &[]).await?;
+    }
+    tokio::fs::write(&ctx.plan_path, "# Active plan\n1. implement\n2. verify\n").await?;
+    assert!(compact(&ctx, "manual", 0).await?.0);
+
+    let projected = ctx.compaction.active_messages().await?;
+    assert!(
+        projected[0]["content"]
+            .as_str()
+            .is_some_and(|content| content.contains("<compacted-summary>"))
+    );
+    assert!(
+        projected[1]["content"]
+            .as_str()
+            .is_some_and(|content| content.contains("<active-plan-checkpoint>\n# Active plan"))
+    );
+    assert_eq!(projected[0]["role"], "user");
+    assert_eq!(projected[1]["role"], "user");
+    assert_eq!(projected[0]["internal"], true);
+    assert_eq!(projected[1]["internal"], true);
+
+    tokio::fs::remove_file(&ctx.plan_path).await?;
+    let cleared = ctx.compaction.active_messages().await?;
+    assert!(cleared.iter().all(|message| {
+        !message["content"]
+            .as_str()
+            .is_some_and(|content| content.contains("<active-plan-checkpoint>"))
+    }));
     Ok(())
 }
 

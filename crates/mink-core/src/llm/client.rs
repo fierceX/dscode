@@ -68,6 +68,16 @@ pub enum LlmPurpose {
     Compaction,
 }
 
+/// Provider-visible logical request prefix used to preserve prompt-cache
+/// alignment across internal requests such as compaction.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LlmCacheProjection {
+    pub model: String,
+    pub system_prompt: String,
+    pub tools: Vec<serde_json::Value>,
+    pub messages: Vec<serde_json::Value>,
+}
+
 pub struct LlmRequest {
     pub purpose: LlmPurpose,
     pub model: String,
@@ -87,6 +97,27 @@ pub struct LlmRequest {
 pub trait LlmBackend: Send + Sync {
     fn name(&self) -> &str;
     async fn stream(&self, request: LlmRequest) -> Result<LlmResponseStream>;
+
+    /// Whether provider prompt usage can be adjusted by the source-request
+    /// token delta. Backends which inject or remove provider-visible content
+    /// dynamically must return false unless they provide an equivalent stable
+    /// projection accounting model.
+    fn prompt_usage_calibration_safe(&self) -> bool {
+        true
+    }
+
+    /// Return the provider-visible prefix corresponding to the first
+    /// `source_prefix_len` source messages. Backends which cannot prove that
+    /// boundary mapping retain source compatibility through the default
+    /// `None` implementation.
+    fn cache_projection(
+        &self,
+        request: &LlmRequest,
+        source_prefix_len: usize,
+    ) -> Option<LlmCacheProjection> {
+        let _ = (request, source_prefix_len);
+        None
+    }
 
     /// Declared image-input capability for one resolved model.
     ///
@@ -230,6 +261,17 @@ impl OpenAiCompatibleBackend {
         self.tool_choice = tool_choice;
         self
     }
+
+    fn tool_choice_for_purpose(&self, purpose: &LlmPurpose) -> Option<serde_json::Value> {
+        if matches!(purpose, LlmPurpose::Compaction) {
+            // Cache-aligned compaction retains Agent tools to preserve the
+            // provider prompt prefix, but tools are never executable there.
+            // Override user-configured `required`/named choices so the wire
+            // request cannot force a response that compaction must reject.
+            return Some(serde_json::json!("none"));
+        }
+        self.tool_choice.clone()
+    }
 }
 
 #[async_trait::async_trait]
@@ -250,12 +292,29 @@ impl LlmBackend for OpenAiCompatibleBackend {
         crate::capabilities::model_capabilities::ImageInputCapability::Unsupported
     }
 
+    fn cache_projection(
+        &self,
+        request: &LlmRequest,
+        source_prefix_len: usize,
+    ) -> Option<LlmCacheProjection> {
+        if source_prefix_len > request.messages.len() {
+            return None;
+        }
+        Some(LlmCacheProjection {
+            model: request.model.clone(),
+            system_prompt: request.system_prompt.clone(),
+            tools: request.tools.clone(),
+            messages: request.messages[..source_prefix_len].to_vec(),
+        })
+    }
+
     async fn stream(&self, request: LlmRequest) -> Result<LlmResponseStream> {
         let client = AsyncLlClient::from_client(
             self.http_client()?.clone(),
             &request.api_key,
             &request.api_url,
         );
+        let tool_choice = self.tool_choice_for_purpose(&request.purpose);
         let body = crate::llm::transport::build_openai_body_with_options_and_extensions(
             &request.model,
             &request.messages,
@@ -263,7 +322,7 @@ impl LlmBackend for OpenAiCompatibleBackend {
             &request.system_prompt,
             request.max_tokens,
             &self.options,
-            self.tool_choice.as_ref(),
+            tool_choice.as_ref(),
             &self.extra_body,
         )?;
         // Final body cap (v7 §9.4): fail before any bytes hit the wire. The
@@ -575,9 +634,17 @@ pub(crate) async fn stream_backend(
     } else {
         LlmPurpose::Agent
     };
-    // Core request projection (v7 §9.2): resolve `tool_attachment` blocks
-    // into data-URL image parts against the home image cache. The compaction
-    // summary path bypasses stream_backend and is text-only by construction.
+    let is_agent_request = matches!(purpose, LlmPurpose::Agent);
+    let local_tokens = crate::llm::transport::estimate_openai_context_tokens(
+        messages_json,
+        tools_json,
+        system_prompt,
+    )?;
+    // Core Agent request projection (v7 §9.2): resolve `tool_attachment`
+    // blocks into data-URL image parts against the home image cache.
+    // Compaction bypasses stream_backend: it may retain Agent tool schemas for
+    // cache alignment, but persisted attachments are degraded to deterministic
+    // text markers instead of materializing or resending image pixels.
     // Runs on the blocking pool: reads + base64 of multi-MB images must not
     // stall async workers.
     let mut messages = messages_json.to_vec();
@@ -611,24 +678,41 @@ pub(crate) async fn stream_backend(
         }),
         model_name.to_string(),
     );
-    let response = match backend
-        .stream(LlmRequest {
-            purpose,
-            model: model_name.to_string(),
-            model_alias: model_alias.map(str::to_string),
-            api_url: ctx.api_url.clone(),
-            api_key: ctx.api_key().to_string(),
-            system_prompt: system_prompt.to_string(),
-            messages,
-            tools: tools_json.to_vec(),
-            max_tokens: crate::session::compaction::effective_max_tokens(&ctx.config),
-            cancel: ctx.cancel.clone(),
-            verbose: ctx.verbose(),
-            display: ctx.display.clone(),
-        })
-        .await
-    {
-        Ok(response) => response,
+    let request = LlmRequest {
+        purpose,
+        model: model_name.to_string(),
+        model_alias: model_alias.map(str::to_string),
+        api_url: ctx.api_url.clone(),
+        api_key: ctx.api_key().to_string(),
+        system_prompt: system_prompt.to_string(),
+        messages,
+        tools: tools_json.to_vec(),
+        max_tokens: crate::session::compaction::effective_max_tokens(&ctx.config),
+        cancel: ctx.cancel.clone(),
+        verbose: ctx.verbose(),
+        display: ctx.display.clone(),
+    };
+    let cache_projection = backend.cache_projection(&request, request.messages.len());
+    let source_fingerprint =
+        crate::session::compaction::prefix_fingerprint(&request.system_prompt, &request.tools);
+    let source_system_prompt = request.system_prompt.clone();
+    let source_tools = request.tools.clone();
+    let backend_name = backend.name().to_string();
+    let response = match backend.stream(request).await {
+        Ok(response) => {
+            if is_agent_request {
+                ctx.compaction.record_agent_request(
+                    model_name,
+                    &source_fingerprint,
+                    local_tokens,
+                    backend_name,
+                    source_system_prompt,
+                    source_tools,
+                    cache_projection,
+                );
+            }
+            response
+        }
         Err(error) => {
             let attempt_count = request_failure_attempt_count(&error);
             record_unreported(&capture, attempt_count, format!("request_failed: {error}"));

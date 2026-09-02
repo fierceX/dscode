@@ -145,7 +145,7 @@ async fn main() -> anyhow::Result<()> {
 
 - **Session 持久化** — Append-only JSONL 完整历史，活跃后缀内存缓存，`--continue` 无缝恢复
 - **非破坏式压缩** — 只更新 `context-state.json` 投影边界，不重写 `conversation.jsonl`；压缩统一使用 LLM 摘要
-- **Plan & Todo 状态** — 确认计划按请求动态投影为 `<current-plan>`；Todo 使用稳定 ID、revision 和原子批量提交
+- **Plan & Todo 状态** — Plan 使用 append-only transition 与压缩后 checkpoint；Todo 使用稳定 ID、revision 和原子批量提交
 - **Artifact 超长输出** — 工具结果超限自动落盘至 `artifacts/`，序号可恢复且禁止覆盖；`Read artifact://<id>` 读取
 - **Prefab 会话重组** — 可选 `prefab` feature 在 session 初始化后重组 session，并从 `events.jsonl` 的标准 `prefix_snapshot` 事件重建完整 system prompt + tools schema；CLI 使用 `--prefab[=TEMPLATE]`，Rust 使用 `with_prefab(true)` / `with_prefab_named()` / `with_prefab_path()` / `with_prefab_spec()`（临时功能，后续 DeepSeek 更新模型后可能撤销）
 - **Token 用量与费用** — LLM 请求级 `usage.jsonl` journal，纳元级定价，覆盖主 Agent、自动压缩和子代理

@@ -336,7 +336,7 @@ fn cache_creation_input_tokens_from_direct_field() {
             _ => None,
         })
         .unwrap();
-    assert_eq!(usage.input_tokens, 60); // 100 - 40
+    assert_eq!(usage.input_tokens, 0); // 100 - 40 read - 60 creation
     assert_eq!(usage.cache_creation_input_tokens, 60);
     assert_eq!(usage.cache_read_input_tokens, 40);
 }
@@ -358,6 +358,29 @@ fn cache_creation_input_tokens_from_prompt_tokens_details() {
         .unwrap();
     assert_eq!(usage.cache_creation_input_tokens, 48);
     assert_eq!(usage.cache_read_input_tokens, 150);
+    assert_eq!(usage.input_tokens, 2); // 200 - 150 read - 48 creation
+}
+
+#[test]
+fn cache_creation_in_later_frame_recomputes_disjoint_input() {
+    let mut p = OpenAIParser::new();
+    let lines = [
+        "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{}}],\"usage\":{\"prompt_tokens\":100,\"prompt_tokens_details\":{\"cached_tokens\":40}}}",
+        "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"cache_creation_input_tokens\":60,\"completion_tokens\":2}}",
+        "data: [DONE]",
+    ];
+    let events = collect_lines(&mut p, &lines);
+    let usage = events
+        .iter()
+        .find_map(|event| match event {
+            Event::Usage(usage) => Some(usage),
+            _ => None,
+        })
+        .expect("usage event");
+    assert_eq!(usage.input_tokens, 0);
+    assert_eq!(usage.cache_read_input_tokens, 40);
+    assert_eq!(usage.cache_creation_input_tokens, 60);
+    assert_eq!(usage.output_tokens, 2);
 }
 
 #[test]

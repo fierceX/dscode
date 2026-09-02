@@ -152,6 +152,26 @@ pub(crate) fn materialize_images_with(
     Ok(())
 }
 
+/// Replace every persisted `tool_attachment` block with a deterministic text
+/// marker. Summary requests never materialize or resend image pixels: cache-
+/// aligned summaries may retain Agent tool schemas, but the payload of an
+/// attachment is only ever a text citation (v7 §10.3).
+pub(crate) fn degrade_images_for_summary(messages: &mut [Value]) {
+    for message in messages.iter_mut() {
+        let _ = degrade_attachments(message, &mut |block| {
+            let url = block.get("url").and_then(Value::as_str).unwrap_or("?");
+            let format = block.get("format").and_then(Value::as_str).unwrap_or("?");
+            let width = block.get("width").and_then(Value::as_u64).unwrap_or(0);
+            let height = block.get("height").and_then(Value::as_u64).unwrap_or(0);
+            *block = serde_json::json!({
+                "type": "text",
+                "text": format!("[image {format} {width}x{height}: {url}]")
+            });
+            Ok(None)
+        });
+    }
+}
+
 /// Visit every message content array and rewrite `tool_attachment` blocks.
 /// `rewrite` may materialize the block in place; it returns `Ok(None)` on
 /// success, `Ok(Some(reason))` to degrade the block into a text placeholder,

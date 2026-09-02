@@ -198,7 +198,7 @@ TurnExecutor (agent/turn.rs)
 │ session/compaction.rs │ 显式压缩策略、非破坏式历史投影和 LLM 摘要
 │ session/compaction_input.rs │ 可选摘要输入降噪
 │ session/prefix.rs     │ ImmutablePrefix 缓存
-│ session/plan.rs       │ PlanStore 与当前计划动态投影
+│ session/plan.rs       │ PlanStore 与 append-only 计划状态转换
 │ session/todo.rs       │ TodoStore、稳定 ID、原子持久化和追加式物化投影
 │ session/atomic_file.rs│ Plan/Todo 共用的同目录原子替换
 │ session/init.rs       │ Session 初始化
@@ -426,7 +426,7 @@ fail closed。
 | `session/compaction.rs` | 显式压缩策略、非破坏式历史投影和 LLM 摘要 |
 | `session/compaction_input.rs` | 可选摘要输入降噪：删除 thinking、压缩工具参数和结果 |
 | `session/prefix.rs` | ImmutablePrefix |
-| `session/plan.rs` | PlanStore、原子计划状态转换和当前计划动态投影 |
+| `session/plan.rs` | PlanStore、原子计划状态转换和 append-only transition |
 | `session/todo.rs` | session `todos.json` 的原子存储、revision 对账和追加式物化投影 |
 | `session/atomic_file.rs` | Plan/Todo 状态文件共用的同目录临时文件和原子替换 |
 | `session/paths.rs` | session 路径 |
@@ -441,7 +441,7 @@ fail closed。
 
 ## 关键不变式
 
-- `TurnCompactor`：同一用户输入的内循环最多压缩一次上下文；PlanConfirm/PlanClear 的强制压缩也必须经过该守卫并传播失败
+- `TurnCompactor`：同一用户输入的内循环最多压缩一次上下文；auto、preflight、manual 和 overflow 统一经过该守卫并传播失败
 - `ImmutablePrefix`：system prompt/tools 变更必须 invalidate prefix
 - 前缀构建/失效重建时必须向 events.jsonl 写一条 `prefix_snapshot` 事件（fingerprint/dependency_fingerprint/system_prompt/tools_json），使任意请求的模型可见前缀可离线重建；缓存命中不得重复写（invariant 测试钉住）
 - `ConversationStore` 内存缓存只保留当前活跃后缀；append 增量更新该缓存，完整历史读取作为一次性读盘操作
@@ -450,7 +450,9 @@ fail closed。
 - `context-state.json` 必须通过同目录临时文件 + rename 原子替换，成功后再更新内存状态
 - 压缩状态提交成功后必须按新的 `active_start` 裁剪 ConversationStore 缓存；模型请求只能通过 `active_messages()` 读取活跃投影
 - 投影边界必须位于完整历史内，且不能拆开 tool call/result 协议
-- 所有压缩统一调用 LLM 摘要；摘要始终作为动态消息，不修改 immutable system/tools prefix
+- 所有压缩统一调用 LLM 摘要；摘要以唯一 internal user `<compacted-summary>` checkpoint 投影，不修改 immutable system/tools prefix
+- auto 压力优先使用同模型、同 system/tools 指纹、同 projection generation 的最近 provider prompt usage 校准；preflight 始终使用保守本地估算，usage 基线只保存在 runtime 内存
+- 支持 cache projection 的 backend 必须让 compaction 复用上一 Agent 请求的实际 system/tools 与 dropped 历史公共前缀；无法证明边界或超预算时按 reduction 配置降级
 - todo 权威完整快照保存在 session `todos.json`；TodoWrite / TodoAdvance 成功后在 conversation 尾部追加增量事件和 `<current-todos>` 物化投影，不做逐请求前置投影
 - `TodoWrite` 和 `TodoAdvance` 各自依赖 `TodoRead`；调用使用最高可见 revision 和稳定 ID，stale revision 必须失败后重读
 - `TodoWrite` 只新增 pending 条目、删除条目或替换正文，`TodoAdvance` 只执行 pending / in_progress / completed 合法转换；两者都必须原子提交
@@ -487,7 +489,7 @@ fail closed。
 - 工具真实执行只接受 `ModelToolSurface` 中的工具；disable flag 和 sandbox 工具策略不属于运行时合同
 - PlanDraft/PlanConfirm/PlanClear 必须通过类型化 `PlanCommand` 和 `PlanStore` 完成；文件错误必须返回模型，禁止空成功
 - 已确认计划存在时禁止创建新草稿；PlanClear 必须同时清理可能遗留的陈旧草稿
-- 已确认计划必须在每次 LLM 请求时作为唯一的动态 `<current-plan>` system message 投影；不得写入 conversation、压缩摘要或 immutable prefix；默认**尾置投影**（作为最后一条消息），使计划修订不失效前缀缓存，`plan_projection_tail=false` 可回退前置投影（插入前导 system 消息之后）
+- PlanConfirm/PlanClear 成功工具结果写入后必须追加 confirmed/cleared 内部 user transition，不触发强制压缩；未压缩历史依赖 PlanDraft + transition，压缩后若 `plan.md` 仍存在则在摘要后投影唯一的 `<active-plan-checkpoint>`，PlanClear 后移除
 - Plan 与 SubAgent 结果必须在延迟工作完成并经过统一大小保护后再进入信号采集
 - 默认 approval mode 是 `yolo`；`prompt` 目前没有交互式 UI，会 fail closed
 - `ToolRunner::format_tool_result()` 是工具输出进入 LLM/UI 前的统一最大字节保护，超长输出写入 `artifact://<id>`

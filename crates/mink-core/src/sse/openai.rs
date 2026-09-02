@@ -17,6 +17,7 @@ struct PendingCall {
 #[derive(Default)]
 pub struct OpenAIParser {
     stop_reason: String,
+    prompt_tokens_total: Option<i64>,
     input_tokens: i64,
     output_tokens: i64,
     cache_read_input_tokens: i64,
@@ -89,8 +90,8 @@ impl OpenAIParser {
         // 缓存命中字段双拼写兜底（对齐 DSH translate.ts 的 disjoint 约定）：
         // OpenAI 兼容拼写（顶层 cached_tokens 或 prompt_tokens_details.cached_tokens）
         // 优先，DeepSeek 原生拼写 prompt_cache_hit_tokens 兜底。
-        // prompt_cache_miss_tokens 不单独记——它隐含在
-        // input_tokens = prompt_tokens - cache_read 的减法结果中。
+        // prompt_cache_miss_tokens 不单独记——它隐含在互斥分区
+        // input_tokens = prompt_tokens - cache_read - cache_creation 中。
         if let Some(v) = usage
             .get("cached_tokens")
             .or_else(|| {
@@ -102,16 +103,6 @@ impl OpenAIParser {
             .and_then(Value::as_i64)
         {
             self.cache_read_input_tokens = v;
-        }
-        if let Some(v) = usage.get("prompt_tokens").and_then(Value::as_i64) {
-            self.input_tokens = if self.cache_read_input_tokens > 0 {
-                // i64::saturating_sub saturates at i64::MIN, not at zero, so a
-                // provider reporting cached tokens above prompt_tokens would
-                // still produce a negative input count. Clamp to zero.
-                v.saturating_sub(self.cache_read_input_tokens).max(0)
-            } else {
-                v
-            };
         }
         // cache_creation_input_tokens: direct field or from prompt_tokens_details.cache_creation
         if let Some(v) = usage
@@ -125,6 +116,10 @@ impl OpenAIParser {
         {
             self.cache_creation_input_tokens = v;
         }
+        if let Some(v) = usage.get("prompt_tokens").and_then(Value::as_i64) {
+            self.prompt_tokens_total = Some(v);
+        }
+        self.recompute_input_tokens();
         let choice = body
             .get("choices")
             .and_then(Value::as_array)
@@ -247,6 +242,19 @@ impl OpenAIParser {
         }
         self.pending_stop = Some(self.stop_reason.clone());
         Ok(())
+    }
+
+    fn recompute_input_tokens(&mut self) {
+        let Some(total) = self.prompt_tokens_total else {
+            return;
+        };
+        // UsageEvent input/cache-read/cache-creation are disjoint partitions.
+        // Cache details may arrive in later SSE frames than prompt_tokens, so
+        // recompute from the retained total after every usage update.
+        self.input_tokens = total
+            .saturating_sub(self.cache_read_input_tokens)
+            .saturating_sub(self.cache_creation_input_tokens)
+            .max(0);
     }
 
     fn emit_pending(&mut self, emit: &mut dyn FnMut(Event) -> Result<()>) -> Result<()> {

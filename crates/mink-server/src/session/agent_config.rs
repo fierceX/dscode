@@ -74,7 +74,6 @@ pub(crate) struct ContextConfigFile {
     pub context_compact_tail_tokens: Option<usize>,
     pub context_compact_max_output_tokens: Option<i32>,
     pub context_compact_input_reduction: Option<bool>,
-    pub plan_projection_tail: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
@@ -156,7 +155,6 @@ pub(crate) struct AgentConfig {
     pub context_compact_tail_tokens: Option<usize>,
     pub context_compact_max_output_tokens: Option<i32>,
     pub context_compact_input_reduction: Option<bool>,
-    pub plan_projection_tail: Option<bool>,
     pub tool_timeout_secs: Option<i32>,
     pub tool_timeout_max_secs: Option<i32>,
     pub sub_agent_timeout_secs: Option<i32>,
@@ -257,7 +255,6 @@ pub(crate) fn merge(base: AgentConfig, over: AgentConfig) -> AgentConfig {
             base.context_compact_input_reduction,
             over.context_compact_input_reduction,
         ),
-        plan_projection_tail: pick(base.plan_projection_tail, over.plan_projection_tail),
         tool_timeout_secs: pick(base.tool_timeout_secs, over.tool_timeout_secs),
         tool_timeout_max_secs: pick(base.tool_timeout_max_secs, over.tool_timeout_max_secs),
         sub_agent_timeout_secs: pick(base.sub_agent_timeout_secs, over.sub_agent_timeout_secs),
@@ -400,7 +397,6 @@ fn from_file(file: &MinkConfigFile) -> AgentConfig {
         "context_compact_max_output_tokens",
     );
     cfg.context_compact_input_reduction = file.context.context_compact_input_reduction;
-    cfg.plan_projection_tail = file.context.plan_projection_tail;
 
     let tools = &file.tools;
     cfg.tool_timeout_secs = positive(tools.tool_timeout, "tool_timeout");
@@ -528,9 +524,6 @@ pub(crate) fn apply_to(mut options: AgentOptions, cfg: &AgentConfig) -> AgentOpt
     }
     if let Some(v) = cfg.context_compact_input_reduction {
         context.compact_input_reduction = v;
-    }
-    if let Some(v) = cfg.plan_projection_tail {
-        context.plan_projection_tail = v;
     }
     options = options.with_context_policy(context);
 
@@ -666,7 +659,6 @@ llm_first_event_timeout = 30
 max_context = "120k"
 context_compact_pct = 80
 context_reserve_tokens = 2048
-plan_projection_tail = false
 
 [tools]
 enabled_tools = ["Read", "Edit", "Bash"]
@@ -720,7 +712,6 @@ timeout = 60
         assert_eq!(layer.max_context_tokens, Some(120_000));
         assert_eq!(layer.context_compact_pct, Some(80));
         assert_eq!(layer.context_reserve_tokens, Some(2048));
-        assert_eq!(layer.plan_projection_tail, Some(false));
         assert_eq!(
             layer.enabled_tools.as_deref(),
             Some(&["Read".to_string(), "Edit".to_string(), "Bash".to_string()][..])
@@ -741,6 +732,13 @@ timeout = 60
         let layer = parse_layer("model = \"pro\"\n", "test");
         assert_eq!(layer.model, None, "flat top-level keys must be rejected");
         assert_eq!(layer.api_key, None);
+    }
+
+    #[test]
+    fn removed_plan_projection_tail_is_rejected() {
+        let error = toml::from_str::<MinkConfigFile>("[context]\nplan_projection_tail = false\n")
+            .unwrap_err();
+        assert!(error.to_string().contains("plan_projection_tail"));
     }
 
     #[test]

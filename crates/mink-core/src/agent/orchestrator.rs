@@ -172,11 +172,6 @@ impl OrchActor {
                                         }
                                     }
                                 }
-                                self.ctx.log_event(crate::events::EventLog::Compact {
-                                    version: None,
-                                    trigger: "manual".into(),
-                                    result: _reason.clone(),
-                                });
                                 self.refresh_title().await;
                                 Ok(crate::runtime::CompactOutcome::Compacted { reason: _reason.clone() })
                             }
@@ -185,6 +180,11 @@ impl OrchActor {
                                 Ok(crate::runtime::CompactOutcome::Skipped { reason: reason.clone() })
                             }
                             Err(e) => {
+                                self.ctx.log_event(crate::events::EventLog::Compact {
+                                    version: Some(2),
+                                    trigger: "manual".into(),
+                                    result: format!("failed: {e:#}"),
+                                });
                                 self.ctx.display.render_error(&format!("Compact failed: {e}"));
                                 Err(anyhow::anyhow!("{e:#}"))
                             }
@@ -421,6 +421,7 @@ impl OrchActor {
         } else {
             self.forced_model = Some(model.to_string());
         }
+        self.ctx.compaction.clear_prompt_usage();
         let resolved = self.resolve_active();
         self.ctx
             .display

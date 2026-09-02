@@ -24,8 +24,11 @@ agent 在压缩后不会让冷历史持续驻留内存。恢复 session 时会�
 活跃消息。
 
 压缩策略由显式配置控制，包括触发百分比、主请求响应预留、压缩后热尾部和摘要输出预算。
-所有压缩统一调用 LLM 生成滚动摘要，并将摘要作为动态消息以保持 system/tools 前缀稳定。
-摘要请求使用当前活动模型，并通过 runtime 注入的共享 LLM backend 发送。
+所有压缩统一调用 LLM 生成滚动摘要，并将摘要作为 internal user checkpoint 以保持
+system/tools 前缀稳定。支持 cache projection 的 backend 会让摘要请求复用上一 Agent 请求的
+实际 system/tools 与历史公共前缀；无法对齐时自动降级。auto 压力使用最近 provider prompt
+usage 校准，preflight 仍完全依赖保守本地估算。摘要请求使用当前活动模型，并通过 runtime
+注入的共享 LLM backend 发送。
 Agent JSONL、Python SDK 和 Rust API 均可直接配置上下文窗口及五个压缩参数；runtime 会在创建
 session 前拒绝 reserve、热尾部或摘要输出预算与窗口不相容的组合。
 开启摘要输入降噪后，会在摘要请求前删除 thinking、压缩工具参数和结果，同时保留用户请求、
@@ -35,8 +38,9 @@ assistant 文本、错误证据和 artifact 引用。Provider 在产生可见输
 Fork 子代理会在 runtime 初始化前克隆父 session 的完整状态。Artifact ID 从克隆后的索引继续
 分配，正文文件使用独占创建，从而保持继承的 `artifact://` 引用稳定。
 
-Plan 和 Todo 使用独立的 session 状态文件。确认后的计划在每次 LLM 请求时投影为动态
-`<current-plan>` system message，不进入 immutable prefix 或 conversation。Todo 的权威完整
+Plan 和 Todo 使用独立的 session 状态文件。PlanConfirm/PlanClear 在成功工具结果后追加
+内部 user transition；仅在历史已压缩时从 `plan.md` 投影稳定的 `<active-plan-checkpoint>`。
+Todo 的权威完整
 快照保存在 `todos.json`；成功变更以增量事件和紧凑 active 投影追加到 conversation，并使用
 revision 和稳定 ID 防止 stale write。
 

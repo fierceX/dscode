@@ -345,7 +345,6 @@ context_reserve_tokens = 64000
 context_compact_tail_tokens = 256000
 context_compact_max_output_tokens = 8192
 context_compact_input_reduction = false
-plan_projection_tail = true
 
 [tools]
 tool_timeout = 600
@@ -564,15 +563,16 @@ mink --list-sessions                            # 列出所有 session
 ### 生命周期
 
 ```
-LLM 提议 → PlanDraft(草稿) → 用户确认 → PlanConfirm → <current-plan> 动态注入
-  → TodoRead/TodoWrite/TodoAdvance 执行 → PlanClear → 移除动态计划
+LLM 提议 → PlanDraft(草稿) → 用户确认 → PlanConfirm → confirmed transition
+  → TodoRead/TodoWrite/TodoAdvance 执行 → PlanClear → cleared transition
 ```
 
 - `PlanDraft(content)`：保存或取消草稿（空 content = 取消）。已确认计划存在时拒绝创建。
-- `PlanConfirm()`：原子 rename `plan.draft → plan.md` + 请求压缩。下一轮 LLM 请求注入 `<current-plan>`。
-- `PlanClear()`：删除 `plan.md` + 清理残留 `plan.draft` + 请求压缩。下一轮移除动态计划。
+- `PlanConfirm()`：原子 rename `plan.draft → plan.md`，成功工具结果后追加 confirmed transition。
+- `PlanClear()`：删除 `plan.md`、清理残留 `plan.draft`，成功工具结果后追加 cleared transition。
 
-PlanConfirm/PlanClear 的压缩请求服从 TurnCompactor 同轮一次守卫，失败会返回当前 turn。
+PlanConfirm/PlanClear 不强制压缩。历史压缩后，活动 `plan.md` 以稳定的
+`<active-plan-checkpoint>` 出现在摘要 checkpoint 之后。
 执行阶段的 Todo 工具协议见 [工具系统 · Todo 协议](#todo-协议)。
 
 ---
@@ -590,19 +590,21 @@ PlanConfirm/PlanClear 的压缩请求服从 TurnCompactor 同轮一次守卫，�
 | `context_compact_tail_tokens` | 256000 | 压缩后保留的热尾部目标 |
 | `context_compact_max_output_tokens` | 8192 | 摘要输出上限 |
 | `context_compact_input_reduction` | false | 压缩 think 和工具噪声 |
-| `plan_projection_tail` | true | 已确认计划尾置投影（最后一条消息），计划修订不失效前缀缓存；`false` 回退前置投影 |
 
-触发点取百分比阈值和 `max_context - context_reserve_tokens` 中较早者。
+触发点取百分比阈值和 `max_context - context_reserve_tokens` 中较早者。auto 使用最近一次
+同模型、同 immutable prefix、同压缩 generation 的 provider prompt usage 校准压力；
+preflight 始终使用保守本地估算。
 `max_context_tokens=0` 禁用 auto/preflight 压缩，保留 `/compact`。
 
 ### 流程
 
 1. 从活跃窗口选择不破坏 tool call/result 配对的边界
-2. 可选降噪：删除 thinking，压缩工具参数和结果
-3. 使用最小摘要 prompt，LLM 合并新旧历史
-4. 原子提交 `context-state.json`（临时文件 + rename）
-5. 裁剪运行时缓存到新活跃边界
-6. `conversation.jsonl` 保持完整且只追加
+2. backend 支持时复用上一 Agent 请求的 system/tools 与 dropped 历史公共缓存前缀
+3. 可选降噪只处理未缓存后缀；无法对齐时降级为全量 reduced/raw 摘要输入
+4. LLM 合并旧 `<compacted-summary>` 与新增 dropped 历史
+5. 原子提交 `context-state.json`（临时文件 + rename）
+6. 以 internal user `<compacted-summary>` 投影摘要并裁剪运行时缓存
+7. `conversation.jsonl` 保持完整且只追加
 
 ### 防护
 
@@ -857,12 +859,13 @@ grep '\[trajectory\]' conversation.jsonl
 DeepSeek 的 context caching 用量通过 OpenAI 兼容字段回传：
 `prompt_tokens_details.cached_tokens`（DeepSeek 返回的就是这个兼容拼写，
 不是原生 `prompt_cache_hit_tokens`）。mink 的解析链以兼容拼写优先、原生拼写
-兜底（`prompt_cache_hit_tokens`），未命中部分隐含在
-`input_tokens = prompt_tokens - cache_read_tokens` 的减法中。
+兜底（`prompt_cache_hit_tokens`）。三类输入统计是互斥分区：
+`input_tokens = prompt_tokens - cache_read_tokens - cache_creation_tokens`。
 
 **缓存命中率可正常计算**：命中率 = 累计 `cache_read_tokens` / 累计
-`prompt_tokens`；标题栏 `I:` 字段括号内即该比率。前缀命中要求 system prompt、
-tools 与历史消息前缀字节级稳定——计划修订会改变其后的全部前缀，因此
-`plan_projection_tail=true`（默认）把计划放在最后一条消息，修订只影响自身位置；
+(`input_tokens + cache_read_tokens + cache_creation_tokens`)；标题栏 `I:` 字段括号内
+即该比率。前缀命中要求 system prompt、
+tools 与历史消息前缀字节级稳定。计划确认/清除通过 append-only transition 表达，
+压缩后的活动计划 checkpoint 位于稳定动态前缀中；
 `prefix_snapshot` 事件（events.jsonl）可用于离线重建请求前缀并归因
 "这次为什么 cache miss"。

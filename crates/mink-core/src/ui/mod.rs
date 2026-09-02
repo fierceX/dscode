@@ -165,7 +165,14 @@ pub struct StatsSnapshot {
 
 impl StatsSnapshot {
     pub fn cache_pct(&self) -> String {
-        let total = self.total_input_tokens + self.total_cache_read_tokens;
+        // Provider prompt accounting is partitioned into mutually exclusive
+        // uncached, cache-read, and cache-creation tokens. Creation tokens are
+        // misses, so omitting them would overstate the hit rate (even 100% for
+        // a request that created more cache than it read).
+        let total = self
+            .total_input_tokens
+            .saturating_add(self.total_cache_read_tokens)
+            .saturating_add(self.total_cache_creation_tokens);
         self.total_cache_read_tokens
             .checked_mul(100)
             .and_then(|tokens| tokens.checked_div(total))
@@ -229,4 +236,31 @@ pub async fn render_title_snapshot(
         belief,
     };
     ctx.display.render_title_update(model_label, &snapshot);
+}
+
+#[cfg(test)]
+mod stats_snapshot_tests {
+    use super::StatsSnapshot;
+
+    #[test]
+    fn cache_pct_includes_cache_creation_in_prompt_total() {
+        let snapshot = StatsSnapshot {
+            total_cache_read_tokens: 40,
+            total_cache_creation_tokens: 60,
+            ..Default::default()
+        };
+        assert_eq!(snapshot.cache_pct(), "40%");
+    }
+
+    #[test]
+    fn cache_pct_handles_mixed_and_empty_prompt_partitions() {
+        let mixed = StatsSnapshot {
+            total_input_tokens: 20,
+            total_cache_read_tokens: 30,
+            total_cache_creation_tokens: 50,
+            ..Default::default()
+        };
+        assert_eq!(mixed.cache_pct(), "30%");
+        assert_eq!(StatsSnapshot::default().cache_pct(), "—");
+    }
 }

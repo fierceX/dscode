@@ -11,11 +11,15 @@ pub enum PlanCommand {
 }
 
 impl PlanCommand {
-    pub fn compaction_trigger(self) -> Option<&'static str> {
+    pub fn transition_message(self) -> Option<&'static str> {
         match self {
             Self::SetDraft => None,
-            Self::Confirm => Some("plan_confirm"),
-            Self::Clear => Some("plan_clear"),
+            Self::Confirm => Some(
+                "<plan-transition state=\"confirmed\">\nThe latest successful PlanDraft is now authoritative. Follow it until a later plan transition clears it.\n</plan-transition>",
+            ),
+            Self::Clear => Some(
+                "<plan-transition state=\"cleared\">\nThe confirmed plan is complete and is no longer active.\n</plan-transition>",
+            ),
         }
     }
 }

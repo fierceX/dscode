@@ -48,6 +48,7 @@ pub(super) fn reserved_section_ids() -> BTreeSet<&'static str> {
             "runtime-capabilities",
             "tool-inventory",
             "system-conventions",
+            "runtime-checkpoints",
             "rules",
             "instruction-files",
             "rule-index",
