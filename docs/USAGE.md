@@ -1,6 +1,6 @@
 # 使用手册
 
-> 更新日期：2026-08-18
+> 更新日期：2026-09-03
 
 本文面向终端用户，覆盖 CLI 交互模式、配置参数、沙箱、session、计划、压缩、工具、技能和
 常见工作流。Rust 库 / Python SDK 嵌入见 [嵌入与 SDK 使用](EMBEDDING.md)；机器协议
@@ -293,7 +293,7 @@ read_dirs = ["./data"]
 分辨率优先级：显式 `image_input` > backend 声明（`vision_models` 列表）> 关闭。
 内置默认视觉模型为 `deepseek-v4-flash-vision-exp`；其余模型保持 text-only
 （fail closed）。`[provider.image]` 只覆盖已支持会话的限额，不会把文本会话变成
-视觉会话。设计协议见 `docs/设计哲学-多模态读图.md`。
+视觉会话。设计说明见 `docs/设计哲学-多模态读图能力.md`。
 
 - 开启后：`Read` 图片文件或 `image://sha256:<hex64>` 会把图片附加到**下一次** LLM
   请求（OpenAI `image_url` data-URL，原字节 base64 无转换）；图片路径拒绝行

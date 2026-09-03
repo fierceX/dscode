@@ -1,5 +1,67 @@
 # Changelog
 
+## v0.6.0 (2026-09-03)
+
+### 多模态读图支持
+
+新增读图全链路：`Read` 捕获图片 → 内容寻址缓存 → 请求时物化注入，并贯通能力冻结、配额与降级矩阵。
+
+- **能力层**：新增 `SessionModelCapabilities`（`capabilities/model_capabilities.rs`）与
+  `ImageInputCapability`（`Unsupported` / `OpenAiChatImageUrl`）——含 detail、
+  allowed_mime、wire_protocol、token_estimator 与图片数量/字节/维度/像素限额，以及覆盖
+  以上字段的能力指纹。能力在 session 初始化时解析并冻结，持久化到
+  `model-capabilities.json`（原子替换）；恢复时重算指纹核对，模型切换经兼容谓词门控：
+  Unsupported 会话接受任意模型但永远 text-only，图片会话要求指纹精确匹配（不兼容时
+  拒绝启动/切换）。
+- **工具层**：`Read` 支持图片捕获——本地文件 magic 嗅探（PNG/JPEG/GIF/WebP）、
+  `image://sha256:<hex64>` 引用读取（重新注入）、VFS 逐张读图（字节不跨批累积）；
+  图片路径拒绝行 selector / `:raw`；MIME 双层校验（Mink 支持集 ∩ 模型 allowed_mime）、
+  单图字节/边长/像素上限，超限 fail closed。能力关闭时行为与旧版逐字节一致
+  （`image://` 仍为未知 scheme fail-closed）。
+- **缓存层**：`<home>/.mink/cache/images/v1/` 内容寻址不可变对象（原始字节 SHA-256
+  命名），两阶段提交（EEXIST 去重 + 目录 fsync + 读回 digest 校验），无索引文件；
+  子代理不继承父缓存，fork 后的父引用统一按历史 unavailable 处理。
+- **请求投影**：conversation 只存 `tool_attachment` 块（`image://` 引用 + 预算元数据，
+  无路径无文件名）；请求时物化为 OpenAI `image_url` data-URL（原字节 base64，无转换）。
+  单次消费生命周期：最后一条 assistant 消息之后的引用为未消费批，物化一次后降级为
+  确定性文本引用（`Read image://...` 可重新注入，幂等）。每批配额（默认 600 张 /
+  16MB 原始字节）从 0 计数、批次间重置、历史引用永不锁死；本轮引用物化失败使请求
+  失败（不谎报"已附加"），历史引用降级 `[image unavailable]`。
+- **请求预算**：OpenAI 分块 token 估算（长边 2000 / 短边 768 两级缩放；detail=high
+  时 85 base + 170/512px tile）；最终请求体硬上限 32MB；压缩器与主请求共用同一投影
+  （已消费图片不再计为视觉 token），摘要输入降噪把 `tool_attachment` 置为占位。
+- **配置（CLI / `.minkrc`）**：`[provider] image_input = "on"|"off"`（显式覆盖 backend
+  声明）、`vision_models = [...]`（替换内置默认 `deepseek-v4-flash-vision-exp`，
+  空列表 = 全部关闭）、`[provider.image]` 限额覆盖（detail /
+  max_images_per_request / max_image_bytes_per_request / max_image_bytes /
+  max_dimension / max_pixels，字节支持 K/M/G 后缀）；环境变量 `MINK_IMAGE_INPUT` /
+  `MINK_VISION_MODELS`。示例见 `.minkrc.example`。
+- **Rust 库 API（新增，非破坏）**：`AgentOptions::with_image_input()` /
+  `with_vision_models()` / `with_image_limits()`；`LlmBackend` 新增
+  `image_input_capability(model)` 声明方法（默认 `Unsupported`，fail closed）；
+  `RouterLlmBackend` 透传内层 backend 声明；相关类型（`ImageInputCapability`、
+  `ImageLimitsOverrides`、`OpenAiChatImageUrlLimits`、`ImageDetail`、`ImageFormat`、
+  `TokenEstimator`、`WireProtocol`）自 `mink::runtime` 导出。分辨率优先级：显式
+  `image_input` > backend 声明 > `Unsupported`；`image_limits` 只作用于已支持会话，
+  不会把文本会话变成视觉会话。
+- **测试**：库级捕获/引用/配额/VFS/资源排除用例（`tools/runner_tests.rs` 等）、
+  `crates/mink-core/tests/image_e2e.rs` 端到端、router 透传测试。
+
+### 缓存命中与压缩/Plan 协议
+
+压缩器让 provider 缓存命中可见，并把 Plan 状态变更收敛为可重放协议：
+
+- auto 压缩使用最近有效 provider prompt usage 校准压力，preflight 保持保守本地估算；
+  新增 pressure source、baseline 和 projection generation 事件字段。
+- `LlmBackend` 新增可选 cache projection seam；OpenAI-compatible 与 Router backend
+  支持摘要请求复用主请求的 system/tools 和历史公共缓存前缀，不支持时自动降级。
+- 压缩摘要改为 internal user `<compacted-summary>` checkpoint，旧 session 恢复时无需迁移。
+- PlanConfirm/PlanClear 在成功工具结果后追加 transition，不再强制压缩；历史压缩后活动计划
+  通过 `<active-plan-checkpoint>` 投影。Plan 文件变更与 conversation 追加由
+  `plan-transaction.json` 可重放 journal 协调：未绑定的中断操作回滚，已绑定操作在恢复时
+  幂等补齐 tool result / transition，避免 `plan.md` 与模型历史永久分叉。
+- 删除 `plan_projection_tail` 配置；旧 TOML 字段按未知字段策略拒绝。
+
 ## v0.5.0 (2026-08-18)
 
 ### 信号系统：分层响应模型（Breaking）

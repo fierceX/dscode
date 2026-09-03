@@ -1,6 +1,6 @@
 # 嵌入与 SDK 使用
 
-> 更新日期：2026-08-18
+> 更新日期：2026-09-03
 
 本文面向把 Mink 作为**库或 SDK** 集成的开发者：Rust 嵌入式 runtime（`mink::runtime`）
 和 Python SDK（`mink-agent`），以及跨端统一的 Token 用量与费用访问。终端用户的
@@ -21,7 +21,7 @@ Rust 发布包为 `mink-core`，库 crate 名为 `mink`。发布包只包含可�
 
 ```toml
 [dependencies]
-mink = { package = "mink-core", version = "0.5.0", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.6.0", default-features = false, features = ["runtime"] }
 ```
 
 公开入口为 `mink::prelude`、`mink::runtime`、`mink::sdk_protocol` 和 `mink::ui`；启用 `prefab` feature 时 `mink::runtime::prefab` 提供 `ensure_session()`。
@@ -150,6 +150,12 @@ let runtime = AgentRuntime::start(
   closed）。OpenAI-compatible 后端按 `with_vision_models` 列表声明；自定义后端不开此
   方法则会话保持 text-only，也可用 `AgentOptions::with_image_input(...)` 显式声明
   （优先级高于 backend 声明）
+- 缓存投影（可选）：实现 `cache_projection(request, source_prefix_len)` 可让压缩摘要
+  复用上一 Agent 请求的 system/tools 与历史公共缓存前缀（返回 provider 可见的整条前缀
+  或其指定长度切片）；不实现时返回默认 `None`，摘要自动降级为全量输入，功能不受影响
+- 校准门控：若 backend 会动态改写请求（如注入/删减消息或改变工具面），声明
+  `prompt_usage_calibration_safe() -> false` 可关闭 auto 压缩的 provider usage 校准，
+  回退到保守本地估算（默认 `true`，仅对 provider 可见内容与本地请求一致时适用）
 
 完整示例：
 
@@ -189,7 +195,7 @@ let runtime = AgentRuntime::start(
 
 ```toml
 [dependencies]
-mink = { package = "mink-core", version = "0.5.0", default-features = false, features = ["runtime", "prefab"] }
+mink = { package = "mink-core", version = "0.6.0", default-features = false, features = ["runtime", "prefab"] }
 ```
 
 ```rust

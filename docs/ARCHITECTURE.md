@@ -1,6 +1,6 @@
 # 架构说明
 
-> 更新日期：2026-08-18
+> 更新日期：2026-09-03
 
 本文描述 Mink 当前代码结构、模块职责和运行时数据流。终端用户命令、配置和工作流见
 [USAGE.md](USAGE.md)；Rust/Python 嵌入见 [EMBEDDING.md](EMBEDDING.md)；机器协议见
@@ -67,7 +67,7 @@ TurnExecutor (agent/turn.rs)
   │  PlanActionHandler / SubAgentCoordinator
   ▼
 ┌─────── LLM 层 ────────┐
-│ llm/client.rs         │ LlmBackend 注入、OpenAI-compatible 流式客户端、重试、usage 采集、模型名解析和请求选项
+│ llm/client.rs         │ LlmBackend 注入、OpenAI-compatible 流式客户端、重试、usage 采集、模型名解析、请求选项、缓存投影 seam 与校准门控
 │ llm/transport.rs      │ OpenAI chat/completions 请求构造、tool_choice 和 extra_body 合并
 │ sse/openai.rs         │ SSE 增量解析、usage、stop、tool call 合并
 │ sse/toolcall.rs       │ tool_call 字段归一化
@@ -111,7 +111,7 @@ TurnExecutor (agent/turn.rs)
 │ session/artifacts.rs  │ artifact index、持久序号恢复、防覆盖完整输出
 │ session/stats.rs      │ token、费用、请求数统计
 │ session/usage.rs      │ LLM 请求级 Token 与费用明细 JSONL（UsageJournal / MeteredStream）
-│ session/compaction.rs │ 显式策略、非破坏式投影、LLM 摘要和压缩状态
+│ session/compaction.rs │ 显式策略、非破坏式投影、LLM 摘要、压缩状态；provider usage 压力校准与缓存对齐摘要
 │ session/compaction_input.rs │ 可选摘要输入降噪
 │ session/prefix.rs     │ ImmutablePrefix
 │ session/plan.rs       │ PlanStore 与 append-only 计划状态转换
@@ -269,7 +269,7 @@ Server 生命周期：Ctrl+C → axum serve 停止 → idle reaper abort → `re
 | `agent/prefix.rs` | `PrefixManager`，构建/复用 immutable prefix；prefab 模式下从 session `events.jsonl` 的 `prefix_snapshot` 事件重建 |
 | `agent/compactor.rs` | `TurnCompactor`，封装同轮压缩防护 |
 | `agent/tool_signals.rs` | 工具信号采集和 belief 更新 |
-| `agent/plan_actions.rs` | 将已完成的 PlanCommand 转换为 turn effect 和压缩请求 |
+| `agent/plan_actions.rs` | 将已完成的 PlanCommand 转换为 turn effect 与 append-only transition |
 | `agent/sub_coordinator.rs` | SubAgent 工具调用的启动与结果注入 |
 | `agent/sub_executor.rs` | 子代理独立 session / fork session 执行 |
 | `agent/belief.rs` | `BeliefTracker` |
@@ -325,7 +325,7 @@ bindings。发给 provider 的 schemas 直接来自 surface；prefix 直接消�
 | `session/artifacts.rs` | artifact 索引、持久序号恢复和正文防覆盖写入 |
 | `session/stats.rs` | session 累计 token、费用和请求数统计 |
 | `session/usage.rs` | LLM 请求级 Token 与费用明细 journal |
-| `session/compaction.rs` | 显式压缩策略、非破坏式投影、LLM 摘要和压缩状态 |
+| `session/compaction.rs` | 显式压缩策略、非破坏式投影、LLM 摘要和压缩状态；provider usage 压力校准与缓存对齐摘要 |
 | `session/compaction_input.rs` | 摘要请求输入降噪 |
 | `session/prefix.rs` | ImmutablePrefix |
 | `session/plan.rs` | PlanStore、原子计划状态转换和 append-only transition |
@@ -491,6 +491,7 @@ Session 目录保存 conversation、events、metadata、summary、stats 和 arti
 ├── context-state.json     # 首次提交压缩状态后生成
 ├── plan.md                # 确认计划存在时生成
 ├── plan.draft             # 未确认草稿存在时生成
+├── plan-transaction.json  # 计划文件变更与 conversation 追加的事务 journal（事务期间存在，结束后移除）
 ├── todos.json             # 首次成功 Todo 变更后生成
 ├── usage.jsonl            # 首次记录 LLM 请求后生成
 └── artifacts/
@@ -524,8 +525,9 @@ Session 目录保存 conversation、events、metadata、summary、stats 和 arti
 - `ConversationStore` 缓存由 `start + lines` 组成，只保留 `active_start` 之后的活跃后缀；压缩提交成功后同步裁剪缓存。
 - 正常 turn、压缩和最终回复提取不加载完整历史；恢复时流式解析并校验 JSONL，但只保留并缓存活跃后缀。
 - 投影边界必须位于完整历史内，并且不能拆开 tool call/result 协议。
-- 所有压缩统一调用 LLM 摘要；摘要作为动态消息加入活跃投影，不改变 immutable system/tools prefix。
-- 当前计划与压缩摘要一样属于逐请求动态 system state；两者都不能进入 immutable prefix 或持久化 conversation。
+- 所有压缩统一调用 LLM 摘要；摘要以唯一 internal user `<compacted-summary>` checkpoint 投影，不修改 immutable system/tools prefix。
+- 摘要输入优先复用上一 Agent 请求的 system/tools 与历史公共缓存前缀（backend 声明 `cache_projection`），无法证明边界或超预算时按 reduction 配置降级；auto 压力以最近同模型、同指纹、同投影代际的 provider prompt usage 校准，preflight 保持保守本地估算，`CompactionCheck` 事件记录压力来源。
+- Plan 状态变更以 append-only transition 持久化在 conversation 尾部（confirmed/cleared 内部 user 消息），压缩后活动 `plan.md` 以唯一的 `<active-plan-checkpoint>` 投影，PlanClear 后移除；文件变更与 conversation 追加由 `plan-transaction.json` 可重放 journal 协调，两者都不进入 immutable prefix。
 - Todo 权威完整快照保存在 `todos.json`；conversation 尾部追加增量事件和当前 active batch 的紧凑物化投影，不进入 immutable prefix。
 - `TodoWrite` 和 `TodoAdvance` 各自依赖 `TodoRead`，并使用最高可见 revision 与稳定 ID；stale revision fail closed。
 - TodoWrite 只新增 `pending` 条目、删除条目或替换正文，TodoAdvance 只转换进度；批量更新通过同目录临时文件和 rename 原子提交，持久化成功后才更新内存。

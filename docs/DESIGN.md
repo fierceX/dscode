@@ -1,6 +1,6 @@
 # 设计文档
 
-> 更新日期：2026-08-18
+> 更新日期：2026-09-03
 
 本文记录 Mink 的设计取舍和关键不变式，不作为用户手册或工具协议参考。终端用户入口、
 配置和运行方式见 [USAGE.md](USAGE.md)；Rust/Python 嵌入见 [EMBEDDING.md](EMBEDDING.md)；
@@ -147,7 +147,7 @@ pub struct ImmutablePrefix {
 }
 ```
 
-压缩摘要始终作为活跃消息投影中的动态 system message，不修改 immutable system/tools prefix。
+压缩摘要始终以唯一 internal user `<compacted-summary>` checkpoint 投影，不修改 immutable system/tools prefix。
 
 **fingerprint 校验**（`verify_fingerprint()`）：重新计算 system prompt、tools schema 和依赖
 fingerprint 的联合指纹并与缓存值比对。校验失败时 `PrefixManager` 丢弃旧前缀并重新构建，不使用
@@ -275,9 +275,11 @@ Tool evidence:
 Reflections:
 ```
 
-摘要请求使用独立的最小 system prompt，不加载主 agent 的 skills、rules、工具定义和 mission。
-输出预算由 `context_compact_max_output_tokens` 独立控制。摘要结果统一作为动态 system message，
-保持 immutable system/tools prefix；`summary.txt` 仅作为 session 元数据和人工检查缓存。
+摘要请求使用独立的最小 system prompt，不加载主 agent 的 skills、rules、工具定义和 mission
+（但 backend 声明 `cache_projection` 时复用主请求的 system/tools 与历史公共缓存前缀
+以保留缓存命中）。输出预算由 `context_compact_max_output_tokens` 独立控制。摘要结果统一
+作为 internal user `<compacted-summary>` checkpoint 投影，保持 immutable system/tools
+prefix；`summary.txt` 仅作为 session 元数据和人工检查缓存。
 
 开启 `context_compact_input_reduction` 时，`compaction_input.rs` 先把被折叠消息转换为紧凑
 transcript：用户和 assistant text 保留，thinking 删除，工具参数限制为 1000 字符，工具结果限制为
@@ -880,7 +882,7 @@ Rust 发布包名为 `mink-core`，库 crate 名为 `mink`。`mink-core` 发布�
 实现；终端二进制和 UI 实现由 workspace 中的 `mink-cli` 包持有。服务端依赖时推荐只启用嵌入式 runtime：
 
 ```toml
-mink = { package = "mink-core", version = "0.5.0", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.6.0", default-features = false, features = ["runtime"] }
 ```
 
 `mink::runtime` / `mink::prelude` 解决这些问题：**同一套 OrchActor / TurnExecutor / ToolRunner 核心，但无进程边界**。
@@ -931,8 +933,8 @@ Rust crate mink ───┘
 
 ## 主题十六：多模态读图（v7 协议）
 
-实现为"Read 捕获 → 内容寻址缓存 → 请求时物化注入"三段式，完整协议见
-[`docs/设计哲学-多模态读图.md`](设计哲学-多模态读图.md)。关键不变式：
+实现为"Read 捕获 → 内容寻址缓存 → 请求时物化注入"三段式，设计意图与行为边界见
+[`docs/设计哲学-多模态读图能力.md`](设计哲学-多模态读图能力.md)。关键不变式：
 
 - 能力在 session 初始化时解析并冻结（`model-capabilities.json`），恢复与 `/model`
   切换经能力指纹兼容门控——Unsupported 会话接受任意模型但永远 text-only，图片会话
