@@ -134,6 +134,7 @@ mod tests {
     #[test]
     fn defaults_and_env_are_serialized_within_one_test() {
         // env var tests must not run in parallel with other env writes.
+        let _guard = crate::session::TEST_ENV_LOCK.blocking_lock();
         let home = std::env::var_os("MINK_HOME");
         unsafe { std::env::set_var("MINK_HOME", "/tmp/unit-mink-home") };
         let cfg = ServerConfig::load(None).unwrap();
@@ -150,6 +151,7 @@ mod tests {
 
 #[test]
 fn user_minkrc_model_is_default_when_no_env() {
+    let _guard = crate::session::TEST_ENV_LOCK.blocking_lock();
     // read_user_minkrc 读 $HOME/.minkrc——临时 HOME + 临时 .minkrc
     let home = std::env::var_os("HOME");
     let rc_path = std::path::Path::new("/tmp/mink-rc-test").join(".minkrc");

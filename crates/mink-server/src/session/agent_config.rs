@@ -769,6 +769,7 @@ timeout = 60
 
     #[test]
     fn env_overrides_are_applied_on_top() {
+        let _guard = crate::session::TEST_ENV_LOCK.blocking_lock();
         let mut cfg = parse_layer(
             "[provider]\nmodel = \"file-model\"\napi_key = \"file-key\"\n",
             "test",

@@ -1118,6 +1118,7 @@ mod tests {
 
     #[tokio::test]
     async fn build_options_applies_project_minkrc_and_env_overrides() {
+        let _guard = crate::session::TEST_ENV_LOCK.lock().await;
         use crate::session::agent_config;
         use std::sync::{Arc, Mutex};
 
