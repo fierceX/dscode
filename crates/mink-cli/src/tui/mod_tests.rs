@@ -2626,12 +2626,82 @@ fn duplicate_paste_is_not_queued_twice() {
     )));
 
     assert_eq!(state.input.pending_images.len(), 1);
+    let notice = state
+        .lines
+        .iter()
+        .find(|line| line.text.contains("already queued"))
+        .expect("duplicate paste must be reported");
+    // The notice must not echo the absolute attachment path.
+    assert!(!notice.text.contains("/tmp/"), "{}", notice.text);
+}
+
+#[test]
+fn ctrl_v_and_newline_keys_are_ignored_while_the_file_picker_is_open() {
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (ui_tx, ui_rx) = std::sync::mpsc::channel();
+    let dir = unique_test_dir("clipboard-overlay");
+    let mut state = TuiState {
+        image_input: Some(mink::runtime::OpenAiChatImageUrlLimits::default()),
+        attachments_dir: dir.clone(),
+        ui_tx: Some(ui_tx),
+        clipboard_reader: Some(fake_clipboard_reader()),
+        overlay: Some(ActiveOverlay::FilePicker(
+            FilePickerState::open_with_candidates("", 0, Vec::new()),
+        )),
+        ..Default::default()
+    };
+
+    for (code, modifiers) in [
+        (KeyCode::Char('v'), KeyModifiers::CONTROL),
+        (KeyCode::Enter, KeyModifiers::SHIFT),
+        (KeyCode::Enter, KeyModifiers::ALT),
+        (KeyCode::Char('j'), KeyModifiers::CONTROL),
+    ] {
+        assert!(!handle_event(
+            Event::Key(KeyEvent::new(code, modifiers)),
+            &mut state,
+            &tx,
+        ));
+    }
+
     assert!(
-        state
-            .lines
-            .iter()
-            .any(|line| line.text.contains("already queued")),
-        "duplicate paste must be reported"
+        state.clipboard_started.is_none(),
+        "Ctrl+V must not start a clipboard read behind the overlay"
+    );
+    assert!(ui_rx.try_recv().is_err());
+    assert!(state.input.buf.is_empty(), "newline keys must be inert");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn chips_are_hidden_while_the_file_picker_overlay_is_open() {
+    let mut state = TuiState::default();
+    state.input.pending_images = vec![pending_image("a")];
+    state.overlay = Some(ActiveOverlay::FilePicker(
+        FilePickerState::open_with_candidates("", 0, Vec::new()),
+    ));
+    let backend = TestBackend::new(100, 40);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    terminal
+        .draw(|f| render(f, &mut state, TuiMode::Full))
+        .unwrap();
+
+    let buf = terminal.backend().buffer();
+    let rows: Vec<String> = (0..40)
+        .map(|y| {
+            (0..100)
+                .map(|x| buf.cell((x, y)).unwrap().symbol().to_string())
+                .collect()
+        })
+        .collect();
+    assert!(
+        rows.iter().all(|row| !row.contains("[image #1")),
+        "chips must not be drawn under the picker overlay: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|row| row.contains("files:")),
+        "the picker must still be rendered"
     );
 }
 
@@ -2685,6 +2755,68 @@ fn replay_compacts_paste_markers_in_user_input() {
             .map(|line| line.text.as_str())
             .collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn shift_alt_enter_and_ctrl_j_insert_newlines() {
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = TuiState::default();
+    state.input.buf = "ab".into();
+    state.input.cursor = 1;
+
+    for (code, modifiers) in [
+        (KeyCode::Enter, KeyModifiers::SHIFT),
+        (KeyCode::Enter, KeyModifiers::ALT),
+        (KeyCode::Char('j'), KeyModifiers::CONTROL),
+    ] {
+        assert!(!handle_event(
+            Event::Key(KeyEvent::new(code, modifiers)),
+            &mut state,
+            &tx,
+        ));
+    }
+
+    assert_eq!(state.input.buf, "a\n\n\nb");
+    assert_eq!(state.input.cursor, "a\n\n\n".len());
+}
+
+#[test]
+fn keyboard_enhancement_gate_respects_env_and_term() {
+    assert!(keyboard_enhancement_allowed(None, Some("xterm-256color")));
+    assert!(keyboard_enhancement_allowed(
+        Some("on"),
+        Some("xterm-256color")
+    ));
+    assert!(!keyboard_enhancement_allowed(
+        Some("off"),
+        Some("xterm-256color")
+    ));
+    assert!(!keyboard_enhancement_allowed(Some(" 0 "), None));
+    assert!(!keyboard_enhancement_allowed(Some("false"), None));
+    assert!(!keyboard_enhancement_allowed(Some("no"), None));
+    // Case-insensitive, like every other MINK_* parser.
+    assert!(!keyboard_enhancement_allowed(Some("OFF"), None));
+    assert!(!keyboard_enhancement_allowed(Some(" False "), None));
+    assert!(!keyboard_enhancement_allowed(Some("No"), None));
+    assert!(!keyboard_enhancement_allowed(None, Some("dumb")));
+    assert!(!keyboard_enhancement_allowed(None, Some("")));
+    // TERM unset is not a reason to skip the probe: the probe itself decides.
+    assert!(keyboard_enhancement_allowed(None, None));
+}
+
+#[test]
+fn disable_keyboard_enhancement_pops_at_most_once() {
+    KEYBOARD_ENHANCED.store(false, Ordering::SeqCst);
+    // Never pushed: must not emit a stray pop sequence.
+    disable_keyboard_enhancement();
+    assert!(!KEYBOARD_ENHANCED.load(Ordering::SeqCst));
+
+    KEYBOARD_ENHANCED.store(true, Ordering::SeqCst);
+    disable_keyboard_enhancement();
+    assert!(!KEYBOARD_ENHANCED.load(Ordering::SeqCst));
+    // Idempotent: the restore guard and the panic hook may both call it.
+    disable_keyboard_enhancement();
+    assert!(!KEYBOARD_ENHANCED.load(Ordering::SeqCst));
 }
 
 fn line_text(line: &Line<'static>) -> String {

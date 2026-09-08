@@ -93,6 +93,8 @@ flash B:0.73 T:12 R:45 I:200K(50%) O:20K C:400K(40%) [idle]
 |------|------|
 | `Ctrl+C` | 工作中中断当前 turn；空闲时退出 |
 | `Ctrl+V` | 粘贴剪贴板图片（macOS）：暂存到 session `attachments/`，随下一条消息附带绝对路径 |
+| `Shift+Enter` | 输入框内换行（需终端支持 Kitty keyboard protocol） |
+| `Ctrl+J` / `Alt+Enter` | 换行（不依赖终端协议的兜底键） |
 | `/flash` / `/pro` | 切换模型 |
 | `/compact` | 手动触发上下文压缩 |
 | `/help` / `/skills` | 显示帮助或 skill 列表 |
@@ -105,6 +107,11 @@ flash B:0.73 T:12 R:45 I:200K(50%) O:20K C:400K(40%) [idle]
 | `Ctrl+D` | REPL 中退出 |
 
 `/flash` / `/pro` 立即生效，不会发送给 LLM。
+
+`Shift+Enter` 需要终端上报修饰键（Kitty keyboard protocol 的 `DISAMBIGUATE_ESCAPE_CODES`）：
+TUI 启动时探测并启用，退出时自动还原，panic 时由 panic hook 还原；Ghostty / kitty /
+WezTerm / Alacritty / iTerm2 3.5+ 等终端支持。`Ctrl+J` 与 `Alt+Enter` 在任何终端都能换行。
+`MINK_KEYBOARD_ENHANCEMENT=off` 可跳过探测与启用（不响应探测的终端上探测最多等待 2 秒）。
 
 ### 粘贴图片（`Ctrl+V`，macOS）
 
@@ -424,6 +431,7 @@ policy = "full"                      # off | evidence | state_ops | restart | fu
 | `MINK_EDIT_FUZZY_MATCH` | `true` | Replace 模糊匹配开关 |
 | `MINK_EDIT_FUZZY_THRESHOLD` | `0.95` | Replace 模糊阈值，`0.0..=1.0` |
 | `MINK_EDIT_ENFORCE_SEEN_LINES` | `false` | Hashline seen-line 守卫 |
+| `MINK_KEYBOARD_ENHANCEMENT` | auto | `off` 跳过 Kitty keyboard protocol 探测与启用（Shift+Enter 失效，Ctrl+J / Alt+Enter 仍可用） |
 | `MINK_HOME` | `$HOME` | session 存储目录覆盖 |
 | `MINK_LIMITS` | — | JSON sandbox 限制配置 |
 

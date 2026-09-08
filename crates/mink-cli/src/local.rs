@@ -30,6 +30,7 @@ pub(crate) const TUI_EXTRA_HELP: &[&str] = &[
     "  Ctrl+C          Interrupt current task",
     "  Ctrl+C again    Exit TUI",
     "  Ctrl+V          Paste clipboard image (macOS)",
+    "  Shift+Enter     Insert a newline (Ctrl+J / Alt+Enter also work)",
     "  Esc             Exit TUI",
     "  /exit  /quit    Exit TUI",
 ];

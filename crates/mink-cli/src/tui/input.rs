@@ -104,7 +104,15 @@ fn handle_key(
                 insert_char(state, c);
             }
         }
-        (KeyModifiers::SHIFT, KeyCode::Enter) => insert_char(state, '\n'),
+        (KeyModifiers::SHIFT, KeyCode::Enter)
+        | (KeyModifiers::ALT, KeyCode::Enter)
+        | (KeyModifiers::CONTROL, KeyCode::Char('j')) => {
+            // The file picker owns these keys while it is open: a newline in a
+            // path query is meaningless and only blanks the candidate list.
+            if state.overlay.is_none() {
+                insert_char(state, '\n');
+            }
+        }
         (KeyModifiers::CONTROL, KeyCode::Char('a')) | (KeyModifiers::NONE, KeyCode::Home) => {
             state.input.cursor = 0;
         }
@@ -116,7 +124,11 @@ fn handle_key(
         (mods, KeyCode::Char('v'))
             if mods.contains(KeyModifiers::CONTROL) || mods.contains(KeyModifiers::SUPER) =>
         {
-            request_clipboard_image(state)
+            // Queuing an image behind an open overlay gives no visible
+            // feedback and would garble the picker; require a closed overlay.
+            if state.overlay.is_none() {
+                request_clipboard_image(state)
+            }
         }
         (KeyModifiers::CONTROL, KeyCode::Char('d')) => {
             if state.input.buf.is_empty() {

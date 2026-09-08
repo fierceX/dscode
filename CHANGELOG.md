@@ -2,12 +2,18 @@
 
 ## Unreleased
 
+### Shift+Enter 换行
+
+- **多行输入**：`Shift+Enter` 在输入框内换行。终端默认把 Enter 与 Shift+Enter 都发同一个 CR，TUI 启动时探测并启用 Kitty keyboard protocol（`DISAMBIGUATE_ESCAPE_CODES`），退出与 panic 时自动 pop 还原；不支持的终端可用 `Ctrl+J` 或 `Alt+Enter`（任何终端都可用）。`MINK_KEYBOARD_ENHANCEMENT=off` 跳过探测与启用，避免不响应探测的终端最多 2 秒的启动等待。
+- **测试**：新增 2 个用例（三个换行键各自插入 `\n`、env/TERM 门控矩阵）。
+
 ### TUI 粘贴图片（Ctrl+V，macOS）
 
 - **`Ctrl+V` 粘贴剪贴板图片**：TUI 通过 `osascript` 读取剪贴板 PNG，校验会话冻结的图片能力与限额后写入 `<session_dir>/attachments/<sha256>.png`（内容寻址、原子写、重复粘贴复用；目录 `0700`），并在输入框上方显示待发送 chip（空输入框按 `Backspace` 移除最后一张）。
 - **消息通道**：提交时在用户文本尾部追加 `[Attached image: "<绝对路径>" - Read it to view.]`，图片仍由模型 `Read` 走既有捕获链（magic 校验 → 限额 → 内容寻址缓存 → 单次消费）。这是**约定而非契约**：模型未读取时图片不会送达；slash 命令不携带图片（保留待发送状态）；路径含引号或控制字符时拒绝附加并提示（marker 无法无歧义表示）。
 - **能力门控**：TUI 启动时读取 `model-capabilities.json`，文本会话 `Ctrl+V` 只提示、不读剪贴板、不落盘；其它平台明确报错。
 - **触发键**：`Ctrl+V`（默认）与 `Super+V`（终端转发 Kitty keyboard protocol 时）等价；macOS 的 `Cmd+V` 由终端自身占用，程序收不到按键或图片字节，文档给出终端重绑方法。
+- **浮层与提示细节**：文件选择器打开期间隐藏 chip 行且 `Ctrl+V` / 换行键不生效（浮层紧贴输入框上沿，重叠会花屏）；重复粘贴提示不再回显附件绝对路径。
 - **模块**：新增 `tui/clipboard.rs`（可注入 runner，便于测试）与 `tui/attachments.rs`；文档见 `docs/USAGE.md`、`docs/设计哲学-多模态读图能力.md` §3.1。
 - **测试**：新增 29 个用例（剪贴板提取/校验、附件去重与损坏 fail closed、按键与 marker 展开、重复粘贴去重、chip 渲染、回放 marker 压缩、能力快照门控），另有一个 `#[ignore]` 的真实剪贴板冒烟测试（`clipboard_smoke`）。
 

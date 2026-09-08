@@ -44,8 +44,13 @@ pub(crate) fn render(f: &mut Frame, state: &mut TuiState, mode: TuiMode) {
             let lines_before = split_at_visual_width(&state.input.buf[..cursor], inner_w);
             let cursor_row = lines_before.len().saturating_sub(1);
             // 待发送的剪贴板图片占输入框上方一行 chip（最多 2 行）；空间不足时
-            // 直接不显示，优先保证输入框和状态栏可见。
-            let chip_rows = usize::from(area.height.saturating_sub(5)).min(2);
+            // 直接不显示。文件选择器浮层紧贴输入框上沿绘制，重叠时会花屏，
+            // 因此浮层打开期间隐藏 chip（关闭后恢复显示）。
+            let chip_rows = if state.overlay.is_some() {
+                0
+            } else {
+                usize::from(area.height.saturating_sub(5)).min(2)
+            };
             let chips = chip_lines(&state.input.pending_images, inner_w, chip_rows);
             let chips_height = chips.len();
             // 输入框正文最大行数受视口高度约束：正文行 + 2 行边框之外，

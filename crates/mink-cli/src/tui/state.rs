@@ -730,8 +730,10 @@ impl TuiState {
                     .iter()
                     .any(|pending| pending.path == image.path)
                 {
+                    // No path in the notice: the transcript would leak the
+                    // absolute session path and wrap over several rows.
                     self.push_line(TranscriptItem::new(
-                        format!("Image already queued: {}", image.path.display()),
+                        "Image already queued (same content).".into(),
                         TranscriptKind::Info,
                     ));
                 } else {

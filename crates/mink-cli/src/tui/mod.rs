@@ -27,6 +27,7 @@ use render::render;
 use replay::load_session;
 use signal::drain_signals;
 use state::{TuiState, short_cwd_label};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -58,9 +59,11 @@ fn run_full_tui(
         crossterm::event::EnableMouseCapture,
         crossterm::event::EnableBracketedPaste,
     )?;
+    enable_keyboard_enhancement();
     struct FullRestoreGuard;
     impl Drop for FullRestoreGuard {
         fn drop(&mut self) {
+            disable_keyboard_enhancement();
             let _ = crossterm::execute!(
                 std::io::stdout(),
                 crossterm::event::DisableBracketedPaste,
@@ -105,9 +108,11 @@ fn run_inline_tui(
             }
         };
     crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste,)?;
+    enable_keyboard_enhancement();
     struct RestoreGuard;
     impl Drop for RestoreGuard {
         fn drop(&mut self) {
+            disable_keyboard_enhancement();
             let _ = crossterm::execute!(
                 std::io::stdout(),
                 crossterm::event::DisableBracketedPaste,
@@ -204,6 +209,62 @@ fn tui_main_loop(
         }
     }
     Ok(())
+}
+
+/// Whether this process pushed the progressive keyboard enhancement flags.
+/// The panic hook and the restore guards share it so neither emits a stray pop
+/// on a terminal that never enabled the protocol.
+static KEYBOARD_ENHANCED: AtomicBool = AtomicBool::new(false);
+
+/// Push progressive keyboard enhancement flags so Shift+Enter (and Super+V)
+/// arrive distinctly; most terminals send the same CR for Enter and
+/// Shift+Enter without them.
+fn enable_keyboard_enhancement() {
+    let env_value = std::env::var("MINK_KEYBOARD_ENHANCEMENT").ok();
+    let term = std::env::var("TERM").ok();
+    if !keyboard_enhancement_allowed(env_value.as_deref(), term.as_deref()) {
+        return;
+    }
+    if !crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false) {
+        return;
+    }
+    let pushed = crossterm::execute!(
+        std::io::stdout(),
+        crossterm::event::PushKeyboardEnhancementFlags(
+            crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+        )
+    )
+    .is_ok();
+    if pushed {
+        KEYBOARD_ENHANCED.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Env/TERM gate evaluated *before* the terminal probe: the probe blocks up to
+/// two seconds when the terminal does not answer, so dumb or opted-out sessions
+/// must not pay for it.
+fn keyboard_enhancement_allowed(env_value: Option<&str>, term: Option<&str>) -> bool {
+    if matches!(
+        env_value
+            .map(|value| value.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some("off" | "0" | "false" | "no")
+    ) {
+        return false;
+    }
+    !matches!(term, Some("") | Some("dumb"))
+}
+
+/// Pop the flags once, if this process pushed them. Safe to call from both the
+/// restore guards and the panic hook.
+pub(crate) fn disable_keyboard_enhancement() {
+    if !KEYBOARD_ENHANCED.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        crossterm::event::PopKeyboardEnhancementFlags
+    );
 }
 
 /// Session paste staging directory (`<session_dir>/attachments`).

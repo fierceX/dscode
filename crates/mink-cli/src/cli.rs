@@ -175,7 +175,12 @@ pub struct CliExit {
 pub fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         #[cfg(feature = "tui")]
-        let _ = crossterm::terminal::disable_raw_mode();
+        {
+            // A panic while the Kitty keyboard protocol is active must not
+            // leave the user's shell in CSI-u mode.
+            crate::tui::disable_keyboard_enhancement();
+            let _ = crossterm::terminal::disable_raw_mode();
+        }
         eprintln!("{info}");
     }));
 }
