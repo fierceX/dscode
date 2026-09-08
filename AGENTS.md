@@ -1,6 +1,6 @@
 # Agents Guide
 
-> 更新日期：2026-09-03
+> 更新日期：2026-09-08
 
 ## 项目概览
 
@@ -193,7 +193,7 @@ grep '"prefix_snapshot"' events.jsonl | jq '{version, fingerprint, dependency_fi
 | `docs/ARCHITECTURE.md` | 运行时分层、模块职责、核心数据流（模块查找首选） |
 | `docs/DESIGN.md` | 设计取舍与不变式详述；信号/工具能力细节见设计哲学文档 |
 | `docs/USAGE.md` | CLI 参数、配置、会话管理、工具参考 |
-| `docs/EMBEDDING.md` | Rust 库 / Python SDK 嵌入、Token 与费用 |
+| `docs/EMBEDDING.md` | Rust 库 / Python SDK 嵌入、Token 用量 |
 | `docs/PROTOCOL.md` | `--print` stream-json 与 `--agent-jsonl` 协议 |
 | `docs/server.md` | mink-server REST/SSE API、生命周期与并发语义 |
 | `docs/tools.md` | 内置工具参数与行为（Read/Edit 协议细节） |

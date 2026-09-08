@@ -334,9 +334,8 @@ impl super::TurnExecutor {
             elapsed_secs: elapsed,
             idle_secs: idle,
         });
-        self.ctx.display.render_info(&format!(
-            "Waiting for model response... elapsed={}s idle={}s",
-            elapsed, idle
-        ));
+        self.ctx
+            .display
+            .render_info(&crate::ui::llm_wait_heartbeat_message(elapsed, idle));
     }
 }

@@ -344,6 +344,11 @@ pub(crate) struct TuiState {
     pub todos: Option<TodoDisplay>,
     pub artifacts_dir: PathBuf,
     pub artifact_detail: Option<ArtifactDetail>,
+    /// 流式期间收到的 Info 信号（如 llm_wait_heartbeat）。
+    /// 不打断进行中的 markdown 流：先缓冲，待流结束时落为独立条目。
+    pub pending_infos: Vec<String>,
+    /// 流式期间的等待状态标签（心跳精简后，如 `·30s`），仅在状态栏瞬时展示。
+    pub stream_status: Option<String>,
     /// 中断当前任务（由 Ctrl+C 触发），None 表示无中断能力
     pub view: View,
     pub overlay: Option<ActiveOverlay>,
@@ -403,6 +408,8 @@ impl Default for TuiState {
             todos: None,
             artifacts_dir: PathBuf::new(),
             artifact_detail: None,
+            pending_infos: Vec::new(),
+            stream_status: None,
             view: View::Main,
             overlay: None,
             file_picker_policy: FilePickerPolicy::default(),
@@ -477,6 +484,13 @@ impl TuiState {
     pub(crate) fn finalize_stream(&mut self) {
         self.save_stream();
         self.streaming = false;
+        // 流式期间缓冲的 Info（非心跳告警等）在流结束后落盘：此时文本已完整，
+        // 不会被切成两段重新按 markdown 解析（围栏上下文不再丢失）。
+        self.stream_status = None;
+        let pending = std::mem::take(&mut self.pending_infos);
+        for info in pending {
+            self.push_line(TranscriptItem::new(info, TranscriptKind::Info));
+        }
     }
 
     pub(crate) fn promote_stable_stream_prefix(&mut self) {
@@ -664,6 +678,14 @@ fn stable_markdown_prefix_end(text: &str) -> usize {
         }
     }
     stable_end
+}
+
+/// 识别 LLM 等待心跳消息并提取精简状态标签（如 `·30s`）。
+/// 消息格式由 mink-core 统一（`mink::runtime::llm_wait_heartbeat_message`）；
+/// 非心跳消息返回 None（按普通告警处理）。
+pub(crate) fn heartbeat_status_label(msg: &str) -> Option<String> {
+    let elapsed = mink::runtime::parse_llm_wait_heartbeat_elapsed(msg)?;
+    Some(format!("·{elapsed}s"))
 }
 
 fn upsert_todo(items: &mut Vec<crate::ui::TodoItemDisplay>, update: crate::ui::TodoItemDisplay) {

@@ -12,9 +12,7 @@ pub use crate::session::artifacts::{ArtifactManager, ArtifactRecord};
 pub use crate::session::metadata::{SessionMetadata, SessionReferenceError, SessionSeed};
 pub use crate::session::paths::Paths as SessionPaths;
 pub use crate::session::todo::{TodoSnapshot, TodoStatus};
-pub use crate::session::usage::{
-    PricingCatalog, TokenUsage, UsageCost, UsageKind, UsageRecord, UsageStatus, UsageSummary,
-};
+pub use crate::session::usage::{TokenUsage, UsageKind, UsageRecord, UsageStatus, UsageSummary};
 
 #[derive(Debug, Clone)]
 pub struct SessionRecord {

@@ -53,6 +53,7 @@ pub use crate::ui::{
     ArtifactDisplay, PlanDisplay, PlanTransitionDisplay, PresentedToolResultDisplay, StatsSnapshot,
     SubAgentStreamKind, SubAgentStreamSink, TodoChangeDisplay, TodoCountsDisplay, TodoDisplay,
     TodoItemDisplay, TodoStatusDisplay, ToolCallDisplay, ToolPresentation, ToolResultDisplay,
+    llm_wait_heartbeat_message, parse_llm_wait_heartbeat_elapsed,
 };
 pub(crate) use builder::build_runtime;
 pub use config::{SessionInfo, SessionPolicy};

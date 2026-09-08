@@ -70,9 +70,6 @@ export interface SessionState {
   model: string;
   tokensIn: number;
   tokensOut: number;
-  /** 费用（微人民币）与未计价请求数——来自 title_update 实时统计 */
-  costMicros: number;
-  unpricedRequests: number;
   belief: number;
   /** Agent 工作状态（由事件推导）：idle/waiting/thinking/generating/tool/sub-agent/compacting/error */
   workState: string;
@@ -86,6 +83,6 @@ export interface SessionState {
 export function emptySession(sessionId: string, title: string): SessionState {
   return {
     sessionId, title, running: false, desynced: false, lastSeq: 0, seenTurnEvents: [], model: "",
-    tokensIn: 0, tokensOut: 0, costMicros: 0, unpricedRequests: 0, belief: 0, workState: "idle", cacheReadTokens: 0, contextTokens: 0, maxContextTokens: 0, items: [],
+    tokensIn: 0, tokensOut: 0, belief: 0, workState: "idle", cacheReadTokens: 0, contextTokens: 0, maxContextTokens: 0, items: [],
   };
 }

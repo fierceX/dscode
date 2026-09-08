@@ -12,7 +12,7 @@
 [TOC]
 
 > 嵌入与 SDK：[EMBEDDING.md](EMBEDDING.md) · 机器协议：[PROTOCOL.md](PROTOCOL.md) ·
-> Token 用量与费用：见 [EMBEDDING.md](EMBEDDING.md#token-用量与费用)
+> Token 用量：见 [EMBEDDING.md](EMBEDDING.md#token-用量)
 
 ---
 
@@ -46,7 +46,7 @@ mink interactive mode (type 'exit' or Ctrl+D to quit)
 通过 terminal scrolling region 写入稳定内容，避免宽字符占位空格和 viewport 整体重绘，适合 SSH 和长日志：
 
 ```
-flash B:0.73 T:12 R:45 I:200K(50%) O:20K C:400K(40%) ¥0.12 [idle]
+flash B:0.73 T:12 R:45 I:200K(50%) O:20K C:400K(40%) [idle]
 ────────────────────────────────────────────────────────────────
  原生 terminal scrollback（已完成对话和结构化工具卡片）
 ────────────────────────────────────────────────────────────────
@@ -64,8 +64,8 @@ flash B:0.73 T:12 R:45 I:200K(50%) O:20K C:400K(40%) ¥0.12 [idle]
 | `I:200K` | 输入 tokens | 总输入 tokens，括号内为缓存命中率 |
 | `O:20K` | 输出 tokens | 总输出 tokens |
 | `C:400K` | 上下文 | 当前上下文 tokens，括号内为使用率 |
-| `¥0.12` | 费用 | 累计费用（按模型单价实时计算） |
 | `[idle]` | 工作状态 | idle / waiting / thinking / generating / tool / sub-agent / compacting / error |
+| `·30s` | 等待心跳 | LLM 流式/首事件等待的精简标签（仅状态栏瞬时显示，流恢复/结束即清除） |
 
 **B（信念度）值含义：**
 
@@ -107,7 +107,7 @@ flash B:0.73 T:12 R:45 I:200K(50%) O:20K C:400K(40%) ¥0.12 [idle]
 
 ### 标题栏（REPL/CLI 模式）
 
-终端窗口标题显示相同统计：`flash B:0.73 T:12 R:45 I:200K(50%) O:20K C:400K(40%) ¥0.12`
+终端窗口标题显示相同统计：`flash B:0.73 T:12 R:45 I:200K(50%) O:20K C:400K(40%)`
 信念度在每次工具调用后实时更新，低于阈值时在同轮的下次 LLM 调用前注入提示或中止。
 
 ### 非交互 CLI 模式

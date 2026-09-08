@@ -74,7 +74,6 @@ const usage = computed(() => {
     ctx: fmtK(stt?.contextTokens ?? 0),
     ctxPct: maxCtx ? Math.round(((stt?.contextTokens ?? 0) / maxCtx) * 100) : null,
     maxCtx: maxCtx ? fmtK(maxCtx) : null,
-    cost: `¥${((stt?.costMicros ?? 0) / 1_000_000).toFixed(4)}${(stt?.unpricedRequests ?? 0) > 0 ? ` + ${stt?.unpricedRequests} 未计价` : ""}`,
     belief: (stt?.belief ?? 0).toFixed(2),
   };
 });
@@ -171,10 +170,9 @@ const todoCounts = computed(() => {
                   </div>
                 </div>
                 <div class="ug-group">
-                  <div class="ug-title">费用</div>
+                  <div class="ug-title">信念度</div>
                   <div class="metric">
-                    <div class="m"><span>累计</span><b>{{ usage.cost }}</b></div>
-                    <div class="m"><span>信念度</span><b>{{ usage.belief }}</b></div>
+                    <div class="m"><span>当前</span><b>{{ usage.belief }}</b></div>
                   </div>
                 </div>
               </div>

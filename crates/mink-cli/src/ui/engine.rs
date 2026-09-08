@@ -153,7 +153,7 @@ impl Display for TerminalDisplay {
             String::new()
         };
         let msg = format!(
-            "\x1b]0;{}{belief_str} T:{} R:{} I:{}({}) O:{} C:{}({}) {}\x07",
+            "\x1b]0;{}{belief_str} T:{} R:{} I:{}({}) O:{} C:{}({})\x07",
             model,
             StatsSnapshot::fmt_num(stats.current_turn_count),
             StatsSnapshot::fmt_num(stats.agent_request_count),
@@ -162,7 +162,6 @@ impl Display for TerminalDisplay {
             fmt_k(stats.total_output_tokens),
             fmt_k(stats.current_context_tokens),
             stats.ctx_pct(),
-            stats.format_cost(),
         );
         self.write_err(&msg);
     }

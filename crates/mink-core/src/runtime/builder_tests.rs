@@ -1176,7 +1176,8 @@ async fn run_turn_returns_usage_records_from_the_session_journal() {
     assert_eq!(outcome.usage.tokens.input_tokens, 100);
     assert_eq!(outcome.usage.tokens.cache_read_tokens, 40);
     assert_eq!(outcome.usage.tokens.output_tokens, 20);
-    assert_eq!(outcome.usage.cost.known_nano_cny, 140_800);
+    // 费用统计已移除：记录中费用恒为 0。
+    assert_eq!(outcome.usage_records[0].cost_nano_cny, Some(0));
     assert_eq!(
         outcome.usage_records[0].billing_turn_id,
         outcome.billing_turn_id

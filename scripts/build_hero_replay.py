@@ -136,7 +136,6 @@ def enrich_steps(steps, session_label: str):
     out = []
     belief = 0.89
     output_k = 58.8
-    cost = 0.603
     turn = 12
     retry = 90
 
@@ -149,7 +148,6 @@ def enrich_steps(steps, session_label: str):
         elif kind == "tool":
             status = "[tool]"
             output_k += 0.1
-            cost += 0.002
         elif kind == "tool_result":
             status = "[tool]"
             output_k += 0.1
@@ -170,7 +168,7 @@ def enrich_steps(steps, session_label: str):
             {
                 "statusLeft": session_label,
                 "statusCenter": f"B:{belief:.2f} T:{turn} R:{retry} I:13.31M(98%) O:{output_k:.1f}K",
-                "statusRight": f"C:231.1K(23%) ¥{cost:.3f} {status}",
+                "statusRight": f"C:231.1K(23%) {status}",
                 "input": "",
                 **{k: v for k, v in step.items() if k != "kind"},
             }

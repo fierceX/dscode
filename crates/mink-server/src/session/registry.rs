@@ -6,7 +6,7 @@
 
 use crate::session::runtime::SessionRuntime;
 use anyhow::{Result, anyhow};
-use mink::runtime::session::{self as runtime_session, SessionMetadata, UsageCost};
+use mink::runtime::session::{self as runtime_session, SessionMetadata};
 use mink::runtime::{AgentOptions, SessionPolicy};
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -85,19 +85,17 @@ pub struct SessionSummary {
     /// Server-side runtime state: free (disk only) | active | running.
     pub status: &'static str,
     pub path: String,
-    /// Usage 汇总（usage.jsonl）：会话累计 tokens 与费用，无记录时为 0。
+    /// Usage 汇总（usage.jsonl）：会话累计 tokens，无记录时为 0。
     pub tokens_in: u64,
     pub tokens_out: u64,
     pub cache_read_tokens: u64,
-    pub cost_nano_cny: u64,
-    pub unpriced_requests: u64,
     /// 最近一次请求的上下文估计（usage.jsonl 最后记录 input+cache），0 表示无记录
     pub last_context_tokens: u64,
 }
 
-/// 逐行读取 usage.jsonl 并汇总 tokens/费用。缺失表示尚无用量；单个会话的
+/// 逐行读取 usage.jsonl 并汇总 tokens。缺失表示尚无用量；单个会话的
 /// usage 读取错误（包括 I/O 级损坏）降级为零，避免拖垮整个会话列表。
-fn summarize_usage(dir: &Path) -> (u64, u64, u64, UsageCost, u64) {
+fn summarize_usage(dir: &Path) -> (u64, u64, u64, u64) {
     match runtime_session::SessionReader::new(dir).usage_snapshot() {
         Ok(usage) => (
             usage.summary.tokens.input_tokens,
@@ -107,7 +105,6 @@ fn summarize_usage(dir: &Path) -> (u64, u64, u64, UsageCost, u64) {
                 .tokens
                 .cache_read_tokens
                 .saturating_add(usage.summary.tokens.cache_creation_tokens),
-            usage.summary.cost,
             usage.last_context_tokens,
         ),
         Err(error) => {
@@ -115,7 +112,7 @@ fn summarize_usage(dir: &Path) -> (u64, u64, u64, UsageCost, u64) {
                 "[mink-server] warning: failed to summarize usage for {}: {error:#}",
                 dir.display()
             );
-            (0, 0, 0, UsageCost::default(), 0)
+            (0, 0, 0, 0)
         }
     }
 }
@@ -755,7 +752,7 @@ fn summary_from_metadata(
     metadata: Option<SessionMetadata>,
     modified: Option<SystemTime>,
     dir: &Path,
-    usage: (u64, u64, u64, UsageCost, u64),
+    usage: (u64, u64, u64, u64),
 ) -> SessionSummary {
     let corrupt = dir.join("session.json").exists() && metadata.is_none();
     let fallback_id = dir
@@ -773,7 +770,7 @@ fn summary_from_metadata(
         first_prompt: None,
         summary: None,
     });
-    let (tokens_in, tokens_out, cache_read_tokens, cost, last_context_tokens) = usage;
+    let (tokens_in, tokens_out, cache_read_tokens, last_context_tokens) = usage;
     SessionSummary {
         project_key: project_key_from_dir(dir),
         corrupt,
@@ -791,8 +788,6 @@ fn summary_from_metadata(
         tokens_in,
         tokens_out,
         cache_read_tokens,
-        cost_nano_cny: cost.known_nano_cny,
-        unpriced_requests: cost.unpriced_requests,
         last_context_tokens,
     }
 }

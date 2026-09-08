@@ -27,6 +27,9 @@ experiments/
 cpython-wasi/
 .minkrc
 sandbox-poc/
+# Local captured model trajectories may contain prompts, reasoning, request
+# metadata, paths, or endpoints. Never stage raw captures.
+reference-trajectory/
 
 node_modules/
 data/

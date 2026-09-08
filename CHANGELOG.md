@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### 费用统计移除 & TUI 流式渲染修复
+
+- **费用统计移除**：上游模型单价随时段（高峰/空闲）与官方调价变动，硬编码价目表无法准确持续计价；移除 `PricingCatalog`/`UsageCost` 与全部费用输出（TUI 状态栏、REPL 标题栏、Web 前端会话指标/用量面板、首页演示状态栏，以及协议 `final`/`title_update`/`/api/sessions` 中的费用字段）；`UsageSummary` 与 `mink::ui::StatsSnapshot` 不再携带费用，`StatsSnapshot::format_cost()` 一并删除。
+- **兼容字段**：`usage.jsonl` 记录的 `cost_nano_cny` 保留——已上报记录恒写 `0`，未上报记录写 `null`（历史记录照常读取，不影响既有 session 文件）。
+- **TUI 流式渲染修复**：流式期间到达的 Info 信号（如 LLM 等待心跳 `Waiting for model response...`）不再调用 `finalize_stream()` 把文本拦腰截断——此前会把含未闭合代码围栏的 markdown 切成两段，下半段丢失围栏上下文按段落重新渲染、残留闭合围栏把后续内容吞为原始文本；现在心跳仅以状态栏精简标签（如 `·30s`）瞬时展示，流恢复/结束即清除，不再进入 transcript；流式期间的其它告警推迟到流结束时落盘。心跳文案由 mink-core 统一格式化与解析（`mink::runtime::llm_wait_heartbeat_message` / `parse_llm_wait_heartbeat_elapsed`），展示层不再复制字符串。
+
 ## v0.6.0 (2026-09-03)
 
 ### 多模态读图支持

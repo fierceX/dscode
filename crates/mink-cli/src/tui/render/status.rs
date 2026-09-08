@@ -131,11 +131,14 @@ fn build_status_items(state: &TuiState) -> Vec<StatusItem> {
         style: theme::muted(),
         priority: 2,
     });
-    items.push(StatusItem {
-        text: s.format_cost(),
-        style: theme::muted(),
-        priority: 3,
-    });
+    // 流式等待心跳的精简状态标签（如 `·30s`），渲染宽度不足时优先被裁剪。
+    if let Some(status) = state.stream_status.as_deref() {
+        items.push(StatusItem {
+            text: status.to_string(),
+            style: theme::info(),
+            priority: 9,
+        });
+    }
     items.push(StatusItem {
         text: format!("[{}]", state.work_state.label()),
         style: theme::work_state(state.work_state),

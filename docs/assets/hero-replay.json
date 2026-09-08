@@ -7,7 +7,7 @@
     {
       "statusLeft": "flash @agent-task",
       "statusCenter": "B:0.88 T:12 R:90 I:13.31M(98%) O:58.7K",
-      "statusRight": "C:231.1K(23%) ¥0.601 [idle]",
+      "statusRight": "C:231.1K(23%) [idle]",
       "input": "",
       "mode": "instant",
       "line": "<span class=\"prompt\">&gt;</span> 定位并修复 mock 日志预览里的 UTF-8 中文截断 panic"
@@ -15,7 +15,7 @@
     {
       "statusLeft": "flash @agent-task",
       "statusCenter": "B:0.89 T:12 R:90 I:13.31M(98%) O:58.8K",
-      "statusRight": "C:231.1K(23%) ¥0.602 [thinking]",
+      "statusRight": "C:231.1K(23%) [thinking]",
       "input": "",
       "mode": "typed",
       "prefixHtml": "<span class=\"warn\">▶ thinking</span> | ",
@@ -24,7 +24,7 @@
     {
       "statusLeft": "flash @agent-task",
       "statusCenter": "B:0.89 T:12 R:90 I:13.31M(98%) O:58.9K",
-      "statusRight": "C:231.1K(23%) ¥0.604 [tool]",
+      "statusRight": "C:231.1K(23%) [tool]",
       "input": "",
       "mode": "instant",
       "line": "<span class=\"ok\">▼ ✓ Edit.patch</span> Edit.patch(restore missing .status(200))"
@@ -32,7 +32,7 @@
     {
       "statusLeft": "flash @agent-task",
       "statusCenter": "B:0.89 T:12 R:90 I:13.31M(98%) O:59.0K",
-      "statusRight": "C:231.1K(23%) ¥0.604 [tool]",
+      "statusRight": "C:231.1K(23%) [tool]",
       "input": "",
       "mode": "instant",
       "line": "Edit(master/src/main.rs) [+1 -0 lines] @master/src/main.rs#A339"
@@ -40,7 +40,7 @@
     {
       "statusLeft": "flash @agent-task",
       "statusCenter": "B:0.90 T:12 R:90 I:13.31M(98%) O:59.1K",
-      "statusRight": "C:231.1K(23%) ¥0.605 [thinking]",
+      "statusRight": "C:231.1K(23%) [thinking]",
       "input": "",
       "mode": "typed",
       "prefixHtml": "<span class=\"warn\">▶ thinking</span> | ",
@@ -49,7 +49,7 @@
     {
       "statusLeft": "flash @agent-task",
       "statusCenter": "B:0.90 T:12 R:90 I:13.31M(98%) O:59.2K",
-      "statusRight": "C:231.1K(23%) ¥0.606 [tool]",
+      "statusRight": "C:231.1K(23%) [tool]",
       "input": "",
       "mode": "instant",
       "line": "<span class=\"ok\">▼ ✓ Read</span> Read(master/src/main.rs:268-280)"
@@ -57,7 +57,7 @@
     {
       "statusLeft": "flash @agent-task",
       "statusCenter": "B:0.90 T:12 R:90 I:13.31M(98%) O:59.3K",
-      "statusRight": "C:231.1K(23%) ¥0.606 [tool]",
+      "statusRight": "C:231.1K(23%) [tool]",
       "input": "",
       "mode": "instant",
       "line": "Read(master/src/main.rs:268-280) [13 lines, 544 bytes]"
@@ -65,7 +65,7 @@
     {
       "statusLeft": "flash @agent-task",
       "statusCenter": "B:0.91 T:12 R:90 I:13.31M(98%) O:59.4K",
-      "statusRight": "C:231.1K(23%) ¥0.607 [thinking]",
+      "statusRight": "C:231.1K(23%) [thinking]",
       "input": "",
       "mode": "typed",
       "prefixHtml": "<span class=\"warn\">▶ thinking</span> | ",
@@ -74,7 +74,7 @@
     {
       "statusLeft": "flash @agent-task",
       "statusCenter": "B:0.91 T:12 R:90 I:13.31M(98%) O:59.5K",
-      "statusRight": "C:231.1K(23%) ¥0.609 [tool]",
+      "statusRight": "C:231.1K(23%) [tool]",
       "input": "",
       "mode": "instant",
       "line": "<span class=\"ok\">▼ ✓ Edit.patch</span> Edit.patch(add callback body preview)"
@@ -82,7 +82,7 @@
     {
       "statusLeft": "flash @agent-task",
       "statusCenter": "B:0.91 T:12 R:90 I:13.31M(98%) O:59.6K",
-      "statusRight": "C:231.1K(23%) ¥0.609 [tool]",
+      "statusRight": "C:231.1K(23%) [tool]",
       "input": "",
       "mode": "instant",
       "line": "Edit(master/src/main.rs) [+6 -1 lines] @master/src/main.rs#9257"
@@ -90,7 +90,7 @@
     {
       "statusLeft": "flash @agent-task",
       "statusCenter": "B:0.91 T:12 R:90 I:13.31M(98%) O:59.7K",
-      "statusRight": "C:231.1K(23%) ¥0.612 [tool]",
+      "statusRight": "C:231.1K(23%) [tool]",
       "input": "",
       "mode": "instant",
       "line": "<span class=\"ok\">▼ ✓ Bash</span> Bash(cargo check)"
@@ -98,7 +98,7 @@
     {
       "statusLeft": "flash @agent-task",
       "statusCenter": "B:0.91 T:12 R:90 I:13.31M(98%) O:59.8K",
-      "statusRight": "C:231.1K(23%) ¥0.612 [tool]",
+      "statusRight": "C:231.1K(23%) [tool]",
       "input": "",
       "mode": "instant",
       "line": "<span class=\"ok\">OK:</span> cargo check passed with no errors"
@@ -106,7 +106,7 @@
     {
       "statusLeft": "flash @agent-task",
       "statusCenter": "B:0.91 T:12 R:90 I:13.31M(98%) O:59.9K",
-      "statusRight": "C:231.1K(23%) ¥0.615 [tool]",
+      "statusRight": "C:231.1K(23%) [tool]",
       "input": "",
       "mode": "instant",
       "line": "<span class=\"ok\">▼ ✓ Bash</span> Bash(git commit -m \"feat: mock 打印请求和回调内容\")"
@@ -114,7 +114,7 @@
     {
       "statusLeft": "flash @agent-task",
       "statusCenter": "B:0.91 T:12 R:90 I:13.31M(98%) O:60.0K",
-      "statusRight": "C:231.1K(23%) ¥0.615 [tool]",
+      "statusRight": "C:231.1K(23%) [tool]",
       "input": "",
       "mode": "instant",
       "line": "commit: feat: mock 打印请求和回调内容"
@@ -122,7 +122,7 @@
     {
       "statusLeft": "flash @agent-task",
       "statusCenter": "B:0.92 T:12 R:90 I:13.31M(98%) O:60.1K",
-      "statusRight": "C:231.1K(23%) ¥0.616 [writing]",
+      "statusRight": "C:231.1K(23%) [writing]",
       "input": "",
       "mode": "typed",
       "prefixHtml": "<span class=\"prompt\">&gt;</span> ",
@@ -131,7 +131,7 @@
     {
       "statusLeft": "flash @agent-task",
       "statusCenter": "B:0.92 T:12 R:90 I:13.31M(98%) O:60.2K",
-      "statusRight": "C:231.1K(23%) ¥0.616 [idle]",
+      "statusRight": "C:231.1K(23%) [idle]",
       "input": "",
       "mode": "instant",
       "line": "<span class=\"prompt\">&gt;</span> 分析 mock callback 日志中的 UTF-8 截断 panic，并直接修复"
@@ -139,7 +139,7 @@
     {
       "statusLeft": "flash @agent-task",
       "statusCenter": "B:0.94 T:12 R:90 I:13.31M(98%) O:60.3K",
-      "statusRight": "C:231.1K(23%) ¥0.617 [thinking]",
+      "statusRight": "C:231.1K(23%) [thinking]",
       "input": "",
       "mode": "typed",
       "prefixHtml": "<span class=\"warn\">▶ thinking</span> | ",
@@ -148,7 +148,7 @@
     {
       "statusLeft": "flash @agent-task",
       "statusCenter": "B:0.94 T:12 R:90 I:13.31M(98%) O:60.4K",
-      "statusRight": "C:231.1K(23%) ¥0.618 [writing]",
+      "statusRight": "C:231.1K(23%) [writing]",
       "input": "",
       "mode": "typed",
       "prefixHtml": "<span class=\"prompt\">&gt;</span> ",
@@ -157,7 +157,7 @@
     {
       "statusLeft": "flash @agent-task",
       "statusCenter": "B:0.94 T:12 R:90 I:13.31M(98%) O:60.5K",
-      "statusRight": "C:231.1K(23%) ¥0.620 [tool]",
+      "statusRight": "C:231.1K(23%) [tool]",
       "input": "",
       "mode": "instant",
       "line": "<span class=\"ok\">▼ ✓ Edit.patch</span> Edit.patch(fix callback log truncation)"
@@ -165,7 +165,7 @@
     {
       "statusLeft": "flash @agent-task",
       "statusCenter": "B:0.94 T:12 R:90 I:13.31M(98%) O:60.6K",
-      "statusRight": "C:231.1K(23%) ¥0.620 [tool]",
+      "statusRight": "C:231.1K(23%) [tool]",
       "input": "",
       "mode": "instant",
       "line": "Edit(master/src/main.rs) [+5 -3 lines] @master/src/main.rs#E765"
@@ -173,7 +173,7 @@
     {
       "statusLeft": "flash @agent-task",
       "statusCenter": "B:0.95 T:12 R:90 I:13.31M(98%) O:60.7K",
-      "statusRight": "C:231.1K(23%) ¥0.621 [thinking]",
+      "statusRight": "C:231.1K(23%) [thinking]",
       "input": "",
       "mode": "typed",
       "prefixHtml": "<span class=\"warn\">▶ thinking</span> | ",
@@ -182,7 +182,7 @@
     {
       "statusLeft": "flash @agent-task",
       "statusCenter": "B:0.95 T:12 R:90 I:13.31M(98%) O:60.8K",
-      "statusRight": "C:231.1K(23%) ¥0.622 [tool]",
+      "statusRight": "C:231.1K(23%) [tool]",
       "input": "",
       "mode": "instant",
       "line": "<span class=\"ok\">▼ ✓ Read</span> Read(master/src/main.rs:174-178)"
@@ -190,7 +190,7 @@
     {
       "statusLeft": "flash @agent-task",
       "statusCenter": "B:0.95 T:12 R:90 I:13.31M(98%) O:60.9K",
-      "statusRight": "C:231.1K(23%) ¥0.622 [tool]",
+      "statusRight": "C:231.1K(23%) [tool]",
       "input": "",
       "mode": "instant",
       "line": "Read(master/src/main.rs:174-178) [5 lines, 233 bytes]"
@@ -198,7 +198,7 @@
     {
       "statusLeft": "flash @agent-task",
       "statusCenter": "B:0.95 T:12 R:90 I:13.31M(98%) O:61.0K",
-      "statusRight": "C:231.1K(23%) ¥0.622 [tool]",
+      "statusRight": "C:231.1K(23%) [tool]",
       "input": "",
       "mode": "instant",
       "line": "174: let body_preview = if body_bytes.len() > 500 { ... }"
@@ -206,7 +206,7 @@
     {
       "statusLeft": "flash @agent-task",
       "statusCenter": "B:0.96 T:12 R:90 I:13.31M(98%) O:61.1K",
-      "statusRight": "C:231.1K(23%) ¥0.623 [thinking]",
+      "statusRight": "C:231.1K(23%) [thinking]",
       "input": "",
       "mode": "typed",
       "prefixHtml": "<span class=\"warn\">▶ thinking</span> | ",
@@ -215,7 +215,7 @@
     {
       "statusLeft": "flash @agent-task",
       "statusCenter": "B:0.96 T:12 R:90 I:13.31M(98%) O:61.2K",
-      "statusRight": "C:231.1K(23%) ¥0.625 [tool]",
+      "statusRight": "C:231.1K(23%) [tool]",
       "input": "",
       "mode": "instant",
       "line": "<span class=\"ok\">▼ ✓ Edit.patch</span> Edit.patch(fix request log truncation)"
@@ -223,7 +223,7 @@
     {
       "statusLeft": "flash @agent-task",
       "statusCenter": "B:0.96 T:12 R:90 I:13.31M(98%) O:61.3K",
-      "statusRight": "C:231.1K(23%) ¥0.625 [tool]",
+      "statusRight": "C:231.1K(23%) [tool]",
       "input": "",
       "mode": "instant",
       "line": "Edit(master/src/main.rs) [+4 -1 lines] @master/src/main.rs#E9D4"
@@ -231,7 +231,7 @@
     {
       "statusLeft": "flash @agent-task",
       "statusCenter": "B:0.96 T:12 R:90 I:13.31M(98%) O:61.4K",
-      "statusRight": "C:231.1K(23%) ¥0.626 [thinking]",
+      "statusRight": "C:231.1K(23%) [thinking]",
       "input": "",
       "mode": "typed",
       "prefixHtml": "<span class=\"warn\">▶ thinking</span> | ",
@@ -240,7 +240,7 @@
     {
       "statusLeft": "flash @agent-task",
       "statusCenter": "B:0.96 T:12 R:90 I:13.31M(98%) O:61.5K",
-      "statusRight": "C:231.1K(23%) ¥0.629 [tool]",
+      "statusRight": "C:231.1K(23%) [tool]",
       "input": "",
       "mode": "instant",
       "line": "<span class=\"ok\">▼ ✓ Bash</span> Bash(cargo check)"
@@ -248,7 +248,7 @@
     {
       "statusLeft": "flash @agent-task",
       "statusCenter": "B:0.96 T:12 R:90 I:13.31M(98%) O:61.6K",
-      "statusRight": "C:231.1K(23%) ¥0.629 [tool]",
+      "statusRight": "C:231.1K(23%) [tool]",
       "input": "",
       "mode": "instant",
       "line": "<span class=\"ok\">OK:</span> cargo check passed with no errors"
@@ -256,7 +256,7 @@
     {
       "statusLeft": "flash @agent-task",
       "statusCenter": "B:0.96 T:12 R:90 I:13.31M(98%) O:61.7K",
-      "statusRight": "C:231.1K(23%) ¥0.632 [tool]",
+      "statusRight": "C:231.1K(23%) [tool]",
       "input": "",
       "mode": "instant",
       "line": "<span class=\"ok\">▼ ✓ Bash</span> Bash(git commit -m \"fix: mock 日志截断中文导致 panic\")"
@@ -264,7 +264,7 @@
     {
       "statusLeft": "flash @agent-task",
       "statusCenter": "B:0.96 T:12 R:90 I:13.31M(98%) O:61.8K",
-      "statusRight": "C:231.1K(23%) ¥0.632 [tool]",
+      "statusRight": "C:231.1K(23%) [tool]",
       "input": "",
       "mode": "instant",
       "line": "commit: fix: mock 日志截断中文导致 panic"
@@ -272,7 +272,7 @@
     {
       "statusLeft": "flash @agent-task",
       "statusCenter": "B:0.96 T:12 R:90 I:13.31M(98%) O:61.9K",
-      "statusRight": "C:231.1K(23%) ¥0.633 [idle]",
+      "statusRight": "C:231.1K(23%) [idle]",
       "input": "",
       "mode": "typed",
       "prefixHtml": "<span class=\"prompt\">&gt;</span> ",
@@ -281,7 +281,7 @@
     {
       "statusLeft": "flash @agent-task",
       "statusCenter": "B:0.96 T:12 R:90 I:13.31M(98%) O:62.0K",
-      "statusRight": "C:231.1K(23%) ¥0.634 [idle]",
+      "statusRight": "C:231.1K(23%) [idle]",
       "input": "",
       "mode": "typed",
       "prefixHtml": "<span class=\"prompt\">&gt;</span> ",

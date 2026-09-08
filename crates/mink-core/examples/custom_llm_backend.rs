@@ -88,11 +88,10 @@ async fn main() -> Result<()> {
 
     println!("{}", outcome.text);
     println!(
-        "usage: requests={}, input={}, output={}, known_nano_cny={}",
+        "usage: requests={}, input={}, output={}",
         outcome.usage.request_count,
         outcome.usage.tokens.input_tokens,
-        outcome.usage.tokens.output_tokens,
-        outcome.usage.cost.known_nano_cny
+        outcome.usage.tokens.output_tokens
     );
 
     runtime.shutdown().await?;

@@ -3,7 +3,7 @@
 > 更新日期：2026-09-03
 
 本文面向把 Mink 作为**库或 SDK** 集成的开发者：Rust 嵌入式 runtime（`mink::runtime`）
-和 Python SDK（`mink-agent`），以及跨端统一的 Token 用量与费用访问。终端用户的
+和 Python SDK（`mink-agent`），以及跨端统一的 Token 用量访问。终端用户的
 CLI 交互、配置和会话管理见 [使用手册](USAGE.md)；机器协议（`--print` / `--agent-jsonl`）
 见 [机器协议](PROTOCOL.md)；架构和模块职责见 [ARCHITECTURE.md](ARCHITECTURE.md)。
 
@@ -281,7 +281,7 @@ print(result["text"])
 | `status` / `error` / `exit_code` | 执行状态 |
 | `session_id` / `home` / `cwd` | session 信息 |
 | `events_path` / `conversation_path` / `artifacts_dir` / `summary_path` / `usage_path` | session 文件路径 |
-| `billing_turn_id` / `usage_records` / `usage` | Token 用量与费用（见下） |
+| `billing_turn_id` / `usage_records` / `usage` | Token 用量（见下） |
 
 ### 流式事件
 
@@ -298,9 +298,9 @@ for event in session.stream_events("解释这段代码"):
 
 ---
 
-## Token 用量与费用
+## Token 用量
 
-每轮 `run_turn()` 结束后，`TurnOutcome` 携带本轮所有 LLM 请求的 Token 消耗和人民币费用。
+每轮 `run_turn()` 结束后，`TurnOutcome` 携带本轮所有 LLM 请求的 Token 消耗。
 
 ### 字段说明
 
@@ -308,7 +308,7 @@ for event in session.stream_events("解释这段代码"):
 |-----------|------------|------|
 | `billing_turn_id` | `billing_turn_id` | 本轮稳定标识；Agent、压缩、子代理共用 |
 | `usage_records` | `usage_records` | 每笔 LLM 请求明细 |
-| `usage` | `usage` | `UsageSummary` 汇总：请求数、attempt 数、Token、费用明细 |
+| `usage` | `usage` | `UsageSummary` 汇总：请求数、attempt 数、Token |
 | `session.usage_path` | `usage_path` | `usage.jsonl` 路径 |
 
 ### UsageSummary
@@ -320,7 +320,6 @@ for event in session.stream_events("解释这段代码"):
 | `unreported_request_count` | 未返回 usage 的请求数 |
 | `attempt_count` | HTTP 重试合计 |
 | `tokens` | [TokenUsage](#tokenusage) |
-| `cost` | `UsageCost`：`known_nano_cny`（已知费用，纳元，`1 元 = 10⁹ 纳元`）+ `unpriced_requests`（未定价请求数） |
 
 ### TokenUsage
 
@@ -340,19 +339,11 @@ Turn / Compaction / SubAgent → MeteredStream → usage.jsonl
 
 Agent 工具循环、自动压缩、子代理共享同一 `billing_turn_id`。手动压缩使用 `operation-*`。
 
-### 定价模型
+### 费用说明
 
-DeepSeek API 官方单价（纳元整数运算）：
-
-| 模型 | 输入（纳元/token） | 输出（纳元/token） | 缓存读取（纳元/token） |
-|------|-------------------|-------------------|----------------------|
-| Flash | 1,000 | 2,000 | 20 |
-| Pro | 3,000 | 6,000 | 25 |
-
-计算公式：`input × input_nano + cache_creation × input_nano + cache_read × cache_read_nano + output × output_nano`
-
-`UsageRecord` 的 `cost_nano_cny` 对未定价请求为 `None`。`UsageSummary.cost.known_nano_cny`
-汇总已知费用，`unpriced_requests` 统计未定价请求数；未知模型只记录 Token，不产生 known 费用。
+费用统计已移除：上游模型单价随时段（高峰/空闲）与官方调价变动，本地无法准确持续计价。
+`UsageRecord.cost_nano_cny` 作为兼容字段保留：已上报记录恒为 `0`，未上报记录为 `null`；
+`UsageSummary` 不再包含费用字段，终端/服务端不再展示费用。
 
 ### usage.jsonl 格式
 
@@ -361,7 +352,7 @@ DeepSeek API 官方单价（纳元整数运算）：
  "kind":"agent","origin_session_id":"session-...","model":"deepseek-v4-flash",
  "attempt_count":1,"status":"reported",
  "tokens":{"input_tokens":100,"cache_read_tokens":40,...},
- "cost_nano_cny":140800,"reason":null,"completed_at":"2026-06-18T00:00:00Z"}
+ "cost_nano_cny":0,"reason":null,"completed_at":"2026-06-18T00:00:00Z"}
 ```
 
 ### Rust 库中访问
@@ -375,8 +366,8 @@ let outcome = AgentRuntime::start(
         .with_model("flash"),
 ).await?.run_turn("解释这段代码").await?;
 
-println!("input: {}, cost: {} 纳元",
-    outcome.usage.tokens.input_tokens, outcome.usage.cost.known_nano_cny);
+println!("input: {}, output: {}",
+    outcome.usage.tokens.input_tokens, outcome.usage.tokens.output_tokens);
 for record in &outcome.usage_records {
     println!("  {}: kind={:?}, status={:?}", record.request_id, record.kind, record.status);
 }
@@ -389,7 +380,7 @@ from mink_agent import AgentSession, SandboxConfig
 
 session = AgentSession(SandboxConfig(api_key="sk-...", read_dirs=["."]))
 result = session.run("解释这段代码")
-print(f"cost: {result['usage']['cost']['known_nano_cny']} nano-cny")
+print(f"input: {result['usage']['tokens']['input_tokens']} tokens")
 for record in result['usage_records']:
     print(f"  {record['request_id']}: kind={record['kind']}")
 session.close()

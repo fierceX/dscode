@@ -37,8 +37,6 @@ export function attachSession(summary: SessionSummary) {
   st.cacheReadTokens = summary.cache_read_tokens ?? 0;
   // 当前上下文 = 最近一次请求的上下文（服务端 usage.jsonl 最后记录）；无记录时回退输入合计
   st.contextTokens = summary.last_context_tokens ?? st.tokensIn;
-  st.costMicros = Math.round((summary.cost_nano_cny ?? 0) / 1000);
-  st.unpricedRequests = summary.unpriced_requests ?? 0;
   appState.sessionState = st;
   try { localStorage.setItem(SESSION_KEY, `${summary.project_key}\n${summary.id}`); } catch { /* 隐私模式等忽略 */ }
 }

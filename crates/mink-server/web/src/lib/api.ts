@@ -22,8 +22,6 @@ export interface SessionSummary {
   tokens_in?: number;
   tokens_out?: number;
   cache_read_tokens?: number;
-  cost_nano_cny?: number;
-  unpriced_requests?: number;
   last_context_tokens?: number;
 }
 

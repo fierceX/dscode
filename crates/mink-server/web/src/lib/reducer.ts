@@ -184,11 +184,6 @@ export function reduceEvent(state: SessionState, raw: RawEvent): SessionState {
       if (typeof stats.total_cache_read_tokens === "number") next.cacheReadTokens = stats.total_cache_read_tokens;
       if (typeof stats.current_context_tokens === "number") next.contextTokens = stats.current_context_tokens;
       if (typeof stats.max_context_tokens === "number") next.maxContextTokens = stats.max_context_tokens;
-      const cost = stats.cost as Record<string, unknown> | undefined;
-      if (typeof cost?.known_nano_cny === "number") {
-        next.costMicros = Math.round(cost.known_nano_cny / 1000);
-      }
-      if (typeof cost?.unpriced_requests === "number") next.unpricedRequests = cost.unpriced_requests;
       if (typeof stats.belief === "number") next.belief = stats.belief;
       break;
     }

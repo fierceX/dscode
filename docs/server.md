@@ -69,7 +69,7 @@ MINK_SERVER_PORT=9000 ./target/debug/mink-server
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/sessions` | 会话列表（含 tokens/费用/context 汇总） |
+| GET | `/api/sessions` | 会话列表（含 tokens/context 汇总） |
 | POST | `/api/sessions` | 创建会话 `{name, cwd?}`（对 active alias 幂等，不重复创建） |
 | GET | `/api/sessions/{id}` | 会话状态（open/running） |
 | DELETE | `/api/sessions/{id}` | 删除会话（先持有系统文件锁，阻止并发删除） |

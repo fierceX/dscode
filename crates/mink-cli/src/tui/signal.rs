@@ -58,6 +58,7 @@ impl TuiState {
         match sig {
             TuiSignal::Thinking(c) => {
                 let c = sanitize_tui_text(c);
+                self.stream_status = None;
                 if !self.stream_line.is_empty()
                     && self.stream_kind != TranscriptKind::StreamThinking
                 {
@@ -72,6 +73,8 @@ impl TuiState {
             }
             TuiSignal::Text(c) => {
                 let c = sanitize_tui_text(c);
+                // 新内容到达：清除过期的瞬时等待状态（心跳标签）。
+                self.stream_status = None;
                 if !self.stream_line.is_empty() && self.stream_kind != TranscriptKind::StreamText {
                     self.stream_line.push('\n');
                     self.save_stream();
@@ -106,8 +109,19 @@ impl TuiState {
                 ));
             }
             TuiSignal::Info(n) => {
-                self.finalize_stream();
-                self.push_line(TranscriptItem::new(n.clone(), TranscriptKind::Info));
+                // 等待心跳（LLM 流式等待/首事件等待）：只在状态栏瞬时展示（如 `·30s`），
+                // 无论是否流式都不进入 transcript。
+                if let Some(label) = crate::tui::state::heartbeat_status_label(n) {
+                    self.stream_status = Some(label);
+                } else if self.streaming {
+                    // 流式期间不打断：文本可能正处在未闭合的 markdown 围栏中间，
+                    // 直接 finalize 会让后续内容丢失围栏上下文而无法正确渲染。
+                    // 非心跳告警推迟到流结束时落盘。
+                    self.pending_infos.push(n.clone());
+                } else {
+                    self.finalize_stream();
+                    self.push_line(TranscriptItem::new(n.clone(), TranscriptKind::Info));
+                }
             }
             TuiSignal::ToolResult {
                 tool_use_id,

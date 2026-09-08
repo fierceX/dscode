@@ -14,7 +14,7 @@ pub mod sdk_protocol;
 /// CLI binaries and the library runtime.
 pub mod prelude {
     pub use crate::runtime::session::{
-        PricingCatalog, TokenUsage, UsageCost, UsageKind, UsageRecord, UsageStatus, UsageSummary,
+        TokenUsage, UsageKind, UsageRecord, UsageStatus, UsageSummary,
     };
     pub use crate::runtime::{
         AgentEvent, AgentEventKind, AgentEventStream, AgentOptions, AgentRuntime,

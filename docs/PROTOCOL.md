@@ -129,9 +129,12 @@ echo '{"version":3,"prompt":"scan this repo"}' | mink-core --agent-jsonl
   "tool_error_count": 0,
   "error": null,
   "usage_records": [],
-  "usage": {"request_count": 1, "tokens": {...}, "cost": {"known_nano_cny": 140800, "unpriced_requests": 0}}
+  "usage": {"request_count": 1, "tokens": {...}}
 }
 ```
+
+> 兼容性：`usage` 不再包含 `cost` 字段（费用统计已移除）；`usage_records[].cost_nano_cny`
+> 为兼容字段，已上报记录为 `0`、未上报记录为 `null`。
 
 `status` 取值：`ok` / `failed` / `interrupted` / `max_turns_exceeded`。
 `request.options.stream_events=false` 时只输出此 `final`；SDK 侧从

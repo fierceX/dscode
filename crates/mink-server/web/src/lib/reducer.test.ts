@@ -112,8 +112,8 @@ describe("reduceEvent", () => {
 
   it("title_update 严格读取嵌套 stats", () => {
     let s = emptySession("s1", "t");
-    s = reduceEvent(s, ev("title_update", { model: "pro", stats: { total_input_tokens: 7, total_output_tokens: 3, total_cache_read_tokens: 5, current_context_tokens: 12, max_context_tokens: 100, cost: { known_nano_cny: 6000, unpriced_requests: 2 }, belief: 0.8 } }));
-    expect(s).toMatchObject({ model: "pro", tokensIn: 7, tokensOut: 3, cacheReadTokens: 5, contextTokens: 12, maxContextTokens: 100, costMicros: 6, unpricedRequests: 2, belief: 0.8 });
+    s = reduceEvent(s, ev("title_update", { model: "pro", stats: { total_input_tokens: 7, total_output_tokens: 3, total_cache_read_tokens: 5, current_context_tokens: 12, max_context_tokens: 100, belief: 0.8 } }));
+    expect(s).toMatchObject({ model: "pro", tokensIn: 7, tokensOut: 3, cacheReadTokens: 5, contextTokens: 12, maxContextTokens: 100, belief: 0.8 });
   });
 
   it("stop 插入唯一结束标记，turn_final 只提交权威状态", () => {

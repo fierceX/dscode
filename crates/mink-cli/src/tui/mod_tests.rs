@@ -1131,6 +1131,165 @@ fn inline_stream_promotes_complete_markdown_blocks_before_stop() {
 }
 
 #[test]
+fn info_heartbeat_during_streaming_does_not_split_markdown_fence() {
+    // 心跳在未闭合的代码围栏中间到达：文本不得被切段，否则下半段丢失围栏
+    // 上下文，围栏内的注释行会被当成 markdown 重新解析。
+    let text = r#"**核心思路**：示例说明。
+
+```
+data/demo/material/
+├── _library/                          # 类型库（不参与查找）
+│   ├── types.json                     # 入口键全集：key → type
+│   │                                  #    {"a":"A",
+│   │                                  #     "b":"B", …}
+│   ├── sources/示例素材-0000/          # 原始原件归档（只存一份）
+│   └── 校验报告-<日期>.md               # 每类型校验
+│
+├── <entry>_<branch>/                   # 每个业务入口（自包含）
+│   ├── type.json                      # {"type":"A","type_version":"2025-01-01"}
+│   ├── framework.json                 # 章节框架 → 结构化章节树
+│   ├── shared.md                      # 跨源固定模板块
+│   ├── sources/
+│   │   ├── <分支ID>/                    # 分支 = 素材版本（01.01/02.02、A/B…）
+│   │   │   ├── index.md               # 来源 / 适用说明
+│   │   │   ├── 工艺工况.md             # 内容提炼（匹配判断用）
+│   │   │   └── 原文.md                 # 抽取正文
+│   │   └── …
+│   └── output/                        # 占位（可无）
+│
+└── （不再有旧式手摆目录）
+```
+
+## 5. 后续
+
+继续讨论。
+"#;
+    let split = text.find("01.01/02.02").unwrap();
+    let (head, tail) = text.split_at(split);
+
+    let mut state = TuiState::default();
+    state.apply(&TuiSignal::Text(head.into()));
+    state.apply(&TuiSignal::Info(mink::runtime::llm_wait_heartbeat_message(
+        30, 0,
+    )));
+    // 心跳不打断流：尚未落入 transcript，状态栏标签就位。
+    assert!(state.streaming);
+    assert_eq!(state.lines.len(), 0);
+    assert_eq!(state.stream_status.as_deref(), Some("·30s"));
+    state.apply(&TuiSignal::Text(tail.into()));
+    // 新内容到达后等待标签清除。
+    assert_eq!(state.stream_status, None);
+    state.apply(&TuiSignal::Stop);
+
+    // 最终 transcript：完整文本一条，心跳不落盘（瞬态状态）。
+    assert_eq!(state.lines.len(), 1);
+    assert_eq!(state.lines[0].text, text);
+    assert!(!state.streaming);
+
+    // Render the final transcript the same way the TUI does.
+    let mut rendered = String::new();
+    for item in &state.lines {
+        for line in crate::tui::render::transcript_item_lines(item, 104) {
+            rendered.push_str(&line_text(&line));
+            rendered.push('\n');
+        }
+    }
+
+    // 跨心跳边界的那一行必须完整：被切段时两半会渲染成不同行。
+    assert!(
+        rendered.contains("# 分支 = 素材版本（01.01/02.02、A/B…）"),
+        "fence line split at heartbeat; rendered:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("├── _library/                          # 类型库（不参与查找）"),
+        "tree line before heartbeat lost; rendered:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("└── 原文.md                 # 抽取正文"),
+        "tree line after heartbeat lost; rendered:\n{rendered}"
+    );
+    // 围栏闭合后的内容按 markdown 渲染（标题不再被代码块吞掉）。
+    assert!(
+        rendered.contains("5. 后续"),
+        "content after fence missing; rendered:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("Waiting for model response"),
+        "heartbeat should not be persisted into transcript; rendered:\n{rendered}"
+    );
+}
+
+#[test]
+fn heartbeat_status_label_extracts_elapsed_seconds() {
+    assert_eq!(
+        crate::tui::state::heartbeat_status_label(&mink::runtime::llm_wait_heartbeat_message(
+            30, 0
+        ))
+        .as_deref(),
+        Some("·30s")
+    );
+    assert_eq!(
+        crate::tui::state::heartbeat_status_label(&mink::runtime::llm_wait_heartbeat_message(
+            60, 45
+        ))
+        .as_deref(),
+        Some("·60s")
+    );
+    assert_eq!(
+        crate::tui::state::heartbeat_status_label("Retrying (1/3)..."),
+        None
+    );
+    assert_eq!(crate::tui::state::heartbeat_status_label("其他信息"), None);
+}
+
+#[test]
+fn info_during_streaming_non_heartbeat_is_deferred_until_stream_ends() {
+    let mut state = TuiState::default();
+    state.apply(&TuiSignal::Text("first".into()));
+    state.apply(&TuiSignal::Info("Retrying (1/3)...".into()));
+    assert!(state.streaming);
+    assert_eq!(state.lines.len(), 0);
+    assert_eq!(
+        state.pending_infos.as_slice(),
+        &["Retrying (1/3)...".to_string()]
+    );
+    state.apply(&TuiSignal::Text("second".into()));
+    state.apply(&TuiSignal::Stop);
+    assert_eq!(state.lines.len(), 2);
+    assert_eq!(state.lines[0].kind, TranscriptKind::StreamText);
+    assert_eq!(state.lines[1].kind, TranscriptKind::Info);
+    assert_eq!(state.lines[1].text, "Retrying (1/3)...");
+}
+
+#[test]
+fn status_bar_shows_transient_wait_label() {
+    let mut state = TuiState {
+        cwd_label: String::new(),
+        ..Default::default()
+    };
+    let line = build_status_line(&state, 80);
+    assert!(!line.contains("·"));
+    // 首事件等待阶段（未流式）的心跳同样只进状态栏，不进 transcript。
+    state.apply(&TuiSignal::Info(mink::runtime::llm_wait_heartbeat_message(
+        30, 0,
+    )));
+    assert_eq!(state.lines.len(), 0);
+    assert_eq!(state.stream_status.as_deref(), Some("·30s"));
+    // 流式阶段心跳替换更新标签。
+    state.apply(&TuiSignal::Text("hello".into()));
+    assert_eq!(state.stream_status, None);
+    state.apply(&TuiSignal::Info(mink::runtime::llm_wait_heartbeat_message(
+        60, 45,
+    )));
+    assert_eq!(state.stream_status.as_deref(), Some("·60s"));
+    let line = build_status_line(&state, 80);
+    assert!(line.contains("·60s"));
+    assert!(line.contains("[generating]"));
+    state.apply(&TuiSignal::Stop);
+    assert_eq!(state.stream_status, None);
+}
+
+#[test]
 fn markdown_trailing_newline_does_not_create_an_extra_blank_row() {
     let mut lines = Vec::new();
 

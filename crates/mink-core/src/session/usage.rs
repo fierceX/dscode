@@ -84,15 +84,10 @@ pub struct UsageRecord {
     pub attempt_count: u32,
     pub status: UsageStatus,
     pub tokens: Option<TokenUsage>,
+    /// 兼容字段：费用统计已移除。已上报记录恒写 `0`；未上报记录保持 `None`（历史文件同样可能为 `None` 或旧数值）。
     pub cost_nano_cny: Option<u64>,
     pub reason: Option<String>,
     pub completed_at: String,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UsageCost {
-    pub known_nano_cny: u64,
-    pub unpriced_requests: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,7 +97,6 @@ pub struct UsageSummary {
     pub unreported_request_count: u64,
     pub attempt_count: u64,
     pub tokens: TokenUsage,
-    pub cost: UsageCost,
 }
 
 impl UsageSummary {
@@ -129,11 +123,6 @@ impl UsageSummary {
         }
         if let Some(tokens) = &record.tokens {
             self.tokens.add_assign(tokens);
-        }
-        if let Some(cost) = record.cost_nano_cny {
-            self.cost.known_nano_cny = self.cost.known_nano_cny.saturating_add(cost);
-        } else if record.status == UsageStatus::Reported && record.tokens.is_some() {
-            self.cost.unpriced_requests = self.cost.unpriced_requests.saturating_add(1);
         }
     }
 }
@@ -283,8 +272,10 @@ impl UsageCapture {
         let record = self.record(
             attempt_count,
             UsageStatus::Reported,
-            Some(tokens.clone()),
-            PricingCatalog::price(&self.model, &tokens)?,
+            Some(tokens),
+            // 费用统计已移除（上游定价随时间/时段变动，无法本地准确计价）；
+            // 为兼容历史 session 文件语义，记录中费用恒写 0。
+            Some(0),
             None,
         );
         self.journal.append(&record)?;
@@ -296,6 +287,7 @@ impl UsageCapture {
             attempt_count,
             UsageStatus::Unreported,
             None,
+            // 未上报 usage 的请求不伪造费用：保持 None（与“无 Token”语义一致）。
             None,
             Some(reason.into()),
         );
@@ -378,47 +370,6 @@ pub(crate) fn read_records(path: &Path) -> Result<Vec<UsageRecord>> {
         }
     }
     Ok(records)
-}
-
-pub struct PricingCatalog;
-
-impl PricingCatalog {
-    fn rates(model: &str) -> Option<(u64, u64, u64)> {
-        match model.to_ascii_lowercase().as_str() {
-            "flash" | "deepseek-v4-flash" => Some((1_000, 2_000, 20)),
-            "pro" | "deepseek-v4-pro" => Some((3_000, 6_000, 25)),
-            _ => None,
-        }
-    }
-
-    pub fn price(model: &str, tokens: &TokenUsage) -> Result<Option<u64>> {
-        let Some((input_nano, output_nano, cache_read_nano)) = Self::rates(model) else {
-            return Ok(None);
-        };
-        tokens
-            .input_tokens
-            .checked_mul(input_nano)
-            .and_then(|value| {
-                tokens
-                    .cache_creation_tokens
-                    .checked_mul(input_nano)
-                    .and_then(|cache| value.checked_add(cache))
-            })
-            .and_then(|value| {
-                tokens
-                    .cache_read_tokens
-                    .checked_mul(cache_read_nano)
-                    .and_then(|cache| value.checked_add(cache))
-            })
-            .and_then(|value| {
-                tokens
-                    .output_tokens
-                    .checked_mul(output_nano)
-                    .and_then(|output| value.checked_add(output))
-            })
-            .ok_or_else(|| anyhow!("usage cost overflow"))
-            .map(Some)
-    }
 }
 
 #[cfg(test)]

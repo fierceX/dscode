@@ -35,7 +35,8 @@ fn journal_filters_and_summarizes_turn_records() {
     assert_eq!(summary.request_count, 1);
     assert_eq!(summary.attempt_count, 2);
     assert_eq!(summary.tokens.input_tokens, 100);
-    assert_eq!(summary.cost.known_nano_cny, 140_800);
+    // 费用统计已移除：已上报记录写 0（兼容既有 session 文件语义）。
+    assert_eq!(records[0].cost_nano_cny, Some(0));
     assert_eq!(journal.summary(), summary);
     let reloaded = UsageJournal::new(path.clone());
     assert_eq!(reloaded.summary(), summary);
@@ -43,8 +44,8 @@ fn journal_filters_and_summarizes_turn_records() {
 }
 
 #[test]
-fn unknown_models_are_reported_as_unpriced() {
-    let path = temp_path("unpriced");
+fn reported_records_always_carry_zero_cost_for_compat() {
+    let path = temp_path("zero-cost");
     let journal = UsageJournal::new(path.clone());
     journal.begin_turn();
     journal
@@ -63,10 +64,13 @@ fn unknown_models_are_reported_as_unpriced() {
         )
         .unwrap();
 
+    let records = journal.all_records().unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].cost_nano_cny, Some(0));
+    // 汇总不再包含费用字段。
     let summary = journal.summary();
-    assert_eq!(summary.cost.known_nano_cny, 0);
-    assert_eq!(summary.cost.unpriced_requests, 1);
-    assert!(journal.all_records().unwrap()[0].cost_nano_cny.is_none());
+    assert_eq!(summary.tokens.input_tokens, 10);
+    assert_eq!(summary.tokens.output_tokens, 5);
     let _ = std::fs::remove_file(path);
 }
 
@@ -160,6 +164,7 @@ fn unreported_record_does_not_fabricate_zero_tokens() {
     let records = journal.all_records().unwrap();
     assert_eq!(records[0].status, UsageStatus::Unreported);
     assert!(records[0].tokens.is_none());
+    // 未上报 usage 不伪造费用，保持 None。
     assert!(records[0].cost_nano_cny.is_none());
     let _ = std::fs::remove_file(path);
 }

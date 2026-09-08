@@ -138,6 +138,30 @@ pub trait Display: Send + Sync {
     fn render_clear_line(&self);
 }
 
+/// LLM 等待心跳消息的稳定前缀。
+///
+/// mink-core 是消息格式的唯一来源（[`llm_wait_heartbeat_message`]）；
+/// mink-cli/TUI 等展示层通过 [`parse_llm_wait_heartbeat_elapsed`] 识别心跳，
+/// 不再各自复制字面量。
+pub const LLM_WAIT_HEARTBEAT_PREFIX: &str = "Waiting for model response...";
+
+/// 构造 LLM 等待心跳消息（`Display::render_info` 的稳定文本契约）。
+pub fn llm_wait_heartbeat_message(elapsed_secs: u64, idle_secs: u64) -> String {
+    format!("{LLM_WAIT_HEARTBEAT_PREFIX} elapsed={elapsed_secs}s idle={idle_secs}s")
+}
+
+/// 从心跳消息解析 elapsed 秒数；非心跳消息返回 `None`。
+pub fn parse_llm_wait_heartbeat_elapsed(msg: &str) -> Option<u64> {
+    let rest = msg.strip_prefix(LLM_WAIT_HEARTBEAT_PREFIX)?;
+    let digits: String = rest
+        .split("elapsed=")
+        .nth(1)?
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse().ok()
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum SubAgentStreamKind {
     Thinking,
@@ -158,7 +182,6 @@ pub struct StatsSnapshot {
     pub max_context_tokens: u64,
     pub total_cache_read_tokens: u64,
     pub total_cache_creation_tokens: u64,
-    pub cost: crate::session::usage::UsageCost,
     /// 信念度 B ∈ [0, 1]。0.0 表示未追踪
     pub belief: f64,
 }
@@ -186,22 +209,6 @@ impl StatsSnapshot {
             .map_or_else(|| "—".to_string(), |pct| format!("{pct}%"))
     }
 
-    pub fn format_cost(&self) -> String {
-        let nano = self.cost.known_nano_cny;
-        let known = if nano < 1_000_000 {
-            "¥0.00".to_string()
-        } else if nano < 1_000_000_000 {
-            format!("¥{:.3}", nano as f64 / 1_000_000_000.0)
-        } else {
-            format!("¥{:.2}", nano as f64 / 1_000_000_000.0)
-        };
-        if self.cost.unpriced_requests == 0 {
-            known
-        } else {
-            format!("{known} + {} unpriced", self.cost.unpriced_requests)
-        }
-    }
-
     pub fn fmt_num(n: u64) -> String {
         let s = n.to_string();
         let mut buf = String::with_capacity(s.len() + s.len() / 3);
@@ -222,7 +229,6 @@ pub async fn render_title_snapshot(
     belief: f64,
 ) {
     let stats = ctx.stats.snapshot().await;
-    let usage = ctx.usage.summary();
     let snapshot = StatsSnapshot {
         current_turn_count: stats.current_turn_count,
         agent_request_count: stats.agent_request_count,
@@ -232,7 +238,6 @@ pub async fn render_title_snapshot(
         max_context_tokens: ctx.config.max_context_tokens as u64,
         total_cache_read_tokens: stats.total_cache_read_tokens,
         total_cache_creation_tokens: stats.total_cache_creation_tokens,
-        cost: usage.cost,
         belief,
     };
     ctx.display.render_title_update(model_label, &snapshot);
@@ -262,5 +267,36 @@ mod stats_snapshot_tests {
         };
         assert_eq!(mixed.cache_pct(), "30%");
         assert_eq!(StatsSnapshot::default().cache_pct(), "—");
+    }
+}
+
+#[cfg(test)]
+mod llm_wait_heartbeat_tests {
+    use super::{llm_wait_heartbeat_message, parse_llm_wait_heartbeat_elapsed};
+
+    #[test]
+    fn heartbeat_message_format_is_pinned_and_parseable() {
+        // 精确文本被 CLI/TUI 依赖；变更此处必须同步更新展示层。
+        assert_eq!(
+            llm_wait_heartbeat_message(30, 0),
+            "Waiting for model response... elapsed=30s idle=0s"
+        );
+        assert_eq!(
+            parse_llm_wait_heartbeat_elapsed(&llm_wait_heartbeat_message(60, 45)),
+            Some(60)
+        );
+    }
+
+    #[test]
+    fn non_heartbeat_messages_are_rejected() {
+        assert_eq!(parse_llm_wait_heartbeat_elapsed("Retrying (1/3)..."), None);
+        assert_eq!(
+            parse_llm_wait_heartbeat_elapsed("Waiting for model response..."),
+            None
+        );
+        assert_eq!(
+            parse_llm_wait_heartbeat_elapsed("Waiting for model response... idle=1s"),
+            None
+        );
     }
 }

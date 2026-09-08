@@ -119,7 +119,7 @@ async fn main() -> anyhow::Result<()> {
 
 - **三种交互 surface** — REPL 行模式（`-i`）、Full TUI 全屏模式（`--tui`）、Inline TUI 原生 scrollback 模式（`--tui=inline`）
 - **Hashline / Replace 双模式编辑** — Hashline 使用 `Read` 生成的 `[PATH#TAG]` 快照和行/文本锚点；Replace 使用唯一 `old_text` exact/fuzzy 匹配；两者都在歧义时 fail closed
-- **结构化 transcript** — 统一的工具卡片渲染、Markdown 子集、自动折叠、实时信念 / token / 费用状态栏
+- **结构化 transcript** — 统一的工具卡片渲染、Markdown 子集、自动折叠、实时信念 / token 状态栏
 - **机器协议** — `--print` 输出 ndjson 事件流；`--agent-jsonl` 提供 single-shot Agent JSONL 协议
 
 ### 🛠️ 工具系统
@@ -148,7 +148,7 @@ async fn main() -> anyhow::Result<()> {
 - **Plan & Todo 状态** — Plan 使用 append-only transition 与压缩后 checkpoint；Todo 使用稳定 ID、revision 和原子批量提交
 - **Artifact 超长输出** — 工具结果超限自动落盘至 `artifacts/`，序号可恢复且禁止覆盖；`Read artifact://<id>` 读取
 - **Prefab 会话重组** — 可选 `prefab` feature 在 session 初始化后重组 session，并从 `events.jsonl` 的标准 `prefix_snapshot` 事件重建完整 system prompt + tools schema；CLI 使用 `--prefab[=TEMPLATE]`，Rust 使用 `with_prefab(true)` / `with_prefab_named()` / `with_prefab_path()` / `with_prefab_spec()`（临时功能，后续 DeepSeek 更新模型后可能撤销）
-- **Token 用量与费用** — LLM 请求级 `usage.jsonl` journal，纳元级定价，覆盖主 Agent、自动压缩和子代理
+- **Token 用量** — LLM 请求级 `usage.jsonl` journal，覆盖主 Agent、自动压缩和子代理
 
 ### 🔌 集成与扩展
 
@@ -188,7 +188,7 @@ async fn main() -> anyhow::Result<()> {
 | 文档 | 说明 |
 |------|------|
 | [使用手册](docs/USAGE.md) | 面向终端用户：CLI 交互、配置、沙箱、session、工具和常见工作流 |
-| [嵌入与 SDK](docs/EMBEDDING.md) | Rust 库 / Python SDK 嵌入、Token 用量与费用 |
+| [嵌入与 SDK](docs/EMBEDDING.md) | Rust 库 / Python SDK 嵌入、Token 用量 |
 | [机器协议](docs/PROTOCOL.md) | `--print` stream-json 与 `--agent-jsonl` 协议 |
 | [工具参考](docs/tools.md) | 面向工具协议：内置工具参数、结果通道、资源 URL、审批和构建裁剪 |
 | [架构说明](docs/ARCHITECTURE.md) | 运行时分层、模块职责、资源/能力系统、核心数据流 |

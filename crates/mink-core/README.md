@@ -69,8 +69,6 @@ async fn main() -> anyhow::Result<()> {
     println!("billing_turn_id: {}", outcome.billing_turn_id);
     println!("input: {}, cache_read: {}, output: {}",
              u.tokens.input_tokens, u.tokens.cache_read_tokens, u.tokens.output_tokens);
-    println!("cost: {} 纳元 (≈ {:.4} 元)", u.cost.known_nano_cny,
-             u.cost.known_nano_cny as f64 / 1_000_000_000.0);
 
     // 每笔 LLM 请求明细
     for record in &outcome.usage_records {
@@ -200,9 +198,10 @@ cargo run -p mink-core --example custom_llm_backend
 ```
 
 Custom model names are accepted as-is. Usage tokens are still recorded when the
-backend emits `LlmEvent::Usage`; built-in price calculation only applies to the
-default `flash` / `pro` DeepSeek tiers, so private model cost is reported as
-zero unless the host computes pricing separately.
+backend emits `LlmEvent::Usage`. Cost accounting has been removed, so
+`UsageRecord.cost_nano_cny` is only a compatibility field: `0` for reported
+records and `None` for unreported ones. Hosts that need pricing must compute it
+themselves.
 
 每次真实 LLM 请求都会追加到 session `usage.jsonl`。`TurnOutcome.usage_records` 只包含当前
 `billing_turn_id` 的主 Agent、自动压缩和子代理明细，`TurnOutcome.usage` 是这些记录的汇总。
