@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### TUI 粘贴图片（Ctrl+V，macOS）
+
+- **`Ctrl+V` 粘贴剪贴板图片**：TUI 通过 `osascript` 读取剪贴板 PNG，校验会话冻结的图片能力与限额后写入 `<session_dir>/attachments/<sha256>.png`（内容寻址、原子写、重复粘贴复用；目录 `0700`），并在输入框上方显示待发送 chip（空输入框按 `Backspace` 移除最后一张）。
+- **消息通道**：提交时在用户文本尾部追加 `[Attached image: "<绝对路径>" - Read it to view.]`，图片仍由模型 `Read` 走既有捕获链（magic 校验 → 限额 → 内容寻址缓存 → 单次消费）。这是**约定而非契约**：模型未读取时图片不会送达；slash 命令不携带图片（保留待发送状态）；路径含引号或控制字符时拒绝附加并提示（marker 无法无歧义表示）。
+- **能力门控**：TUI 启动时读取 `model-capabilities.json`，文本会话 `Ctrl+V` 只提示、不读剪贴板、不落盘；其它平台明确报错。
+- **触发键**：`Ctrl+V`（默认）与 `Super+V`（终端转发 Kitty keyboard protocol 时）等价；macOS 的 `Cmd+V` 由终端自身占用，程序收不到按键或图片字节，文档给出终端重绑方法。
+- **模块**：新增 `tui/clipboard.rs`（可注入 runner，便于测试）与 `tui/attachments.rs`；文档见 `docs/USAGE.md`、`docs/设计哲学-多模态读图能力.md` §3.1。
+- **测试**：新增 29 个用例（剪贴板提取/校验、附件去重与损坏 fail closed、按键与 marker 展开、重复粘贴去重、chip 渲染、回放 marker 压缩、能力快照门控），另有一个 `#[ignore]` 的真实剪贴板冒烟测试（`clipboard_smoke`）。
+
 ### 费用统计移除 & TUI 流式渲染修复
 
 - **费用统计移除**：上游模型单价随时段（高峰/空闲）与官方调价变动，硬编码价目表无法准确持续计价；移除 `PricingCatalog`/`UsageCost` 与全部费用输出（TUI 状态栏、REPL 标题栏、Web 前端会话指标/用量面板、首页演示状态栏，以及协议 `final`/`title_update`/`/api/sessions` 中的费用字段）；`UsageSummary` 与 `mink::ui::StatsSnapshot` 不再携带费用，`StatsSnapshot::format_cost()` 一并删除。

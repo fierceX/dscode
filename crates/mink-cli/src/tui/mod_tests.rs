@@ -2191,6 +2191,502 @@ fn new_user_input_is_appended_after_the_open_stream() {
     assert_eq!(state.work_state, WorkState::Idle);
 }
 
+fn pending_image(name: &str) -> crate::tui::state::PendingImage {
+    crate::tui::state::PendingImage {
+        path: PathBuf::from(format!("/tmp/{name}.png")),
+        width: 12,
+        height: 8,
+        bytes: 3456,
+    }
+}
+
+fn fake_clipboard_reader() -> crate::tui::state::ClipboardReader {
+    std::sync::Arc::new(
+        |_: &std::path::Path,
+         _: &mink::runtime::OpenAiChatImageUrlLimits|
+         -> anyhow::Result<crate::tui::clipboard::ClipboardPng> {
+            Ok(crate::tui::clipboard::ClipboardPng {
+                bytes: b"fake-png".to_vec(),
+                width: 12,
+                height: 8,
+            })
+        },
+    )
+}
+
+fn session_info(dir: &std::path::Path) -> mink::runtime::SessionInfo {
+    mink::runtime::SessionInfo {
+        session_id: "s".into(),
+        session_ref: "s".into(),
+        is_new: true,
+        home: dir.to_path_buf(),
+        cwd: dir.to_path_buf(),
+        events_path: dir.join("events.jsonl"),
+        conversation_path: dir.join("conversation.jsonl"),
+        artifacts_dir: dir.join("artifacts"),
+        summary_path: dir.join("summary.md"),
+        usage_path: dir.join("usage.jsonl"),
+        plan_path: dir.join("plan.md"),
+        plan_draft_path: dir.join("plan.draft"),
+        todos_path: dir.join("todos.json"),
+    }
+}
+
+#[test]
+fn ctrl_v_stages_clipboard_image_and_queues_it() {
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (ui_tx, ui_rx) = std::sync::mpsc::channel();
+    let dir = unique_test_dir("clipboard-stage");
+    let mut state = TuiState {
+        image_input: Some(mink::runtime::OpenAiChatImageUrlLimits::default()),
+        attachments_dir: dir.clone(),
+        ui_tx: Some(ui_tx),
+        clipboard_reader: Some(fake_clipboard_reader()),
+        ..Default::default()
+    };
+
+    assert!(!handle_event(
+        Event::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL)),
+        &mut state,
+        &tx,
+    ));
+    assert!(state.clipboard_started.is_some());
+
+    let event = ui_rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("clipboard worker must report back");
+    state.apply_ui_event(event);
+
+    assert!(state.clipboard_started.is_none());
+    assert_eq!(state.input.pending_images.len(), 1);
+    let image = &state.input.pending_images[0];
+    assert!(image.path.starts_with(&dir), "{:?}", image.path);
+    assert_eq!((image.width, image.height, image.bytes), (12, 8, 8));
+    assert_eq!(std::fs::read(&image.path).unwrap(), b"fake-png");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn super_v_also_requests_clipboard_image() {
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (ui_tx, ui_rx) = std::sync::mpsc::channel();
+    let dir = unique_test_dir("clipboard-super");
+    let mut state = TuiState {
+        image_input: Some(mink::runtime::OpenAiChatImageUrlLimits::default()),
+        attachments_dir: dir.clone(),
+        ui_tx: Some(ui_tx),
+        clipboard_reader: Some(fake_clipboard_reader()),
+        ..Default::default()
+    };
+
+    assert!(!handle_event(
+        Event::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::SUPER)),
+        &mut state,
+        &tx,
+    ));
+
+    let event = ui_rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("Super+V must trigger the clipboard worker");
+    state.apply_ui_event(event);
+
+    assert_eq!(state.input.pending_images.len(), 1);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn stale_clipboard_read_allows_a_retry() {
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (ui_tx, ui_rx) = std::sync::mpsc::channel();
+    let dir = unique_test_dir("clipboard-stale");
+    let mut state = TuiState {
+        image_input: Some(mink::runtime::OpenAiChatImageUrlLimits::default()),
+        attachments_dir: dir.clone(),
+        ui_tx: Some(ui_tx),
+        clipboard_reader: Some(fake_clipboard_reader()),
+        // A read that never reported back (hung osascript) must not disable
+        // paste for the rest of the session.
+        clipboard_started: Some(std::time::Instant::now() - std::time::Duration::from_secs(60)),
+        ..Default::default()
+    };
+
+    assert!(!handle_event(
+        Event::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL)),
+        &mut state,
+        &tx,
+    ));
+
+    let event = ui_rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("a stale in-flight read must not block a retry");
+    state.apply_ui_event(event);
+    assert_eq!(state.input.pending_images.len(), 1);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn ctrl_v_without_image_capability_reports_and_queues_nothing() {
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (ui_tx, _ui_rx) = std::sync::mpsc::channel();
+    let mut state = TuiState {
+        image_input: None,
+        attachments_dir: unique_test_dir("clipboard-disabled"),
+        ui_tx: Some(ui_tx),
+        clipboard_reader: Some(fake_clipboard_reader()),
+        ..Default::default()
+    };
+
+    assert!(!handle_event(
+        Event::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL)),
+        &mut state,
+        &tx,
+    ));
+
+    assert!(state.clipboard_started.is_none());
+    assert!(state.input.pending_images.is_empty());
+    let last = state.lines.last().unwrap();
+    assert_eq!(last.kind, TranscriptKind::Info);
+    assert!(
+        last.text.contains("no image input capability"),
+        "{}",
+        last.text
+    );
+}
+
+#[test]
+fn backspace_on_empty_input_drops_last_queued_image() {
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = TuiState::default();
+    state.input.pending_images = vec![pending_image("a"), pending_image("b")];
+
+    assert!(!handle_event(
+        Event::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
+        &mut state,
+        &tx,
+    ));
+    assert_eq!(state.input.pending_images.len(), 1);
+    assert_eq!(
+        state.input.pending_images[0].path,
+        PathBuf::from("/tmp/a.png")
+    );
+
+    assert!(!handle_event(
+        Event::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
+        &mut state,
+        &tx,
+    ));
+    assert!(state.input.pending_images.is_empty());
+}
+
+#[test]
+fn enter_expands_image_markers_and_keeps_history_clean() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = TuiState::default();
+    state.input.buf = "look at this".into();
+    state.input.cursor = state.input.buf.len();
+    state.input.pending_images = vec![pending_image("a")];
+
+    assert!(!handle_event(
+        Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &mut state,
+        &tx,
+    ));
+
+    let command = rx.try_recv().expect("run command");
+    let crate::cli::RuntimeCmd::Run { input, .. } = command else {
+        panic!("expected a Run command");
+    };
+    assert_eq!(
+        input,
+        "look at this\n\n[Attached image: \"/tmp/a.png\" - Read it to view.]"
+    );
+    assert_eq!(state.input.history, vec!["look at this".to_string()]);
+    assert!(state.input.pending_images.is_empty());
+    assert_eq!(
+        state.lines.last().unwrap().text,
+        "> [image #1] look at this"
+    );
+}
+
+#[test]
+fn enter_with_only_images_submits_marker_text() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = TuiState::default();
+    state.input.pending_images = vec![pending_image("a")];
+
+    assert!(!handle_event(
+        Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &mut state,
+        &tx,
+    ));
+
+    let command = rx.try_recv().expect("run command");
+    let crate::cli::RuntimeCmd::Run { input, .. } = command else {
+        panic!("expected a Run command");
+    };
+    assert_eq!(input, "[Attached image: \"/tmp/a.png\" - Read it to view.]");
+    assert!(state.input.history.is_empty());
+    assert_eq!(state.lines.last().unwrap().text, "> [image #1]");
+}
+
+#[test]
+fn slash_command_keeps_pending_images_queued() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut state = TuiState::default();
+    state.input.buf = "/plan".into();
+    state.input.cursor = state.input.buf.len();
+    state.input.pending_images = vec![pending_image("a")];
+
+    assert!(!handle_event(
+        Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &mut state,
+        &tx,
+    ));
+
+    assert!(
+        rx.try_recv().is_err(),
+        "slash commands never reach the runtime"
+    );
+    assert!(matches!(state.view, View::Plan { .. }));
+    assert_eq!(state.input.pending_images.len(), 1);
+    assert!(
+        state
+            .lines
+            .iter()
+            .any(|line| line.text.contains("stay queued")),
+        "queue notice missing"
+    );
+}
+
+#[test]
+fn failed_send_keeps_text_and_queued_images() {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<crate::cli::RuntimeCmd>();
+    drop(rx);
+    let mut state = TuiState::default();
+    state.input.buf = "look at this".into();
+    state.input.cursor = state.input.buf.len();
+    state.input.pending_images = vec![pending_image("a")];
+
+    assert!(!handle_event(
+        Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &mut state,
+        &tx,
+    ));
+
+    assert_eq!(state.input.buf, "look at this");
+    assert_eq!(state.input.cursor, "look at this".len());
+    assert_eq!(state.input.pending_images.len(), 1);
+    assert!(
+        state
+            .lines
+            .iter()
+            .any(|line| line.kind == TranscriptKind::Error
+                && line.text.contains("Failed to send user input")),
+        "a failed send must be reported"
+    );
+}
+
+#[test]
+fn unrepresentable_attachment_path_fails_closed() {
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (ui_tx, ui_rx) = std::sync::mpsc::channel();
+    let root = unique_test_dir("clipboard-quote");
+    let mut state = TuiState {
+        image_input: Some(mink::runtime::OpenAiChatImageUrlLimits::default()),
+        attachments_dir: root.join("bad\"dir"),
+        ui_tx: Some(ui_tx),
+        clipboard_reader: Some(fake_clipboard_reader()),
+        ..Default::default()
+    };
+
+    assert!(!handle_event(
+        Event::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL)),
+        &mut state,
+        &tx,
+    ));
+    let event = ui_rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("clipboard worker must report back");
+    state.apply_ui_event(event);
+
+    assert!(state.input.pending_images.is_empty());
+    assert!(
+        state
+            .lines
+            .iter()
+            .any(|line| line.kind == TranscriptKind::Error
+                && line.text.contains("cannot be represented")),
+        "unrepresentable paths must fail closed"
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn chip_lines_truncate_to_requested_rows() {
+    let images = vec![pending_image("a"), pending_image("b"), pending_image("c")];
+
+    let lines = render::chip_lines(&images, 12, 2);
+
+    assert_eq!(lines.len(), 2);
+    assert!(lines[0].contains("[image #1"), "{}", lines[0]);
+    assert!(lines[1].ends_with('…'), "{}", lines[1]);
+    assert!(
+        lines
+            .iter()
+            .all(|line| unicode_width::UnicodeWidthStr::width(line.as_str()) <= 12),
+        "chips must stay within the requested width: {lines:?}"
+    );
+    assert!(render::chip_lines(&images, 80, 0).is_empty());
+    assert!(render::chip_lines(&[], 80, 2).is_empty());
+}
+
+#[test]
+fn load_image_limits_reads_frozen_snapshot() {
+    let dir = unique_test_dir("capabilities");
+    std::fs::create_dir_all(&dir).unwrap();
+    let info = session_info(&dir);
+
+    assert!(
+        load_image_limits(&info).is_none(),
+        "missing snapshot fails closed"
+    );
+
+    let supported = mink::runtime::ImageInputCapability::OpenAiChatImageUrl(Default::default());
+    std::fs::write(
+        dir.join("model-capabilities.json"),
+        serde_json::json!({"image_input": supported}).to_string(),
+    )
+    .unwrap();
+    assert!(load_image_limits(&info).is_some());
+
+    let unsupported = mink::runtime::ImageInputCapability::Unsupported;
+    std::fs::write(
+        dir.join("model-capabilities.json"),
+        serde_json::json!({"image_input": unsupported}).to_string(),
+    )
+    .unwrap();
+    assert!(
+        load_image_limits(&info).is_none(),
+        "text-only snapshot fails closed"
+    );
+
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn render_draws_queued_image_chips_above_the_input() {
+    let mut state = TuiState::default();
+    state
+        .lines
+        .push(TranscriptItem::new("hello".into(), TranscriptKind::Text));
+    state.input.pending_images = vec![pending_image("a")];
+    let backend = TestBackend::new(80, 20);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    terminal
+        .draw(|f| render(f, &mut state, TuiMode::Full))
+        .unwrap();
+
+    let buf = terminal.backend().buffer();
+    let row_text = |y: u16| -> String {
+        (0..80)
+            .map(|x| buf.cell((x, y)).unwrap().symbol().to_string())
+            .collect()
+    };
+    let chip_row = (0..20)
+        .find(|y| row_text(*y).contains("[image #1 12x8 3.4KB]"))
+        .expect("chip row must be rendered");
+    assert!(
+        row_text(chip_row + 1).starts_with('┌'),
+        "input box must stay directly below the chips"
+    );
+}
+
+#[test]
+fn format_bytes_keeps_one_decimal_only_when_needed() {
+    let format = crate::tui::state::format_bytes;
+
+    assert_eq!(format(512), "512B");
+    assert_eq!(format(1024), "1KB");
+    assert_eq!(format(1536), "1.5KB");
+    assert_eq!(format(220 * 1024), "220KB");
+    assert_eq!(format(1024 * 1024), "1MB");
+    assert_eq!(format(1024 * 1024 * 3 / 2), "1.5MB");
+}
+
+#[test]
+fn duplicate_paste_is_not_queued_twice() {
+    let mut state = TuiState::default();
+
+    state.apply_ui_event(crate::tui::state::TuiUiEvent::ImageCaptured(pending_image(
+        "a",
+    )));
+    state.apply_ui_event(crate::tui::state::TuiUiEvent::ImageCaptured(pending_image(
+        "a",
+    )));
+
+    assert_eq!(state.input.pending_images.len(), 1);
+    assert!(
+        state
+            .lines
+            .iter()
+            .any(|line| line.text.contains("already queued")),
+        "duplicate paste must be reported"
+    );
+}
+
+#[test]
+fn compact_user_input_replaces_only_marker_lines() {
+    use crate::tui::state::compact_user_input_for_display as compact;
+
+    assert_eq!(
+        compact("[Attached image: \"/tmp/a.png\" - Read it to view.]"),
+        "[image]"
+    );
+    assert_eq!(
+        compact("hello\n[Attached image: \"/tmp/a.png\" - Read it to view.]"),
+        "hello\n[image]"
+    );
+    assert_eq!(compact("plain text"), "plain text");
+}
+
+#[test]
+fn replay_compacts_paste_markers_in_user_input() {
+    let path = std::env::temp_dir().join(format!(
+        "mink_tui_paste_replay_{}_{}.jsonl",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let events = [
+        serde_json::json!({
+            "type": "user_input",
+            "content": "[Attached image: \"/tmp/a.png\" - Read it to view.]"
+        }),
+        serde_json::json!({"type": "text", "content": "answer"}),
+    ];
+    let data = events
+        .iter()
+        .map(serde_json::Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&path, data).unwrap();
+
+    let lines = load_session(&path);
+    let _ = std::fs::remove_file(path);
+
+    assert!(
+        lines.iter().any(|line| line.text == "> [image]"),
+        "replayed paste markers must not echo absolute paths: {:?}",
+        lines
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
 fn line_text(line: &Line<'static>) -> String {
     line.spans
         .iter()

@@ -176,6 +176,8 @@ cargo build --release
 - 已消费引用在下一次请求后投影为文本提示（`[Previously attached image: ...]`）；
   需要重新看图用 `Read image://sha256:<hex64>`（幂等）。能力关闭时图片走普通文本路径，
   `image://` 保持未知 scheme fail-closed。图片不写入 `artifacts/`。
+- TUI 的 `Ctrl+V` 粘贴（见 [USAGE.md](USAGE.md#粘贴图片ctrlfvmacos)）不改变这里的捕获语义：
+  它只把剪贴板 PNG 暂存为绝对路径并写进用户消息，图片仍必须经 `Read` 捕获。
 
 ## `Write`
 

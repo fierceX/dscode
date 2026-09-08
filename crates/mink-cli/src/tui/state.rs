@@ -238,6 +238,122 @@ impl Default for TranscriptItem {
     }
 }
 
+/// One clipboard image staged for the next user message. The bytes live in
+/// `<session_dir>/attachments/<sha256>.png`; the message only carries the path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PendingImage {
+    pub path: PathBuf,
+    pub width: u32,
+    pub height: u32,
+    pub bytes: usize,
+}
+
+impl PendingImage {
+    /// Stable marker appended to the submitted user text. The model is asked
+    /// to `Read` the absolute path; the capture itself still runs through the
+    /// v7 image pipeline.
+    pub(crate) fn marker(&self) -> String {
+        format!(
+            "[Attached image: \"{}\" - Read it to view.]",
+            self.path.display()
+        )
+    }
+
+    pub(crate) fn chip(&self, index: usize) -> String {
+        format!(
+            "[image #{index} {}x{} {}]",
+            self.width,
+            self.height,
+            format_bytes(self.bytes)
+        )
+    }
+}
+
+pub(crate) fn format_bytes(bytes: usize) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = 1024.0 * 1024.0;
+    let value = bytes as f64;
+    if value >= MB {
+        scaled(value / MB, "MB")
+    } else if value >= KB {
+        scaled(value / KB, "KB")
+    } else {
+        format!("{bytes}B")
+    }
+}
+
+/// At most one decimal: `220KB` instead of `220.0KB`, `1.5KB` keeps its digit.
+fn scaled(value: f64, unit: &str) -> String {
+    let rounded = (value * 10.0).round() / 10.0;
+    if (rounded - rounded.trunc()).abs() < f64::EPSILON {
+        format!("{rounded:.0}{unit}")
+    } else {
+        format!("{rounded:.1}{unit}")
+    }
+}
+
+/// Result of a background clipboard read, delivered back to the TUI loop.
+#[derive(Debug)]
+pub(crate) enum TuiUiEvent {
+    ImageCaptured(PendingImage),
+    ClipboardFailed(String),
+}
+
+/// Injectable clipboard reader (tests); production uses the platform impl.
+pub(crate) type ClipboardReader = std::sync::Arc<
+    dyn Fn(
+            &std::path::Path,
+            &crate::runtime::OpenAiChatImageUrlLimits,
+        ) -> anyhow::Result<crate::tui::clipboard::ClipboardPng>
+        + Send
+        + Sync,
+>;
+
+/// Submitted text for the runtime: the typed text plus one marker per image.
+pub(crate) fn submitted_user_input(typed: &str, images: &[PendingImage]) -> String {
+    if images.is_empty() {
+        return typed.to_string();
+    }
+    let markers = images
+        .iter()
+        .map(PendingImage::marker)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if typed.is_empty() {
+        markers
+    } else {
+        format!("{typed}\n\n{markers}")
+    }
+}
+
+/// Transcript echo for one user message: images collapse to `[image #N]`.
+pub(crate) fn display_user_input(typed: &str, images: &[PendingImage]) -> String {
+    let prefix = (1..=images.len())
+        .map(|index| format!("[image #{index}]"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    match (typed.is_empty(), prefix.is_empty()) {
+        (true, _) => prefix,
+        (false, true) => typed.to_string(),
+        (false, false) => format!("{prefix} {typed}"),
+    }
+}
+
+/// Compact paste markers in replayed user input back to `[image]` so a resumed
+/// session does not echo absolute attachment paths.
+pub(crate) fn compact_user_input_for_display(text: &str) -> String {
+    text.split('\n')
+        .map(|line| {
+            if line.starts_with("[Attached image: \"") && line.ends_with("\" - Read it to view.]") {
+                "[image]"
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct InputState {
     pub buf: String,
@@ -246,6 +362,8 @@ pub(crate) struct InputState {
     pub history: Vec<String>,
     pub history_idx: Option<usize>,
     pub draft_before_history: Option<String>,
+    /// Clipboard images queued for the next submitted message.
+    pub pending_images: Vec<PendingImage>,
 }
 
 impl InputState {
@@ -343,6 +461,18 @@ pub(crate) struct TuiState {
     pub plan: Option<PlanDisplay>,
     pub todos: Option<TodoDisplay>,
     pub artifacts_dir: PathBuf,
+    /// Paste staging directory (`<session_dir>/attachments`).
+    pub attachments_dir: PathBuf,
+    /// Frozen session image limits; `None` disables clipboard image paste.
+    pub image_input: Option<crate::runtime::OpenAiChatImageUrlLimits>,
+    /// Result channel of background clipboard reads (absent in tests that do
+    /// not exercise the async path).
+    pub ui_tx: Option<std::sync::mpsc::Sender<TuiUiEvent>>,
+    /// When the in-flight clipboard read started. A read that never reports
+    /// back (hung `osascript`) must not disable paste for the whole session.
+    pub clipboard_started: Option<Instant>,
+    /// Injectable clipboard reader; `None` uses the platform implementation.
+    pub clipboard_reader: Option<ClipboardReader>,
     pub artifact_detail: Option<ArtifactDetail>,
     /// 流式期间收到的 Info 信号（如 llm_wait_heartbeat）。
     /// 不打断进行中的 markdown 流：先缓冲，待流结束时落为独立条目。
@@ -407,6 +537,11 @@ impl Default for TuiState {
             plan: None,
             todos: None,
             artifacts_dir: PathBuf::new(),
+            attachments_dir: PathBuf::new(),
+            image_input: None,
+            ui_tx: None,
+            clipboard_started: None,
+            clipboard_reader: None,
             artifact_detail: None,
             pending_infos: Vec::new(),
             stream_status: None,
@@ -577,6 +712,39 @@ impl TuiState {
         current.counts = update.counts.clone();
         current.changes.clone_from(&update.changes);
         self.todos = Some(current);
+    }
+
+    /// Apply one background clipboard result. Failed reads are reported once;
+    /// a captured image only grows the pending list (the chip row is the
+    /// visible feedback).
+    pub(crate) fn apply_ui_event(&mut self, event: TuiUiEvent) {
+        self.clipboard_started = None;
+        match event {
+            TuiUiEvent::ImageCaptured(image) => {
+                // The same bytes stage to the same content-addressed path: a
+                // duplicate paste would make the model receive one picture
+                // twice (double vision tokens) for no benefit.
+                if self
+                    .input
+                    .pending_images
+                    .iter()
+                    .any(|pending| pending.path == image.path)
+                {
+                    self.push_line(TranscriptItem::new(
+                        format!("Image already queued: {}", image.path.display()),
+                        TranscriptKind::Info,
+                    ));
+                } else {
+                    self.input.pending_images.push(image);
+                }
+            }
+            TuiUiEvent::ClipboardFailed(message) => {
+                self.push_line(TranscriptItem::new(
+                    format!("Clipboard image unavailable: {message}"),
+                    TranscriptKind::Error,
+                ));
+            }
+        }
     }
 
     pub(crate) fn arm_task_notification(&mut self) {

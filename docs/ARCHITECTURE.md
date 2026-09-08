@@ -1,6 +1,6 @@
 # 架构说明
 
-> 更新日期：2026-09-03
+> 更新日期：2026-09-08
 
 本文描述 Mink 当前代码结构、模块职责和运行时数据流。终端用户命令、配置和工作流见
 [USAGE.md](USAGE.md)；Rust/Python 嵌入见 [EMBEDDING.md](EMBEDDING.md)；机器协议见
@@ -436,17 +436,19 @@ VFS 只接管普通路径。`artifact://`、`skill://`、`rule://` 和 `session:
 | `crates/mink-core/src/runtime/events.rs` | `AgentEventStream`、`EventSink`、结构化工具事件与 `StatsSnapshot` |
 | `crates/mink-cli/src/ui/engine.rs` | REPL 同步渲染 |
 | `crates/mink-cli/src/ui/replay.rs` | REPL replay |
-| `crates/mink-cli/src/tui/mod.rs` | TUI 入口和事件循环 |
+| `crates/mink-cli/src/tui/mod.rs` | TUI 入口和事件循环，包括冻结图片能力读取与后台剪贴板结果轮询 |
 | `crates/mink-cli/src/tui/display.rs` | CLI 事件投影 -> `TuiSignal` 适配 |
 | `crates/mink-cli/src/tui/signal.rs` | `TuiSignal` reducer |
-| `crates/mink-cli/src/tui/state.rs` | 共享 transcript、Full viewport/click state、Inline committed state、Plan/Todo/Artifact 和子代理状态 |
+| `crates/mink-cli/src/tui/state.rs` | 共享 transcript、Full viewport/click state、Inline committed state、Plan/Todo/Artifact、子代理状态和待发送粘贴图片 |
 | `crates/mink-cli/src/tui/input.rs` | 键盘、粘贴、历史、详情页滚动和命令输入 |
+| `crates/mink-cli/src/tui/clipboard.rs` | 剪贴板图片读取（macOS `osascript`）与 PNG 结构/限额校验 |
+| `crates/mink-cli/src/tui/attachments.rs` | session `attachments/` 内容寻址暂存（SHA-256 命名、原子写、去重） |
 | `crates/mink-cli/src/tui/command.rs` | slash command 解析 |
 | `crates/mink-cli/src/tui/render.rs` | 渲染 facade 和布局 |
 | `crates/mink-cli/src/tui/render/*` | content/detail/input/status 子渲染器 |
 | `crates/mink-cli/src/tui/markdown.rs` | Markdown facade |
 | `crates/mink-cli/src/tui/markdown/*` | normalize、block、inline、table、diff、types、util |
-| `crates/mink-cli/src/tui/replay.rs` | TUI replay |
+| `crates/mink-cli/src/tui/replay.rs` | TUI replay（粘贴 marker 回放时压成 `[image]`） |
 
 ---
 
@@ -494,6 +496,7 @@ Session 目录保存 conversation、events、metadata、summary、stats 和 arti
 ├── plan-transaction.json  # 计划文件变更与 conversation 追加的事务 journal（事务期间存在，结束后移除）
 ├── todos.json             # 首次成功 Todo 变更后生成
 ├── usage.jsonl            # 首次记录 LLM 请求后生成
+├── attachments/           # TUI Ctrl+V 粘贴图片的暂存副本（内容寻址 PNG，随 session 保留）
 └── artifacts/
     ├── index.jsonl
     └── <tool>-0001.txt

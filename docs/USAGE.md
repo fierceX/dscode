@@ -1,6 +1,6 @@
 # 使用手册
 
-> 更新日期：2026-09-03
+> 更新日期：2026-09-08
 
 本文面向终端用户，覆盖 CLI 交互模式、配置参数、沙箱、session、计划、压缩、工具、技能和
 常见工作流。Rust 库 / Python SDK 嵌入见 [嵌入与 SDK 使用](EMBEDDING.md)；机器协议
@@ -92,6 +92,7 @@ flash B:0.73 T:12 R:45 I:200K(50%) O:20K C:400K(40%) [idle]
 | 操作 | 行为 |
 |------|------|
 | `Ctrl+C` | 工作中中断当前 turn；空闲时退出 |
+| `Ctrl+V` | 粘贴剪贴板图片（macOS）：暂存到 session `attachments/`，随下一条消息附带绝对路径 |
 | `/flash` / `/pro` | 切换模型 |
 | `/compact` | 手动触发上下文压缩 |
 | `/help` / `/skills` | 显示帮助或 skill 列表 |
@@ -104,6 +105,31 @@ flash B:0.73 T:12 R:45 I:200K(50%) O:20K C:400K(40%) [idle]
 | `Ctrl+D` | REPL 中退出 |
 
 `/flash` / `/pro` 立即生效，不会发送给 LLM。
+
+### 粘贴图片（`Ctrl+V`，macOS）
+
+终端不会把剪贴板图片交给程序，所以 TUI 自己读取剪贴板（macOS 通过 `osascript` 提取
+pasteboard 的 `PNGf` 表示）：
+
+- `Ctrl+V` 读取剪贴板 PNG，按当前会话能力与限额校验后写入
+  `<session>/attachments/<sha256>.png`（内容寻址，重复粘贴复用同一文件；目录权限 `0700`）。
+- 图片先进入输入框上方的待发送列表（如 `[image #1 1440x900 220KB]`）；输入框为空时按
+  `Backspace` 移除最后一张，`Enter` 提交时在消息尾部追加
+  `[Attached image: "<绝对路径>" - Read it to view.]`。slash 命令不携带图片，图片会留在待发送列表；
+  重复粘贴同一张图不会重复入队（内容寻址到同一路径时提示已排队）。
+  附件路径含引号或控制字符时拒绝附加并提示（marker 无法无歧义表示）。
+- **送达依赖模型调用 `Read`**：附件文件只是“传输副本”，图片真正进入上下文仍走 `Read` 的捕获链
+  （magic 校验 → 限额 → 内容寻址缓存 → 单次消费）。模型未读取时图片不会送达，可以直接要求它读取该路径。
+- 仅当会话冻结的 `model-capabilities.json` 声明了图片能力时可用；文本会话按 `Ctrl+V`
+  只会得到一条提示，不会读剪贴板也不会落盘。
+- **为什么不是 `Cmd+V`**：macOS 的 `Cmd+V` 是终端自己的快捷键——终端拦截它做文本粘贴，既不会把按键事件交给程序，也不会把剪贴板里的图片字节交给程序，所以默认触发键是 `Ctrl+V`。若坚持用 `Cmd+V`，需要在终端里把它重绑为发送 `0x16`：
+  iTerm2：Settings → Profiles → Keys → Key Mappings 添加 `⌘V` → “Send Hex Code” `0x16`；
+  WezTerm/Ghostty/kitty 类似 `cmd+v` → `text:\x16`。代价是该终端下 `Cmd+V` 不再粘贴文本
+  （可把文本粘贴改绑到 `⌘⇧V`）。终端若支持并转发 Kitty keyboard protocol 的 `Super+V`，
+  TUI 也会识别。
+- 目前仅支持 macOS，其它平台会明确报错。附件文件随 session 目录保留（不主动清理，随 session 一起删除）。
+- 验证真实剪贴板路径：`cargo test -p mink-cli --features tui -- --ignored --nocapture clipboard_smoke`
+  （需剪贴板里有图片；该测试默认被 `#[ignore]` 跳过，不会在常规测试中读取系统剪贴板）。
 
 ### 标题栏（REPL/CLI 模式）
 
@@ -302,6 +328,8 @@ read_dirs = ["./data"]
 - 单次消费：图片完整发送一次后，历史中的引用降级为文本提示
   （`[Previously attached image: ...]`）；需要重新看图用
   `Read image://sha256:<hex64>` 重新注入（幂等）。
+- TUI 粘贴：`Ctrl+V` 把剪贴板 PNG 落到 session `attachments/`，消息只带绝对路径
+  （约定而非契约，模型需调用 `Read`）；见[粘贴图片](#粘贴图片ctrlfvmacos)。
 - 升级/换模型注意：会话冻结的能力指纹与新配置不一致时（库升级改变默认限额、
   修改 `[provider.image]`、切换到不同能力模型），启动或 `/model` 切换会失败
   （fail closed），需要新建会话；未启用图片的文本会话不受影响。
@@ -535,6 +563,7 @@ package_dirs = ["./packages"]
         ├── plan.draft         ← 未确认草稿
         ├── todos.json         ← 首次 Todo 变更后生成
         ├── usage.jsonl        ← 首次 LLM 请求后生成
+        ├── attachments/       ← TUI Ctrl+V 粘贴图片的暂存副本（内容寻址 PNG）
         └── artifacts/
             ├── index.jsonl
             └── <tool>-0001.txt

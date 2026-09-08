@@ -29,6 +29,7 @@ pub(crate) const TUI_EXTRA_HELP: &[&str] = &[
     "  /sub-agent ID   Open sub-agent detail",
     "  Ctrl+C          Interrupt current task",
     "  Ctrl+C again    Exit TUI",
+    "  Ctrl+V          Paste clipboard image (macOS)",
     "  Esc             Exit TUI",
     "  /exit  /quit    Exit TUI",
 ];

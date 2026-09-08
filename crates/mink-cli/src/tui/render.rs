@@ -5,7 +5,7 @@ use crate::tui::render::detail::{
     render_todos_content,
 };
 use crate::tui::render::file_picker::render_file_picker;
-use crate::tui::render::input::render_input;
+use crate::tui::render::input::{render_chips, render_input};
 use crate::tui::render::status::render_status;
 use crate::tui::state::{TuiState, View};
 use ratatui::{
@@ -24,7 +24,7 @@ pub(crate) use content::transcript_item_lines;
 pub(crate) use content::{collapsed_summary, content_viewport_height, visible_lines};
 #[cfg(test)]
 pub(crate) use detail::{detail_lines_for_session, detail_viewport_height};
-pub(crate) use input::{clamp_input_scroll, split_at_visual_width};
+pub(crate) use input::{chip_lines, clamp_input_scroll, split_at_visual_width};
 #[cfg(test)]
 pub(crate) use status::{build_status_line, build_status_spans};
 
@@ -43,11 +43,18 @@ pub(crate) fn render(f: &mut Frame, state: &mut TuiState, mode: TuiMode) {
             let cursor = state.input.clamped_cursor();
             let lines_before = split_at_visual_width(&state.input.buf[..cursor], inner_w);
             let cursor_row = lines_before.len().saturating_sub(1);
+            // 待发送的剪贴板图片占输入框上方一行 chip（最多 2 行）；空间不足时
+            // 直接不显示，优先保证输入框和状态栏可见。
+            let chip_rows = usize::from(area.height.saturating_sub(5)).min(2);
+            let chips = chip_lines(&state.input.pending_images, inner_w, chip_rows);
+            let chips_height = chips.len();
             // 输入框正文最大行数受视口高度约束：正文行 + 2 行边框之外，
-            // 布局还需要至少 1 行内容区和 1 行状态栏。主视图入口保证
+            // 布局还需要至少 1 行内容区、chip 行和 1 行状态栏。主视图入口保证
             // `area.height >= 5`，因此小视口（inline 最小 8 行）下不会把
             // 输入框压缩到越界，导致最后一行被裁剪、光标落到边框上。
-            let max_content_lines = usize::from(area.height).saturating_sub(4).clamp(1, 5);
+            let max_content_lines = usize::from(area.height)
+                .saturating_sub(4 + chips_height)
+                .clamp(1, 5);
             let content_lines = vis_lines.len().clamp(1, max_content_lines);
             state.input.scroll_row = clamp_input_scroll(
                 vis_lines.len(),
@@ -63,14 +70,18 @@ pub(crate) fn render(f: &mut Frame, state: &mut TuiState, mode: TuiMode) {
                 .collect();
             let input_height = content_lines + 2;
 
+            let mut constraints = vec![Constraint::Min(1)];
+            if chips_height > 0 {
+                constraints.push(Constraint::Length(chips_height as u16));
+            }
+            constraints.push(Constraint::Length(input_height as u16));
+            constraints.push(Constraint::Length(1));
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Min(1),
-                    Constraint::Length(input_height as u16),
-                    Constraint::Length(1),
-                ])
+                .constraints(constraints)
                 .split(area);
+            let input_area = chunks[chunks.len() - 2];
+            let status_area = chunks[chunks.len() - 1];
 
             render_content(
                 f,
@@ -82,18 +93,23 @@ pub(crate) fn render(f: &mut Frame, state: &mut TuiState, mode: TuiMode) {
                     ContentMode::Inline
                 },
             );
-            render_input(f, chunks[1], &visible_input_lines);
-            render_file_picker(f, chunks[1], state);
+            if chips_height > 0 {
+                render_chips(f, chunks[1], &chips);
+            }
+            render_input(f, input_area, &visible_input_lines);
+            render_file_picker(f, input_area, state);
 
             let row = cursor_row.saturating_sub(state.input.scroll_row);
             let col = lines_before.last().map_or(0, |line| {
                 unicode_width::UnicodeWidthStr::width(line.as_str())
             });
-            let cursor_x = (chunks[1].x + 1 + col as u16).min(chunks[1].right().saturating_sub(2));
-            let cursor_y = (chunks[1].y + 1 + row as u16).min(chunks[1].bottom().saturating_sub(2));
+            let cursor_x =
+                (input_area.x + 1 + col as u16).min(input_area.right().saturating_sub(2));
+            let cursor_y =
+                (input_area.y + 1 + row as u16).min(input_area.bottom().saturating_sub(2));
             f.set_cursor_position((cursor_x, cursor_y));
 
-            render_status(f, chunks[2], state);
+            render_status(f, status_area, state);
         }
         View::SubAgentDetail { session_id, scroll } => {
             let chunks = Layout::default()

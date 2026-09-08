@@ -1,5 +1,7 @@
 //! TUI module for mink using ratatui.
 
+mod attachments;
+mod clipboard;
 mod command;
 mod display;
 mod file_picker;
@@ -137,10 +139,14 @@ fn tui_main_loop(
     sandbox: &SandboxConfig,
 ) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let (ui_tx, ui_rx) = mpsc::channel::<state::TuiUiEvent>();
     let mut state = TuiState {
         lines: load_session(&session.events_path),
         cwd_label: short_cwd_label(),
         artifacts_dir: session.artifacts_dir.clone(),
+        attachments_dir: attachments_dir(session),
+        image_input: load_image_limits(session),
+        ui_tx: Some(ui_tx),
         model: initial_model.to_string(),
         file_picker_policy: FilePickerPolicy::from_sandbox(cwd, sandbox),
         ..Default::default()
@@ -151,6 +157,10 @@ fn tui_main_loop(
 
     loop {
         if drain_signals(&mut sig_rx, &mut state, mode) {
+            state.dirty = true;
+        }
+        while let Ok(event) = ui_rx.try_recv() {
+            state.apply_ui_event(event);
             state.dirty = true;
         }
         if mode == TuiMode::Inline {
@@ -194,6 +204,30 @@ fn tui_main_loop(
         }
     }
     Ok(())
+}
+
+/// Session paste staging directory (`<session_dir>/attachments`).
+fn attachments_dir(session: &crate::runtime::SessionInfo) -> std::path::PathBuf {
+    session
+        .events_path
+        .parent()
+        .map(|dir| dir.join("attachments"))
+        .unwrap_or_default()
+}
+
+/// Read the frozen image capability from the session snapshot. A missing or
+/// text-only snapshot disables clipboard paste (fail closed).
+fn load_image_limits(
+    session: &crate::runtime::SessionInfo,
+) -> Option<crate::runtime::OpenAiChatImageUrlLimits> {
+    #[derive(serde::Deserialize)]
+    struct Snapshot {
+        image_input: crate::runtime::ImageInputCapability,
+    }
+    let dir = session.events_path.parent()?;
+    let raw = std::fs::read_to_string(dir.join("model-capabilities.json")).ok()?;
+    let snapshot: Snapshot = serde_json::from_str(&raw).ok()?;
+    snapshot.image_input.limits().cloned()
 }
 
 fn preferred_inline_height() -> u16 {

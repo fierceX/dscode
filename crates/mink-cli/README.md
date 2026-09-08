@@ -15,7 +15,7 @@
 - `src/cli.rs`：`mink` / `mink-core` 共用 CLI adapter，负责参数解析、配置合并、sandbox re-exec、模式分发和 `--prefab[=TEMPLATE]` 启用。
 - `src/ui`：REPL / 普通终端输出实现。
 - `src/tui`：ratatui Full / Inline 双 TUI surface，共享结构化 transcript、工具卡片、
-  Markdown、输入、详情、通知和 session replay。
+  Markdown、输入、剪贴板图片暂存（`clipboard.rs` / `attachments.rs`）、详情、通知和 session replay。
 - `src/main.rs`：`mink` thin wrapper。
 - `src/bin/mink-core.rs`：SDK 精简二进制 thin wrapper。
 

@@ -4,13 +4,18 @@ use crate::tui::command::{SlashCommand, parse_slash_command};
 use crate::tui::file_picker::FilePickerState;
 use crate::tui::sanitize::normalize_tui_input;
 use crate::tui::state::{
-    ActiveOverlay, ClickAction, TranscriptItem, TranscriptKind, TuiState, View, WorkState,
+    ActiveOverlay, ClickAction, PendingImage, TranscriptItem, TranscriptKind, TuiState, TuiUiEvent,
+    View, WorkState, display_user_input, submitted_user_input,
 };
 use crossterm::event::{Event, KeyCode, KeyModifiers, MouseEventKind};
 use std::time::{Duration, Instant};
 
 const SCROLL_STEP: usize = 3;
 const INTERRUPT_EXIT_WINDOW: Duration = Duration::from_secs(2);
+/// A clipboard read that never reports back (hung `osascript`) must not
+/// disable paste for the rest of the session: after this window a new read is
+/// allowed to start.
+const CLIPBOARD_RETRY_WINDOW: Duration = Duration::from_secs(10);
 
 fn scroll_by(state: &mut TuiState, delta: isize) {
     let base = if state.viewport.auto_scroll {
@@ -108,6 +113,11 @@ fn handle_key(
         }
         (KeyModifiers::CONTROL, KeyCode::Char('u')) => cursor_delete_before(state),
         (KeyModifiers::CONTROL, KeyCode::Char('k')) => cursor_delete_after(state),
+        (mods, KeyCode::Char('v'))
+            if mods.contains(KeyModifiers::CONTROL) || mods.contains(KeyModifiers::SUPER) =>
+        {
+            request_clipboard_image(state)
+        }
         (KeyModifiers::CONTROL, KeyCode::Char('d')) => {
             if state.input.buf.is_empty() {
                 state.quit = true;
@@ -124,7 +134,15 @@ fn handle_key(
         (KeyModifiers::NONE, KeyCode::Left) => cursor_left(state),
         (KeyModifiers::NONE, KeyCode::Right) => cursor_right(state),
         (KeyModifiers::NONE, KeyCode::Enter) => return handle_enter(state, orch_tx),
-        (KeyModifiers::NONE, KeyCode::Backspace) => cursor_backspace(state),
+        (KeyModifiers::NONE, KeyCode::Backspace) => {
+            if state.input.buf.is_empty() {
+                // An empty input turns Backspace into "remove the last queued
+                // clipboard image".
+                state.input.pending_images.pop();
+            } else {
+                cursor_backspace(state);
+            }
+        }
         (KeyModifiers::CONTROL, KeyCode::Char('w')) | (KeyModifiers::ALT, KeyCode::Backspace) => {
             cursor_delete_word(state)
         }
@@ -289,6 +307,69 @@ fn insert_char(state: &mut TuiState, c: char) {
     state.input.cursor += c.len_utf8();
 }
 
+/// Ctrl+V: read the system clipboard on a worker thread (the platform reader
+/// spawns a subprocess, so it must not block the event loop) and stage the
+/// image under the session attachment directory.
+fn request_clipboard_image(state: &mut TuiState) {
+    let Some(limits) = state.image_input.clone() else {
+        state.push_line(TranscriptItem::new(
+            "Clipboard image paste is unavailable: this session has no image input capability."
+                .into(),
+            TranscriptKind::Info,
+        ));
+        return;
+    };
+    if state
+        .clipboard_started
+        .is_some_and(|started| started.elapsed() < CLIPBOARD_RETRY_WINDOW)
+    {
+        return;
+    }
+    let Some(ui_tx) = state.ui_tx.clone() else {
+        return;
+    };
+    if state.attachments_dir.as_os_str().is_empty() {
+        state.push_line(TranscriptItem::new(
+            "Clipboard image paste is unavailable: the session attachment directory is unknown."
+                .into(),
+            TranscriptKind::Error,
+        ));
+        return;
+    }
+    state.clipboard_started = Some(Instant::now());
+    let dir = state.attachments_dir.clone();
+    let reader = state.clipboard_reader.clone();
+    std::thread::spawn(move || {
+        let staged = match reader {
+            Some(reader) => reader(&dir, &limits),
+            None => crate::tui::clipboard::read_clipboard_png(&dir, &limits),
+        }
+        .and_then(|png| {
+            let path = crate::tui::attachments::AttachmentStore::new(dir.clone())
+                .commit_png(&png.bytes)?;
+            // The marker quotes the path; a quote or control character inside
+            // it could not be represented unambiguously for the model.
+            let display = path.to_string_lossy();
+            if display.contains('"') || display.chars().any(char::is_control) {
+                anyhow::bail!(
+                    "attachment path cannot be represented in the message marker: {display}"
+                );
+            }
+            Ok(PendingImage {
+                path,
+                width: png.width,
+                height: png.height,
+                bytes: png.bytes.len(),
+            })
+        });
+        let event = match staged {
+            Ok(image) => TuiUiEvent::ImageCaptured(image),
+            Err(error) => TuiUiEvent::ClipboardFailed(format!("{error:#}")),
+        };
+        let _ = ui_tx.send(event);
+    });
+}
+
 fn cursor_left(state: &mut TuiState) {
     if state.input.cursor > 0 {
         let mut pos = state.input.cursor - 1;
@@ -445,63 +526,84 @@ fn handle_enter(
     orch_tx: &tokio::sync::mpsc::UnboundedSender<RuntimeCmd>,
 ) -> bool {
     state.input.clamp_cursor();
-    let input = std::mem::take(&mut state.input.buf);
+    let typed = std::mem::take(&mut state.input.buf);
+    let images = std::mem::take(&mut state.input.pending_images);
     state.input.cursor = 0;
-    if input.is_empty() {
+    if typed.is_empty() && images.is_empty() {
         return false;
     }
-    state.input.history.push(input.clone());
+    if !typed.is_empty() {
+        state.input.history.push(typed.clone());
+    }
     state.input.history_idx = None;
     // 提交新输入前先封口上一轮未结束的流式内容，保证用户输入始终显示在
     // 已展示内容之后，避免被后续到达的 finalize 插入到错误位置。
     state.finalize_stream();
     state.push_line(TranscriptItem::new(
-        format!("> {input}"),
+        format!("> {}", display_user_input(&typed, &images)),
         TranscriptKind::Info,
     ));
-    match parse_slash_command(&input) {
-        Ok(Some(command)) => match command {
-            SlashCommand::Flash => {
-                let _ = orch_tx.send(RuntimeCmd::SetModel("flash".into()));
+    match parse_slash_command(&typed) {
+        Ok(Some(command)) => {
+            if !images.is_empty() {
+                // Slash commands are local UI/runtime actions, not model
+                // turns: keep the images queued for the next real message.
+                state.input.pending_images = images;
+                state.push_line(TranscriptItem::new(
+                    "Queued image(s) were not attached to a slash command; they stay queued for the next message."
+                        .into(),
+                    TranscriptKind::Info,
+                ));
             }
-            SlashCommand::Pro => {
-                let _ = orch_tx.send(RuntimeCmd::SetModel("pro".into()));
-            }
-            SlashCommand::Model(model) => {
-                let _ = orch_tx.send(RuntimeCmd::SetModel(model));
-            }
-            SlashCommand::Compact => {
-                if orch_tx.send(RuntimeCmd::Compact).is_ok() {
-                    state.arm_task_notification();
-                    state.work_state = WorkState::Compacting;
-                } else {
-                    state.push_line(TranscriptItem::new(
-                        "Failed to send compact command.".into(),
-                        TranscriptKind::Error,
-                    ));
+            match command {
+                SlashCommand::Flash => {
+                    let _ = orch_tx.send(RuntimeCmd::SetModel("flash".into()));
+                }
+                SlashCommand::Pro => {
+                    let _ = orch_tx.send(RuntimeCmd::SetModel("pro".into()));
+                }
+                SlashCommand::Model(model) => {
+                    let _ = orch_tx.send(RuntimeCmd::SetModel(model));
+                }
+                SlashCommand::Compact => {
+                    if orch_tx.send(RuntimeCmd::Compact).is_ok() {
+                        state.arm_task_notification();
+                        state.work_state = WorkState::Compacting;
+                    } else {
+                        state.push_line(TranscriptItem::new(
+                            "Failed to send compact command.".into(),
+                            TranscriptKind::Error,
+                        ));
+                    }
+                }
+                SlashCommand::Help => state.add_help(),
+                SlashCommand::Skills => state.show_skills(),
+                SlashCommand::Plan => state.view = View::Plan { scroll: 0 },
+                SlashCommand::Todos => state.view = View::Todos { scroll: 0 },
+                SlashCommand::SubAgent(session_id) => {
+                    state.view = View::SubAgentDetail {
+                        session_id,
+                        scroll: 0,
+                    }
+                }
+                SlashCommand::Artifact(id) => state.open_artifact(&id),
+                SlashCommand::Quit => {
+                    state.quit = true;
+                    return true;
                 }
             }
-            SlashCommand::Help => state.add_help(),
-            SlashCommand::Skills => state.show_skills(),
-            SlashCommand::Plan => state.view = View::Plan { scroll: 0 },
-            SlashCommand::Todos => state.view = View::Todos { scroll: 0 },
-            SlashCommand::SubAgent(session_id) => {
-                state.view = View::SubAgentDetail {
-                    session_id,
-                    scroll: 0,
-                }
-            }
-            SlashCommand::Artifact(id) => state.open_artifact(&id),
-            SlashCommand::Quit => {
-                state.quit = true;
-                return true;
-            }
-        },
+        }
         Ok(None) => {
+            let input = submitted_user_input(&typed, &images);
             if orch_tx.send(RuntimeCmd::Run { input, done: None }).is_ok() {
                 state.arm_task_notification();
                 state.work_state = WorkState::WaitingModel;
             } else {
+                // The runtime channel is closed: put the text and the queued
+                // images back so a failed send never silently discards them.
+                state.input.buf = typed;
+                state.input.cursor = state.input.buf.len();
+                state.input.pending_images = images;
                 state.push_line(TranscriptItem::new(
                     "Failed to send user input.".into(),
                     TranscriptKind::Error,
@@ -509,6 +611,9 @@ fn handle_enter(
             }
         }
         Err(_) => {
+            if !images.is_empty() {
+                state.input.pending_images = images;
+            }
             state.push_line(TranscriptItem::new(
                 "Unknown command. Prefix with a space to send it as text.".into(),
                 TranscriptKind::Info,

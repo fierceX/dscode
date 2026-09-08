@@ -1,7 +1,7 @@
 use crate::replay::ReplayEventKind;
 use crate::session::store::first_line;
 use crate::tui::signal::TuiSignal;
-use crate::tui::state::{TranscriptItem, TranscriptKind, TuiState};
+use crate::tui::state::{TranscriptItem, TranscriptKind, TuiState, compact_user_input_for_display};
 use crate::ui::{ArtifactDisplay, ToolPresentation, ToolResultKind};
 use crate::util::truncate_display;
 use std::collections::VecDeque;
@@ -70,7 +70,9 @@ fn build_lines_from_events(events: &[serde_json::Value]) -> Vec<TranscriptItem> 
             ReplayEventKind::PrefixSnapshot | ReplayEventKind::Ignored => {}
             ReplayEventKind::UserInput => {
                 state.finalize_stream();
-                let preview = truncate_display(first_line(c), 77);
+                // 粘贴图片的 marker 只保留 `[image]`，避免恢复会话时回显绝对路径。
+                let compacted = compact_user_input_for_display(c);
+                let preview = truncate_display(first_line(&compacted), 77);
                 if !preview.is_empty() {
                     state.push_line(TranscriptItem::new(
                         format!("> {preview}"),

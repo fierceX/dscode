@@ -9,6 +9,7 @@ Mink 是一个 Rust 实现的轻量 AI coding agent，专为 DeepSeek/OpenAI-com
 核心能力：
 
 - LLM 流式请求 → 工具执行 → 决策的内循环；REPL / TUI 两种终端模式
+- TUI 剪贴板图片粘贴：`Ctrl+V` 暂存到 session `attachments/`，用户消息附绝对路径，图片仍由 `Read` 捕获（约定通道，非结构性保证）
 - **Rust 库 API**：`AgentRuntime::start() → run_turn() / stream_turn() → shutdown()`，无需子进程
 - 信号驱动的信念系统：自动错误检测、轨迹证据注入（`[trajectory]`）、编辑循环快照回滚与恢复首步守卫；档位由 `SignalPolicy` 门控，阈值/超参为内部 `Config.signal` 常量，`MINK_SIGNAL_POLICY=off` 关闭
 - 上下文自适应压缩：显式阈值、响应预留、热尾部、摘要预算；摘要以 internal user `<compacted-summary>` checkpoint 投影
@@ -146,6 +147,7 @@ main.rs → OrchActor (agent/orchestrator.rs) → TurnExecutor (agent/turn.rs)
 
 - Display 实现必须完整转发 `ToolCallDisplay` / `PresentedToolResultDisplay` 结构化字段，不得丢失 `tool_use_id`、presentation 或 artifact 元数据。
 - TUI 光标必须落在 UTF-8 char boundary；输入/删除按 char boundary 处理。
+- TUI 粘贴图片只产生 session `attachments/` 传输副本并把绝对路径写入用户消息；图片进入上下文的唯一入口仍是 `Read` 捕获；重复粘贴按内容寻址路径去重，路径不可无歧义表示时 fail closed。
 - Inline TUI 只提交连续且 sealed 的 transcript 前缀；committed 项不得修改或重复写入原生 scrollback；空闲保留最后一个 sealed item，新工作开始后才能推进 committed 边界。
 - Inline 详情视图不得丢弃或重建主视图 terminal（否则 alternate screen 内容叠加残影）；Full TUI 保留主视图鼠标命中、可逆折叠与应用内 viewport，不受 Inline committed 边界影响。
 - TUI 实时 signal 与 replay 必须经同一个 reducer，结构化工具状态不得从展示文本反向解析；Todo 增量 presentation 合并到当前完整状态；Plan/Todo/Artifact 详情先按内容宽度折行再算滚动范围。

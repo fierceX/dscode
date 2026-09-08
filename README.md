@@ -120,6 +120,7 @@ async fn main() -> anyhow::Result<()> {
 - **三种交互 surface** — REPL 行模式（`-i`）、Full TUI 全屏模式（`--tui`）、Inline TUI 原生 scrollback 模式（`--tui=inline`）
 - **Hashline / Replace 双模式编辑** — Hashline 使用 `Read` 生成的 `[PATH#TAG]` 快照和行/文本锚点；Replace 使用唯一 `old_text` exact/fuzzy 匹配；两者都在歧义时 fail closed
 - **结构化 transcript** — 统一的工具卡片渲染、Markdown 子集、自动折叠、实时信念 / token 状态栏
+- **图片粘贴** — Full/Inline TUI 中 `Ctrl+V` 读取剪贴板 PNG（macOS），内容寻址暂存到 session `attachments/` 并随消息附带绝对路径；模型 `Read` 后走既有读图链路
 - **机器协议** — `--print` 输出 ndjson 事件流；`--agent-jsonl` 提供 single-shot Agent JSONL 协议
 
 ### 🛠️ 工具系统
