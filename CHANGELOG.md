@@ -1,11 +1,11 @@
 # Changelog
 
-## Unreleased
+## v0.6.1 (2026-09-08)
 
 ### Shift+Enter 换行
 
 - **多行输入**：`Shift+Enter` 在输入框内换行。终端默认把 Enter 与 Shift+Enter 都发同一个 CR，TUI 启动时探测并启用 Kitty keyboard protocol（`DISAMBIGUATE_ESCAPE_CODES`），退出与 panic 时自动 pop 还原；不支持的终端可用 `Ctrl+J` 或 `Alt+Enter`（任何终端都可用）。`MINK_KEYBOARD_ENHANCEMENT=off` 跳过探测与启用，避免不响应探测的终端最多 2 秒的启动等待。
-- **测试**：新增 2 个用例（三个换行键各自插入 `\n`、env/TERM 门控矩阵）。
+- **测试**：新增 3 个用例（三个换行键各自插入 `\n`、env/TERM 门控矩阵、pop 至多一次）。
 
 ### TUI 粘贴图片（Ctrl+V，macOS）
 
@@ -15,7 +15,7 @@
 - **触发键**：`Ctrl+V`（默认）与 `Super+V`（终端转发 Kitty keyboard protocol 时）等价；macOS 的 `Cmd+V` 由终端自身占用，程序收不到按键或图片字节，文档给出终端重绑方法。
 - **浮层与提示细节**：文件选择器打开期间隐藏 chip 行且 `Ctrl+V` / 换行键不生效（浮层紧贴输入框上沿，重叠会花屏）；重复粘贴提示不再回显附件绝对路径。
 - **模块**：新增 `tui/clipboard.rs`（可注入 runner，便于测试）与 `tui/attachments.rs`；文档见 `docs/USAGE.md`、`docs/设计哲学-多模态读图能力.md` §3.1。
-- **测试**：新增 29 个用例（剪贴板提取/校验、附件去重与损坏 fail closed、按键与 marker 展开、重复粘贴去重、chip 渲染、回放 marker 压缩、能力快照门控），另有一个 `#[ignore]` 的真实剪贴板冒烟测试（`clipboard_smoke`）。
+- **测试**：新增 31 个用例（剪贴板提取/校验、附件去重与损坏 fail closed、按键与 marker 展开、重复粘贴去重、chip 渲染、回放 marker 压缩、能力快照门控、浮层下按键惰性与 chip 隐藏），另有一个 `#[ignore]` 的真实剪贴板冒烟测试（`clipboard_smoke`）。
 
 ### 费用统计移除 & TUI 流式渲染修复
 

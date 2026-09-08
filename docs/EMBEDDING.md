@@ -1,6 +1,6 @@
 # 嵌入与 SDK 使用
 
-> 更新日期：2026-09-03
+> 更新日期：2026-09-08
 
 本文面向把 Mink 作为**库或 SDK** 集成的开发者：Rust 嵌入式 runtime（`mink::runtime`）
 和 Python SDK（`mink-agent`），以及跨端统一的 Token 用量访问。终端用户的
@@ -21,7 +21,7 @@ Rust 发布包为 `mink-core`，库 crate 名为 `mink`。发布包只包含可�
 
 ```toml
 [dependencies]
-mink = { package = "mink-core", version = "0.6.0", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.6.1", default-features = false, features = ["runtime"] }
 ```
 
 公开入口为 `mink::prelude`、`mink::runtime`、`mink::sdk_protocol` 和 `mink::ui`；启用 `prefab` feature 时 `mink::runtime::prefab` 提供 `ensure_session()`。
@@ -195,7 +195,7 @@ let runtime = AgentRuntime::start(
 
 ```toml
 [dependencies]
-mink = { package = "mink-core", version = "0.6.0", default-features = false, features = ["runtime", "prefab"] }
+mink = { package = "mink-core", version = "0.6.1", default-features = false, features = ["runtime", "prefab"] }
 ```
 
 ```rust

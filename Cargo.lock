@@ -2057,7 +2057,7 @@ dependencies = [
 
 [[package]]
 name = "mink-cli"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "crossterm",
@@ -2078,7 +2078,7 @@ dependencies = [
 
 [[package]]
 name = "mink-core"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2111,7 +2111,7 @@ dependencies = [
 
 [[package]]
 name = "mink-prefab"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2126,7 +2126,7 @@ dependencies = [
 
 [[package]]
 name = "mink-router"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2139,7 +2139,7 @@ dependencies = [
 
 [[package]]
 name = "mink-server"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "async-stream",

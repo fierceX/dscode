@@ -21,9 +21,9 @@ required-features = ["sdk-bin"]
 anyhow.workspace = true
 crossterm = { workspace = true, optional = true }
 ignore = { workspace = true, optional = true }
-mink = { package = "mink-core", version = "0.6.0", path = "../mink-core", default-features = false }
-mink-prefab = { version = "0.6.0", path = "../mink-prefab", optional = true, features = ["mink-integration"] }
-mink-router = { version = "0.6.0", path = "../mink-router", optional = true }
+mink = { package = "mink-core", version = "0.6.1", path = "../mink-core", default-features = false }
+mink-prefab = { version = "0.6.1", path = "../mink-prefab", optional = true, features = ["mink-integration"] }
+mink-router = { version = "0.6.1", path = "../mink-router", optional = true }
 ratatui = { workspace = true, optional = true }
 rustyline = { workspace = true, optional = true }
 serde_json.workspace = true

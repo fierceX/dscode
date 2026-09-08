@@ -1,6 +1,6 @@
 # mink-core
 
-> 更新日期：2026-09-03
+> 更新日期：2026-09-08
 
 `mink-core` 是对外发布的 Rust 包；库 crate 名为 `mink`。
 
@@ -48,7 +48,7 @@ revision 和稳定 ID 防止 stale write。
 
 ```toml
 [dependencies]
-mink = { package = "mink-core", version = "0.6.0", default-features = false, features = ["runtime"] }
+mink = { package = "mink-core", version = "0.6.1", default-features = false, features = ["runtime"] }
 ```
 
 ```rust
